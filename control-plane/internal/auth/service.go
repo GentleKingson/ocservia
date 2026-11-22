@@ -18,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -115,17 +114,11 @@ func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Princi
 		}
 		principal.Issuer, principal.Subject, principal.BreakGlass = session.Issuer, session.Subject, session.BreakGlass
 		principal.ExpiresAt = envelope.ExpiresAt
-		if !session.ExpiresAt.Valid {
+		if session.ExpiresAt.IsZero() {
 			return ErrUnauthenticated
 		}
-		if session.ExpiresAt.Micros != value.PositiveInfinity {
-			expires, err := session.ExpiresAt.Time()
-			if err != nil {
-				return err
-			}
-			if expires.Before(principal.ExpiresAt) {
-				principal.ExpiresAt = expires
-			}
+		if session.ExpiresAt.Before(principal.ExpiresAt) {
+			principal.ExpiresAt = session.ExpiresAt
 		}
 		return nil
 	})

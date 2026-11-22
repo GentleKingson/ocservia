@@ -90,39 +90,30 @@ function parseArguments(argv) {
 }
 
 function deriveMigrationHead(directory) {
-  let schema;
+  const sqlDir = path.join(directory, "sql");
+  let entries;
   try {
-    schema = fs.readFileSync(path.join(directory, "schema.sql"), "utf8");
+    entries = fs.readdirSync(sqlDir, { withFileTypes: true });
   } catch (error) {
-    fail(`cannot read schema artifact in ${directory}: ${error.message}`);
+    fail(`cannot read goose migrations in ${sqlDir}: ${error.message}`);
   }
-  const headers = {};
-  for (const line of schema.split("\n")) {
-    if (line.startsWith("-- ocservia:step=")) break;
-    const match =
-      /^-- ocservia:(artifact|format|engine|epoch|revision)=(.+)$/.exec(line);
-    if (!match) continue;
-    if (headers[match[1]] !== undefined)
-      fail(`duplicate schema header ${match[1]}`);
-    headers[match[1]] = match[2];
-  }
-  if (
-    headers.artifact !== "schema" ||
-    headers.format !== "1" ||
-    headers.engine !== "postgresql"
-  ) {
-    fail("unsupported PostgreSQL schema artifact");
-  }
-  for (const key of ["epoch", "revision"]) {
-    if (
-      !/^(0|[1-9][0-9]*)$/.test(headers[key] ?? "") ||
-      !Number.isSafeInteger(Number(headers[key]))
-    ) {
-      fail(`invalid schema ${key}`);
+  let maxVersion = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".sql")) continue;
+    const match = /^([0-9]+)_.+\.sql$/.exec(entry.name);
+    if (!match) {
+      fail(`unexpected goose migration filename: ${entry.name}`);
     }
+    const version = Number(match[1]);
+    if (!Number.isSafeInteger(version) || version < 1) {
+      fail(`invalid goose migration version in ${entry.name}`);
+    }
+    if (version > maxVersion) maxVersion = version;
   }
-  if (Number(headers.epoch) < 1) fail("invalid schema epoch");
-  return { epoch: Number(headers.epoch), revision: Number(headers.revision) };
+  if (maxVersion < 1) {
+    fail(`no goose SQL migrations found in ${sqlDir}`);
+  }
+  return { epoch: 1, revision: maxVersion };
 }
 
 const values = parseArguments(process.argv.slice(2));

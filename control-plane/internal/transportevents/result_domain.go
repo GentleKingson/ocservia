@@ -9,7 +9,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -34,17 +33,11 @@ func validateDispatchedResult(envelope *agentv1.CommandEnvelope, result *agentv1
 	}
 	issuedTime := issuedAt.AsTime()
 	lowerBound := issuedTime
-	if !stored.CreatedAt.Valid || stored.CreatedAt.Micros == value.PositiveInfinity {
+	if stored.CreatedAt.IsZero() {
 		return invalidCommandResult("stored command creation is later than the result")
 	}
-	if stored.CreatedAt.Micros != value.NegativeInfinity {
-		commandCreatedAt, err := stored.CreatedAt.Time()
-		if err != nil {
-			return err
-		}
-		if commandCreatedAt.After(lowerBound) {
-			lowerBound = commandCreatedAt
-		}
+	if stored.CreatedAt.After(lowerBound) {
+		lowerBound = stored.CreatedAt
 	}
 	if completedTime.Before(lowerBound.Add(-5 * time.Minute)) {
 		return invalidCommandResult("command result completed_at precedes issued_at")
@@ -99,7 +92,7 @@ func validateDispatchedResult(envelope *agentv1.CommandEnvelope, result *agentv1
 	return nil
 }
 
-func applyConfigOutcome(ctx context.Context, store resultstore.ResultStore, apply *configApplyIdentity, result *agentv1.CommandResult, applyResult *agentv1.ConfigApplyResult, operationState string, operationID, nodeID, workspaceID uuid.UUID, at value.Timestamp) error {
+func applyConfigOutcome(ctx context.Context, store resultstore.ResultStore, apply *configApplyIdentity, result *agentv1.CommandResult, applyResult *agentv1.ConfigApplyResult, operationState string, operationID, nodeID, workspaceID uuid.UUID, at time.Time) error {
 	applyState := operationState
 	failureCode := resultText("")
 	if result.GetErrorCode() != "" {
@@ -128,7 +121,7 @@ func applyConfigOutcome(ctx context.Context, store resultstore.ResultStore, appl
 	return nil
 }
 
-func applyCSROutcome(ctx context.Context, store resultstore.ResultStore, csr *agentv1.CertificateCsr, csrResult *agentv1.CertificateCsrResult, verification privdattestation.Verification, effectiveState string, operationID uuid.UUID, at value.Timestamp) error {
+func applyCSROutcome(ctx context.Context, store resultstore.ResultStore, csr *agentv1.CertificateCsr, csrResult *agentv1.CertificateCsrResult, verification privdattestation.Verification, effectiveState string, operationID uuid.UUID, at time.Time) error {
 	certificateID, parseErr := uuid.FromBytes(csr.GetCertificateId())
 	if parseErr != nil {
 		return invalidCommandResult("certificate command ID is invalid")
@@ -144,7 +137,8 @@ func applyCSROutcome(ctx context.Context, store resultstore.ResultStore, csr *ag
 		outcome.DER, outcome.PublicHash = csrResult.GetCsrDer(), csrResult.GetPublicKeySha256()
 	}
 	if certificateState == "csr_ready" && verification.Verified() && verification.Certificate != nil {
-		outcome.VerifiedAt, outcome.ReceiptHash, outcome.KeyID = at, verification.ReceiptSHA256, resultText(verification.KeyID)
+		verifiedAt := at
+		outcome.VerifiedAt, outcome.ReceiptHash, outcome.KeyID = &verifiedAt, verification.ReceiptSHA256, resultText(verification.KeyID)
 		outcome.EffectRecordID, outcome.CSRHash, outcome.SubjectHash = verification.EffectRecordID, verification.Certificate.GetCsrDerSha256(), verification.Certificate.GetRequestedSubjectSha256()
 	}
 	if err := store.CSROutcome(ctx, outcome); err != nil {
@@ -153,17 +147,18 @@ func applyCSROutcome(ctx context.Context, store resultstore.ResultStore, csr *ag
 	return nil
 }
 
-func applyRevokeOutcome(ctx context.Context, store resultstore.ResultStore, revoke *agentv1.CertificateRevoke, revokeResult *agentv1.CertificateRevokeResult, effectiveState string, nodeID uuid.UUID, at value.Timestamp) error {
+func applyRevokeOutcome(ctx context.Context, store resultstore.ResultStore, revoke *agentv1.CertificateRevoke, revokeResult *agentv1.CertificateRevokeResult, effectiveState string, nodeID uuid.UUID, at time.Time) error {
 	certificateID, parseErr := uuid.FromBytes(revoke.GetCertificateId())
 	if parseErr != nil {
 		return invalidCommandResult("certificate revoke ID is invalid")
 	}
 	certificateState := "revoking"
-	var revokedAt value.Timestamp
+	var revokedAt *time.Time
 	if effectiveState == "unknown" {
 		certificateState = "unknown"
 	} else if effectiveState == "succeeded" && revokeResult != nil {
-		certificateState, revokedAt = "revoked", at
+		t := at
+		certificateState, revokedAt = "revoked", &t
 	}
 	if err := store.RevokeOutcome(ctx, resultstore.RevokeOutcome{CertificateID: certificateID, NodeID: nodeID, State: certificateState, RevokedAt: revokedAt, Reason: revoke.GetReason(), At: at}); err != nil {
 		return fmt.Errorf("update certificate revocation outcome: %w", err)
@@ -171,7 +166,7 @@ func applyRevokeOutcome(ctx context.Context, store resultstore.ResultStore, revo
 	return nil
 }
 
-func applyArtifactOutcome(ctx context.Context, store resultstore.ResultStore, artifact *agentv1.CertificateP12, artifactResult *agentv1.CertificateArtifactResult, effectiveState string, operationID uuid.UUID, at value.Timestamp) error {
+func applyArtifactOutcome(ctx context.Context, store resultstore.ResultStore, artifact *agentv1.CertificateP12, artifactResult *agentv1.CertificateArtifactResult, effectiveState string, operationID uuid.UUID, at time.Time) error {
 	artifactID, parseErr := uuid.FromBytes(artifact.GetArtifactId())
 	if parseErr != nil {
 		return invalidCommandResult("certificate artifact ID is invalid")
@@ -223,7 +218,7 @@ func normalizeCommandOutcome(envelope *agentv1.CommandEnvelope, state string, da
 	return outcome, err
 }
 
-func (outcome commandOutcome) apply(ctx context.Context, store resultstore.ResultStore, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, verification privdattestation.Verification, operation resultstore.ResultOperation, nodeID uuid.UUID, operationState string, at value.Timestamp) error {
+func (outcome commandOutcome) apply(ctx context.Context, store resultstore.ResultStore, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, verification privdattestation.Verification, operation resultstore.ResultOperation, nodeID uuid.UUID, operationState string, at time.Time) error {
 	switch apply := configApplyBinding(envelope); {
 	case apply != nil:
 		return applyConfigOutcome(ctx, store, apply, result, outcome.config, operationState, operation.ID, nodeID, operation.WorkspaceID, at)
@@ -234,9 +229,10 @@ func (outcome commandOutcome) apply(ctx context.Context, store resultstore.Resul
 	case envelope.GetCertificateP12() != nil:
 		return applyArtifactOutcome(ctx, store, envelope.GetCertificateP12(), outcome.artifact, operationState, operation.ID, at)
 	case envelope.GetAgentUpgrade() != nil:
-		var scheduledAt value.Timestamp
+		var scheduledAt *time.Time
 		if operationState == "accepted" {
-			scheduledAt = at
+			t := at
+			scheduledAt = &t
 		}
 		if err := store.UpgradeOutcome(ctx, operation.ID, operationState, scheduledAt, at); err != nil {
 			return fmt.Errorf("update agent upgrade outcome: %w", err)

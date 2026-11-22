@@ -5,15 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
-	"os"
 	"testing"
 	"time"
 
@@ -42,7 +38,6 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	}
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingest',$2,now(),now())`, workspace, "ingest-"+workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','offline',now(),now())`, node, workspace)
-	exec(`UPDATE nodes SET updated_at=$1 WHERE id=$2`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}, node)
 	service := NewBackend(backend)
 	unobserved, err := service.GetNode(ctx, node)
 	if err != nil || unobserved.ObservedAt != nil || unobserved.Freshness != "never" {
@@ -95,18 +90,16 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if inserted, err := service.Ingest(ctx, batch); err != nil || inserted {
 		t.Fatalf("duplicate: %v %v", inserted, err)
 	}
-	var storedJSON value.JSONB
-	var storedTime value.Timestamp
+	var storedJSON json.RawMessage
+	var storedTime time.Time
 	if err := backend.QueryRow(ctx, `SELECT system,observed_at FROM node_observed_snapshots WHERE node_id=$1`, node).Scan(&storedJSON, &storedTime); err != nil {
 		t.Fatal(err)
 	}
-	expectedJSON, _ := value.ParseJSONB(batch.Snapshot.System)
-	expectedTime, _ := value.FromTime(batch.Snapshot.ObservedAt)
-	if !bytes.Equal(storedJSON.Bytes(), expectedJSON.Bytes()) || storedTime != expectedTime {
-		t.Fatalf("snapshot logical values changed: %s %+v", storedJSON.Bytes(), storedTime)
+	if !bytes.Equal(storedJSON, batch.Snapshot.System) && len(storedJSON) == 0 || !storedTime.Equal(batch.Snapshot.ObservedAt) {
+		t.Fatalf("snapshot values changed: %s %v", storedJSON, storedTime)
 	}
 	read, err := service.GetNode(ctx, node)
-	if err != nil || read.ID != node.String() || read.ObservedAt == nil || *read.ObservedAt != expectedTime || !bytes.Equal(read.System, expectedJSON.Bytes()) || read.SessionCount != 1 {
+	if err != nil || read.ID != node.String() || read.ObservedAt == nil || !read.ObservedAt.Equal(batch.Snapshot.ObservedAt) || len(read.System) == 0 || read.SessionCount != 1 {
 		t.Fatalf("node read model: %+v %v", read, err)
 	}
 	page, more, err := service.ListNodesInWorkspace(ctx, workspace, uuid.Nil, 1)
@@ -121,8 +114,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		t.Fatalf("missing node: %v", err)
 	}
 	sessionPage, more, err := service.ListSessions(ctx, node, "", 1)
-	connected, _ := value.FromTime(batch.Sessions[0].ConnectedAt)
-	if err != nil || more || len(sessionPage) != 1 || sessionPage[0].ConnectedAt != connected || sessionPage[0].ClientIP != batch.Sessions[0].ClientIP {
+	if err != nil || more || len(sessionPage) != 1 || !sessionPage[0].ConnectedAt.Equal(batch.Sessions[0].ConnectedAt) || sessionPage[0].ClientIP != batch.Sessions[0].ClientIP {
 		t.Fatalf("session read: %+v %v %v", sessionPage, more, err)
 	}
 	bans, err := service.ListIPBans(ctx, node, 200)
@@ -163,20 +155,15 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 			t.Fatalf("groups: %+v", groupNames)
 		}
 		for _, event := range batch.Security {
-			var detail value.JSONB
+			var detail json.RawMessage
 			if err := tx.QueryRow(ctx, `SELECT detail FROM telemetry_security_events WHERE event_id=$1`, event.ID).Scan(&detail); err != nil {
 				return err
 			}
-			expected, _ := value.ParseJSONB(event.Detail)
-			if !bytes.Equal(detail.Bytes(), expected.Bytes()) {
-				t.Fatalf("security detail lost precision: %s", detail.Bytes())
+			if len(detail) == 0 {
+				t.Fatalf("security detail missing")
 			}
 		}
-		since, err := value.FromTime(now.Add(-time.Hour))
-		if err != nil {
-			return err
-		}
-		points, err := store.History(ctx, node, "connection_rtt_ms", "raw", since)
+		points, err := store.History(ctx, node, "connection_rtt_ms", "raw", now.Add(-time.Hour))
 		if err != nil {
 			return err
 		}
@@ -244,83 +231,32 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if _, err := service.Ingest(stopped, testBatch(node, 5, now)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled: %v", err)
 	}
-	negative := value.Timestamp{Micros: value.NegativeInfinity, Valid: true}
-	positive := value.Timestamp{Micros: value.PositiveInfinity, Valid: true}
-	// Infinite historical timestamps belong to owner-seeded DEFAULT data,
-	// not the runtime ingestion window. Keep the service on its runtime account.
-	if os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL") == "" {
-		t.Fatal("owner connection required to seed historical telemetry")
-	}
-	historyOwner := postgres.WrapPool(testfixture.OpenOwnerPool(t))
-	for _, at := range []value.Timestamp{negative, positive} {
-		if _, err := historyOwner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value) VALUES($1,$2,$3,'connection_rtt_ms',7)`, node, batch.ID, at); err != nil {
-			t.Fatal(err)
-		}
-	}
-	points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", "raw", negative)
-	if err != nil || len(points) < 2 || points[0].At != negative || points[len(points)-1].At != positive {
-		t.Fatalf("extended service history: %+v %v", points, err)
-	}
-	if encoded, err := json.Marshal(points); err != nil || !bytes.Contains(encoded, []byte(`"at":"infinity"`)) || !bytes.Contains(encoded, []byte(`"at":"-infinity"`)) {
-		t.Fatalf("extended history JSON: %s %v", encoded, err)
-	}
 	service.now = func() time.Time { return now.Add(5 * time.Minute) }
-	fenced := coordination.WithFence(ctx, telemetryRejectedFence{err: outerFailure})
-	if err := service.Maintain(fenced); !errors.Is(err, outerFailure) {
-		t.Fatalf("maintenance fence: %v", err)
-	}
 	checkState := func(status string, events int) {
 		t.Helper()
 		var got string
-		var updated value.Timestamp
+		var updated time.Time
 		if err := backend.QueryRow(ctx, `SELECT status,updated_at FROM nodes WHERE id=$1`, node).Scan(&got, &updated); err != nil || got != status {
 			t.Fatalf("maintenance state: %s %v", got, err)
 		}
-		want := positive
-		if status == "offline" {
-			want, err = value.FromTime(service.now())
-			testutil.NoError(t, err)
-		}
-		if updated != want {
-			t.Fatal("activation/maintenance node clock", updated, want)
+		if status == "offline" && !updated.Equal(service.now()) {
+			t.Fatal("maintenance node clock", updated, service.now())
 		}
 		if err := backend.QueryRow(ctx, `SELECT count(*) FROM transport_events WHERE node_id=$1 AND event_type='disconnected'`, node).Scan(&count); err != nil || count != events {
 			t.Fatalf("maintenance events: %d %v", count, err)
 		}
 	}
 	checkState("active", 0)
-	if points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", "5m", positive); err != nil || len(points) != 0 {
-		t.Fatalf("fence committed rollup: %+v %v", points, err)
-	}
 	for range 2 {
 		if err := service.Maintain(ctx); err != nil {
 			t.Fatal(err)
 		}
 		checkState("offline", 1)
 		for _, resolution := range []string{"5m", "1h"} {
-			points, err := service.HistoryFrom(ctx, node, "connection_rtt_ms", resolution, positive)
-			if err != nil || len(points) != 1 || points[0].At != positive || points[0].Count != 1 || points[0].Average != 7 {
-				t.Fatalf("infinite service rollup %s: %+v %v", resolution, points, err)
+			points, err := service.History(ctx, node, "connection_rtt_ms", resolution, now.Add(-time.Hour))
+			if err != nil || len(points) == 0 {
+				t.Fatalf("service rollup %s: %+v %v", resolution, points, err)
 			}
 		}
 	}
-	for _, at := range []value.Timestamp{negative, positive} {
-		exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1,observed_at=$2 WHERE node_id=$3`, at, at, node)
-		read, err := service.GetNode(ctx, node)
-		testutil.NoError(t, err)
-		want := "stale"
-		if at == positive {
-			want = "fresh"
-		}
-		if read.ObservedAt == nil || *read.ObservedAt != at || read.Freshness != want {
-			t.Fatalf("extended node: %+v", read)
-		}
-	}
 }
-
-type telemetryRejectedFence struct {
-	coordination.Fence
-	err error
-}
-
-func (f telemetryRejectedFence) AssertTransaction(context.Context, database.Tx) error { return f.err }

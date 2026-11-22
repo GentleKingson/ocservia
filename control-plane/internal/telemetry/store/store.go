@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -19,21 +18,21 @@ type Node struct {
 	Name, Status                                                             string
 	Version                                                                  int64
 	ConfigRevision                                                           int64
-	ObservedAt, Heartbeat                                                    value.Timestamp
+	ObservedAt, Heartbeat                                                    *time.Time
 	BootID, InstanceID, AgentVersion, OcservVersion, OSRelease, Architecture string
-	Ocserv, System, Path                                                     value.JSONB
+	Ocserv, System, Path                                                     json.RawMessage
 	Security, Health, Aggregate, Raw                                         uint64
 	Sessions                                                                 int
 	UpgradeEligible                                                          bool
 }
 
 type ReadSession struct {
-	ID          string          `json:"id"`
-	Username    string          `json:"username"`
-	ClientIP    string          `json:"client_ip"`
-	ConnectedAt value.Timestamp `json:"connected_at"`
-	BytesIn     int64           `json:"bytes_in"`
-	BytesOut    int64           `json:"bytes_out"`
+	ID          string    `json:"id"`
+	Username    string    `json:"username"`
+	ClientIP    string    `json:"client_ip"`
+	ConnectedAt time.Time `json:"connected_at"`
+	BytesIn     int64     `json:"bytes_in"`
+	BytesOut    int64     `json:"bytes_out"`
 }
 
 type IPBan struct {
@@ -77,27 +76,27 @@ type Sample struct {
 }
 
 type Point struct {
-	At      value.Timestamp `json:"at"`
-	Metric  string          `json:"metric"`
-	Count   int64           `json:"count"`
-	Minimum float64         `json:"minimum"`
-	Maximum float64         `json:"maximum"`
-	Average float64         `json:"average"`
+	At      time.Time `json:"at"`
+	Metric  string    `json:"metric"`
+	Count   int64     `json:"count"`
+	Minimum float64   `json:"minimum"`
+	Maximum float64   `json:"maximum"`
+	Average float64   `json:"average"`
 }
 
 type Group struct {
 	Name        string
-	Members     value.TextArray
+	Members     []string
 	Revision    int64
 	Fingerprint []byte
-	ObservedAt  value.Timestamp
+	ObservedAt  time.Time
 }
 
 type SecurityEvent struct {
 	ID             uuid.UUID
-	ObservedAt     value.Timestamp
+	ObservedAt     time.Time
 	Severity, Type string
-	Detail         value.JSONB
+	Detail         json.RawMessage
 }
 
 type Store interface {
@@ -119,7 +118,7 @@ type Store interface {
 	InsertUpgrade(context.Context, uuid.UUID, Upgrade) error
 
 	InsertHistory(context.Context, uuid.UUID, uuid.UUID, []Sample) error
-	History(context.Context, uuid.UUID, string, string, value.Timestamp) ([]Point, error)
+	History(context.Context, uuid.UUID, string, string, time.Time) ([]Point, error)
 	MaintainHistory(context.Context, time.Time) error
 
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error

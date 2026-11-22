@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -22,7 +21,7 @@ type StoreTerm struct {
 
 type Lease struct {
 	Epoch int64
-	Until value.Timestamp
+	Until time.Time
 }
 
 type OwnerState struct {
@@ -30,13 +29,13 @@ type OwnerState struct {
 	Incarnation     int64
 	ConnectionID    [16]byte
 	Epoch           int64
-	Until           value.Timestamp
+	Until           time.Time
 	LeaseUntilValid bool
 }
 
 type Store interface {
 	Acquire(context.Context, StoreTerm, time.Duration) (Lease, error)
-	Renew(context.Context, StoreTerm, time.Duration) (value.Timestamp, error)
+	Renew(context.Context, StoreTerm, time.Duration) (time.Time, error)
 	Release(context.Context, StoreTerm) error
 	Assert(context.Context, StoreTerm) error
 	Read(context.Context, [16]byte) (OwnerState, error)

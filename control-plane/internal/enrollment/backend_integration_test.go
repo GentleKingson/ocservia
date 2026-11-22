@@ -22,7 +22,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -103,8 +102,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"}); err != nil || !allowed {
 		t.Fatal("active agent not permitted", allowed, err)
 	}
-	at, _ := value.FromTime(time.Now().UTC())
-	expires, _ := at.Add(time.Hour)
+	at := time.Now().UTC()
+	expires := at.Add(time.Hour)
 	requester, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, requester, requester.String(), at, at)
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,$3)`, workspace, requester, at)
@@ -255,24 +254,18 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("prebound token consumed by another endpoint", err)
 	}
 	bootstrapRequest := enrollmentRequest(bootstrap.Value, bootstrapEndpoint)
-	negative, positive := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
-	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, positive, bootstrap.ID)
+	past, future := time.Now().UTC().Add(-time.Hour), time.Now().UTC().Add(time.Hour)
+	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, past, future, bootstrap.ID)
 	if err := s.ValidateEnrollment(ctx, bootstrapRequest); err != nil {
-		t.Fatal("logical bootstrap expiry", err)
+		t.Fatal("bootstrap expiry", err)
 	}
 	bootstrapped, err := s.Enroll(ctx, bootstrapRequest)
 	testutil.NoError(t, err)
-	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, positive, value.Timestamp{Valid: true, Micros: value.MinTimestamp}, bootstrap.ID)
+	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, future, past, bootstrap.ID)
 	if replay, err := s.Enroll(ctx, bootstrapRequest); err != nil || !bytes.Equal(replay.GetNodeId(), bootstrapped.GetNodeId()) {
 		t.Fatal("bound bootstrap retry with expired token", replay, err)
 	}
 	if _, err := s.Enroll(ctx, enrollmentRequest(bootstrap.Value, endpointFixture(103))); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("bootstrap endpoint substitution", err)
-	}
-	wideEndpoint := endpointFixture(104)
-	wide := createToken(t, s, workspace, wideEndpoint)
-	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, wide.ID)
-	if _, err := s.Enroll(ctx, enrollmentRequest(wide.Value, wideEndpoint)); err != nil {
-		t.Fatal("full finite token expiry", err)
 	}
 }

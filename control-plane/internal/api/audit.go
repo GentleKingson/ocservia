@@ -12,7 +12,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 
 	"github.com/google/uuid"
 )
@@ -41,7 +40,7 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 	items := []map[string]any{}
 	for rows.Next() {
 		var id uuid.UUID
-		var occurred value.Timestamp
+		var occurred time.Time
 		var actorType, actorID, action, resourceType, requestID, result string
 		var resourceID, nodeID, commandID *uuid.UUID
 		var traceID, reason, errorType *string
@@ -188,7 +187,8 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 		var vpn, rx, tx, dest, protocol *string
 		var event *uuid.UUID
 		var port *int32
-		var connected, last, absent, started value.Timestamp
+		var last time.Time
+		var connected, absent, started *time.Time
 		if err := rows.Scan(&node, &session, &user, &client, &vpn, &connected, &rx, &tx, &last, &absent, &kind, &event, &dest, &port, &protocol, &started); err != nil {
 			unavailable()
 			return
@@ -200,10 +200,10 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 		if tx != nil {
 			item["bytes_out"] = *tx
 		}
-		if connected.Valid {
+		if connected != nil {
 			item["connected_at"] = connected
 		}
-		if started.Valid {
+		if started != nil {
 			item["flow_started_at"] = started
 		}
 		if event != nil {
@@ -218,26 +218,24 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 		if port != nil {
 			item["destination_port"] = *port
 		}
-		if absent.Valid {
+		if absent != nil {
 			item["absent_at"] = absent
 		}
 		if vpn != nil {
 			item["vpn_ip"] = *vpn
 		}
 		if len(items)+1 == q.Limit {
-			sortTime := last
+			at := last
 			key := session
 			if event != nil {
 				key = event.String()
+			} else if connected != nil {
+				at = *connected
 			} else {
-				sortTime = connected
-			}
-			at, err := sortTime.Time()
-			if err != nil {
 				unavailable()
 				return
 			}
-			cursor = auditstore.VpnAuditCursor{At: at, Node: node, Key: key, Kind: q.Kind}
+			cursor = auditstore.VpnAuditCursor{At: at.UTC(), Node: node, Key: key, Kind: q.Kind}
 		}
 		items = append(items, item)
 	}

@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -83,10 +82,7 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 	if err != nil {
 		return 0, fmt.Errorf("select ambiguous dispatched commands: %w", err)
 	}
-	at, err := value.FromTime(reconnect.ObservedAt)
-	if err != nil {
-		return 0, err
-	}
+	at := reconnect.ObservedAt.UTC()
 	recovered := 0
 	for _, commandID := range candidates {
 		if recovered == reconnect.Limit {
@@ -122,11 +118,7 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 		if err != nil {
 			return 0, fmt.Errorf("prepare reconnect reconciliation for command %s: %w", commandID, err)
 		}
-		expires, err := value.FromTime(expiresAt)
-		if err != nil {
-			return 0, err
-		}
-		if err := store.ScheduleReconnectRecovery(ctx, commandID, candidate.OperationID, payload, expires, at); err != nil {
+		if err := store.ScheduleReconnectRecovery(ctx, commandID, candidate.OperationID, payload, expiresAt.UTC(), at); err != nil {
 			return 0, err
 		}
 		if err := markRecoveryProjection(ctx, store, candidate.OperationID, &envelope, at); err != nil {
@@ -439,7 +431,7 @@ func dispatchedOnAuthority(envelope *agentv1.CommandEnvelope, commandID, nodeID 
 		bytes.Equal(binding.GetConnectionId(), authority.connection[:])
 }
 
-func markRecoveryProjection(ctx context.Context, store operationstore.Store, operationID uuid.UUID, envelope *agentv1.CommandEnvelope, at value.Timestamp) error {
+func markRecoveryProjection(ctx context.Context, store operationstore.Store, operationID uuid.UUID, envelope *agentv1.CommandEnvelope, at time.Time) error {
 	if envelope.GetAgentUpgrade() != nil {
 		acked, err := store.UpgradeSchedulingAcked(ctx, operationID)
 		if err != nil {

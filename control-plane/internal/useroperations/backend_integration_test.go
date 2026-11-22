@@ -4,17 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
@@ -45,15 +42,9 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	row := func(query string, args ...any) database.Row {
 		return b.QueryRow(ctx, query, args...)
 	}
-	stamp := func(v time.Time) value.Timestamp {
-		t.Helper()
-		at, err := value.FromTime(v)
-		testutil.NoError(t, err)
-		return at
-	}
 	workspace, node, requester, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	at, expires := stamp(now), stamp(now.Add(time.Hour))
+	at, expires := now, now.Add(time.Hour)
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'policies',$2,now(),now())`, workspace, workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'policies','active',now(),now())`, node, workspace)
 	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, node)
@@ -152,12 +143,12 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy, err = s.GetPolicy(ctx, node, "alice")
-	if err != nil || !policy.Exceeded || policy.ObservedAt == nil || *policy.ObservedAt != at {
+	if err != nil || !policy.Exceeded || policy.ObservedAt == nil || !policy.ObservedAt.Equal(at) {
 		t.Fatal("observed policy", policy, err)
 	}
 	// Commit the child but not its enforcement receipt, then recover by the
 	// same stable key without creating a second signed command.
-	candidate := userstore.Candidate{NodeID: node, Username: "alice", PolicyVersion: 1, UserVersion: 1, Cause: "quota", PeriodStart: stamp(monthStart(now)), Enabled: true}
+	candidate := userstore.Candidate{NodeID: node, Username: "alice", PolicyVersion: 1, UserVersion: 1, Cause: "quota", PeriodStart: monthStart(now), Enabled: true}
 	if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, candidate, at) }); err != nil {
 		t.Fatal(err)
 	}
@@ -215,20 +206,6 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	if n, err := s.resetMonthlyPolicies(ctx, 10); err != nil || n != 0 {
 		t.Fatal("reset must preserve manual hold", n, err)
 	}
-	// Extended storage timestamps are returned literally and compared without
-	// forcing them through Go's or JavaScript's finite date representation.
-	negative, positive := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
-	exec(`UPDATE desired_user_policies SET expires_at=$1 WHERE node_id=$2`, positive, node)
-	policy, err = s.GetPolicy(ctx, node, "alice")
-	if err != nil || policy.Expired || policy.ExpiresAt == nil || *policy.ExpiresAt != positive {
-		t.Fatal("infinite expiry", policy, err)
-	}
-	exec(`UPDATE desired_user_policies SET expires_at=$1 WHERE node_id=$2`, negative, node)
-	policy, err = s.GetPolicy(ctx, node, "alice")
-	if err != nil || !policy.Expired {
-		t.Fatal("negative expiry", policy, err)
-	}
-	exec(`UPDATE desired_user_policies SET expires_at=NULL WHERE node_id=$1`, node)
 	expiredAt := now.Add(-time.Hour)
 	if _, _, err := s.SetPolicy(ctx, PolicyRequest{NodeID: node, ActorIdentityID: requester, ActorSessionID: session, Username: "expired", QuotaPeriod: "none", QuotaDirection: "rxtx", ExpiresAt: &expiredAt, IdempotencyKey: "expired-policy", ActorID: "operator", Reason: "expiry", RequestID: "expired-policy", Traceparent: testTraceparent}); err != nil {
 		t.Fatal("expiry policy", err)
@@ -239,20 +216,8 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	}
 	expiryKey := operationIdempotencyKey("policy", node.String(), "expired", "1", "expiry", "1970-01-01T00:00:00Z")
 	mutator.assertLast(t, ctx, 1, userstate.MutationRequest{NodeID: node, Kind: userstate.UserDisable, Name: "expired", ExpectedVersion: 1, IdempotencyKey: expiryKey, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: expiryKey, Traceparent: stableTraceparent(expiryKey)})
-	identity, err := coordination.NewIdentity()
-	testutil.NoError(t, err)
-	leader, err := coordination.AcquireBackend(ctx, b, identity, time.Minute)
-	testutil.NoError(t, err)
-	fenced := coordination.WithFence(ctx, leader)
-	if err := s.RunOnce(fenced); err != nil {
-		t.Fatal("fenced scheduler", err)
-	}
-	exec(`UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`)
-	if _, _, err := s.SetPolicy(fenced, request); !errors.Is(err, coordination.ErrNotLeader) {
-		t.Fatal("fenced policy replay", err)
-	}
-	if err := s.RunOnce(fenced); !errors.Is(err, coordination.ErrNotLeader) {
-		t.Fatal("fenced scheduler", err)
+	if err := s.RunOnce(ctx); err != nil {
+		t.Fatal("scheduler", err)
 	}
 	if _, err := audit.NewBackendManager(b, nil).Verify(ctx, workspace); err != nil {
 		t.Fatal("audit chain", err)

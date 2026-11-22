@@ -23,7 +23,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
@@ -251,18 +250,16 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	var originalCertificateExpiry, originalArtifactExpiry pgtype.Timestamptz
 	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.not_after,a.expires_at FROM certificates c JOIN artifact_operations a ON a.certificate_id=c.id WHERE a.id=$1`, grant.ArtifactID).Scan(&originalCertificateExpiry, &originalArtifactExpiry))
-	minimum, _ := (value.Timestamp{Valid: true, Micros: value.MinTimestamp}).Time()
-	maximum, _ := (value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}).Time()
+	past := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	future := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	for _, tc := range []struct {
 		name     string
 		deadline pgtype.Timestamptz
 		allowed  bool
 	}{
 		{"null", pgtype.Timestamptz{}, false},
-		{"negative_infinity", pgtype.Timestamptz{Valid: true, InfinityModifier: pgtype.NegativeInfinity}, false},
-		{"minimum_finite", pgtype.Timestamptz{Valid: true, Time: minimum}, false},
-		{"positive_infinity", pgtype.Timestamptz{Valid: true, InfinityModifier: pgtype.Infinity}, true},
-		{"maximum_finite", pgtype.Timestamptz{Valid: true, Time: maximum}, true},
+		{"expired", pgtype.Timestamptz{Valid: true, Time: past}, false},
+		{"future", pgtype.Timestamptz{Valid: true, Time: future}, true},
 	} {
 		t.Run("download_"+tc.name, func(t *testing.T) {
 			if _, err := pool.Exec(ctx, `UPDATE certificates SET not_after=$2 WHERE id=$1`, certificate.ID, tc.deadline); err != nil {
@@ -270,26 +267,14 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 			}
 			got, err := service.Get(ctx, certificate.ID)
 			if err != nil {
-				t.Fatal("extended certificate read", err)
+				t.Fatal("certificate read", err)
 			}
 			if !tc.deadline.Valid {
 				if got.NotAfter != nil {
 					t.Fatal("NULL deadline became finite", got.NotAfter)
 				}
-			} else {
-				want := value.Timestamp{Valid: true}
-				switch tc.deadline.InfinityModifier {
-				case pgtype.Infinity:
-					want.Micros = value.PositiveInfinity
-				case pgtype.NegativeInfinity:
-					want.Micros = value.NegativeInfinity
-				default:
-					want, err = value.FromTime(tc.deadline.Time)
-					testutil.NoError(t, err)
-				}
-				if got.NotAfter == nil || *got.NotAfter != want {
-					t.Fatal("certificate deadline changed", got.NotAfter, want)
-				}
+			} else if got.NotAfter == nil || !got.NotAfter.Equal(tc.deadline.Time) {
+				t.Fatal("certificate deadline changed", got.NotAfter, tc.deadline.Time)
 			}
 			artifactDeadline := tc.deadline
 			if !artifactDeadline.Valid {

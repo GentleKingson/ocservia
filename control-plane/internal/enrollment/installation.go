@@ -134,11 +134,7 @@ func (s *Service) InstallationConfig(ctx context.Context, root string) (Installa
 			return InstallationConfig{}, ErrInvalidToken
 		}
 	}
-	expires, err := token.ExpiresAt.Time()
-	if err != nil {
-		return InstallationConfig{}, err
-	}
-	return InstallationConfig{ControllerEndpointID: s.controllerEndpointID, Environment: token.Environment, EnrollmentToken: child, RelayURL: s.installation.RelayURL, RelayAccessToken: s.installation.RelayToken, CommandVerificationKeyHex: hex.EncodeToString(s.signer.PublicKey()), ExpiresAt: expires}, nil
+	return InstallationConfig{ControllerEndpointID: s.controllerEndpointID, Environment: token.Environment, EnrollmentToken: child, RelayURL: s.installation.RelayURL, RelayAccessToken: s.installation.RelayToken, CommandVerificationKeyHex: hex.EncodeToString(s.signer.PublicKey()), ExpiresAt: token.ExpiresAt}, nil
 }
 
 type InstallationBinding struct {

@@ -16,9 +16,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -188,14 +186,8 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 		return fmt.Errorf("assign audit order: %w", err)
 	}
 	// Hash the persisted microsecond value, never a higher-precision clock value.
-	at, err := value.FromTime(record.At)
-	if err != nil {
-		return err
-	}
-	record.At, err = at.Time()
-	if err != nil {
-		return err
-	}
+	at := record.At.UTC().Truncate(time.Microsecond)
+	record.At = at
 	previous, err := s.Previous(ctx, record.WorkspaceID)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return fmt.Errorf("read audit chain: %w", err)
@@ -211,9 +203,7 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if err != nil {
 		return err
 	}
-	// Feed the unchanged canonicalizer the same logical JSON it will read back.
-	// In particular, whitespace around a top-level null must not add a field.
-	record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
+	record.BeforeSummary, record.AfterSummary = before, after
 	payload, err := encodeChainPayload(previous, record)
 	if err != nil {
 		return fmt.Errorf("encode audit payload: %w", err)
@@ -223,7 +213,7 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if record.TraceID != "" {
 		traceID = record.TraceID
 	}
-	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), before, after, nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
+	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), nullableJSON(before), nullableJSON(after), nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
@@ -272,11 +262,6 @@ func canonicalJSON(input json.RawMessage) (json.RawMessage, error) {
 	}
 	var decoded any
 	if err := json.Unmarshal(input, &decoded); err != nil {
-		// Preserve every previously signable v1 payload byte. Only extend the
-		// formerly rejected domain for valid JSONB numbers outside float64.
-		if logical, parseErr := value.ParseJSONB(input); parseErr == nil {
-			return json.RawMessage(logical.Bytes()), nil
-		}
 		return nil, err
 	}
 	encoded, err := json.Marshal(decoded)
@@ -333,20 +318,17 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		record := ChainRecord{WorkspaceID: workspaceID}
 		var resourceID *uuid.UUID
 		var storedPrevious, storedHash, eventMAC, compactionMAC []byte
-		var compactedAt value.Timestamp
+		var compactedAt *time.Time
 		var compactionKeyID *string
 		var authVersion int16
 		var eventKeyID *string
-		var at value.Timestamp
-		var before, after value.JSONB
+		var at time.Time
+		var before, after []byte
 		if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC, &compactedAt, &compactionKeyID, &compactionMAC); err != nil {
 			return chainVerification{}, err
 		}
-		record.At, err = at.Time()
-		if err != nil {
-			return chainVerification{}, err
-		}
-		record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
+		record.At = at.UTC().Truncate(time.Microsecond)
+		record.BeforeSummary, record.AfterSummary = before, after
 		if resourceID != nil {
 			record.ResourceID = *resourceID
 		}
@@ -356,8 +338,8 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		}
 		digest := sha256.Sum256(payload)
 		hashValid := subtle.ConstantTimeCompare(storedHash, digest[:]) == 1
-		if compactedAt.Valid {
-			hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, compactedAt, compactionKeyID, compactionMAC)
+		if compactedAt != nil {
+			hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, *compactedAt, compactionKeyID, compactionMAC)
 			verified.CompactedEvents++
 		} else if compactionKeyID != nil || len(compactionMAC) != 0 {
 			hashValid = false
@@ -469,7 +451,7 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 				return err
 			}
 		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return nil
 	})
 }
 
@@ -506,20 +488,17 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 			record := ChainRecord{WorkspaceID: workspaceID}
 			var resourceID *uuid.UUID
 			var storedPrevious, storedHash, eventMAC, compactionMAC []byte
-			var compactedAt value.Timestamp
+			var compactedAt *time.Time
 			var compactionKeyID *string
 			var authVersion int16
 			var eventKeyID *string
-			var at value.Timestamp
-			var before, after value.JSONB
+			var at time.Time
+			var before, after []byte
 			if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC, &compactedAt, &compactionKeyID, &compactionMAC); err != nil {
 				return uuid.Nil, nil, false, err
 			}
-			record.At, err = at.Time()
-			if err != nil {
-				return uuid.Nil, nil, false, err
-			}
-			record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
+			record.At = at.UTC().Truncate(time.Microsecond)
+			record.BeforeSummary, record.AfterSummary = before, after
 			if resourceID != nil {
 				record.ResourceID = *resourceID
 			}
@@ -529,8 +508,8 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 			}
 			digest := sha256.Sum256(payload)
 			hashValid := subtle.ConstantTimeCompare(storedHash, digest[:]) == 1
-			if compactedAt.Valid {
-				hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, compactedAt, compactionKeyID, compactionMAC)
+			if compactedAt != nil {
+				hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, *compactedAt, compactionKeyID, compactionMAC)
 			} else if compactionKeyID != nil || len(compactionMAC) != 0 {
 				hashValid = false
 			}
@@ -692,9 +671,16 @@ func nullableString(value string) any {
 	}
 	return value
 }
-func summaryValue(raw json.RawMessage) (value.JSONB, error) {
+func summaryValue(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
-		return value.JSONB{}, nil
+		return nil, nil
 	}
-	return value.ParseJSONB(raw)
+	return canonicalJSON(raw)
+}
+
+func nullableJSON(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return []byte(raw)
 }

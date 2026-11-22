@@ -17,7 +17,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
@@ -63,11 +62,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || !bytes.Equal(current.SubjectDigest, approved.SubjectDigest) || !bytes.Equal(current.RequestHash, requestHash) {
 			return ErrNotReady
 		}
-		at, err := value.FromTime(now)
-		if err != nil {
-			return err
-		}
-		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey, at)
+		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey, now.UTC())
 		if err != nil || !active {
 			return ErrNotReady
 		}
@@ -104,7 +99,7 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 			return err
 		}
 		var dnsNames []string
-		if err := json.Unmarshal(stored.DNSNames.Bytes(), &dnsNames); err != nil {
+		if err := json.Unmarshal(stored.DNSNames, &dnsNames); err != nil {
 			return ErrNotReady
 		}
 		csrDigest := sha256.Sum256(csrDER)

@@ -7,12 +7,11 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 )
 
-func (s operationStore) DispatchCandidates(ctx context.Context, limit, available int, at value.Timestamp) ([]operationstore.Dispatch, error) {
+func (s operationStore) DispatchCandidates(ctx context.Context, limit, available int, at time.Time) ([]operationstore.Dispatch, error) {
 	rows, err := s.Query(ctx, `WITH ranked AS (
 		SELECT outbox.id AS outbox_id,command.id AS command_id,command.state,outbox.available_at,
 		row_number() OVER(PARTITION BY command.node_id ORDER BY CASE WHEN command.state='unknown' THEN 0 ELSE 1 END,outbox.available_at,outbox.id) AS node_rank
@@ -51,7 +50,7 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 	return result, rows.Err()
 }
 
-func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Dispatch, worker uuid.UUID, until, at value.Timestamp) (bool, error) {
+func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Dispatch, worker uuid.UUID, until, at time.Time) (bool, error) {
 	n, err := s.Exec(ctx, `INSERT INTO node_command_leases(node_id,command_id,lease_token,worker_id,leased_until,created_at)
 		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id) DO NOTHING`, d.NodeID, d.CommandID, d.LeaseToken, worker, until, at)
 	if err != nil || n == 0 {
@@ -111,7 +110,7 @@ func (s operationStore) SaveTerminalEnvelope(ctx context.Context, id uuid.UUID, 
 	return err
 }
 
-func (s operationStore) PublishDispatch(ctx context.Context, d operationstore.Dispatch, at value.Timestamp) error {
+func (s operationStore) PublishDispatch(ctx context.Context, d operationstore.Dispatch, at time.Time) error {
 	n, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=$3,locked_by=NULL,locked_until=NULL,last_error=NULL
 		WHERE id=$1 AND locked_by=(SELECT worker_id FROM node_command_leases WHERE lease_token=$2)`, d.OutboxID, d.LeaseToken, at)
 	if err == nil && n != 1 {
@@ -120,7 +119,7 @@ func (s operationStore) PublishDispatch(ctx context.Context, d operationstore.Di
 	return err
 }
 
-func (s operationStore) RecordDispatched(ctx context.Context, d operationstore.Dispatch, envelope []byte, unknown bool, at value.Timestamp) error {
+func (s operationStore) RecordDispatched(ctx context.Context, d operationstore.Dispatch, envelope []byte, unknown bool, at time.Time) error {
 	if unknown {
 		_, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,updated_at=$3 WHERE id=$1 AND state='unknown'`, d.CommandID, envelope, at)
 		return err
@@ -142,7 +141,7 @@ func (s operationStore) RecordDispatched(ctx context.Context, d operationstore.D
 	return err
 }
 
-func (s operationStore) CloseDispatch(ctx context.Context, d operationstore.Dispatch, at value.Timestamp) error {
+func (s operationStore) CloseDispatch(ctx context.Context, d operationstore.Dispatch, at time.Time) error {
 	n, err := s.Exec(ctx, `UPDATE command_attempts SET state='sent',finished_at=$4 WHERE id=$1 AND command_id=$2 AND outbox_event_id=$3 AND state='sending'`, d.AttemptID, d.CommandID, d.OutboxID, at)
 	if err != nil {
 		return err
@@ -157,7 +156,7 @@ func (s operationStore) CloseDispatch(ctx context.Context, d operationstore.Disp
 	return err
 }
 
-func (s operationStore) FailDispatch(ctx context.Context, d operationstore.Dispatch, message string, at value.Timestamp) error {
+func (s operationStore) FailDispatch(ctx context.Context, d operationstore.Dispatch, message string, at time.Time) error {
 	var valid bool
 	if err := s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_command_leases WHERE node_id=$1 AND command_id=$2 AND lease_token=$3 AND leased_until>$4)`, d.NodeID, d.CommandID, d.LeaseToken, at).Scan(&valid); err != nil {
 		return err
@@ -165,17 +164,14 @@ func (s operationStore) FailDispatch(ctx context.Context, d operationstore.Dispa
 	if !valid {
 		return database.ErrNotFound
 	}
-	retry, err := at.Add(time.Second)
-	if err != nil {
-		return err
-	}
+	retry := at.Add(time.Second)
 	if _, err := s.Exec(ctx, `UPDATE outbox_events SET locked_by=NULL,locked_until=NULL,available_at=$3,last_error=$2 WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID, message, retry); err != nil {
 		return err
 	}
 	if _, err := s.Exec(ctx, `UPDATE command_attempts SET state='failed',finished_at=$2,error_code='transport_unavailable' WHERE id=$1 AND state='sending'`, d.AttemptID, at); err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `DELETE FROM node_command_leases WHERE lease_token=$1`, d.LeaseToken)
+	_, err := s.Exec(ctx, `DELETE FROM node_command_leases WHERE lease_token=$1`, d.LeaseToken)
 	return err
 }
 
@@ -197,14 +193,11 @@ func (s operationStore) ExtendDispatch(ctx context.Context, d operationstore.Dis
 	}
 	// Read wall time after FOR UPDATE acquires row locks so lease extension
 	// never uses a pre-wait timestamp.
-	var at value.Timestamp
+	var at time.Time
 	if err := s.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at); err != nil {
 		return err
 	}
-	until, err := at.Add(duration)
-	if err != nil {
-		return err
-	}
+	until := at.Add(duration)
 	n, err := s.Exec(ctx, `UPDATE node_command_leases SET leased_until=$2 WHERE lease_token=$1 AND worker_id=$3`, d.LeaseToken, until, worker)
 	if err != nil {
 		return err
@@ -219,9 +212,9 @@ func (s operationStore) ExtendDispatch(ctx context.Context, d operationstore.Dis
 	return err
 }
 
-func (s operationStore) RecoveryClock(ctx context.Context) (at value.Timestamp, err error) {
+func (s operationStore) RecoveryClock(ctx context.Context) (at time.Time, err error) {
 	err = s.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at)
-	return
+	return at.UTC(), err
 }
 
 func (s operationStore) ExpiredApplyCommands(ctx context.Context) ([]operationstore.RecoveryCommand, error) {
@@ -329,7 +322,7 @@ func (s operationStore) ReconcileExpiredApply(ctx context.Context, v operationst
 	return s.recoveryEvent(ctx, v.Command.OperationID, v.At)
 }
 
-func (s operationStore) recoveryEvent(ctx context.Context, operation uuid.UUID, at value.Timestamp) error {
+func (s operationStore) recoveryEvent(ctx context.Context, operation uuid.UUID, at time.Time) error {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return err
@@ -482,7 +475,7 @@ func (s operationStore) MarkRecoveryProjection(ctx context.Context, v operations
 	return nil
 }
 
-func (s operationStore) ScheduleReconnectRecovery(ctx context.Context, command, operation uuid.UUID, payload []byte, expires, at value.Timestamp) error {
+func (s operationStore) ScheduleReconnectRecovery(ctx context.Context, command, operation uuid.UUID, payload []byte, expires, at time.Time) error {
 	n, err := s.Exec(ctx, `UPDATE commands SET state='unknown',envelope=$2,expires_at=$3,updated_at=$4 WHERE id=$1 AND state IN ('dispatched','accepted','running','unknown')`, command, payload, expires, at)
 	if err != nil {
 		return err

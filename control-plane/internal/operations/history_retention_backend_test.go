@@ -3,11 +3,7 @@ package operations_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -18,20 +14,14 @@ import (
 	"time"
 )
 
-type lostRetentionFence struct{}
-
-func (lostRetentionFence) AssertTransaction(context.Context, database.Tx) error {
-	return coordination.ErrLeadershipLost
-}
-
 func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	f := newOutboxFixture(t)
 	ctx := context.Background()
 	service := operations.NewBackend(f.backend, 1, f.signer)
 	old := time.Now().UTC().Add(-100 * 24 * time.Hour)
-	created, _ := value.FromTime(old.Add(-time.Hour))
-	expired, _ := value.FromTime(old)
-	terminal, _ := value.FromTime(old.Add(time.Minute))
+	created := old.Add(-time.Hour)
+	expired := old
+	terminal := old.Add(time.Minute)
 	node := f.node(t)
 	request := outboxRequest(node)
 	var firstID string
@@ -77,14 +67,8 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	}
 	worker, err := historyretention.New(f.backend, historyretention.DefaultPolicy())
 	testutil.NoError(t, err)
-	if err := worker.RunOnce(coordination.WithFence(ctx, lostRetentionFence{})); !errors.Is(err, coordination.ErrLeadershipLost) {
-		t.Fatal("fence", err)
-	}
 	count := func() int {
 		return f.count(t, `SELECT count(*) FROM commands WHERE details_compacted_at IS NOT NULL`)
-	}
-	if count() != 0 {
-		t.Fatal("lost fence committed compaction")
 	}
 	testutil.NoError(t, worker.RunOnce(ctx))
 	if count() != historyretention.BatchSize {
@@ -102,11 +86,11 @@ func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	if err != nil || !replay || again.ID != firstID {
 		t.Fatal("idempotency identity lost", again, replay, err)
 	}
-	var compact, digest []byte
-	testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT envelope,envelope_sha256 FROM commands WHERE operation_id=$1`, uuid.MustParse(firstID)).Scan(&compact, &digest))
+	var compact []byte
+	testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT envelope FROM commands WHERE operation_id=$1`, uuid.MustParse(firstID)).Scan(&compact))
 	var header agentv1.CommandEnvelope
 	testutil.NoError(t, proto.Unmarshal(compact, &header))
-	if header.Payload != nil || header.Authorization == nil || len(digest) != 32 || !bytes.Equal(header.NodeId, node[:]) {
+	if header.Payload != nil || header.Authorization == nil || !bytes.Equal(header.NodeId, node[:]) {
 		t.Fatal("compact authority evidence missing")
 	} // Ordinary revoked-node history is independent of command detail. Keep
 	// identity/revocation rows, and keep snapshots needed by unresolved work.

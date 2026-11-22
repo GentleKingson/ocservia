@@ -19,7 +19,6 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	telemetry "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
@@ -213,7 +212,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			service = operations.NewBackend(f.backend, 1, f.signer)
 			dispatch := original
 			for attempt := 1; attempt <= 3; attempt++ {
-				past := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
+				past := time.Unix(0, 0).UTC()
 				f.exec(t, `UPDATE node_command_leases SET leased_until=$1 WHERE lease_token=$2`, past, dispatch.LeaseToken)
 				f.exec(t, `UPDATE outbox_events SET locked_until=$1 WHERE id=$2`, past, dispatch.OutboxID)
 				testutil.NoError(t, service.Reap(ctx, 3))
@@ -300,7 +299,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 					f.exec(t, `UPDATE commands SET state=$1 WHERE operation_id=$2`, state, operation)
 				}
 				if published {
-					at := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
+					at := time.Unix(0, 0).UTC()
 					f.exec(t, `UPDATE outbox_events SET published_at=$1 WHERE command_id IN (SELECT id FROM commands WHERE operation_id=$2)`, at, operation)
 				}
 				return operation
@@ -310,8 +309,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		t.Run("quiescent-unknown-does-not-block-other-workspace", func(t *testing.T) {
 			f, service, seed := newFixture(t)
 			otherWorkspace := uuid.Must(uuid.NewV7())
-			at, err := value.FromTime(time.Now().UTC())
-			testutil.NoError(t, err)
+			at := time.Now().UTC()
 			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`, otherWorkspace, otherWorkspace.String(), at, at)
 			f.exec(t, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, otherWorkspace, outboxIdentityID, at)
 			node := uuid.Must(uuid.NewV7())
@@ -406,7 +404,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			testutil.NoError(t, err)
 			id := uuid.MustParse(created.ID)
 			if source == "certificate-release" {
-				f.exec(t, `UPDATE outbox_events SET available_at=$1`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity})
+				f.exec(t, `UPDATE outbox_events SET available_at=$1`, time.Now().UTC().Add(24*time.Hour))
 			} else {
 				f.exec(t, `UPDATE nodes SET status='offline' WHERE id=$1`, node)
 			}

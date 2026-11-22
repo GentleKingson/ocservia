@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -93,8 +92,8 @@ type AgentRollout struct {
 	CreatedBy     string             `json:"created_by"`
 	CurrentBatch  int                `json:"current_batch"`
 	PauseCode     string             `json:"pause_code,omitempty"`
-	CreatedAt     value.Timestamp    `json:"created_at"`
-	UpdatedAt     value.Timestamp    `json:"updated_at"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
 	Nodes         []AgentRolloutNode `json:"nodes,omitempty"`
 	Excluded      []json.RawMessage  `json:"excluded,omitempty"`
 }
@@ -338,11 +337,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 		return AgentRollout{}, false, ErrRolloutInvalid
 	}
 	requestHash := agentRolloutRequestHash(target, sorted, request.BatchSize, request.StopOnFailure)
-	now := s.now()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return AgentRollout{}, false, err
-	}
+	now := s.now().UTC()
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return AgentRollout{}, false, fmt.Errorf("begin agent rollout creation: %w", err)
@@ -389,11 +384,11 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 	if err != nil {
 		return AgentRollout{}, false, err
 	}
-	if err := store.InsertRollout(ctx, operationstore.PendingRollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Exclusions: exclusionsJSON, CreatedAt: at, IdempotencyKey: request.IdempotencyKey}); err != nil {
+	if err := store.InsertRollout(ctx, operationstore.PendingRollout{ID: rolloutID, WorkspaceID: request.WorkspaceID, TargetVersion: target, BatchSize: request.BatchSize, Reason: reason, RequestHash: requestHash, CreatedBy: request.ActorIdentityID, ActorSession: request.ActorSessionID, Exclusions: exclusionsJSON, CreatedAt: now, IdempotencyKey: request.IdempotencyKey}); err != nil {
 		return AgentRollout{}, false, fmt.Errorf("insert agent rollout: %w", err)
 	}
 	for ordinal, node := range eligible {
-		if err := store.InsertRolloutNode(ctx, rolloutID, operationstore.RolloutNode{NodeID: node.nodeID, Ordinal: ordinal, Batch: rolloutBatchForOrdinal(ordinal, request.BatchSize)}, at); err != nil {
+		if err := store.InsertRolloutNode(ctx, rolloutID, operationstore.RolloutNode{NodeID: node.nodeID, Ordinal: ordinal, Batch: rolloutBatchForOrdinal(ordinal, request.BatchSize)}, now); err != nil {
 			return AgentRollout{}, false, fmt.Errorf("insert agent rollout node: %w", err)
 		}
 	}
@@ -429,11 +424,7 @@ func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, a
 	if actorIdentityID == uuid.Nil || actorSessionID == uuid.Nil {
 		return AgentRollout{}, ErrRolloutInvalid
 	}
-	now := s.now()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return AgentRollout{}, err
-	}
+	now := s.now().UTC()
 	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return AgentRollout{}, fmt.Errorf("begin agent rollout resume: %w", err)
@@ -449,7 +440,7 @@ func (s *Service) ResumeAgentRollout(ctx context.Context, rolloutID uuid.UUID, a
 	if rollout.State != RolloutStatePaused {
 		return AgentRollout{}, ErrRolloutState
 	}
-	requeued, err := q.ResumeRollout(ctx, rolloutID, rollout.CurrentBatch, at)
+	requeued, err := q.ResumeRollout(ctx, rolloutID, rollout.CurrentBatch, now)
 	if err != nil {
 		return AgentRollout{}, fmt.Errorf("requeue failed rollout nodes: %w", err)
 	}

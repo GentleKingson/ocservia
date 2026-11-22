@@ -20,7 +20,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
@@ -114,15 +113,8 @@ func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	}
 	digest := sha256.Sum256([]byte(encoded))
 	now := s.now().UTC()
-	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: now.Add(ttl)}
-	at, err := value.FromTime(now)
-	if err != nil {
-		return Token{}, err
-	}
-	expires, err := at.Add(ttl)
-	if err != nil {
-		return Token{}, err
-	}
+	expires := now.Add(ttl)
+	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: expires}
 	var expectedName *string
 	if spec.ExpectedNodeName != "" {
 		expectedName = &spec.ExpectedNodeName
@@ -142,7 +134,7 @@ func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if err := auth.AuthorizeMutationTx(ctx, tx, spec.ActorIdentityID, spec.ActorSessionID, spec.WorkspaceID); err != nil {
 		return Token{}, err
 	}
-	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at})
+	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: now})
 	if err != nil {
 		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
 	}
@@ -184,7 +176,7 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return ErrInvalidToken
 	}
-	if token.ConsumedAt.Valid {
+	if token.ConsumedAt != nil {
 		if token.ConsumedNode == nil || !slices.Equal(token.Endpoint, request.GetEndpointId()) {
 			return ErrInvalidToken
 		}
@@ -213,15 +205,11 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 // Recheck expiry after all admission and node/key lock waits. Returning false
 // rolls back the node, key and capability writes in the caller's transaction.
 func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.EnrollmentStore, token enrollmentstore.Token, node uuid.UUID, endpoint []byte) (bool, error) {
-	now := s.now()
+	now := s.now().UTC()
 	if !tokenUnexpired(token.ExpiresAt, now) {
 		return false, nil
 	}
-	at, err := value.FromTime(now)
-	if err != nil {
-		return false, err
-	}
-	return store.ConsumeToken(ctx, token.ID, node, endpoint, at)
+	return store.ConsumeToken(ctx, token.ID, node, endpoint, now)
 }
 
 func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
@@ -260,7 +248,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return nil, ErrInvalidToken
 	}
-	if token.ConsumedAt.Valid {
+	if token.ConsumedAt != nil {
 		if token.ConsumedNode == nil || len(token.Endpoint) != 32 || subtle.ConstantTimeCompare(token.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrEndpointMismatch
 		}
@@ -297,25 +285,21 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		return nil, ErrPendingLimit
 	}
 	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return nil, err
-	}
 	nodeID := uuid.Must(uuid.NewV7())
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
 	if expectedName != nil {
 		name = *expectedName
 	}
-	if err := store.InsertNode(ctx, nodeID, workspaceID, name, at); err != nil {
+	if err := store.InsertNode(ctx, nodeID, workspaceID, name, now); err != nil {
 		return nil, fmt.Errorf("insert bootstrap node: %w", err)
 	}
-	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), at); err != nil {
+	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), now); err != nil {
 		return nil, fmt.Errorf("bind bootstrap endpoint: %w", err)
 	}
 	sealingKeys := slices.Clone(request.GetSealingKeys())
 	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 	for _, key := range sealingKeys {
-		if err := store.InsertSealingKey(ctx, nodeID, enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}, at); err != nil {
+		if err := store.InsertSealingKey(ctx, nodeID, enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}, now); err != nil {
 			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
 		}
 	}
@@ -329,7 +313,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if !consumed {
 		return nil, ErrInvalidToken
 	}
-	revision, err := store.Activate(ctx, nodeID, "{}", "default", at)
+	revision, err := store.Activate(ctx, nodeID, "{}", "default", now)
 	if err != nil {
 		return nil, err
 	}
@@ -373,11 +357,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return NodeTrust{}, err
-	}
-	revision, err = store.Revoke(ctx, revocation.NodeID, at)
+	revision, err = store.Revoke(ctx, revocation.NodeID, now)
 	if err != nil {
 		return NodeTrust{}, err
 	}
@@ -689,15 +669,11 @@ func supportedCapabilitiesMatch(ctx context.Context, store enrollmentstore.Enrol
 }
 
 func enqueueTrustConvergence(ctx context.Context, tx database.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {
-	at, err := value.FromTime(now)
-	if err != nil {
-		return err
-	}
 	store, err := enrollmentstore.Trust(tx)
 	if err != nil {
 		return err
 	}
-	err = store.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, at)
+	err = store.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, now.UTC())
 	if err != nil {
 		return fmt.Errorf("enqueue node trust convergence: %w", err)
 	}
@@ -761,9 +737,8 @@ func rollback(tx database.Tx) {
 	_ = tx.Rollback(ctx)
 }
 
-func tokenUnexpired(expires value.Timestamp, now time.Time) bool {
-	at, err := value.FromTime(now)
-	return err == nil && expires.Valid && expires.Micros > at.Micros
+func tokenUnexpired(expires time.Time, now time.Time) bool {
+	return !expires.IsZero() && expires.After(now)
 }
 
 func (s *Service) begin(ctx context.Context, isolation database.Isolation) (database.Tx, enrollmentstore.EnrollmentStore, error) {

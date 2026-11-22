@@ -12,7 +12,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 )
@@ -79,11 +78,7 @@ func (s *Service) advanceAgentRollout(ctx context.Context, rolloutID uuid.UUID) 
 // creation manages its own transaction; progressed reports whether the
 // rollout moved forward and another pass may make further progress.
 func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID) ([]claimedRolloutNode, bool, error) {
-	now := s.now()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return nil, false, err
-	}
+	now := s.now().UTC()
 	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("begin rollout advance: %w", err)
@@ -111,7 +106,7 @@ func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID
 		return nil
 	}
 	if rollout.State == RolloutStateQueued {
-		if err := q.SetRolloutState(ctx, rolloutID, "running", rollout.PauseCode, at); err != nil {
+		if err := q.SetRolloutState(ctx, rolloutID, "running", rollout.PauseCode, now); err != nil {
 			return nil, false, fmt.Errorf("start rollout: %w", err)
 		}
 		rollout.State = RolloutStateRunning
@@ -147,10 +142,6 @@ func (s *Service) prepareRolloutAdvance(ctx context.Context, rolloutID uuid.UUID
 // succeeded (durable outcome, online, fresh telemetry, target version
 // observed).
 func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q operationstore.Store, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) error {
-	at, err := value.FromTime(now)
-	if err != nil {
-		return err
-	}
 	terminal, err := q.TerminalRolloutNodes(ctx, rollout.ID)
 	if err != nil {
 		return fmt.Errorf("read terminal rollout nodes: %w", err)
@@ -170,7 +161,7 @@ func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q operationsto
 		case RolloutNodeUnknown:
 			failureCode = "outcome_unknown"
 		}
-		changed, err := q.SetRolloutNodeOutcome(ctx, rollout.ID, node.NodeID, node.Outcome, failureCode, at)
+		changed, err := q.SetRolloutNodeOutcome(ctx, rollout.ID, node.NodeID, node.Outcome, failureCode, now)
 		if err != nil {
 			return fmt.Errorf("roll up rollout node outcome: %w", err)
 		}
@@ -195,10 +186,6 @@ func (s *Service) rollUpTerminalRolloutNodes(ctx context.Context, q operationsto
 // the rollout; it never counts as an upgrade.
 // The second return reports whether the batch pointer advanced.
 func (s *Service) evaluateRolloutBatch(ctx context.Context, q operationstore.Store, rollout *rolloutRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, bool, error) {
-	at, err := value.FromTime(now)
-	if err != nil {
-		return nil, false, err
-	}
 	nodes, err := q.RolloutNodes(ctx, rollout.ID)
 	if err != nil {
 		return nil, false, err
@@ -214,7 +201,7 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q operationstore.Sto
 		// Rollout admission fixes stop-on-failure to true; the stored policy
 		// is part of the approved rollout request hash.
 		pauseCode := "node_" + blocked.State
-		if err := q.SetRolloutState(ctx, rollout.ID, "paused", pauseCode, at); err != nil {
+		if err := q.SetRolloutState(ctx, rollout.ID, "paused", pauseCode, now); err != nil {
 			return nil, false, fmt.Errorf("pause rollout: %w", err)
 		}
 		rollout.State = RolloutStatePaused
@@ -246,7 +233,7 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q operationstore.Sto
 	}
 	if pendingElsewhere {
 		nextBatch := rollout.CurrentBatch + 1
-		if err := q.SetRolloutBatch(ctx, rollout.ID, nextBatch, at); err != nil {
+		if err := q.SetRolloutBatch(ctx, rollout.ID, nextBatch, now); err != nil {
 			return nil, false, fmt.Errorf("advance rollout batch: %w", err)
 		}
 		if err := appendEvent(map[string]any{"event": "batch_completed", "batch": rollout.CurrentBatch}); err != nil {
@@ -258,10 +245,10 @@ func (s *Service) evaluateRolloutBatch(ctx context.Context, q operationstore.Sto
 		}
 		return nil, true, nil
 	}
-	return nil, false, completeRollout(ctx, q, rollout, nodes, at, appendEvent)
+	return nil, false, completeRollout(ctx, q, rollout, nodes, now, appendEvent)
 }
 
-func completeRollout(ctx context.Context, q operationstore.Store, rollout *rolloutRow, nodes []rolloutNodeRow, at value.Timestamp, appendEvent func(map[string]any) error) error {
+func completeRollout(ctx context.Context, q operationstore.Store, rollout *rolloutRow, nodes []rolloutNodeRow, at time.Time, appendEvent func(map[string]any) error) error {
 	// Every node reached a terminal state: succeeded nodes count as upgrades,
 	// skipped nodes do not. A rollout that upgraded nothing failed.
 	succeeded, skipped := 0, 0
@@ -300,10 +287,6 @@ func completeRollout(ctx context.Context, q operationstore.Store, rollout *rollo
 // that the fleet no longer matches the approved request before the next
 // batch starts.
 func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore.Store, rollout *rolloutRow, current []*rolloutNodeRow, now time.Time, appendEvent func(map[string]any) error) ([]claimedRolloutNode, error) {
-	at, err := value.FromTime(now)
-	if err != nil {
-		return nil, err
-	}
 	type eligibleClaim struct {
 		observation rolloutNodeObservation
 		digest      [sha256.Size]byte
@@ -313,7 +296,7 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore
 	// one node changed eligibility, no peer from the approved batch may be
 	// dispatched until an operator explicitly resumes the rollout.
 	for _, node := range current {
-		if node.State != RolloutNodePending || (node.DispatchLease.Valid && node.DispatchLease.Micros > at.Micros) {
+		if node.State != RolloutNodePending || (node.DispatchLease != nil && node.DispatchLease.After(now)) {
 			continue
 		}
 		observation, err := loadRolloutNodeObservation(ctx, q, node.NodeID, rollout.WorkspaceID)
@@ -336,6 +319,7 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore
 			continue
 		}
 		var nodeVersion int64
+		var err error
 		if node.DispatchVersion > 0 {
 			// A prior claim pinned the node version; a reclaim after a crash
 			// reuses it so the deterministic idempotency key replays the exact
@@ -351,11 +335,8 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore
 		if attempt < 1 {
 			attempt = 1
 		}
-		lease, err := value.FromTime(now.Add(rolloutDispatchLease))
-		if err != nil {
-			return nil, err
-		}
-		changed, err := q.ClaimRolloutNode(ctx, rollout.ID, operationstore.RolloutNode{NodeID: node.NodeID, DispatchVersion: nodeVersion, DispatchAttempt: attempt}, lease, at)
+		lease := now.Add(rolloutDispatchLease)
+		changed, err := q.ClaimRolloutNode(ctx, rollout.ID, operationstore.RolloutNode{NodeID: node.NodeID, DispatchVersion: nodeVersion, DispatchAttempt: attempt}, lease, now)
 		if err != nil {
 			return nil, fmt.Errorf("claim rollout node: %w", err)
 		}
@@ -370,11 +351,7 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore
 }
 
 func pauseRolloutForSkippedNode(ctx context.Context, q operationstore.Store, rollout *rolloutRow, node *rolloutNodeRow, reason string, now time.Time, appendEvent func(map[string]any) error) (bool, error) {
-	at, err := value.FromTime(now)
-	if err != nil {
-		return false, err
-	}
-	changed, err := q.SkipRolloutNode(ctx, rollout.ID, *node, reason, at)
+	changed, err := q.SkipRolloutNode(ctx, rollout.ID, *node, reason, now)
 	if err != nil {
 		return false, fmt.Errorf("skip rollout node: %w", err)
 	}
@@ -447,10 +424,7 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 	default:
 		return false, fmt.Errorf("dispatch rollout node upgrade: %w", err)
 	}
-	at, err := value.FromTime(s.now())
-	if err != nil {
-		return false, err
-	}
+	now := s.now().UTC()
 	operationID, err := uuid.Parse(operation.ID)
 	if err != nil {
 		return false, err
@@ -460,7 +434,7 @@ func (s *Service) dispatchRolloutNode(ctx context.Context, rolloutID uuid.UUID, 
 		return false, fmt.Errorf("begin rollout dispatch record: %w", err)
 	}
 	defer rollbackRollout(tx)
-	if err := q.AttachRolloutOperation(ctx, rolloutID, node.NodeID, operationID, node.Observation.AgentVersion, at); err != nil {
+	if err := q.AttachRolloutOperation(ctx, rolloutID, node.NodeID, operationID, node.Observation.AgentVersion, now); err != nil {
 		return false, fmt.Errorf("record rollout dispatch: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -513,16 +487,12 @@ func (s *Service) recordRolloutNodeSkipped(ctx context.Context, rolloutID uuid.U
 }
 
 func (s *Service) releaseRolloutNodeClaim(ctx context.Context, rolloutID uuid.UUID, nodeID uuid.UUID) error {
-	at, err := value.FromTime(s.now())
-	if err != nil {
-		return err
-	}
 	tx, q, err := s.beginRollout(ctx)
 	if err != nil {
 		return fmt.Errorf("begin rollout claim release: %w", err)
 	}
 	defer rollbackRollout(tx)
-	if err := q.ReleaseRolloutClaim(ctx, rolloutID, nodeID, at); err != nil {
+	if err := q.ReleaseRolloutClaim(ctx, rolloutID, nodeID, s.now().UTC()); err != nil {
 		return fmt.Errorf("release rollout node claim: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

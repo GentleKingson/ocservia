@@ -5,9 +5,11 @@ package connection
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"path/filepath"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
@@ -159,7 +161,41 @@ func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.
 }
 
 // ValidateRuntime runs before starting listeners or background work.
-// A valid schema receipt alone does not prove telemetry history is usable.
+// It verifies both schema migration alignment and telemetry partition readiness.
 func (c *Connection) ValidateRuntime(ctx context.Context) error {
+	if err := migrations.ValidateSchemaVersion(ctx, c.pg); err != nil {
+		return err
+	}
 	return postgres.WrapPool(c.pg).ValidateTelemetryRuntime(ctx)
+}
+
+const controllerLockID int64 = 764057383691829797
+
+// AcquireControllerLock holds a PostgreSQL session advisory lock for the
+// lifetime of the Controller process so a second Controller cannot start
+// against the same database.
+func (c *Connection) AcquireControllerLock(ctx context.Context) (func(), error) {
+	conn, err := c.pg.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire controller lock connection: %w", err)
+	}
+	var locked bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", controllerLockID).Scan(&locked); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("acquire controller advisory lock: %w", err)
+	}
+	if !locked {
+		conn.Release()
+		return nil, errors.New("another Controller instance already holds the database advisory lock")
+	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var unlocked bool
+		if err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", controllerLockID).Scan(&unlocked); err != nil || !unlocked {
+			_ = conn.Hijack().Close(unlockCtx)
+			return
+		}
+		conn.Release()
+	}, nil
 }

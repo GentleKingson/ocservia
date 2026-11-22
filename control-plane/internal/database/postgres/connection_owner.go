@@ -9,7 +9,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -25,7 +24,7 @@ func (s connectionOwnerStore) Acquire(ctx context.Context, t connectionowner.Sto
 	}
 	var previousOwner uuid.UUID
 	var previousIncarnation, epoch int64
-	var previousUntil value.Timestamp
+	var previousUntil time.Time
 	err = s.QueryRow(ctx, `SELECT owner_instance_id,owner_incarnation,owner_epoch,lease_until FROM connection_owner_fencing WHERE node_id=$1 FOR UPDATE`, t.NodeID[:]).Scan(&previousOwner, &previousIncarnation, &epoch, &previousUntil)
 	absent := errors.Is(err, database.ErrNotFound)
 	if err != nil && !absent {
@@ -35,16 +34,13 @@ func (s connectionOwnerStore) Acquire(ctx context.Context, t connectionowner.Sto
 	if err != nil {
 		return v, err
 	}
-	v.Until, err = at.Add(ttl)
-	if err != nil {
-		return v, err
-	}
+	v.Until = at.Add(ttl)
 	if absent {
 		v.Epoch = 1
 		_, err = s.Exec(ctx, `INSERT INTO connection_owner_fencing(node_id,owner_instance_id,owner_incarnation,connection_id,owner_epoch,lease_until,updated_at) VALUES($1,$2,$3,$4,1,$5,$6)`, t.NodeID[:], t.Identity.InstanceID, t.Identity.Incarnation, t.ConnectionID[:], v.Until, at)
 		return v, err
 	}
-	if previousUntil.Micros > at.Micros && (previousOwner != t.Identity.InstanceID || previousIncarnation != t.Identity.Incarnation) {
+	if previousUntil.After(at) && (previousOwner != t.Identity.InstanceID || previousIncarnation != t.Identity.Incarnation) {
 		return v, database.ErrNotFound
 	}
 	if epoch == math.MaxInt64 {
@@ -59,19 +55,16 @@ func (s connectionOwnerStore) Acquire(ctx context.Context, t connectionowner.Sto
 	return
 }
 
-func (s connectionOwnerStore) Renew(ctx context.Context, t connectionowner.StoreTerm, ttl time.Duration) (until value.Timestamp, err error) {
+func (s connectionOwnerStore) Renew(ctx context.Context, t connectionowner.StoreTerm, ttl time.Duration) (until time.Time, err error) {
 	at, err := s.lockLiveTerm(ctx, t)
 	if err != nil {
 		return until, err
 	}
-	until, err = at.Add(ttl)
-	if err != nil {
-		return until, err
-	}
+	until = at.Add(ttl)
 	err = s.QueryRow(ctx, `UPDATE connection_owner_fencing SET lease_until=$6,updated_at=$7
 		WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>$7 RETURNING lease_until`,
 		t.NodeID[:], t.Identity.InstanceID, t.Identity.Incarnation, t.ConnectionID[:], t.Epoch, until, at).Scan(&until)
-	return
+	return until.UTC(), err
 }
 
 func (s connectionOwnerStore) Release(ctx context.Context, t connectionowner.StoreTerm) error {
@@ -87,29 +80,29 @@ func (s connectionOwnerStore) Release(ctx context.Context, t connectionowner.Sto
 	return err
 }
 
-func (s connectionOwnerStore) lockLiveTerm(ctx context.Context, t connectionowner.StoreTerm) (value.Timestamp, error) {
-	var until value.Timestamp
+func (s connectionOwnerStore) lockLiveTerm(ctx context.Context, t connectionowner.StoreTerm) (time.Time, error) {
+	var until time.Time
 	err := s.QueryRow(ctx, `SELECT lease_until FROM connection_owner_fencing WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 FOR UPDATE`,
 		t.NodeID[:], t.Identity.InstanceID, t.Identity.Incarnation, t.ConnectionID[:], t.Epoch).Scan(&until)
 	if err != nil {
-		return value.Timestamp{}, err
+		return time.Time{}, err
 	}
 	at, err := database.WallTime(ctx, s.Tx)
-	if err == nil && until.Micros <= at.Micros {
+	if err == nil && !until.After(at) {
 		err = database.ErrNotFound
 	}
 	return at, err
 }
 
 func (s connectionOwnerStore) Assert(ctx context.Context, t connectionowner.StoreTerm) error {
-	var until value.Timestamp
+	var until time.Time
 	err := s.QueryRow(ctx, `SELECT lease_until FROM connection_owner_fencing WHERE node_id=$1 AND owner_instance_id=$2 AND owner_incarnation=$3 AND connection_id=$4 AND owner_epoch=$5 AND lease_until>clock_timestamp() FOR SHARE OF connection_owner_fencing`,
 		t.NodeID[:], t.Identity.InstanceID, t.Identity.Incarnation, t.ConnectionID[:], t.Epoch).Scan(&until)
 	if err != nil {
 		return err
 	}
 	at, err := database.WallTime(ctx, s.Tx)
-	if err == nil && until.Micros <= at.Micros {
+	if err == nil && !until.After(at) {
 		return database.ErrNotFound
 	}
 	return err

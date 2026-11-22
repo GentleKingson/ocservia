@@ -5,27 +5,27 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
 var providerName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 type SecretRef struct {
-	ID          uuid.UUID        `json:"id"`
-	WorkspaceID uuid.UUID        `json:"workspace_id"`
-	Provider    string           `json:"provider"`
-	KeyPath     string           `json:"key_path"`
-	Version     string           `json:"version"`
-	State       string           `json:"state"`
-	RotatedAt   *value.Timestamp `json:"rotated_at,omitempty"`
-	CreatedAt   value.Timestamp  `json:"created_at"`
-	UpdatedAt   value.Timestamp  `json:"updated_at"`
+	ID          uuid.UUID  `json:"id"`
+	WorkspaceID uuid.UUID  `json:"workspace_id"`
+	Provider    string     `json:"provider"`
+	KeyPath     string     `json:"key_path"`
+	Version     string     `json:"version"`
+	State       string     `json:"state"`
+	RotatedAt   *time.Time `json:"rotated_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type SecretRefRequest struct {
@@ -37,13 +37,9 @@ func (s *Service) CreateSecretRef(ctx context.Context, request SecretRefRequest)
 	if !validSecretRefRequest(request) {
 		return SecretRef{}, ErrInvalid
 	}
-	now, id := s.now(), uuid.Must(uuid.NewV7())
-	at, err := value.FromTime(now)
-	if err != nil {
-		return SecretRef{}, err
-	}
-	v := certificatestore.SecretReference{ID: id, WorkspaceID: request.WorkspaceID, Provider: request.Provider, KeyPath: request.KeyPath, Version: request.Version, State: "active", CreatedAt: at, UpdatedAt: at}
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	now, id := s.now().UTC().Truncate(time.Microsecond), uuid.Must(uuid.NewV7())
+	v := certificatestore.SecretReference{ID: id, WorkspaceID: request.WorkspaceID, Provider: request.Provider, KeyPath: request.KeyPath, Version: request.Version, State: "active", CreatedAt: now, UpdatedAt: now}
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
@@ -80,12 +76,8 @@ func (s *Service) RotateSecretRef(ctx context.Context, id uuid.UUID, request Sec
 		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorID, request.SessionID, workspaceID); err != nil {
 			return err
 		}
-		now := s.now()
-		at, err := value.FromTime(now)
-		if err != nil {
-			return err
-		}
-		v, err = store.RotateSecretReference(ctx, id, request.Version, at)
+		now := s.now().UTC().Truncate(time.Microsecond)
+		v, err = store.RotateSecretReference(ctx, id, request.Version, now)
 		if err != nil {
 			return err
 		}
@@ -124,11 +116,7 @@ func (s *Service) SecretRefResource(ctx context.Context, id uuid.UUID) (uuid.UUI
 }
 
 func readSecretReference(v certificatestore.SecretReference) SecretRef {
-	var rotated *value.Timestamp
-	if v.RotatedAt.Valid {
-		rotated = &v.RotatedAt
-	}
-	return SecretRef{ID: v.ID, WorkspaceID: v.WorkspaceID, Provider: v.Provider, KeyPath: v.KeyPath, Version: v.Version, State: v.State, RotatedAt: rotated, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
+	return SecretRef{ID: v.ID, WorkspaceID: v.WorkspaceID, Provider: v.Provider, KeyPath: v.KeyPath, Version: v.Version, State: v.State, RotatedAt: v.RotatedAt, CreatedAt: v.CreatedAt.UTC(), UpdatedAt: v.UpdatedAt.UTC()}
 }
 
 func validSecretRefRequest(request SecretRefRequest) bool {

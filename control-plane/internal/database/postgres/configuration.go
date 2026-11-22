@@ -2,10 +2,10 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -90,7 +90,7 @@ func (s configurationStore) InsertApply(ctx context.Context, v configurationstor
 	return err
 }
 
-func (s configurationStore) AdvanceDesiredRevision(ctx context.Context, node uuid.UUID, revision uint64, at value.Timestamp) (bool, error) {
+func (s configurationStore) AdvanceDesiredRevision(ctx context.Context, node uuid.UUID, revision uint64, at time.Time) (bool, error) {
 	count, err := s.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at)VALUES($1,0,$2,'',$3)
 		ON CONFLICT(node_id) DO UPDATE SET desired_revision=EXCLUDED.desired_revision,updated_at=EXCLUDED.updated_at WHERE node_config_state.desired_revision=$2-1`, node, revision, at)
 	return count == 1, err

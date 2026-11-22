@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 )
@@ -96,17 +96,12 @@ const operationColumns = `o.id::text,o.state,o.node_id::text,o.command_id::text,
 const operationJoins = ` FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id LEFT JOIN agent_upgrade_operations u ON u.operation_id=o.id`
 
 func scanOperation(row database.Row, same *bool) (v operationstore.Operation, err error) {
-	var expires value.Timestamp
-	args := []any{&v.ID, &v.State, &v.NodeID, &v.CommandID, &v.Version, &v.CreatedAt, &v.UpdatedAt, &expires, &v.ConfigApplyState, &v.ConfigApplyFailureCode, &v.AgentUpgradeState, &v.AgentUpgradeTarget}
+	args := []any{&v.ID, &v.State, &v.NodeID, &v.CommandID, &v.Version, &v.CreatedAt, &v.UpdatedAt, &v.ExpiresAt, &v.ConfigApplyState, &v.ConfigApplyFailureCode, &v.AgentUpgradeState, &v.AgentUpgradeTarget}
 	if same != nil {
 		args = append(args, same)
 	}
-	err = row.Scan(args...)
-	if err != nil {
+	if err = row.Scan(args...); err != nil {
 		return operationstore.Operation{}, err
-	}
-	if expires.Valid {
-		v.ExpiresAt = &expires
 	}
 	return
 }
@@ -197,7 +192,7 @@ func (s operationStore) EventSequence(ctx context.Context, operation, event uuid
 	return
 }
 
-func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, payload string, at value.Timestamp) error {
+func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, payload string, at time.Time) error {
 	// Dispatch and command result ingestion lock outbox_events before commands.
 	// Lock outbox first and recheck eligibility after acquiring the lock so a
 	// concurrent dispatch claim cannot deadlock or be superseded in flight.

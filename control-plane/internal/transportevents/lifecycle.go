@@ -9,7 +9,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -28,15 +27,8 @@ func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScena
 	if requestID == "" || tracecontext.TraceID(traceparent) == "" {
 		return operations.Operation{}, fmt.Errorf("%w: request correlation is required", ErrInvalidScenario)
 	}
-	now := s.now()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return operations.Operation{}, err
-	}
-	expires, err := at.Add(time.Minute)
-	if err != nil {
-		return operations.Operation{}, err
-	}
+	now := s.now().UTC()
+	expires := now.Add(time.Minute)
 	workspace, node, operation, command, auditID, err := newIDs()
 	if err != nil {
 		return operations.Operation{}, err
@@ -51,11 +43,11 @@ func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScena
 		if err != nil {
 			return err
 		}
-		workspace, err = store.EnsureWorkspace(ctx, workspace, workspaceSlug, at)
+		workspace, err = store.EnsureWorkspace(ctx, workspace, workspaceSlug, now)
 		if err != nil {
 			return fmt.Errorf("ensure simulator workspace: %w", err)
 		}
-		if err := store.InsertSimulation(ctx, eventstore.Simulation{WorkspaceID: workspace, NodeID: node, OperationID: operation, CommandID: command, Endpoint: endpoint[:], Envelope: envelope, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent), Traceparent: traceparent, At: at, ExpiresAt: expires}); err != nil {
+		if err := store.InsertSimulation(ctx, eventstore.Simulation{WorkspaceID: workspace, NodeID: node, OperationID: operation, CommandID: command, Endpoint: endpoint[:], Envelope: envelope, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent), Traceparent: traceparent, At: now, ExpiresAt: expires}); err != nil {
 			return fmt.Errorf("insert simulator intent: %w", err)
 		}
 		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspace, ActorType: "development_stub", ActorID: "developer", Action: "simulation.probe", ResourceType: "operation", ResourceID: operation, RequestID: requestID, TraceID: tracecontext.TraceID(traceparent), Reason: "development simulation probe", At: now})
@@ -64,7 +56,7 @@ func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScena
 		return operations.Operation{}, fmt.Errorf("create local simulation: %w", err)
 	}
 	nodeText, commandText := node.String(), command.String()
-	return operations.Operation{ID: operation.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: at, UpdatedAt: at}, nil
+	return operations.Operation{ID: operation.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Service) ClaimSimulationJobs(ctx context.Context, limit int) ([]SimulationJob, error) {

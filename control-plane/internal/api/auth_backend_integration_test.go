@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 )
@@ -67,16 +66,13 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if err != nil || principal.IdentityID != id {
 		t.Fatalf("session: %+v %v", principal, err)
 	}
-	// Stored infinite or extended-range expiry must never lengthen the finite
-	// lifetime authenticated by the signed cookie.
-	for _, micros := range []int64{value.PositiveInfinity, value.EndTimestamp - 1} {
-		if _, err := backend.Exec(ctx, `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, value.Timestamp{Micros: micros, Valid: true}, principal.SessionID); err != nil {
-			t.Fatal(err)
-		}
-		bounded, err := service.Authenticate(ctx, cookie)
-		if err != nil || !bounded.ExpiresAt.Truncate(time.Microsecond).Equal(principal.ExpiresAt) {
-			t.Fatalf("logical session expiry %d: %+v %v", micros, bounded, err)
-		}
+	// Stored later expiry must never lengthen the finite lifetime authenticated by the signed cookie.
+	if _, err := backend.Exec(ctx, `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, time.Now().UTC().Add(365*24*time.Hour), principal.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := service.Authenticate(ctx, cookie)
+	if err != nil || !bounded.ExpiresAt.Truncate(time.Microsecond).Equal(principal.ExpiresAt) {
+		t.Fatalf("extended session expiry: %+v %v", bounded, err)
 	}
 	logout := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
 	logout.Header.Set("Origin", authTestOrigin)

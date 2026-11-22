@@ -24,7 +24,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -211,7 +210,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	} else if workspace, err = uuid.NewV7(); err != nil {
 		t.Fatal(err)
 	}
-	at, _ := value.FromTime(time.Now().UTC())
+	at := time.Now().UTC()
 	if !smoke {
 		if _, err := runtime.Store.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Controller process',$2,$3,$3)`, workspace, workspace.String(), at); err != nil {
 			t.Fatal("seed workspace", err)
@@ -246,7 +245,7 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		t.Fatalf("repeat runtime CLI bootstrap: %v\n%s", err, output)
 	}
 	if !production && !smoke {
-		installSchedulerEvidence(t, ctx, owner)
+		// Single-instance advisory lock replaces scheduler maintenance evidence.
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	testutil.NoError(t, err)
@@ -260,9 +259,6 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	extra := map[string]string{"OCSERV_HTTP_ADDRESS": address}
 	if !production {
 		extra["OCSERV_PUBLIC_ORIGIN"] = "http://" + address
-		if !smoke {
-			extra["OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"] = "true"
-		}
 	}
 	cmd := exec.CommandContext(ctx, binary, processArgs...)
 	cmd.Env = environment(runtimeOptions, extra)
@@ -334,22 +330,6 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
 		t.Fatalf("real process authorized reader: %d %s", response.StatusCode, body)
 	}
-	if !production && !smoke {
-		completed := 0
-		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
-			if err := owner.Store.QueryRow(ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed); err != nil {
-				t.Fatal(err)
-			}
-			if completed > 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if completed == 0 {
-			output, _ := os.ReadFile(logPath)
-			t.Fatalf("real maintenance body did not finish with its fence\n%s", output)
-		}
-	}
 	if production {
 		t.Log("production configuration, migration, runtime permissions, readiness, authenticated read, and database writes passed")
 	}
@@ -420,22 +400,6 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		}
 		if _, err := os.Stat(trustSocket); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("failed CLI left Trust socket", err)
-		}
-	})
-}
-
-func installSchedulerEvidence(t *testing.T, ctx context.Context, owner *connection.Connection) {
-	t.Helper()
-	sql, err := os.ReadFile("../../../../deploy/test-fixtures/scheduler-maintenance.sql")
-	testutil.NoError(t, err)
-	if _, err := owner.Store.Exec(ctx, string(sql)); err != nil {
-		t.Fatal("install PostgreSQL evidence fixture", err)
-	}
-	t.Cleanup(func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := owner.Store.Exec(cleanup, `DROP FUNCTION public.test_record_scheduler_maintenance(uuid,bigint,bigint); DROP TABLE public.test_scheduler_maintenance_history`); err != nil {
-			t.Error("remove PostgreSQL evidence fixture", err)
 		}
 	})
 }

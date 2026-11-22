@@ -5,13 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -43,7 +44,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		return invalidCommandResult("command result completed_at exceeds clock skew bound")
 	}
 	errorCodeValue := result.GetErrorCode()
-	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !value.ValidText(errorCodeValue, 128)) {
+	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !validText(errorCodeValue, 128)) {
 		return invalidCommandResult("command result field is invalid")
 	}
 	state := ""
@@ -63,14 +64,8 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	if err != nil {
 		return err
 	}
-	at, err := value.FromTime(observedAt)
-	if err != nil {
-		return err
-	}
-	completed, err := value.FromTime(completedTime)
-	if err != nil {
-		return err
-	}
+	at := observedAt.UTC()
+	completed := completedTime.UTC()
 	stored, err := store.LoadCommand(ctx, commandID, nodeID)
 	if errors.Is(err, database.ErrNotFound) {
 		return invalidCommandResult("command result does not match a dispatched command")
@@ -96,12 +91,10 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	}
 	payloadHash := resultBytesOrNull(result.GetPayloadSha256())
 	hashVersion := int16(result.GetSemanticPayloadHashVersion())
-	var accepted value.Timestamp
+	var accepted *time.Time
 	if acceptedAt := result.GetAcceptedAt(); acceptedAt != nil {
-		accepted, err = value.FromTime(acceptedAt.AsTime())
-		if err != nil {
-			return err
-		}
+		t := acceptedAt.AsTime().UTC()
+		accepted = &t
 	}
 	errorCode := resultText(result.GetErrorCode())
 	resultBytes := result.GetResult()
@@ -266,15 +259,11 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 	if err != nil {
 		return err
 	}
-	expiry, err := value.FromTime(expiresAt)
-	if err != nil {
-		return err
-	}
-	at, err := value.FromTime(observedAt)
-	if err != nil {
-		return err
-	}
-	return store.ScheduleRecovery(ctx, commandID, payload, expiry, at)
+	return store.ScheduleRecovery(ctx, commandID, payload, expiresAt.UTC(), observedAt.UTC())
+}
+
+func validText(s string, maxBytes int) bool {
+	return s != "" && len(s) <= maxBytes && utf8.ValidString(s) && strings.IndexByte(s, 0) < 0
 }
 
 func fixedHostEffect(envelope *agentv1.CommandEnvelope) bool {

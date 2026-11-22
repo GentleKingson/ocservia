@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 	"github.com/google/uuid"
@@ -29,7 +29,7 @@ func newUserOperationsHTTPFixture(t *testing.T) userOperationsHTTPFixture {
 	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlans, UserOperations: f.service, Certificates: f.s.certificates})
 	f.node, f.sibling = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, node := range []uuid.UUID{f.node, f.sibling} {
-		stamp := value.Timestamp{Valid: true}
+		stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, node, f.workspace, node.String(), stamp, stamp)
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.users.write',true)`, node)
 		for _, user := range []struct {

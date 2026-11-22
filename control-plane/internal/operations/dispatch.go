@@ -38,10 +38,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		if err != nil {
 			return err
 		}
-		until, err := at.Add(lease)
-		if err != nil {
-			return err
-		}
+		until := at.Add(lease)
 		candidates, err := store.DispatchCandidates(ctx, limit, available, at)
 		if err != nil {
 			return fmt.Errorf("select outbox candidates: %w", err)

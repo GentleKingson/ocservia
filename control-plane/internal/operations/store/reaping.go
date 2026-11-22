@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -13,18 +12,18 @@ type RecoveryCommand struct {
 	Envelope                                            []byte
 	CommandState, OperationState                        string
 	Attempts                                            int
-	ExpiresAt                                           value.Timestamp
+	ExpiresAt                                           time.Time
 }
 
 type RecoveryUpdate struct {
 	Command       RecoveryCommand
 	Envelope      []byte
-	ExpiresAt, At value.Timestamp
+	ExpiresAt, At time.Time
 	Schedule      bool
 }
 
 type ReapingStore interface {
-	RecoveryClock(context.Context) (value.Timestamp, error)
+	RecoveryClock(context.Context) (time.Time, error)
 	ExpiredApplyCommands(context.Context) ([]RecoveryCommand, error)
 	ReconcileExpiredApply(context.Context, RecoveryUpdate) error
 	ExpiredSendingCommands(context.Context, int) ([]uuid.UUID, error)

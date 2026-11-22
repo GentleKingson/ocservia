@@ -9,11 +9,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
 )
@@ -25,7 +25,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	userOperations := useroperations.NewBackend(f.b, nil)
 	f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations, Certificates: f.s.certificates})
 	other, sibling, foreign := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	stamp := value.Timestamp{Valid: true}
+	stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Business routes',$2,$3,$4)`, other, other.String(), stamp, stamp)
 	for _, node := range []struct{ id, workspace uuid.UUID }{{sibling, f.workspace}, {foreign, other}} {
 		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, node.id, node.workspace, node.id.String(), stamp, stamp)

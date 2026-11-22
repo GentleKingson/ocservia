@@ -16,7 +16,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
@@ -192,11 +191,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		csr.DNSNames = []string{}
 		request.Payload = csr
 	}
-	now := s.now()
-	created, err := value.FromTime(now)
-	if err != nil {
-		return Operation{}, false, err
-	}
+	now := s.now().UTC()
 	hash := requestHash(request)
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
@@ -226,7 +221,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		return Operation{}, false, ErrNodeUnavailable
 	}
 	if upgrade.RolloutID != uuid.Nil {
-		observation, err := s.lockRolloutObservation(ctx, intentStore, request, upgrade, workspaceID, nodeStatus, now, created)
+		observation, err := s.lockRolloutObservation(ctx, intentStore, request, upgrade, workspaceID, nodeStatus, now)
 		if err != nil {
 			return Operation{}, false, err
 		}
@@ -260,7 +255,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return Operation{}, false, ErrCapabilityMissing
 		}
 	}
-	if err := validateConfigurationIntent(ctx, tx, intentStore, request, workspaceID, created); err != nil {
+	if err := validateConfigurationIntent(ctx, tx, intentStore, request, workspaceID, now); err != nil {
 		return Operation{}, false, err
 	}
 	if err := bindCommandCapability(ctx, intentStore, &request); err != nil {
@@ -291,16 +286,12 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		return Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	expiry, err := value.FromTime(expiresAt)
-	if err != nil {
-		return Operation{}, false, err
-	}
 	envelope, payloadType, err := marshalEnvelope(request, operationID, commandID, authorizationRevision, now, expiresAt, s.signer)
 	if err != nil {
 		return Operation{}, false, err
 	}
 	if request.SupersedePending {
-		if err := intentStore.SupersedePending(ctx, request.NodeID, payloadType, created); err != nil {
+		if err := intentStore.SupersedePending(ctx, request.NodeID, payloadType, now); err != nil {
 			return Operation{}, false, err
 		}
 	}
@@ -310,22 +301,22 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	if err := intentStore.InsertIntent(ctx, operationstore.QueuedIntent{
 		ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID,
 		RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey,
-		RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created,
+		RequestHash: hash[:], ExpiresAt: expiresAt, CreatedAt: now,
 	}); err != nil {
 		return Operation{}, false, fmt.Errorf("insert operation intent: %w", err)
 	}
-	if err := insertDomainIntent(ctx, tx, intentStore, request, workspaceID, operationID, created, expiry, fromVersion); err != nil {
+	if err := insertDomainIntent(ctx, tx, intentStore, request, workspaceID, operationID, now, expiresAt, fromVersion); err != nil {
 		return Operation{}, false, err
 	}
-	availableAt := created
+	availableAt := now
 	if payload, ok := request.Payload.(CertificateRevokePayload); ok && payload.HoldDispatch {
-		availableAt = expiry
+		availableAt = expiresAt
 	}
 	if err := intentStore.EnqueueCommand(ctx, operationstore.QueuedCommand{
 		ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID,
 		OutboxID: outboxID, EventID: eventID, PayloadType: payloadType, Envelope: envelope,
 		IdempotencyKey: request.IdempotencyKey, ExpectedVersion: request.ExpectedVersion, Traceparent: request.Traceparent,
-		ExpiresAt: expiry, CreatedAt: created, AvailableAt: availableAt,
+		ExpiresAt: expiresAt, CreatedAt: now, AvailableAt: availableAt,
 	}); err != nil {
 		return Operation{}, false, err
 	}
@@ -348,18 +339,18 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return err
 		})
 		if confirmed == nil {
-			if availableAt == created {
+			if availableAt.Equal(now) {
 				s.Notify()
 			}
 			return existing, false, nil
 		}
 		return Operation{}, false, fmt.Errorf("commit operation transaction: %w", err)
 	}
-	if availableAt == created {
+	if availableAt.Equal(now) {
 		s.Notify()
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()
-	operation := Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: &expiry}
+	operation := Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expiresAt}
 	if _, ok := request.Payload.(ConfigApplyPayload); ok {
 		operation.ConfigApplyState = "queued"
 	}

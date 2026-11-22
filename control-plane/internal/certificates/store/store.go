@@ -6,18 +6,18 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
 type Certificate struct {
-	ID, WorkspaceID, NodeID, OperationID                 uuid.UUID
-	CommonName, State, SerialNumber                      string
-	DNSNames                                             value.JSONB
-	KeyBits                                              uint32
-	Version                                              int64
-	PublicKeySHA256                                      []byte
-	NotBefore, NotAfter, RevokedAt, CreatedAt, UpdatedAt value.Timestamp
+	ID, WorkspaceID, NodeID, OperationID uuid.UUID
+	CommonName, State, SerialNumber      string
+	DNSNames                             []byte
+	KeyBits                              uint32
+	Version                              int64
+	PublicKeySHA256                      []byte
+	NotBefore, NotAfter, RevokedAt       *time.Time
+	CreatedAt, UpdatedAt                 time.Time
 }
 
 type IssueState struct {
@@ -28,7 +28,7 @@ type IssueState struct {
 	Version                                                   int64
 	IssueVersion                                              *int64
 	ReceiptCurrent                                            bool
-	DNSNames                                                  value.JSONB
+	DNSNames                                                  []byte
 	KeyBits                                                   uint32
 }
 
@@ -62,29 +62,30 @@ type ActionBinding struct {
 
 type Artifact struct {
 	ID, OperationID uuid.UUID
-	ExpiresAt       value.Timestamp
+	ExpiresAt       time.Time
 	SameIntent      bool
 }
 
 type PendingCSR struct {
 	ID, WorkspaceID, NodeID, OperationID uuid.UUID
 	CommonName                           string
-	DNSNames                             value.JSONB
+	DNSNames                             []byte
 	KeyBits                              uint32
-	CreatedAt                            value.Timestamp
+	CreatedAt                            time.Time
 }
 
 type PendingArtifact struct {
 	ID, WorkspaceID, NodeID, CertificateID, OperationID, RequesterID uuid.UUID
 	CertificateVersion                                               uint64
 	TokenSHA256, RequestHash                                         []byte
-	ExpiresAt, CreatedAt                                             value.Timestamp
+	ExpiresAt, CreatedAt                                             time.Time
 }
 
 type SecretReference struct {
 	ID, WorkspaceID                   uuid.UUID
 	Provider, KeyPath, Version, State string
-	RotatedAt, CreatedAt, UpdatedAt   value.Timestamp
+	RotatedAt                         *time.Time
+	CreatedAt, UpdatedAt              time.Time
 }
 
 type Store interface {
@@ -98,7 +99,7 @@ type Store interface {
 	LockIssue(context.Context, uuid.UUID) (IssueState, error)
 	SigningReceipt(context.Context, uuid.UUID) (IssueReceipt, error)
 	LockReceipt(context.Context, uuid.UUID) (IssueReceipt, error)
-	KeyActive(context.Context, uuid.UUID, string, value.Timestamp) (bool, error)
+	KeyActive(context.Context, uuid.UUID, string, time.Time) (bool, error)
 	StartIssue(context.Context, Signing) error
 	ResumeIssue(context.Context, uuid.UUID, time.Time) error
 	SignerUnavailable(context.Context, uuid.UUID, []byte, time.Time) error
@@ -112,7 +113,7 @@ type Store interface {
 	ArtifactByOperation(context.Context, uuid.UUID) (Artifact, error)
 	SealingKeyExists(context.Context, uuid.UUID, uint32, string) (bool, error)
 	InsertSecretReference(context.Context, SecretReference) error
-	RotateSecretReference(context.Context, uuid.UUID, string, value.Timestamp) (SecretReference, error)
+	RotateSecretReference(context.Context, uuid.UUID, string, time.Time) (SecretReference, error)
 	GetSecretReference(context.Context, uuid.UUID) (SecretReference, error)
 	SecretReferenceResource(context.Context, uuid.UUID) (uuid.UUID, error)
 }

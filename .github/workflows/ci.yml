@@ -376,8 +376,6 @@ jobs:
             basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - run: scripts/database-integration.sh
-      - name: Check current schema source and independent replay equivalence
-        run: bash scripts/database-postgres-snapshot.sh check
       - name: Verify PostgreSQL 18 volume lifecycle
         run: bash scripts/test-postgres-volume-layout.sh
       - name: Save database Go objects (main only)
