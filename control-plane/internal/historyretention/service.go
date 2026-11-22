@@ -4,14 +4,11 @@ package historyretention
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -43,16 +40,9 @@ func New(backend database.Backend, policy Policy) (*Service, error) {
 // RunOnce commits at most one bounded batch. The next scheduler tick resumes
 // from unmarked rows. No command identity, replay fence or recovery proof is deleted.
 func (s *Service) RunOnce(ctx context.Context) error {
-	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return err
-	}
-	cutoff, err := value.FromTime(now.Add(-time.Duration(s.policy.CommandDays) * 24 * time.Hour))
-	if err != nil {
-		return err
-	}
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	now := s.now().UTC().Truncate(time.Microsecond)
+	cutoff := now.Add(-time.Duration(s.policy.CommandDays) * 24 * time.Hour)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		provider, ok := tx.(Provider)
 		if !ok {
 			return database.ErrUnsupported
@@ -74,31 +64,23 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			digest := sha256.Sum256(command.Envelope)
-			if err := store.Compact(ctx, command, compact, digest[:], at); err != nil {
+			if err := store.Compact(ctx, command, compact, now); err != nil {
 				return err
 			}
 		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return nil
 	})
 	if err != nil {
 		return err
 	}
-	retiredCutoff, err := value.FromTime(now.Add(-time.Duration(s.policy.RetiredNodeDays) * 24 * time.Hour))
-	if err != nil {
-		return err
-	}
+	retiredCutoff := now.Add(-time.Duration(s.policy.RetiredNodeDays) * 24 * time.Hour)
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		provider, ok := tx.(Provider)
 		if !ok {
 			return database.ErrUnsupported
 		}
-		if err := provider.HistoryRetentionStore().CompactRetired(ctx, retiredCutoff); err != nil {
-			return err
-		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return provider.HistoryRetentionStore().CompactRetired(ctx, retiredCutoff)
 	})
-
 }
 func compactEnvelope(command Command, now time.Time) ([]byte, error) {
 	var envelope agentv1.CommandEnvelope

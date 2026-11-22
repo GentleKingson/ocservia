@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -33,7 +32,7 @@ type TrustJob struct {
 // state, revision and reason) whose fenced mutations a caller already
 // completed; closed records the close only when one is required.
 type TrustStore interface {
-	Enqueue(context.Context, TrustJob, value.Timestamp) error
+	Enqueue(context.Context, TrustJob, time.Time) error
 	Claim(context.Context, uuid.UUID) (TrustJob, error)
 	Renew(context.Context, TrustJob, uuid.UUID) (bool, error)
 	MarkUpdateApplied(context.Context, TrustJob, uuid.UUID) (bool, error)

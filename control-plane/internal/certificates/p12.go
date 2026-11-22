@@ -15,7 +15,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 )
@@ -66,11 +65,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		return ArtifactGrant{}, false, err
 	}
 	artifactID := request.ArtifactRequestID
-	expiresAt := s.now().Add(10 * time.Minute)
-	expiry, err := value.FromTime(expiresAt)
-	if err != nil {
-		return ArtifactGrant{}, false, err
-	}
+	expiresAt := s.now().UTC().Add(10 * time.Minute)
 	tokenHash := sha256.Sum256([]byte(token))
 	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
 		NodeID:          nodeID,
@@ -120,7 +115,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		}
 		return ArtifactGrant{ArtifactID: found.ID, Operation: op, ExpiresAt: found.ExpiresAt}, true, nil
 	}
-	return ArtifactGrant{ArtifactID: artifactID, Operation: op, DownloadToken: token, Password: password, ExpiresAt: expiry}, false, nil
+	return ArtifactGrant{ArtifactID: artifactID, Operation: op, DownloadToken: token, Password: password, ExpiresAt: expiresAt}, false, nil
 }
 
 func (s *Service) artifactByRequest(ctx context.Context, workspace uuid.UUID, key string, hash []byte) (v certificatestore.Artifact, err error) {

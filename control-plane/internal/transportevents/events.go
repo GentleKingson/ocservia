@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
@@ -103,10 +102,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 		if err := store.UnknownDispatched(ctx); err != nil {
 			return fmt.Errorf("mark operations unknown after transport event gap: %w", err)
 		}
-		at, err := value.FromTime(s.now())
-		if err != nil {
-			return err
-		}
+		at := s.now().UTC()
 		for _, node := range disconnected {
 			event, err := uuid.NewV7()
 			if err != nil {

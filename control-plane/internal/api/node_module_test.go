@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
@@ -33,9 +33,9 @@ func (r *observedNodeReader) ListIPBans(ctx context.Context, id uuid.UUID, limit
 	r.calls.Add(1)
 	return r.NodeReader.ListIPBans(ctx, id, limit)
 }
-func (r *observedNodeReader) HistoryFrom(ctx context.Context, id uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetry.HistoryPoint, error) {
+func (r *observedNodeReader) History(ctx context.Context, id uuid.UUID, metric, resolution string, since time.Time) ([]telemetry.HistoryPoint, error) {
 	r.calls.Add(1)
-	return r.NodeReader.HistoryFrom(ctx, id, metric, resolution, since)
+	return r.NodeReader.History(ctx, id, metric, resolution, since)
 }
 
 type blockedNodeReader struct {

@@ -75,10 +75,8 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	}
 	var plan configplan.Plan
 	testutil.NoError(t, json.Unmarshal(w.Body.Bytes(), &plan))
-	created, err := plan.CreatedAt.Time()
-	testutil.NoError(t, err)
-	expires, err := plan.ExpiresAt.Time()
-	testutil.NoError(t, err)
+	created := plan.CreatedAt.UTC()
+	expires := plan.ExpiresAt.UTC()
 	if plan.ID.Version() != 7 || plan.ID != plan.OperationID || created.Before(before) || created.After(time.Now().UTC()) || expires.Sub(created) != 15*time.Minute {
 		t.Fatalf("generated IDs/times: %+v", plan)
 	}

@@ -15,7 +15,6 @@ import (
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -57,8 +56,8 @@ type Plan struct {
 	CurrentUnchanged bool              `json:"current_unchanged"`
 	StagingCleaned   bool              `json:"staging_cleaned"`
 	CurrentHash      string            `json:"current_hash,omitempty"`
-	ExpiresAt        value.Timestamp   `json:"expires_at"`
-	CreatedAt        value.Timestamp   `json:"created_at"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+	CreatedAt        time.Time         `json:"created_at"`
 }
 
 type ApplyRequest struct {
@@ -200,8 +199,8 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	plan := Plan{ID: stored.ID, WorkspaceID: stored.WorkspaceID, NodeID: stored.NodeID, OperationID: stored.OperationID, TemplateName: stored.TemplateName, ExpectedRevision: stored.ExpectedRevision, State: stored.State, CandidateHash: hex.EncodeToString(stored.CandidateHash), ExpiresAt: stored.ExpiresAt, CreatedAt: stored.CreatedAt}
-	if err := json.Unmarshal(stored.Warnings.Bytes(), &plan.Warnings); err != nil {
+	plan := Plan{ID: stored.ID, WorkspaceID: stored.WorkspaceID, NodeID: stored.NodeID, OperationID: stored.OperationID, TemplateName: stored.TemplateName, ExpectedRevision: stored.ExpectedRevision, State: stored.State, CandidateHash: hex.EncodeToString(stored.CandidateHash), ExpiresAt: stored.ExpiresAt.UTC(), CreatedAt: stored.CreatedAt.UTC()}
+	if err := json.Unmarshal(stored.Warnings, &plan.Warnings); err != nil {
 		return Plan{}, err
 	}
 	expectedDiff := safeDiff(stored.CandidateRedacted)
@@ -254,11 +253,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
-	now, err := value.FromTime(s.now())
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
-	if plan.Validation != "valid" || plan.CurrentHash == "" || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= now.Micros {
+	if plan.Validation != "valid" || plan.CurrentHash == "" || plan.ExpiresAt.IsZero() || !plan.ExpiresAt.After(s.now()) {
 		return operations.Operation{}, false, ErrStaleRevision
 	}
 	var input configurationstore.ApplyInput
@@ -288,10 +283,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 	if err != nil || len(materialized) != 32 {
 		return operations.Operation{}, false, ErrInvalid
 	}
-	expires, err := plan.ExpiresAt.Time()
-	if err != nil {
-		return operations.Operation{}, false, ErrInvalid
-	}
+	expires := plan.ExpiresAt.UTC()
 	previousHash, err := hex.DecodeString(plan.CurrentHash)
 	if err != nil || len(previousHash) != 32 {
 		return operations.Operation{}, false, ErrInvalid

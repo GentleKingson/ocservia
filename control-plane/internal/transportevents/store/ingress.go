@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -16,14 +16,14 @@ type TransportEvent struct {
 	ID, NodeID        uuid.UUID
 	Type, Traceparent string
 	Payload           []byte
-	At                value.Timestamp
+	At                time.Time
 }
 type Quarantine struct {
 	EventID, NodeID          uuid.UUID
 	Type                     int32
 	PayloadHash              []byte
 	ReasonCode, ReasonDetail string
-	At                       value.Timestamp
+	At                       time.Time
 }
 type IngressStore interface {
 	SaveBusiness(context.Context) error
@@ -31,12 +31,12 @@ type IngressStore interface {
 	ReleaseBusiness(context.Context) error
 	LockTrust(context.Context, uuid.UUID, []byte) (IngressTrust, error)
 	InsertEvent(context.Context, TransportEvent) (bool, error)
-	NodeStatus(context.Context, uuid.UUID, string, value.Timestamp) error
-	SimulationOutcome(context.Context, uuid.UUID, string, string, bool, value.Timestamp) error
+	NodeStatus(context.Context, uuid.UUID, string, time.Time) error
+	SimulationOutcome(context.Context, uuid.UUID, string, string, bool, time.Time) error
 	InsertQuarantine(context.Context, Quarantine) (bool, error)
 	Quarantine(context.Context, uuid.UUID) (Quarantine, error)
 	QuarantineAlert(context.Context, uuid.UUID, uuid.UUID, Quarantine) error
-	AdvanceCursor(context.Context, uuid.UUID, value.Timestamp) error
+	AdvanceCursor(context.Context, uuid.UUID, time.Time) error
 	LastEventID(context.Context) (uuid.UUID, error)
 }
 

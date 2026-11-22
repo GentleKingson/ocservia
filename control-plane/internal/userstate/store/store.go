@@ -3,9 +3,9 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -14,8 +14,8 @@ type Desired struct {
 	Kind, Name        string
 	Version, Revision int64
 	Fingerprint       []byte
-	Members           value.TextArray
-	At                value.Timestamp
+	Members           []string
+	At                time.Time
 }
 
 type Revision struct {
@@ -26,23 +26,23 @@ type Revision struct {
 type Resource struct {
 	Kind, Name, NodeStatus                            string
 	DesiredEnabled, ObservedEnabled                   *bool
-	DesiredMembers, ObservedMembers                   value.TextArray
+	DesiredMembers, ObservedMembers                   []string
 	DesiredVersion, DesiredRevision, ObservedRevision *int64
 	DesiredFingerprint, ObservedFingerprint           []byte
 	OperationID                                       *uuid.UUID
 	OperationState, CommandState, PayloadType         *string
 	SafeRejected                                      *bool
-	ObservedAt                                        value.Timestamp
+	ObservedAt                                        *time.Time
 }
 
 type Store interface {
 	HasSealingKey(context.Context, uuid.UUID, uint32, string) (bool, error)
 	LockDesired(context.Context, uuid.UUID, string, bool) (int64, int64, error)
 	LastRevision(context.Context, uuid.UUID, string, string, int64) (Revision, error)
-	CountResources(context.Context, uuid.UUID, string, bool, value.Timestamp) (int, error)
-	CountMemberships(context.Context, uuid.UUID, string, value.Timestamp) (int, error)
+	CountResources(context.Context, uuid.UUID, string, bool, time.Time) (int, error)
+	CountMemberships(context.Context, uuid.UUID, string, time.Time) (int, error)
 	WriteDesired(context.Context, Desired) error
-	SupersedePending(context.Context, uuid.UUID, string, string, string, int64, value.Timestamp) (bool, error)
+	SupersedePending(context.Context, uuid.UUID, string, string, string, int64, time.Time) (bool, error)
 	List(context.Context, uuid.UUID) ([]Resource, error)
 }
 

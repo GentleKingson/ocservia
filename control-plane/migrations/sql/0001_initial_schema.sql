@@ -1,24 +1,17 @@
--- ocservia:artifact=schema
--- ocservia:format=1
--- ocservia:engine=postgresql
--- ocservia:epoch=2
--- ocservia:revision=5
--- ocservia:history-sha256=0eda454c3f6703a02f08161d06f442334eba8e730940a5b4448bcdecadcc1162
+-- +goose Up
 
--- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"02236adc015c56f8c8cd7e79d687565ea941736cce80e33e21d3f3ee25ca6614"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
 SET LOCAL transaction_timeout = 0;
 SET LOCAL client_encoding = 'UTF8';
 SET LOCAL standard_conforming_strings = on;
-SELECT pg_catalog.set_config('search_path', '', true);
 SET LOCAL check_function_bodies = false;
 SET LOCAL xmloption = content;
 SET LOCAL client_min_messages = warning;
 SET LOCAL row_security = off;
 
+-- +goose StatementBegin
 CREATE FUNCTION public.audit_compact_detail(p_id uuid, p_hash bytea, p_key text, p_mac bytea, p_at timestamp with time zone) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -33,7 +26,9 @@ BEGIN
  RETURN FOUND;
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.check_audit_compaction() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
@@ -54,7 +49,9 @@ BEGIN
  RAISE EXCEPTION 'audit_events permit only authenticated aged detail compaction';
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.prune_vpn_history() RETURNS void
     LANGUAGE sql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -71,7 +68,9 @@ CREATE FUNCTION public.prune_vpn_history() RETURNS void
    SELECT node_id,event_id FROM public.vpn_session_events WHERE observed_at < statement_timestamp()-interval '90 days'
    ORDER BY observed_at LIMIT 1024 FOR UPDATE SKIP LOCKED);
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.reject_audit_checkpoint_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -79,7 +78,9 @@ BEGIN
     RAISE EXCEPTION 'audit_checkpoints are append-only';
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.reject_audit_event_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -87,7 +88,9 @@ BEGIN
     RAISE EXCEPTION 'audit_events is append-only';
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.security_compact_details(p_cutoff timestamp with time zone) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -100,13 +103,15 @@ BEGIN
   WHERE details_compacted_at IS NULL AND observed_at<LEAST(p_cutoff,clock_timestamp()-interval '90 days')
   ORDER BY observed_at,event_id LIMIT 32 FOR UPDATE SKIP LOCKED
  ) UPDATE public.telemetry_security_events e
- SET detail_sha256=sha256(convert_to(e.detail::text,'UTF8')),detail='{}',details_compacted_at=clock_timestamp()
+ SET detail='{}',details_compacted_at=clock_timestamp()
  FROM batch b WHERE e.event_id=b.event_id;
  GET DIAGNOSTICS changed=ROW_COUNT;
  RETURN changed;
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.telemetry_drop_expired_partitions(cutoff timestamp with time zone) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -142,7 +147,9 @@ BEGIN
     RETURN 0;
 END;
 $_$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.telemetry_ensure_month_partition(sample_time timestamp with time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -161,7 +168,9 @@ BEGIN
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON public.%I (node_id, metric, sampled_at DESC)', partition_name || '_query_idx', partition_name);
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.telemetry_prune_rollups(maintenance_time timestamp with time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -188,7 +197,9 @@ BEGIN
       WHERE (r.node_id,r.metric,r.bucket_at)=(e.node_id,e.metric,e.bucket_at);
 END;
 $$;
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 CREATE FUNCTION public.telemetry_reject_runtime_default() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
@@ -200,6 +211,7 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+-- +goose StatementEnd
 
 SET LOCAL default_tablespace = '';
 
@@ -510,9 +522,8 @@ CREATE TABLE public.commands (
     resource_type text,
     resource_key text,
     details_compacted_at timestamp with time zone,
-    envelope_sha256 bytea,
     CONSTRAINT commands_check CHECK ((expires_at > created_at)),
-    CONSTRAINT commands_compaction_evidence CHECK ((((details_compacted_at IS NULL) AND (envelope_sha256 IS NULL)) OR ((details_compacted_at IS NOT NULL) AND (envelope_sha256 IS NOT NULL) AND (octet_length(envelope_sha256) = 32) AND (state = ANY (ARRAY['succeeded'::text, 'failed'::text, 'rejected'::text, 'expired'::text, 'rolled_back'::text, 'superseded'::text]))))),
+    CONSTRAINT commands_compaction_evidence CHECK (((details_compacted_at IS NULL) OR (state = ANY (ARRAY['succeeded'::text, 'failed'::text, 'rejected'::text, 'expired'::text, 'rolled_back'::text, 'superseded'::text])))),
     CONSTRAINT commands_envelope_check CHECK (((octet_length(envelope) >= 1) AND (octet_length(envelope) <= 1048576))),
     CONSTRAINT commands_expected_version_check CHECK ((expected_version >= 0)),
     CONSTRAINT commands_idempotency_key_check CHECK (((length(idempotency_key) >= 1) AND (length(idempotency_key) <= 128))),
@@ -589,18 +600,6 @@ CREATE TABLE public.connection_owner_fencing (
     CONSTRAINT connection_owner_fencing_owner_epoch_check CHECK ((owner_epoch >= 1)),
     CONSTRAINT connection_owner_fencing_owner_incarnation_check CHECK ((owner_incarnation >= 0))
 );
-
-CREATE TABLE public.controller_schema_compatibility (
-    singleton boolean DEFAULT true CONSTRAINT "controller_schema_compatibility_singleton_not_null" NOT NULL,
-    "current_schema" bigint NOT NULL,
-    minimum_compatible_controller_schema bigint CONSTRAINT controller_schema_compatibi_minimum_compatible_control_not_null NOT NULL,
-    CONSTRAINT controller_schema_compatibil_minimum_compatible_controlle_check CHECK ((minimum_compatible_controller_schema > 0)),
-    CONSTRAINT controller_schema_compatibility_check CHECK ((minimum_compatible_controller_schema <= "current_schema")),
-    CONSTRAINT controller_schema_compatibility_current_schema_check CHECK (("current_schema" > 0)),
-    CONSTRAINT controller_schema_compatibility_singleton_check CHECK (singleton)
-);
-
-COMMENT ON TABLE public.controller_schema_compatibility IS 'Authoritative Controller schema compatibility range; not a backup or PITR marker.';
 
 CREATE TABLE public.desired_groups (
     node_id uuid CONSTRAINT "desired_groups_node_id_not_null" NOT NULL,
@@ -1048,34 +1047,6 @@ CREATE TABLE public.outbox_events (
 
 COMMENT ON TABLE public.outbox_events IS 'Transactional outbox; delivery correctness never depends on LISTEN/NOTIFY.';
 
-CREATE TABLE public.scheduler_leadership (
-    id integer CONSTRAINT "scheduler_leadership_id_not_null" NOT NULL,
-    instance_id uuid CONSTRAINT "scheduler_leadership_instance_id_not_null" NOT NULL,
-    incarnation bigint CONSTRAINT "scheduler_leadership_incarnation_not_null" NOT NULL,
-    epoch bigint CONSTRAINT "scheduler_leadership_epoch_not_null" NOT NULL,
-    lease_until timestamp with time zone CONSTRAINT "scheduler_leadership_lease_until_not_null" NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() CONSTRAINT "scheduler_leadership_updated_at_not_null" NOT NULL,
-    CONSTRAINT scheduler_leadership_epoch_check CHECK ((epoch >= 0)),
-    CONSTRAINT scheduler_leadership_id_check CHECK ((id = 1)),
-    CONSTRAINT scheduler_leadership_incarnation_check CHECK ((incarnation >= 0))
-);
-
-CREATE TABLE public.schema_revisions (
-    epoch bigint CONSTRAINT "schema_revisions_epoch_not_null" NOT NULL,
-    revision bigint CONSTRAINT "schema_revisions_revision_not_null" NOT NULL,
-    checksum bytea CONSTRAINT "schema_revisions_checksum_not_null" NOT NULL,
-    state text CONSTRAINT "schema_revisions_state_not_null" NOT NULL,
-    step integer CONSTRAINT "schema_revisions_step_not_null" NOT NULL,
-    started_at timestamp with time zone DEFAULT now() CONSTRAINT "schema_revisions_started_at_not_null" NOT NULL,
-    verified_at timestamp with time zone,
-    CONSTRAINT schema_revisions_check CHECK (((state = 'verified'::text) = (verified_at IS NOT NULL))),
-    CONSTRAINT schema_revisions_checksum_check CHECK ((octet_length(checksum) = 32)),
-    CONSTRAINT schema_revisions_epoch_check CHECK ((epoch > 0)),
-    CONSTRAINT schema_revisions_revision_check CHECK ((revision >= 0)),
-    CONSTRAINT schema_revisions_state_check CHECK ((state = ANY (ARRAY['running'::text, 'verified'::text]))),
-    CONSTRAINT schema_revisions_step_check CHECK ((step >= 0))
-);
-
 CREATE TABLE public.secret_provider_refs (
     id uuid CONSTRAINT "secret_provider_refs_id_not_null" NOT NULL,
     workspace_id uuid CONSTRAINT "secret_provider_refs_workspace_id_not_null" NOT NULL,
@@ -1176,8 +1147,7 @@ CREATE TABLE public.telemetry_security_events (
     event_type text CONSTRAINT "telemetry_security_events_event_type_not_null" NOT NULL,
     detail jsonb CONSTRAINT "telemetry_security_events_detail_not_null" NOT NULL,
     details_compacted_at timestamp with time zone,
-    detail_sha256 bytea,
-    CONSTRAINT security_detail_evidence CHECK ((((details_compacted_at IS NULL) AND (detail_sha256 IS NULL)) OR ((details_compacted_at IS NOT NULL) AND (detail_sha256 IS NOT NULL) AND (octet_length(detail_sha256) = 32) AND (detail = '{}'::jsonb)))),
+    CONSTRAINT security_detail_evidence CHECK (((details_compacted_at IS NULL) OR (detail = '{}'::jsonb))),
     CONSTRAINT telemetry_security_events_detail_check CHECK ((jsonb_typeof(detail) = 'object'::text)),
     CONSTRAINT telemetry_security_events_event_type_check CHECK (((length(event_type) >= 1) AND (length(event_type) <= 128))),
     CONSTRAINT telemetry_security_events_severity_check CHECK ((severity = ANY (ARRAY['info'::text, 'warning'::text, 'critical'::text])))
@@ -1425,9 +1395,6 @@ ALTER TABLE ONLY public.config_plans
 ALTER TABLE ONLY public.connection_owner_fencing
     ADD CONSTRAINT connection_owner_fencing_pkey PRIMARY KEY (node_id);
 
-ALTER TABLE ONLY public.controller_schema_compatibility
-    ADD CONSTRAINT controller_schema_compatibility_pkey PRIMARY KEY (singleton);
-
 ALTER TABLE ONLY public.desired_groups
     ADD CONSTRAINT desired_groups_pkey PRIMARY KEY (node_id, group_name);
 
@@ -1550,12 +1517,6 @@ ALTER TABLE ONLY public.outbox_events
 
 ALTER TABLE ONLY public.outbox_events
     ADD CONSTRAINT outbox_events_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.scheduler_leadership
-    ADD CONSTRAINT scheduler_leadership_pkey PRIMARY KEY (id);
-
-ALTER TABLE ONLY public.schema_revisions
-    ADD CONSTRAINT schema_revisions_pkey PRIMARY KEY (epoch, revision);
 
 ALTER TABLE ONLY public.secret_provider_refs
     ADD CONSTRAINT secret_provider_refs_pkey PRIMARY KEY (id);
@@ -2033,30 +1994,3 @@ REVOKE ALL ON FUNCTION public.telemetry_ensure_month_partition(sample_time times
 REVOKE ALL ON FUNCTION public.telemetry_prune_rollups(maintenance_time timestamp with time zone) FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.telemetry_reject_runtime_default() FROM PUBLIC;
-
-GRANT SELECT,INSERT,UPDATE ON TABLE public.artifact_operations TO ocservia_app;
-
-GRANT SELECT,INSERT,UPDATE ON TABLE public.certificates TO ocservia_app;
-
-GRANT SELECT,INSERT ON TABLE public.node_sealing_keys TO ocservia_app;
-
-GRANT SELECT,INSERT,UPDATE ON TABLE public.secret_provider_refs TO ocservia_app;
-
-GRANT SELECT,INSERT ON TABLE public.workspace_admins TO ocservia_app;
-
-SET LOCAL statement_timeout = 0;
-SET LOCAL lock_timeout = 0;
-SET LOCAL idle_in_transaction_session_timeout = 0;
-SET LOCAL transaction_timeout = 0;
-SET LOCAL client_encoding = 'UTF8';
-SET LOCAL standard_conforming_strings = on;
-SELECT pg_catalog.set_config('search_path', '', true);
-SET LOCAL check_function_bodies = false;
-SET LOCAL xmloption = content;
-SET LOCAL client_min_messages = warning;
-SET LOCAL row_security = off;
-
-INSERT INTO public.controller_schema_compatibility (singleton, "current_schema", minimum_compatible_controller_schema) VALUES (true, 39, 39);
-
-INSERT INTO public.scheduler_leadership(id,instance_id,incarnation,epoch,lease_until) VALUES(1,'00000000-0000-0000-0000-000000000000',0,0,'-infinity');
--- ocservia:end-step

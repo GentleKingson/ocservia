@@ -13,7 +13,6 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/google/uuid"
@@ -21,7 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID uuid.UUID, created value.Timestamp) error {
+func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID uuid.UUID, created time.Time) error {
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
 		configStore, err := configurationstore.FromTransaction(tx)
@@ -57,12 +56,11 @@ func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStor
 			return fmt.Errorf("lock configuration plan: %w", err)
 		}
 		var validation agentv1.ConfigPlanResult
-		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.PlanRevision || !bytes.Equal(plan.CandidateHash, payload.CandidateHash) || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= created.Micros || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
+		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.PlanRevision || !bytes.Equal(plan.CandidateHash, payload.CandidateHash) || plan.ExpiresAt.IsZero() || !plan.ExpiresAt.After(created) || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
 			return ErrStaleRevision
 		}
 		if payload.CompleteCandidate != nil {
-			expires, expiryErr := plan.ExpiresAt.Time()
-			if expiryErr != nil || !proto.Equal(timestamppb.New(expires), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
+			if !proto.Equal(timestamppb.New(plan.ExpiresAt.UTC()), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
 				return ErrStaleRevision
 			}
 		} else if len(validation.GetMaterializedHash()) != 0 {
@@ -108,22 +106,18 @@ func validateObservedTarget(ctx context.Context, intentStore operationstore.Stor
 	return nil
 }
 
-func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID, operationID uuid.UUID, created, expiry value.Timestamp, fromVersion string) error {
+func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID, operationID uuid.UUID, created, expiry time.Time, fromVersion string) error {
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
 		warnings, err := json.Marshal(payload.PlanMetadata.Warnings)
 		if err != nil {
 			return fmt.Errorf("marshal configuration plan warnings: %w", err)
 		}
-		logicalWarnings, err := value.ParseJSONB(warnings)
-		if err != nil {
-			return err
-		}
 		configStore, err := configurationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.PlanRevision, CandidateHash: payload.CandidateHash, CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: logicalWarnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
+		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.PlanRevision, CandidateHash: payload.CandidateHash, CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: warnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration plan: %w", err)
 		}
 	case ConfigApplyPayload:
@@ -146,15 +140,11 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return fmt.Errorf("marshal certificate DNS names: %w", err)
 		}
-		names, err := value.ParseJSONB(dnsNames)
-		if err != nil {
-			return err
-		}
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: names, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
+		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: dnsNames, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate request: %w", err)
 		}
 	case CertificateP12Payload:
@@ -162,11 +152,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return err
 		}
-		artifactExpiry, err := value.FromTime(payload.ArtifactMetadata.ExpiresAt)
-		if err != nil {
-			return err
-		}
-		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, RequestHash: payload.ArtifactMetadata.RequestHash, ExpiresAt: artifactExpiry, CreatedAt: created}); err != nil {
+		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, RequestHash: payload.ArtifactMetadata.RequestHash, ExpiresAt: payload.ArtifactMetadata.ExpiresAt.UTC(), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	case AgentUpgradePayload:
@@ -178,7 +164,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 	return nil
 }
 
-func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, workspaceID uuid.UUID, nodeStatus string, now time.Time, created value.Timestamp) (*rolloutNodeObservation, error) {
+func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, workspaceID uuid.UUID, nodeStatus string, now time.Time) (*rolloutNodeObservation, error) {
 	// Serialize generated operation intent, including idempotent replay,
 	// with rollout pause/resume. A cleared claim or non-running rollout
 	// must not create or recover an operation from an older memory claim.
@@ -189,7 +175,7 @@ func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operat
 	if err != nil {
 		return nil, fmt.Errorf("lock rollout dispatch claim: %w", err)
 	}
-	if claim.State != RolloutStateRunning || claim.NodeState != RolloutNodePending || !claim.DispatchLease.Valid || claim.DispatchLease.Micros <= created.Micros {
+	if claim.State != RolloutStateRunning || claim.NodeState != RolloutNodePending || claim.DispatchLease == nil || !claim.DispatchLease.After(now) {
 		return nil, ErrRolloutState
 	}
 	if s.releaseCatalog == nil {

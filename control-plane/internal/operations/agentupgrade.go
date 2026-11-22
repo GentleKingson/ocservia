@@ -9,7 +9,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
@@ -80,13 +79,7 @@ func (s *Service) decideAgentUpgrade(now time.Time, upgrade pendingUpgrade) (age
 		return agentUpgradeDecision{}, false
 	}
 	online := upgrade.NodeStatus == "active" && upgradeHeartbeatFresh(now, upgrade.LastHeartbeatAt)
-	deadline, err := value.FromTime(now.Add(-s.agentUpgradeReconcileTime))
-	if err != nil {
-		return agentUpgradeDecision{}, false
-	}
-	if now.Nanosecond()%1000 != 0 {
-		deadline.Micros++
-	}
+	deadline := now.Add(-s.agentUpgradeReconcileTime)
 	switch {
 	case upgrade.DurableState == "failed":
 		return agentUpgradeDecision{State: "failed", Terminal: true, Reason: "durable_local_failure"}, true
@@ -94,31 +87,23 @@ func (s *Service) decideAgentUpgrade(now time.Time, upgrade pendingUpgrade) (age
 		return agentUpgradeDecision{State: "rolled_back", Terminal: true, Reason: "durable_local_rollback"}, true
 	case upgrade.DurableState == "succeeded" && online && upgrade.ObservedVersion == upgrade.TargetVersion:
 		return agentUpgradeDecision{State: "succeeded", Terminal: true, Reason: "durable_success_and_target_version_observed"}, true
-	case upgrade.ScheduledAt.Valid && upgrade.ScheduledAt.Micros < deadline.Micros:
+	case !upgrade.ScheduledAt.IsZero() && upgrade.ScheduledAt.Before(deadline):
 		return agentUpgradeDecision{State: "unknown", Terminal: true, Reason: "reconciliation_deadline_exceeded"}, true
-	case upgrade.State == "accepted" && online && upgrade.ObservedAt.Valid && upgrade.ScheduledAt.Valid && upgrade.ObservedAt.Micros > upgrade.ScheduledAt.Micros:
+	case upgrade.State == "accepted" && online && upgrade.ObservedAt != nil && !upgrade.ScheduledAt.IsZero() && upgrade.ObservedAt.After(upgrade.ScheduledAt):
 		return agentUpgradeDecision{State: "running", Terminal: false, Reason: "node_reconnected_verifying_target_version"}, true
 	}
 	return agentUpgradeDecision{}, false
 }
 
-func upgradeHeartbeatFresh(now time.Time, heartbeat value.Timestamp) bool {
-	cutoff, err := value.FromTime(now.Add(-telemetry.OfflineAfter))
-	if err != nil || !heartbeat.Valid {
+func upgradeHeartbeatFresh(now time.Time, heartbeat *time.Time) bool {
+	if heartbeat == nil {
 		return false
 	}
-	if now.Nanosecond()%1000 != 0 {
-		cutoff.Micros++
-	}
-	return heartbeat.Micros >= cutoff.Micros
+	return !heartbeat.Before(now.Add(-telemetry.OfflineAfter))
 }
 
 func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pendingUpgrade, decision agentUpgradeDecision) error {
-	now := s.now()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return err
-	}
+	now := s.now().UTC()
 	commandState := decision.State
 	if commandState == "unknown" {
 		// No terminal command result will ever arrive; expire the delivery
@@ -129,12 +114,12 @@ func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pending
 	// operation, command, and outbox; only the projection lags behind.
 	genericTerminal := upgrade.OperationState == "expired" || upgrade.OperationState == "superseded"
 	unchanged := false
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		if err := store.UpgradeTerminal(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, CommandID: upgrade.CommandID, State: decision.State, OperationState: upgrade.OperationState, CommandState: commandState, GenericTerminal: genericTerminal, At: at}); err != nil {
+		if err := store.UpgradeTerminal(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, CommandID: upgrade.CommandID, State: decision.State, OperationState: upgrade.OperationState, CommandState: commandState, GenericTerminal: genericTerminal, At: now}); err != nil {
 			unchanged = errors.Is(err, database.ErrNotFound)
 			return err
 		}
@@ -171,17 +156,14 @@ func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pending
 }
 
 func (s *Service) applyAgentUpgradeProgress(ctx context.Context, upgrade pendingUpgrade, decision agentUpgradeDecision) error {
-	at, err := value.FromTime(s.now())
-	if err != nil {
-		return err
-	}
+	now := s.now().UTC()
 	unchanged := false
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		err = store.UpgradeProgress(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, State: decision.State, At: at})
+		err = store.UpgradeProgress(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, State: decision.State, At: now})
 		unchanged = errors.Is(err, database.ErrNotFound)
 		return err
 	})

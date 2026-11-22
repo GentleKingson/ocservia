@@ -7,7 +7,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
 	"github.com/google/uuid"
 )
@@ -40,7 +39,7 @@ const auditEventColumns = `id,occurred_at,actor_type,actor_id,action,resource_ty
 func (s auditStore) Events(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT `+auditEventColumns+` FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspace)
 }
-func (s auditStore) EventsAfter(ctx context.Context, workspace uuid.UUID, afterAt value.Timestamp, afterID uuid.UUID) (database.Rows, error) {
+func (s auditStore) EventsAfter(ctx context.Context, workspace uuid.UUID, afterAt time.Time, afterID uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT `+auditEventColumns+` FROM audit_events WHERE workspace_id=$1 AND (occurred_at,id)>($2,$3) ORDER BY occurred_at,id`, workspace, afterAt, afterID)
 }
 func (s auditStore) LatestEvent(ctx context.Context, workspace uuid.UUID) (id uuid.UUID, hash []byte, err error) {
@@ -91,7 +90,7 @@ func (s auditStore) RecentEvents(ctx context.Context, workspace uuid.UUID, limit
 func (s auditStore) Checkpoints(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT through_event_id,through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 ORDER BY created_at,id`, workspace)
 }
-func (s auditStore) LatestCheckpoint(ctx context.Context, workspace uuid.UUID) (eventID uuid.UUID, hash, signature []byte, occurredAt value.Timestamp, authVersion int16, err error) {
+func (s auditStore) LatestCheckpoint(ctx context.Context, workspace uuid.UUID) (eventID uuid.UUID, hash, signature []byte, occurredAt time.Time, authVersion int16, err error) {
 	err = s.QueryRow(ctx, `SELECT c.through_event_id,c.through_event_hash,c.signature,e.occurred_at,e.auth_version
 		FROM audit_checkpoints c JOIN audit_events e ON e.id=c.through_event_id AND e.workspace_id=c.workspace_id AND e.event_hash=c.through_event_hash
 		WHERE c.workspace_id=$1 ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, workspace).Scan(&eventID, &hash, &signature, &occurredAt, &authVersion)
@@ -111,10 +110,10 @@ func (s auditStore) CheckpointHash(ctx context.Context, workspace, event uuid.UU
 	return hash, err
 }
 
-func (s auditStore) ExpiredDetails(ctx context.Context, cutoff value.Timestamp) (database.Rows, error) {
+func (s auditStore) ExpiredDetails(ctx context.Context, cutoff time.Time) (database.Rows, error) {
 	return s.Query(ctx, `SELECT workspace_id,id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac FROM audit_events WHERE details_compacted_at IS NULL AND auth_version=1 AND action<>'audit.auth.transition' AND occurred_at<$1 ORDER BY occurred_at,id LIMIT 32 FOR UPDATE SKIP LOCKED`, cutoff)
 }
-func (s auditStore) CompactDetails(ctx context.Context, id uuid.UUID, hash []byte, key string, mac []byte, at value.Timestamp) error {
+func (s auditStore) CompactDetails(ctx context.Context, id uuid.UUID, hash []byte, key string, mac []byte, at time.Time) error {
 	var changed bool
 	err := s.QueryRow(ctx, `SELECT audit_compact_detail($1,$2,$3,$4,$5)`, id, hash, key, mac, at).Scan(&changed)
 	if err == nil && !changed {
@@ -123,7 +122,7 @@ func (s auditStore) CompactDetails(ctx context.Context, id uuid.UUID, hash []byt
 	return err
 }
 
-func (s auditStore) CompactSecurity(ctx context.Context, cutoff value.Timestamp) error {
+func (s auditStore) CompactSecurity(ctx context.Context, cutoff time.Time) error {
 	_, err := s.Exec(ctx, `SELECT security_compact_details($1)`, cutoff)
 	return err
 }
@@ -143,24 +142,15 @@ const retentionEligible = `c.details_compacted_at IS NULL AND c.payload_type<>'c
  AND NOT EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.operation_id=p.id AND u.state NOT IN ('succeeded','failed','rolled_back','expired'))
  AND NOT EXISTS(SELECT 1 FROM artifact_operations a WHERE a.operation_id=p.id AND a.state NOT IN ('consumed','expired','revoked','failed'))`
 
-func (s historyRetentionStore) Candidates(ctx context.Context, cutoff value.Timestamp) ([]uuid.UUID, error) {
+func (s historyRetentionStore) Candidates(ctx context.Context, cutoff time.Time) ([]uuid.UUID, error) {
 	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id FROM outbox_events o JOIN commands c ON c.id=o.command_id JOIN operations p ON p.id=c.operation_id WHERE `+retentionEligible+` ORDER BY c.updated_at,c.id LIMIT 32 FOR UPDATE OF o SKIP LOCKED`, cutoff))
 }
-func (s historyRetentionStore) LockCommand(ctx context.Context, id uuid.UUID, cutoff value.Timestamp) (v historyretention.Command, err error) {
-	err = s.QueryRow(ctx, `SELECT c.id,c.node_id,c.envelope FROM outbox_events o JOIN commands c ON c.id=o.command_id JOIN operations p ON p.id=c.operation_id WHERE c.details_compacted_at IS NULL AND c.payload_type<>'config_plan' AND c.state IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
- AND p.state IN ('succeeded','failed','rejected','expired','rolled_back','superseded')
- AND c.updated_at<$1 AND c.expires_at<$1 AND p.completed_at<$1
- AND o.published_at IS NOT NULL AND o.locked_by IS NULL
- AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)
- AND NOT EXISTS(SELECT 1 FROM command_attempts a WHERE a.command_id=c.id AND a.state IN ('sending','unknown'))
- AND NOT EXISTS(SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id AND r.state='unknown')
- AND NOT EXISTS(SELECT 1 FROM config_apply_operations a WHERE a.operation_id=p.id AND a.state NOT IN ('succeeded','failed','rolled_back','expired'))
- AND NOT EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.operation_id=p.id AND u.state NOT IN ('succeeded','failed','rolled_back','expired'))
- AND NOT EXISTS(SELECT 1 FROM artifact_operations a WHERE a.operation_id=p.id AND a.state NOT IN ('consumed','expired','revoked','failed')) AND c.id=$2 FOR UPDATE OF c,p`, cutoff, id).Scan(&v.ID, &v.NodeID, &v.Envelope)
+func (s historyRetentionStore) LockCommand(ctx context.Context, id uuid.UUID, cutoff time.Time) (v historyretention.Command, err error) {
+	err = s.QueryRow(ctx, `SELECT c.id,c.node_id,c.envelope FROM outbox_events o JOIN commands c ON c.id=o.command_id JOIN operations p ON p.id=c.operation_id WHERE `+retentionEligible+` AND c.id=$2 FOR UPDATE OF c,p`, cutoff, id).Scan(&v.ID, &v.NodeID, &v.Envelope)
 	return
 }
-func (s historyRetentionStore) Compact(ctx context.Context, c historyretention.Command, header, digest []byte, at value.Timestamp) error {
-	if _, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,envelope_sha256=$3,details_compacted_at=$4 WHERE id=$1`, c.ID, header, digest, at); err != nil {
+func (s historyRetentionStore) Compact(ctx context.Context, c historyretention.Command, header []byte, at time.Time) error {
+	if _, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,details_compacted_at=$3 WHERE id=$1`, c.ID, header, at); err != nil {
 		return err
 	}
 	if _, err := s.Exec(ctx, `UPDATE outbox_events SET payload=$2,last_error=NULL WHERE command_id=$1`, c.ID, header); err != nil {
@@ -169,7 +159,7 @@ func (s historyRetentionStore) Compact(ctx context.Context, c historyretention.C
 	return nil
 }
 
-func (s historyRetentionStore) CompactRetired(ctx context.Context, cutoff value.Timestamp) error {
+func (s historyRetentionStore) CompactRetired(ctx context.Context, cutoff time.Time) error {
 	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT n.id FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.status='revoked' AND k.state='revoked' AND k.revoked_at<$1
  AND NOT EXISTS(SELECT 1 FROM commands c WHERE c.node_id=n.id AND c.state IN ('queued','dispatched','accepted','running','unknown'))
  AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.node_id=n.id)

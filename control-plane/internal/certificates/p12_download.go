@@ -14,9 +14,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
@@ -65,19 +63,12 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 		}
 		issuedAt := s.now().UTC()
 		expires := issuedAt.Add(time.Minute)
-		for _, deadline := range []value.Timestamp{eligible.ArtifactExpires, eligible.CertificateExpires} {
-			if !deadline.Valid || deadline.Validate() != nil {
+		for _, deadline := range []time.Time{eligible.ArtifactExpires, eligible.CertificateExpires} {
+			if deadline.IsZero() {
 				return ErrArtifactDenied
 			}
-			if deadline.Micros == value.PositiveInfinity {
-				continue
-			}
-			finite, timeErr := deadline.Time()
-			if timeErr != nil {
-				return ErrArtifactDenied
-			}
-			if finite.Before(expires) {
-				expires = finite
+			if deadline.Before(expires) {
+				expires = deadline
 			}
 		}
 		grant, err = s.grantSigner.IssueArtifactGrant(eligible.NodeID, id, eligible.CertificateID, eligible.CertificateVersion, eligible.OperationID, eligible.RequesterID.String(), uint64(eligible.Size), grantID, issuedAt, expires)
@@ -207,10 +198,7 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 		if err != nil {
 			return err
 		}
-		if err = audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: v.WorkspaceID, ActorType: "user", ActorID: v.ActorID.String(), SessionID: &v.SessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &v.NodeID, RequestID: v.RequestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, v.CertificateID, hex.EncodeToString(v.Digest), v.Size)), At: s.now()}); err != nil {
-			return err
-		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: v.WorkspaceID, ActorType: "user", ActorID: v.ActorID.String(), SessionID: &v.SessionID, Action: "certificate.p12.download", ResourceType: "artifact", ResourceID: id, NodeID: &v.NodeID, RequestID: v.RequestID, Result: "succeeded", AfterSummary: json.RawMessage(fmt.Sprintf(`{"certificate_id":%q,"sha256":%q,"size":%d}`, v.CertificateID, hex.EncodeToString(v.Digest), v.Size)), At: s.now()})
 	})
 	return result, err
 }
@@ -250,7 +238,7 @@ type pendingArtifactConsumption struct {
 	digest      []byte
 	size        int64
 	actorID     uuid.UUID
-	expiresAt   value.Timestamp
+	expiresAt   time.Time
 }
 
 func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pendingArtifactConsumption) error {
@@ -293,11 +281,8 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 			return err
 		}
 	} else {
-		now, err := value.FromTime(s.now())
-		if err != nil {
-			return err
-		}
-		if !item.expiresAt.Valid {
+		now := s.now().UTC()
+		if item.expiresAt.IsZero() {
 			return ErrArtifactDenied
 		}
 		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
@@ -305,10 +290,7 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 			if err != nil {
 				return err
 			}
-			if err := store.ResetConsumption(ctx, item.id, item.grantID, item.expiresAt.Micros <= now.Micros); err != nil {
-				return err
-			}
-			return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+			return store.ResetConsumption(ctx, item.id, item.grantID, !item.expiresAt.After(now))
 		}); err != nil {
 			return err
 		}

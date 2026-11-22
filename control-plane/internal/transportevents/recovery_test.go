@@ -7,7 +7,6 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -19,7 +18,7 @@ type recoveryResultStore struct {
 	payload []byte
 }
 
-func (s *recoveryResultStore) ScheduleRecovery(_ context.Context, _ uuid.UUID, payload []byte, _, _ value.Timestamp) error {
+func (s *recoveryResultStore) ScheduleRecovery(_ context.Context, _ uuid.UUID, payload []byte, _, _ time.Time) error {
 	s.payload = payload
 	return nil
 }

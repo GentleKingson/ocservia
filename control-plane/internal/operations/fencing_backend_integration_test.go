@@ -9,11 +9,8 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
@@ -22,29 +19,6 @@ func TestFencingBackendIntegration(t *testing.T) {
 	f := newOutboxFixture(t)
 	ctx := context.Background()
 	identity := connectionowner.Identity{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}
-	t.Run("scheduler-noop-rows-affected", func(t *testing.T) {
-		err := database.Within(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := schedulerlease.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			state, err := store.Lock(ctx)
-			if err != nil {
-				return err
-			}
-			at, err := database.WallTime(ctx, tx)
-			if err != nil {
-				return err
-			}
-			if err := store.Put(ctx, state, at); err != nil {
-				return err
-			}
-			return store.Put(ctx, state, at)
-		})
-		if err != nil {
-			t.Fatal("unchanged matched row treated as missing", err)
-		}
-	})
 	for _, action := range []string{"renew", "assert", "release"} {
 		t.Run("owner-expired-during-"+action+"-wait", func(t *testing.T) {
 			node := f.node(t)
@@ -155,86 +129,8 @@ func TestFencingBackendIntegration(t *testing.T) {
 			winner = next
 		}
 		// Runtime cannot delete fencing authority to reset its epoch.
-		for _, table := range []string{"connection_owner_fencing", "scheduler_leadership"} {
-			if _, err := f.backend.Exec(ctx, "DELETE FROM "+table+" WHERE 1=0"); !errors.Is(err, database.ErrPermission) {
-				t.Fatal("fencing deletion permitted", table, err)
-			}
-		}
-	})
-	t.Run("scheduler-renew-and-assert-after-wait", func(t *testing.T) {
-		for _, assert := range []bool{false, true} {
-			owner := schedulerlease.Owner{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}
-			epoch, err := schedulerlease.Acquire(ctx, f.backend, owner, time.Second)
-			testutil.NoError(t, err)
-			locked, err := f.owner.Begin(ctx, database.ReadCommitted)
-			testutil.NoError(t, err)
-			defer locked.Rollback(ctx)
-			store, err := schedulerlease.FromTransaction(locked)
-			testutil.NoError(t, err)
-			state, err := store.Lock(ctx)
-			testutil.NoError(t, err)
-			until, err := state.Until.Time()
-			testutil.NoError(t, err)
-			waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			done := make(chan error, 1)
-			go func() {
-				if assert {
-					done <- database.Within(waiting, f.backend, database.ReadCommitted, func(tx database.Tx) error { return schedulerlease.Assert(waiting, tx, owner, epoch) })
-				} else {
-					done <- schedulerlease.Renew(waiting, f.backend, owner, epoch, time.Second)
-				}
-			}()
-			assertBlocked(t, done)
-			time.Sleep(time.Until(until) + 50*time.Millisecond)
-			if err := locked.Rollback(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if err := <-done; !errors.Is(err, schedulerlease.ErrLost) {
-				t.Fatal("scheduler lease revived", err)
-			}
-		}
-	})
-	t.Run("scheduler-contenders-and-ambiguous-commit", func(t *testing.T) {
-		fault := &commitFaultBackend{Backend: f.backend, commit: true}
-		fault.armed.Store(true)
-		owner := schedulerlease.Owner{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}
-		epoch, err := schedulerlease.Acquire(ctx, fault, owner, time.Minute)
-		if err != nil {
-			t.Fatal("acquire readback", err)
-		}
-		fault.armed.Store(true)
-		if err := schedulerlease.Renew(ctx, fault, owner, epoch, time.Minute); err != nil {
-			t.Fatal("renew readback", err)
-		}
-		past := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
-		f.exec(t, `UPDATE scheduler_leadership SET lease_until=$1 WHERE id=1`, past)
-		start, done := make(chan struct{}), make(chan error, 2)
-		for range 2 {
-			go func() {
-				<-start
-				_, err := coordination.AcquireBackend(ctx, f.backend, coordination.Identity{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 2}, time.Minute)
-				done <- err
-			}()
-		}
-		close(start)
-		won := 0
-		for range 2 {
-			err := <-done
-			if err == nil {
-				won++
-			} else if !errors.Is(err, coordination.ErrLeaseHeld) {
-				t.Fatal(err)
-			}
-		}
-		if won != 1 {
-			t.Fatal("scheduler contenders", won)
-		}
-		if err := schedulerlease.Renew(ctx, f.backend, owner, epoch, time.Minute); !errors.Is(err, schedulerlease.ErrLost) {
-			t.Fatal("old scheduler renewed", err)
-		}
-		if n := f.count(t, "SELECT epoch FROM scheduler_leadership WHERE id=1"); int64(n) <= epoch {
-			t.Fatal("scheduler epoch reused", n)
+		if _, err := f.backend.Exec(ctx, "DELETE FROM connection_owner_fencing WHERE 1=0"); !errors.Is(err, database.ErrPermission) {
+			t.Fatal("fencing deletion permitted", err)
 		}
 	})
 	t.Run("owner-readback-and-stale-dispatch", func(t *testing.T) {

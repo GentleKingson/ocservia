@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
@@ -18,7 +19,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -134,7 +134,7 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 		}
 	}
 	create(read(0), 202)
-	f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,0,11,'',$2)`, plan.NodeID, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,0,11,'',$2)`, plan.NodeID, time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC))
 	create(read(0), 202)
 	f.exec(`UPDATE node_config_state SET revision=7 WHERE node_id=$1`, plan.NodeID)
 	revision := read(7)
@@ -200,7 +200,7 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 	certs := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
 	f.s = f.newServer(Modules{ConfigPlans: plans, Certificates: certs})
 	foreign := uuid.Must(uuid.NewV7())
-	stamp := value.Timestamp{Valid: true}
+	stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Secret module',$2,$3,$4)`, foreign, foreign.String(), stamp, stamp)
 	f.bindWorkspaceAdmin(f.requester, foreign)
 	keyPath := plan.NodeID.String() + "/" + strings.Repeat("52", 32) + "/" + strings.Repeat("53", 32) + "/none"

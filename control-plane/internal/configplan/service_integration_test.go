@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -19,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -246,10 +244,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if err != nil || replayed || apply.State != "queued" {
 		t.Fatalf("apply=%+v replayed=%v err=%v", apply, replayed, err)
 	}
-	expires, expiryErr := validated.ExpiresAt.Time()
-	if expiryErr != nil {
-		t.Fatal(expiryErr)
-	}
+	expires := validated.ExpiresAt.UTC()
 	creator.assertLast(t, ctx, 7, operations.CreateRequest{
 		NodeID:          nodeID,
 		IdempotencyKey:  applyRequest.IdempotencyKey,
@@ -376,22 +371,6 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	request.IdempotencyKey = "stale-plan"
 	if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("stale revision error=%v", err)
-	}
-	warnings := `["safe",null,[1.234567890123456789],{"value":true}]`
-	if _, err := ownerPool.Exec(ctx, `UPDATE config_plans SET warnings=$2::jsonb,created_at='-infinity',expires_at='infinity' WHERE id=$1`, plan.ID, warnings); err != nil {
-		t.Fatal(err)
-	}
-	extended, err := service.Get(ctx, plan.ID)
-	if err != nil || extended.CreatedAt.Micros != value.NegativeInfinity || extended.ExpiresAt.Micros != value.PositiveInfinity || len(extended.Warnings) < 4 {
-		t.Fatal("extended configuration read", extended, err)
-	}
-	encoded, err := json.Marshal(extended.Warnings[:4])
-	testutil.NoError(t, err)
-	got, err := value.ParseJSONB(encoded)
-	testutil.NoError(t, err)
-	want, err := value.ParseJSONB([]byte(warnings))
-	if err != nil || !bytes.Equal(got.Bytes(), want.Bytes()) {
-		t.Fatal("stored warnings narrowed", string(encoded), err)
 	}
 }
 

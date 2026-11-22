@@ -4,90 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
-
-type checkpointFenceFunc func(context.Context, database.Tx) error
-
-func (f checkpointFenceFunc) AssertTransaction(ctx context.Context, tx database.Tx) error {
-	return f(ctx, tx)
-}
-
-func TestCheckpointConcurrentLeaseRenewalIntegration(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	pool := testfixture.OpenRuntimePool(t)
-	backend := postgres.WrapPool(pool)
-	for _, test := range []struct {
-		name     string
-		attempts int
-		want     error
-	}{
-		{"renew once", 2, nil},
-		{"renew every attempt", 3, database.ErrSerialization},
-		{"lose leadership", 2, coordination.ErrNotLeader},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			testutil.Exec(t, ctx, pool, `UPDATE scheduler_leadership SET lease_until=now()`)
-			defer pool.Exec(context.Background(), `UPDATE scheduler_leadership SET lease_until=now()`)
-			identity, err := coordination.NewIdentity()
-			testutil.NoError(t, err)
-			session, err := coordination.AcquireBackend(ctx, backend, identity, time.Minute)
-			testutil.NoError(t, err)
-			workspaceID := uuid.Must(uuid.NewV7())
-			testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'checkpoint renewal',$2,now(),now())`, workspaceID, "audit-renew-"+workspaceID.String())
-			testutil.NoError(t, database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-				return AppendChainTx(ctx, tx, ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: "auditor", Action: "test", ResourceType: "workspace", ResourceID: workspaceID, RequestID: "checkpoint-renewal"})
-			}))
-			attempts := 0
-			fence := checkpointFenceFunc(func(ctx context.Context, tx database.Tx) error {
-				attempts++
-				// The checkpoint has read its snapshot and inserted its row. Renew
-				// on another connection before the real pre-commit fence query.
-				conflict := attempts == 1 || test.name == "renew every attempt"
-				if conflict {
-					testutil.NoError(t, session.RenewBackend(ctx, backend))
-				}
-				if test.name == "lose leadership" && attempts == 1 {
-					testutil.Exec(t, ctx, pool, `UPDATE scheduler_leadership SET lease_until=now()`)
-				}
-				err := session.AssertTransaction(ctx, tx)
-				if conflict && !errors.Is(err, database.ErrSerialization) {
-					t.Fatalf("expected real snapshot conflict, got %v", err)
-				}
-				return err
-			})
-			manager := NewBackendManager(backend, integrationCheckpointKey(t))
-			err = manager.Checkpoint(coordination.WithFence(ctx, fence), workspaceID)
-			if !errors.Is(err, test.want) || attempts != test.attempts {
-				t.Fatalf("checkpoint = %v after %d attempts; want %v after %d", err, attempts, test.want, test.attempts)
-			}
-			var count int
-			testutil.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM audit_checkpoints WHERE workspace_id=$1`, workspaceID).Scan(&count))
-			wantCount := 0
-			if test.want == nil {
-				wantCount = 1
-				verified, err := manager.Verify(ctx, workspaceID)
-				if err != nil || !verified.Valid || !verified.Checkpoint {
-					t.Fatalf("verification = %+v, %v", verified, err)
-				}
-			}
-			if count != wantCount {
-				t.Fatalf("persisted %d checkpoints, want %d", count, wantCount)
-			}
-		})
-	}
-}
 
 func TestHashChainCheckpointAndTamperDetectionIntegration(t *testing.T) {
 	ctx := context.Background()

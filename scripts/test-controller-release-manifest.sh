@@ -41,7 +41,8 @@ assert_rejected() {
 run_manifest "${fixture}/manifest-a.json"
 run_manifest "${fixture}/manifest-b.json"
 cmp -s "${fixture}/manifest-a.json" "${fixture}/manifest-b.json"
-expected_head="$(awk -F= '/^-- ocservia:epoch=/{epoch=$2} /^-- ocservia:revision=/{revision=$2} END {printf "{\"epoch\":%s,\"revision\":%s}", epoch, revision}' "${ROOT}/control-plane/migrations/schema.sql")"
+expected_revision="$(find "${ROOT}/control-plane/migrations/sql" -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' | sed -n 's/^\([0-9][0-9]*\)_.*/\1/p' | awk '{print $1 + 0}' | sort -n | tail -n 1)"
+expected_head="{\"epoch\":1,\"revision\":${expected_revision}}"
 jq -e --argjson expected_head "${expected_head}" '
   .manifest_version == 1 and
   .release_version == "0.2.0" and

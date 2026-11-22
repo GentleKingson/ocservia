@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 )
 
 func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]byte, identity Identity, connectionID [16]byte, leaseTTL time.Duration) (*Term, error) {
@@ -35,11 +34,7 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID [16]by
 	if err != nil {
 		return nil, fmt.Errorf("connectionowner: acquire node ownership: %w", err)
 	}
-	until, err := lease.Until.Time()
-	if err != nil {
-		return nil, err
-	}
-	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: lease.Epoch, leaseTTL: leaseTTL, leaseUntil: until}, nil
+	return &Term{identity: identity, nodeID: nodeID, connectionID: connectionID, epoch: lease.Epoch, leaseTTL: leaseTTL, leaseUntil: lease.Until}, nil
 }
 
 func (t *Term) storedTerm() StoreTerm {
@@ -47,7 +42,7 @@ func (t *Term) storedTerm() StoreTerm {
 }
 
 func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time.Time, error) {
-	var until value.Timestamp
+	var until time.Time
 	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := StoreFromTransaction(tx)
 		if err != nil {
@@ -65,7 +60,7 @@ func (t *Term) RenewBackend(ctx context.Context, backend database.Backend) (time
 	if err != nil {
 		return time.Time{}, fmt.Errorf("connectionowner: renew node ownership: %w", err)
 	}
-	return until.Time()
+	return until, nil
 }
 
 func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) error {
@@ -76,7 +71,7 @@ func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) err
 		}
 		return store.Release(ctx, t.storedTerm())
 	})
-	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, t.storedTerm(), value.Timestamp{}, false) == nil {
+	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, t.storedTerm(), time.Time{}, false) == nil {
 		err = nil
 	}
 	if errors.Is(err, database.ErrNotFound) {
@@ -85,14 +80,14 @@ func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) err
 	return err
 }
 
-func confirmTerm(ctx context.Context, backend database.Backend, term StoreTerm, until value.Timestamp, live bool) error {
+func confirmTerm(ctx context.Context, backend database.Backend, term StoreTerm, until time.Time, live bool) error {
 	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	state, err := ReadStateBackend(check, backend, term.NodeID)
 	if err != nil {
 		return err
 	}
-	if state.InstanceID != term.Identity.InstanceID || state.Incarnation != term.Identity.Incarnation || state.ConnectionID != term.ConnectionID || state.Epoch != term.Epoch || state.LeaseUntilValid != live || (live && (!until.Valid || state.Until.Micros < until.Micros)) {
+	if state.InstanceID != term.Identity.InstanceID || state.Incarnation != term.Identity.Incarnation || state.ConnectionID != term.ConnectionID || state.Epoch != term.Epoch || state.LeaseUntilValid != live || (live && (until.IsZero() || state.Until.Before(until))) {
 		return ErrNotOwner
 	}
 	return nil

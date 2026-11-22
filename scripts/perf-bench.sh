@@ -50,7 +50,6 @@ run_go_bench() (
   (
     cd "${ROOT}/control-plane"
     go test -run='^$' -bench=. -benchmem -count="${GO_BENCH_COUNT}" -benchtime="${GO_BENCH_TIME}" \
-      ./internal/database/value \
       ./internal/database/postgres \
       ./internal/operations \
       ./internal/audit \

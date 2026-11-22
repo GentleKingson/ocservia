@@ -2,10 +2,10 @@ package store
 
 import (
 	"context"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
-	"github.com/google/uuid"
 	"time"
+
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/google/uuid"
 )
 
 type Eligible struct {
@@ -13,7 +13,7 @@ type Eligible struct {
 	CertificateVersion                              uint64
 	Digest                                          []byte
 	Size                                            int64
-	ArtifactExpires, CertificateExpires             value.Timestamp
+	ArtifactExpires, CertificateExpires             time.Time
 }
 type Consumption struct {
 	ID, GrantID, ActorID, SessionID, NodeID, CertificateID, OperationID uuid.UUID
@@ -32,7 +32,7 @@ type PendingConsumption struct {
 	ID, GrantID, ActorID uuid.UUID
 	Grant, Digest        []byte
 	Size                 int64
-	ExpiresAt            value.Timestamp
+	ExpiresAt            time.Time
 }
 type ArtifactStore interface {
 	Resource(context.Context, uuid.UUID) (uuid.UUID, uuid.UUID, error)

@@ -17,7 +17,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
@@ -52,7 +51,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	identity, err := seedAuth.CreateLocalCredential(ctx, username, password)
 	testutil.NoError(t, err)
 	workspace, node := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	at, _ := value.FromTime(time.Now().UTC())
+	at := time.Now().UTC()
 	exec := func(query string, args ...any) {
 		t.Helper()
 		if _, err := owner.Store.Exec(ctx, query, args...); err != nil {

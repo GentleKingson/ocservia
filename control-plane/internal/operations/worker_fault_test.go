@@ -12,7 +12,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
@@ -59,8 +58,8 @@ type faultDispatchTx struct {
 
 func (t *faultDispatchTx) Commit(context.Context) error   { return nil }
 func (t *faultDispatchTx) Rollback(context.Context) error { return nil }
-func (t *faultDispatchTx) WallTime(context.Context) (value.Timestamp, error) {
-	return value.FromTime(t.backend.now)
+func (t *faultDispatchTx) WallTime(context.Context) (time.Time, error) {
+	return t.backend.now, nil
 }
 func (t *faultDispatchTx) CommandLimitStore() commandlimit.Store { return &faultCommandLimitStore{} }
 func (t *faultDispatchTx) OperationStore() operationstore.Store {
@@ -84,7 +83,7 @@ type faultOperationStore struct {
 	backend *faultDispatchBackend
 }
 
-func (s *faultOperationStore) DispatchCandidates(_ context.Context, limit, available int, _ value.Timestamp) ([]Dispatch, error) {
+func (s *faultOperationStore) DispatchCandidates(_ context.Context, limit, available int, _ time.Time) ([]Dispatch, error) {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	maxCount := min(limit, available)
@@ -101,7 +100,7 @@ func (s *faultOperationStore) DispatchCandidates(_ context.Context, limit, avail
 	return out, nil
 }
 
-func (s *faultOperationStore) ClaimDispatch(_ context.Context, d Dispatch, _ uuid.UUID, _, _ value.Timestamp) (bool, error) {
+func (s *faultOperationStore) ClaimDispatch(_ context.Context, d Dispatch, _ uuid.UUID, _, _ time.Time) (bool, error) {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	rec := s.backend.records[d.CommandID]
@@ -131,22 +130,22 @@ func (s *faultOperationStore) DispatchStatus(_ context.Context, d Dispatch) (ope
 	}, nil
 }
 
-func (s *faultOperationStore) PublishDispatch(context.Context, Dispatch, value.Timestamp) error {
+func (s *faultOperationStore) PublishDispatch(context.Context, Dispatch, time.Time) error {
 	return nil
 }
 
-func (s *faultOperationStore) RecordDispatched(_ context.Context, d Dispatch, _ []byte, _ bool, _ value.Timestamp) error {
+func (s *faultOperationStore) RecordDispatched(_ context.Context, d Dispatch, _ []byte, _ bool, _ time.Time) error {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	s.backend.records[d.CommandID].sent = true
 	return nil
 }
 
-func (s *faultOperationStore) CloseDispatch(context.Context, Dispatch, value.Timestamp) error {
+func (s *faultOperationStore) CloseDispatch(context.Context, Dispatch, time.Time) error {
 	return nil
 }
 
-func (s *faultOperationStore) FailDispatch(_ context.Context, d Dispatch, message string, _ value.Timestamp) error {
+func (s *faultOperationStore) FailDispatch(_ context.Context, d Dispatch, message string, _ time.Time) error {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	rec := s.backend.records[d.CommandID]

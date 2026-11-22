@@ -12,7 +12,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
@@ -55,6 +54,11 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger, access
 	if err != nil || auditManager == nil {
 		return err
 	}
+	releaseLock, err := conn.AcquireControllerLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 	return runController(ctx, cfg, build, backend, auditManager, logger, accessLogger, shutdownDeadline)
 }
 
@@ -125,14 +129,6 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
 	}
 	certificateService.EnableOwnerFencing(fenceExecutor)
-	identity, identityErr := coordination.NewIdentity()
-	if identityErr != nil {
-		return fmt.Errorf("mint scheduler identity: %w", identityErr)
-	}
-	// The leadership lease spans the whole maintenance session and is
-	// renewed in the background; losing renewal cancels the session
-	// context, which aborts fenced transactions before they can commit.
-	leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
 
 	history, err := historyretention.New(backend, cfg.HistoryRetention)
 	if err != nil {
@@ -151,15 +147,10 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 			return auditManager.CompactDetails(ctx, cfg.HistoryRetention.AuditDays)
 		},
 	}
-	if cfg.TestSchedulerEvidence {
-		work.evidence = func(ctx context.Context, session *coordination.Session) error {
-			return coordination.RecordMaintenanceCompletion(ctx, backend, session)
-		}
-	}
 	life.start("run telemetry maintenance", func(ctx context.Context) error {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		return runScheduler(ctx, leader, ticker.C, work, cfg.UserOperationConcurrency, logger)
+		return runScheduler(ctx, ticker.C, work, cfg.UserOperationConcurrency, logger)
 	})
 
 	modules := api.Modules{

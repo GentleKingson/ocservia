@@ -11,7 +11,6 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -147,15 +146,11 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 	if occurredAt == nil || occurredAt.CheckValid() != nil {
 		return workspaceID, false, invalidEvent("invalid_occurred_at", "transport event occurred_at is invalid")
 	}
-	occurredTime := occurredAt.AsTime()
+	occurredTime := occurredAt.AsTime().UTC()
 	if occurredTime.Before(observedAt.Add(-maxTransportEventAge)) || occurredTime.After(observedAt.Add(telemetry.MaxTelemetrySkew)) {
 		return workspaceID, false, invalidEvent("occurred_at_out_of_range", "transport event occurred_at is outside the accepted retention window")
 	}
-	at, err := value.FromTime(occurredTime)
-	if err != nil {
-		return workspaceID, false, err
-	}
-	inserted, err := store.InsertEvent(ctx, transportstore.TransportEvent{ID: eventID, NodeID: nodeID, Type: eventType, At: at, Traceparent: event.GetTraceparent(), Payload: event.GetPayload()})
+	inserted, err := store.InsertEvent(ctx, transportstore.TransportEvent{ID: eventID, NodeID: nodeID, Type: eventType, At: occurredTime, Traceparent: event.GetTraceparent(), Payload: event.GetPayload()})
 	if err != nil {
 		return workspaceID, false, fmt.Errorf("insert transport event: %w", err)
 	}
@@ -185,7 +180,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 	}
 	if eventType != "telemetry" {
 		// Routine same-state signals must not invalidate node mutation preconditions.
-		if err := store.NodeStatus(ctx, nodeID, status, at); err != nil {
+		if err := store.NodeStatus(ctx, nodeID, status, occurredTime); err != nil {
 			return workspaceID, false, fmt.Errorf("update node from transport event: %w", err)
 		}
 	}
@@ -199,7 +194,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 		case "disconnected":
 			operationState = "unknown"
 		}
-		if err := store.SimulationOutcome(ctx, nodeID, operationState, event.GetTraceparent(), eventType == "disconnected", at); err != nil {
+		if err := store.SimulationOutcome(ctx, nodeID, operationState, event.GetTraceparent(), eventType == "disconnected", occurredTime); err != nil {
 			return workspaceID, false, fmt.Errorf("update operation from transport event: %w", err)
 		}
 	}
@@ -208,10 +203,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 
 func quarantineTransportEvent(ctx context.Context, store transportstore.IngressStore, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, workspaceID uuid.UUID, observedAt time.Time, failure *permanentInvalidEvent) error {
 	payloadHash := sha256.Sum256(event.GetPayload())
-	at, err := value.FromTime(observedAt)
-	if err != nil {
-		return err
-	}
+	at := observedAt.UTC()
 	v := transportstore.Quarantine{EventID: eventID, NodeID: nodeID, Type: int32(event.GetType()), PayloadHash: payloadHash[:], ReasonCode: failure.reasonCode, ReasonDetail: failure.detail, At: at}
 	inserted, err := store.InsertQuarantine(ctx, v)
 	if err != nil {
@@ -237,11 +229,7 @@ func quarantineTransportEvent(ctx context.Context, store transportstore.IngressS
 	return store.AdvanceCursor(ctx, eventID, at)
 }
 func advanceTransportCursor(ctx context.Context, store transportstore.IngressStore, eventID uuid.UUID, observedAt time.Time) error {
-	at, err := value.FromTime(observedAt)
-	if err != nil {
-		return err
-	}
-	if err := store.AdvanceCursor(ctx, eventID, at); err != nil {
+	if err := store.AdvanceCursor(ctx, eventID, observedAt.UTC()); err != nil {
 		return fmt.Errorf("advance durable transport cursor: %w", err)
 	}
 	return nil

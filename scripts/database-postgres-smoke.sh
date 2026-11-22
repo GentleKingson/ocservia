@@ -54,4 +54,3 @@ docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c '
 export OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/initialization_smoke?sslmode=disable"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseInitializationSmoke
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${name}"
-bash "${ROOT}/scripts/required-go-tests.sh" postgres-snapshot --select -race -timeout=10m

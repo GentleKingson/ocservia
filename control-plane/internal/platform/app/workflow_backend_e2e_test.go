@@ -32,7 +32,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -61,10 +60,9 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 	owner, err := connection.Open(f.ctx, ownerOptions)
 	testutil.NoError(t, err)
 	t.Cleanup(owner.Close)
-	installSchedulerEvidence(t, f.ctx, owner)
 	f.workspace = uuid.Must(uuid.NewV7()).String()
 	workspace := uuid.MustParse(f.workspace)
-	at, _ := value.FromTime(time.Now().UTC())
+	at := time.Now().UTC()
 	if _, err = owner.Store.Exec(f.ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'real E2E',$2,$3,$3)`, workspace, f.workspace, at); err != nil {
 		t.Fatal("initialize empty test workspace", err)
 	}
@@ -103,13 +101,8 @@ func TestControllerTransportBackendE2E(t *testing.T) {
 		"OCSERV_RELAY_URL_A": f.relays[0], "OCSERV_RELAY_ACCESS_TOKEN_FILE": f.root + "/controller/relay-token",
 		"OCSERV_CERTIFICATE_SIGNER_URL": signer.URL, "OCSERV_CERTIFICATE_SIGNER_TOKEN": "isolated-test-signer",
 		"SSL_CERT_FILE": f.root + "/signer-ca.pem",
-		"OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE": "true",
 	})
 	f.start("controller", 65534, 65532, controllerEnvironment, f.root+"/ocserv-control")
-	f.wait("scheduler maintenance commit", func() bool {
-		var completed int
-		return owner.Store.QueryRow(f.ctx, `SELECT count(*) FROM test_scheduler_maintenance_history`).Scan(&completed) == nil && completed > 0
-	})
 	f.wait("Controller trust socket", func() bool { _, err := os.Stat(f.root + "/controller/trust.sock"); return err == nil })
 	// Match deployed enrollment policy: new nodes have no owner session yet.
 	// Once the Agent negotiates fencing, transportd always requires its binding.

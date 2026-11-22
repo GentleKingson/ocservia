@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"go.opentelemetry.io/otel"
@@ -18,11 +17,10 @@ import (
 type maintenanceWork struct {
 	users, rollouts, telemetry, certificates, audit func(context.Context) error
 	retention                                       func(context.Context) error
-	evidence                                        func(context.Context, *coordination.Session) error
 }
 
-func (w maintenanceWork) run(sessionCtx context.Context, session *coordination.Session, started time.Time, concurrency int, logger *slog.Logger) error {
-	runCtx, span := otel.Tracer("ocservia.useroperations").Start(sessionCtx, "user_operations.scheduler.run")
+func (w maintenanceWork) run(ctx context.Context, started time.Time, concurrency int, logger *slog.Logger) error {
+	runCtx, span := otel.Tracer("ocservia.useroperations").Start(ctx, "user_operations.scheduler.run")
 	if err := w.users(runCtx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "scheduler run failed")
@@ -30,14 +28,14 @@ func (w maintenanceWork) run(sessionCtx context.Context, session *coordination.S
 		return err
 	}
 	span.End()
-	logger.InfoContext(sessionCtx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", concurrency)
-	if err := w.rollouts(sessionCtx); err != nil {
-		logger.ErrorContext(sessionCtx, "advance agent rollouts", "error", err)
+	logger.InfoContext(ctx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", concurrency)
+	if err := w.rollouts(ctx); err != nil {
+		logger.ErrorContext(ctx, "advance agent rollouts", "error", err)
 	}
-	if err := w.telemetry(sessionCtx); err != nil {
+	if err := w.telemetry(ctx); err != nil {
 		return err
 	}
-	certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(sessionCtx, "certificates.maintenance.run")
+	certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(ctx, "certificates.maintenance.run")
 	if err := w.certificates(certificateCtx); err != nil {
 		certificateSpan.RecordError(err)
 		certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
@@ -45,50 +43,30 @@ func (w maintenanceWork) run(sessionCtx context.Context, session *coordination.S
 		return err
 	}
 	certificateSpan.End()
-	if err := w.audit(sessionCtx); err != nil {
+	if err := w.audit(ctx); err != nil {
 		return err
 	}
 	if w.retention != nil {
-		if err := w.retention(sessionCtx); err != nil {
-			return err
-		}
-	}
-	if w.evidence != nil {
-		if err := w.evidence(sessionCtx, session); err != nil {
+		if err := w.retention(ctx); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-type schedulerLeader interface {
-	WithSession(context.Context, func(context.Context, *coordination.Session) error) error
-	Stop()
-}
-
-func runScheduler(ctx context.Context, leader schedulerLeader, ticks <-chan time.Time, work maintenanceWork, concurrency int, logger *slog.Logger) error {
-	defer leader.Stop()
+func runScheduler(ctx context.Context, ticks <-chan time.Time, work maintenanceWork, concurrency int, logger *slog.Logger) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		started := time.Now()
-		err := leader.WithSession(ctx, func(sessionCtx context.Context, session *coordination.Session) error {
-			return work.run(sessionCtx, session, started, concurrency, logger)
-		})
-		if err != nil {
+		if err := work.run(ctx, started, concurrency, logger); err != nil {
 			var cleanup *useroperations.EnforcementCleanupError
 			cleanupFailed := errors.As(err, &cleanup)
 			if cleanupFailed && ctx.Err() != nil {
 				return ctx.Err()
 			}
-			// Renewal loss cancels the session, not the process. Retry on the next tick.
-			leadershipLost := errors.Is(err, coordination.ErrLeadershipLost) ||
-				errors.Is(err, coordination.ErrNotLeader) ||
-				(ctx.Err() == nil && errors.Is(err, context.Canceled))
-			if leadershipLost {
-				logger.WarnContext(ctx, "maintenance session lost leadership", "alert_kind", "scheduler.leadership_lost", "error", err)
-			} else if cleanupFailed {
+			if cleanupFailed {
 				logger.ErrorContext(ctx, "policy enforcement cleanup failed; remaining maintenance skipped; retry on next tick", "alert_kind", "user_operations.cleanup_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 			} else if errors.Is(err, database.ErrUnavailable) && ctx.Err() == nil {
 				logger.ErrorContext(ctx, "maintenance database unavailable; remaining maintenance skipped; retry on next tick", "alert_kind", "scheduler.database_unavailable", "error", err, "duration_ms", time.Since(started).Milliseconds())

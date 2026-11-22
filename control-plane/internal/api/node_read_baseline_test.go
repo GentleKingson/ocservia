@@ -16,7 +16,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
@@ -45,7 +44,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	ctx := context.Background()
 	exec := func(query string, args ...any) { t.Helper(); authSafetyExec(t, b, query, args...) }
 	ws, other := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	stamp := value.Timestamp{Valid: true, Micros: 0}
+	stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 	for _, id := range []uuid.UUID{ws, other} {
 		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP baseline',$2,$3,$4)`, id, "baseline-"+id.String(), stamp, stamp)
 	}
@@ -164,12 +163,12 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		assertBaselineJSON(t, get(nodePath+"/ip-bans"+query, ws, cookie), `{"items":[{"ip":"192.0.2.9","seconds_remaining":20},{"ip":"2001:db8::20"}]}`)
 	}
 	// A rollup needs no raw-history partition and keeps time independent of the
-	// wall clock. Omitted since excludes this old point; -infinity includes it.
+	// wall clock. Omitted since excludes this old point; an earlier RFC 3339 bound includes it.
 	exec(`INSERT INTO telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) VALUES($1,'cpu_usage_ratio',$2,2,1,3,2)`, ids[0], stamp)
 	assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio", ws, cookie), `{"items":[],"resolution":"5m"}`)
-	assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio&since=-infinity", ws, cookie), `{"items":[{"at":"2000-01-01T00:00:00Z","metric":"cpu_usage_ratio","count":2,"minimum":1,"maximum":3,"average":2}],"resolution":"5m"}`)
+	assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio&since=1999-12-31T23:59:59Z", ws, cookie), `{"items":[{"at":"2000-01-01T00:00:00Z","metric":"cpu_usage_ratio","count":2,"minimum":1,"maximum":3,"average":2}],"resolution":"5m"}`)
 	for _, resolution := range []string{"raw", "1h"} {
-		assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio&resolution="+resolution+"&since=infinity", ws, cookie), `{"items":[],"resolution":"`+resolution+`"}`)
+		assertBaselineJSON(t, get(nodePath+"/telemetry?metric=cpu_usage_ratio&resolution="+resolution+"&since=2099-01-01T00:00:00Z", ws, cookie), `{"items":[],"resolution":"`+resolution+`"}`)
 	}
 	for _, tc := range []struct{ path, kind, title, detail string }{
 		{"/api/v1/nodes?cursor=bad", "invalid-cursor", "Invalid cursor", "cursor must be a UUIDv7 node ID"},
@@ -179,7 +178,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		{nodePath + "/sessions?cursor=" + strings.Repeat("a", 257), "invalid-pagination", "Invalid pagination", "cursor and page_size are outside permitted bounds"},
 		{nodePath + "/telemetry", "invalid-query", "Invalid query", "metric is invalid"},
 		{nodePath + "/telemetry?metric=cpu_usage_ratio&resolution=bad", "invalid-query", "Invalid query", "resolution is invalid"},
-		{nodePath + "/telemetry?metric=bad&since=bad", "invalid-query", "Invalid query", "since must be an RFC 3339 timestamp, signed six-digit extended-year timestamp, infinity or -infinity"},
+		{nodePath + "/telemetry?metric=bad&since=bad", "invalid-query", "Invalid query", "since must be an RFC 3339 timestamp"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			path, _, _ := strings.Cut(tc.path, "?")
@@ -232,8 +231,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		}
 		catalog, err := releasecatalog.Load(manifest)
 		testutil.NoError(t, err)
-		now, err := value.FromTime(time.Now().UTC())
-		testutil.NoError(t, err)
+		now := time.Now().UTC()
 		exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$3,'module',$4,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$5)`, ids[0], now, now, uuid.Must(uuid.NewV7()), now)
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, ids[0])
 		configured := telemetry.NewWithRecommendedAgentVersionBackend(b, "2.0.0")

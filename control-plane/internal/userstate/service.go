@@ -18,9 +18,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationdata "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
@@ -76,25 +74,23 @@ type SealedSecret struct {
 }
 
 type ResourceState struct {
-	Kind                     string            `json:"kind"`
-	Name                     string            `json:"name"`
-	DesiredEnabled           *bool             `json:"desired_enabled,omitempty"`
-	ObservedEnabled          *bool             `json:"observed_enabled,omitempty"`
-	DesiredMembers           []*string         `json:"desired_members,omitempty"`
-	ObservedMembers          []*string         `json:"observed_members,omitempty"`
-	DesiredVersion           *int64            `json:"desired_version,omitempty"`
-	DesiredRevision          *int64            `json:"desired_revision,omitempty"`
-	ObservedRevision         *int64            `json:"observed_revision,omitempty"`
-	DesiredFingerprint       string            `json:"desired_fingerprint,omitempty"`
-	ObservedFingerprint      string            `json:"observed_fingerprint,omitempty"`
-	Convergence              string            `json:"convergence"`
-	OperationID              *string           `json:"operation_id,omitempty"`
-	OperationState           *string           `json:"operation_state,omitempty"`
-	RecoveryRequired         bool              `json:"recovery_required"`
-	RecoveryMutationKind     *MutationKind     `json:"recovery_mutation_kind,omitempty"`
-	ObservedAt               *value.Timestamp  `json:"observed_at,omitempty"`
-	DesiredMemberDimensions  []value.Dimension `json:"desired_member_dimensions,omitempty"`
-	ObservedMemberDimensions []value.Dimension `json:"observed_member_dimensions,omitempty"`
+	Kind                 string        `json:"kind"`
+	Name                 string        `json:"name"`
+	DesiredEnabled       *bool         `json:"desired_enabled,omitempty"`
+	ObservedEnabled      *bool         `json:"observed_enabled,omitempty"`
+	DesiredMembers       []string      `json:"desired_members,omitempty"`
+	ObservedMembers      []string      `json:"observed_members,omitempty"`
+	DesiredVersion       *int64        `json:"desired_version,omitempty"`
+	DesiredRevision      *int64        `json:"desired_revision,omitempty"`
+	ObservedRevision     *int64        `json:"observed_revision,omitempty"`
+	DesiredFingerprint   string        `json:"desired_fingerprint,omitempty"`
+	ObservedFingerprint  string        `json:"observed_fingerprint,omitempty"`
+	Convergence          string        `json:"convergence"`
+	OperationID          *string       `json:"operation_id,omitempty"`
+	OperationState       *string       `json:"operation_state,omitempty"`
+	RecoveryRequired     bool          `json:"recovery_required"`
+	RecoveryMutationKind *MutationKind `json:"recovery_mutation_kind,omitempty"`
+	ObservedAt           *time.Time    `json:"observed_at,omitempty"`
 }
 
 type Service struct {
@@ -114,9 +110,6 @@ func NewWithSignerBackend(backend database.Backend, signer *commandauth.Signer) 
 }
 
 func commitFenced(ctx context.Context, tx database.Tx) error {
-	if err := coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
-		return err
-	}
 	return tx.Commit(ctx)
 }
 
@@ -211,15 +204,11 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 	if request.Kind == UserCreate && currentVersion > 0 && !replaceRevision {
 		return operations.Operation{}, false, ErrVersionConflict
 	}
-	now := s.now()
-	created, err := value.FromTime(now)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
+	now := s.now().UTC()
 	if err := ensureMutationCapacity(ctx, users, request, currentVersion == 0, now); err != nil {
 		return operations.Operation{}, false, err
 	}
-	coalesced, err := supersedePending(ctx, users, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, created)
+	coalesced, err := supersedePending(ctx, users, request.NodeID, resourceType, request.Name, request.Kind, currentRevision, now)
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
@@ -234,7 +223,7 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		commandExpectedRevision = currentRevision - 1
 	}
 	fingerprint := desiredFingerprint(request.Kind, request.Name, request.Members)
-	if err := users.WriteDesired(ctx, userstore.Desired{NodeID: request.NodeID, Kind: string(request.Kind), Name: request.Name, Version: nextVersion, Revision: nextRevision, Fingerprint: fingerprint[:], Members: value.TextList(request.Members), At: created}); err != nil {
+	if err := users.WriteDesired(ctx, userstore.Desired{NodeID: request.NodeID, Kind: string(request.Kind), Name: request.Name, Version: nextVersion, Revision: nextRevision, Fingerprint: fingerprint[:], Members: request.Members, At: now}); err != nil {
 		if errors.Is(err, database.ErrNotFound) {
 			err = ErrNotFound
 		}
@@ -245,18 +234,14 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		return operations.Operation{}, false, err
 	}
 	expiresAt := now.Add(request.TTL)
-	expiry, err := value.FromTime(expiresAt)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
 	envelope, err := marshalEnvelope(request, operationID, commandID, node.AuthorizationRevision, uint64(nextRevision), now, expiresAt, s.signer)
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
-	if err := operationStore.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiry, CreatedAt: created}); err != nil {
+	if err := operationStore.InsertIntent(ctx, operationdata.QueuedIntent{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, CommandID: commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), IdempotencyKey: request.IdempotencyKey, RequestHash: hash[:], ExpiresAt: expiresAt, CreatedAt: now}); err != nil {
 		return operations.Operation{}, false, fmt.Errorf("insert user operation: %w", err)
 	}
-	if err := operationStore.EnqueueCommand(ctx, operationdata.QueuedCommand{ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, OutboxID: outboxID, EventID: eventID, PayloadType: string(request.Kind), IdempotencyKey: request.IdempotencyKey, Traceparent: request.Traceparent, Envelope: envelope, ExpectedVersion: commandExpectedRevision, ExpiresAt: expiry, CreatedAt: created, AvailableAt: created, ResourceType: &resourceType, ResourceKey: &request.Name}); err != nil {
+	if err := operationStore.EnqueueCommand(ctx, operationdata.QueuedCommand{ID: commandID, OperationID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, OutboxID: outboxID, EventID: eventID, PayloadType: string(request.Kind), IdempotencyKey: request.IdempotencyKey, Traceparent: request.Traceparent, Envelope: envelope, ExpectedVersion: commandExpectedRevision, ExpiresAt: expiresAt, CreatedAt: now, AvailableAt: now, ResourceType: &resourceType, ResourceKey: &request.Name}); err != nil {
 		return operations.Operation{}, false, fmt.Errorf("insert user command: %w", err)
 	}
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{EventID: auditID, WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: actionFor(request.Kind), ResourceType: "operation", ResourceID: operationID, NodeID: &request.NodeID, CommandID: &commandID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, At: now}); err != nil {
@@ -266,7 +251,7 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		return operations.Operation{}, false, err
 	}
 	nodeText, commandText := request.NodeID.String(), commandID.String()
-	return operations.Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: created, UpdatedAt: created, ExpiresAt: &expiry}, false, nil
+	return operations.Operation{ID: operationID.String(), State: "queued", NodeID: &nodeText, CommandID: &commandText, Version: 1, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expiresAt}, false, nil
 }
 
 func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, error) {
@@ -282,17 +267,13 @@ func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, 
 		}
 		for _, v := range rows {
 			item := ResourceState{Kind: v.Kind, Name: v.Name, DesiredEnabled: v.DesiredEnabled, ObservedEnabled: v.ObservedEnabled,
-				DesiredMembers: v.DesiredMembers.Elements, ObservedMembers: v.ObservedMembers.Elements,
-				DesiredMemberDimensions: nonstandardDimensions(v.DesiredMembers), ObservedMemberDimensions: nonstandardDimensions(v.ObservedMembers),
+				DesiredMembers: v.DesiredMembers, ObservedMembers: v.ObservedMembers,
 				DesiredVersion: v.DesiredVersion, DesiredRevision: v.DesiredRevision, ObservedRevision: v.ObservedRevision,
-				DesiredFingerprint: hex.EncodeToString(v.DesiredFingerprint), ObservedFingerprint: hex.EncodeToString(v.ObservedFingerprint), OperationState: v.OperationState}
+				DesiredFingerprint: hex.EncodeToString(v.DesiredFingerprint), ObservedFingerprint: hex.EncodeToString(v.ObservedFingerprint), OperationState: v.OperationState,
+				ObservedAt: v.ObservedAt}
 			if v.OperationID != nil {
 				id := v.OperationID.String()
 				item.OperationID = &id
-			}
-			if v.ObservedAt.Valid {
-				at := v.ObservedAt
-				item.ObservedAt = &at
 			}
 			item.RecoveryRequired, item.RecoveryMutationKind = recoveryMetadata(v.CommandState, v.PayloadType, v.SafeRejected)
 			item.Convergence = convergence(item, v.NodeStatus)
@@ -301,15 +282,6 @@ func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, 
 		return nil
 	})
 	return result, err
-}
-
-// Ordinary membership lists retain their existing JSON shape. Dimensions are
-// included only when needed to preserve a PostgreSQL array's non-list shape.
-func nonstandardDimensions(a value.TextArray) []value.Dimension {
-	if len(a.Dimensions) == 0 || (len(a.Dimensions) == 1 && a.Dimensions[0].LowerBound == 1) {
-		return nil
-	}
-	return a.Dimensions
 }
 
 func validateMutation(request MutationRequest) error {
@@ -412,10 +384,7 @@ func recoveryMetadata(commandState, payloadType *string, safeRejected *bool) (bo
 }
 
 func ensureMutationCapacity(ctx context.Context, users userstore.Store, request MutationRequest, creating bool, now time.Time) error {
-	fresh, err := value.FromTime(now.Add(-90 * time.Second))
-	if err != nil {
-		return err
-	}
+	fresh := now.Add(-90 * time.Second).UTC()
 	if creating {
 		count, err := users.CountResources(ctx, request.NodeID, request.Name, request.Kind == GroupApply, fresh)
 		if err != nil {
@@ -564,7 +533,7 @@ func findIdempotent(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, 
 	return store.FindIdempotent(ctx, workspaceID, key, hash)
 }
 
-func supersedePending(ctx context.Context, users userstore.Store, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, currentRevision int64, at value.Timestamp) (bool, error) {
+func supersedePending(ctx context.Context, users userstore.Store, nodeID uuid.UUID, resourceType, resourceKey string, kind MutationKind, currentRevision int64, at time.Time) (bool, error) {
 	switch kind {
 	case UserCreate:
 		return false, nil

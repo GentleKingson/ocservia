@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -54,9 +51,7 @@ func TestAuditRetentionBackendIntegration(t *testing.T) {
 		}
 	}
 	node := f.node(t)
-	oldStamp, _ := value.FromTime(old)
-	nowStamp, _ := value.FromTime(time.Now().UTC())
-	for _, at := range []value.Timestamp{oldStamp, nowStamp} {
+	for _, at := range []time.Time{old, time.Now().UTC()} {
 		f.exec(t, `INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail)VALUES($1,$2,$3,'warning','retention.test','{"detail":true}')`, uuid.New(), node, at)
 	}
 	if err := manager.CheckpointAll(ctx); err != nil {
@@ -68,10 +63,6 @@ func TestAuditRetentionBackendIntegration(t *testing.T) {
 		if err != nil || !v.Valid || !v.Checkpoint || v.Events != 36 || v.CompactedEvents != compacted {
 			t.Fatal("audit verification", v, err)
 		}
-	}
-	assertChain(0)
-	if err := manager.CompactDetails(coordination.WithFence(ctx, lostRetentionFence{}), 365); !errors.Is(err, coordination.ErrLeadershipLost) {
-		t.Fatal("fence", err)
 	}
 	assertChain(0)
 	if err := manager.CompactDetails(ctx, 365); err != nil {
@@ -99,7 +90,7 @@ func TestAuditRetentionBackendIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertChain(35)
-	if n := f.count(t, `SELECT count(*) FROM telemetry_security_events WHERE details_compacted_at IS NOT NULL AND octet_length(detail_sha256)=32`); n != 1 {
+	if n := f.count(t, `SELECT count(*) FROM telemetry_security_events WHERE details_compacted_at IS NOT NULL AND detail='{}'::jsonb`); n != 1 {
 		t.Fatal("security cutoff", n)
 	}
 	if n := f.count(t, `SELECT count(*) FROM audit_events WHERE reason='aged detail'`); n != 1 {

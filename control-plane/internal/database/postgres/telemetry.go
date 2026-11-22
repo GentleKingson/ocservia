@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/google/uuid"
@@ -349,11 +348,8 @@ func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.
 	return nil
 }
 
-func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetrystore.Point, error) {
-	if err := since.Validate(); err != nil {
-		return nil, err
-	}
-	if !since.Valid {
+func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]telemetrystore.Point, error) {
+	if since.IsZero() {
 		return nil, database.ErrConstraint
 	}
 	query := `SELECT sampled_at,metric,1,value,value,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at >= $3 ORDER BY sampled_at LIMIT 2000`
@@ -452,7 +448,7 @@ func (s *UsageStore) PutCursor(ctx context.Context, nodeID uuid.UUID, sample use
 	return err
 }
 
-func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor, period string, start value.Timestamp, rx, tx int64) error {
+func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor, period string, start time.Time, rx, tx int64) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO observed_user_usage(node_id,username,period,period_start,rx_bytes,tx_bytes,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,username,period,period_start) DO UPDATE SET rx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.rx_bytes::numeric+EXCLUDED.rx_bytes::numeric)::bigint,tx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.tx_bytes::numeric+EXCLUDED.tx_bytes::numeric)::bigint,observed_at=GREATEST(observed_user_usage.observed_at,EXCLUDED.observed_at)`, nodeID, sample.Username, period, start, rx, tx, sample.ObservedAt)
 	return err
 }

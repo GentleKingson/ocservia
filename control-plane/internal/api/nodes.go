@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
@@ -17,7 +17,7 @@ type NodeReader interface {
 	GetNode(context.Context, uuid.UUID) (telemetry.Node, error)
 	ListSessions(context.Context, uuid.UUID, string, int) ([]telemetrystore.ReadSession, bool, error)
 	ListIPBans(context.Context, uuid.UUID, int) ([]telemetry.IPBan, error)
-	HistoryFrom(context.Context, uuid.UUID, string, string, value.Timestamp) ([]telemetry.HistoryPoint, error)
+	History(context.Context, uuid.UUID, string, string, time.Time) ([]telemetry.HistoryPoint, error)
 }
 
 var _ NodeReader = (*telemetry.Service)(nil)
@@ -114,16 +114,16 @@ func (s *Server) listNodeTelemetry(w http.ResponseWriter, r *http.Request) {
 	if resolution == "" {
 		resolution = "5m"
 	}
-	since := value.Timestamp{}
+	var since time.Time
 	if text := r.URL.Query().Get("since"); text != "" {
 		var err error
-		since, err = value.ParseTimestamp(text)
+		since, err = time.Parse(time.RFC3339Nano, text)
 		if err != nil {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", "since must be an RFC 3339 timestamp, signed six-digit extended-year timestamp, infinity or -infinity")
+			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-query", "Invalid query", "since must be an RFC 3339 timestamp")
 			return
 		}
 	}
-	items, err := s.nodes.HistoryFrom(r.Context(), id, metric, resolution, since)
+	items, err := s.nodes.History(r.Context(), id, metric, resolution, since)
 	if err != nil {
 		switch {
 		case errors.Is(err, telemetry.ErrInvalidMetric):

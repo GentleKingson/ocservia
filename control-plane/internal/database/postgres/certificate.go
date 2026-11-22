@@ -6,7 +6,6 @@ import (
 
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -83,7 +82,7 @@ func (s certificateStore) LockReceipt(ctx context.Context, id uuid.UUID) (v cert
 	return
 }
 
-func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key string, at value.Timestamp) (active bool, err error) {
+func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key string, at time.Time) (active bool, err error) {
 	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>$3))`, node, key, at).Scan(&active)
 	return
 }
@@ -157,7 +156,7 @@ func (s certificateStore) InsertSecretReference(ctx context.Context, v certifica
 	return err
 }
 
-func (s certificateStore) RotateSecretReference(ctx context.Context, id uuid.UUID, version string, at value.Timestamp) (certificatestore.SecretReference, error) {
+func (s certificateStore) RotateSecretReference(ctx context.Context, id uuid.UUID, version string, at time.Time) (certificatestore.SecretReference, error) {
 	return scanSecretReference(s.QueryRow(ctx, `UPDATE secret_provider_refs SET version=$2,state='active',rotated_at=$3,updated_at=$3 WHERE id=$1 RETURNING `+secretReferenceColumns, id, version, at))
 }
 

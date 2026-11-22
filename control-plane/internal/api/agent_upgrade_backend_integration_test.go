@@ -15,7 +15,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
@@ -30,7 +29,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	b, owner := authenticationBackendFixtureWithIsolation(t, true)
 	f := newApplyHTTPFixtureWithBackend(t, b, owner)
 	node := uuid.MustParse("019fde50-2222-7222-8222-222222222222")
-	at, _ := value.FromTime(time.Now().UTC())
+	at := time.Now().UTC()
 	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'upgrade','active',1,$3,$4)`, node, f.workspace, at, at)
 	key := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
 	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, []byte(key), at)

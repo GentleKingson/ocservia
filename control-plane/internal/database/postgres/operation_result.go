@@ -3,9 +3,9 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
@@ -50,22 +50,22 @@ func (s commandResultStore) Workspace(ctx context.Context, node uuid.UUID) (id u
 	return
 }
 
-func (s commandResultStore) Alert(ctx context.Context, id, workspace uuid.UUID, severity, kind string, at value.Timestamp) error {
+func (s commandResultStore) Alert(ctx context.Context, id, workspace uuid.UUID, severity, kind string, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,created_at)VALUES($1,$2,$3,$4,$5)`, id, workspace, severity, kind, at)
 	return err
 }
 
-func (s commandResultStore) UpdateCommand(ctx context.Context, id uuid.UUID, state string, at value.Timestamp) (bool, error) {
+func (s commandResultStore) UpdateCommand(ctx context.Context, id uuid.UUID, state string, at time.Time) (bool, error) {
 	n, err := s.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, id, state, at)
 	return n != 0, err
 }
 
-func (s commandResultStore) UpdateOperation(ctx context.Context, operation, command uuid.UUID, state string, terminal bool, at value.Timestamp) (v resultstore.ResultOperation, err error) {
+func (s commandResultStore) UpdateOperation(ctx context.Context, operation, command uuid.UUID, state string, terminal bool, at time.Time) (v resultstore.ResultOperation, err error) {
 	err = s.QueryRow(ctx, `UPDATE operations SET state=$3,version=version+1,updated_at=GREATEST(updated_at,$4),completed_at=CASE WHEN $5::boolean THEN GREATEST(COALESCE(completed_at,$4),$4) ELSE NULL END WHERE id=$1 AND command_id=$2 AND state IN ('queued','dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, operation, command, state, at, terminal).Scan(&v.ID, &v.WorkspaceID, &v.RequestID, &v.TraceID)
 	return
 }
 
-func (s commandResultStore) CompleteOutbox(ctx context.Context, command uuid.UUID, at value.Timestamp) error {
+func (s commandResultStore) CompleteOutbox(ctx context.Context, command uuid.UUID, at time.Time) error {
 	_, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, command, at)
 	return err
 }
@@ -120,17 +120,17 @@ func (s commandResultStore) ArtifactOutcome(ctx context.Context, v resultstore.A
 	return err
 }
 
-func (s commandResultStore) UpgradeOutcome(ctx context.Context, operation uuid.UUID, state string, scheduled, at value.Timestamp) error {
+func (s commandResultStore) UpgradeOutcome(ctx context.Context, operation uuid.UUID, state string, scheduled *time.Time, at time.Time) error {
 	_, err := s.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,scheduled_at=COALESCE($3,scheduled_at),updated_at=$4 WHERE operation_id=$1`, operation, state, scheduled, at)
 	return err
 }
 
-func (s commandResultStore) AppendEvent(ctx context.Context, id, operation uuid.UUID, state string, at value.Timestamp) error {
+func (s commandResultStore) AppendEvent(ctx context.Context, id, operation uuid.UUID, state string, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,$3,$4)`, id, operation, state, at)
 	return err
 }
 
-func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.UUID, payload []byte, expires, at value.Timestamp) error {
+func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.UUID, payload []byte, expires, at time.Time) error {
 	if _, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,expires_at=$3 WHERE id=$1 AND state='unknown'`, command, payload, expires); err != nil {
 		return err
 	}

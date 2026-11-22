@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -29,7 +28,7 @@ type Credential struct {
 type Session struct {
 	Issuer, Subject string
 	BreakGlass      bool
-	ExpiresAt       value.Timestamp
+	ExpiresAt       time.Time
 }
 
 type Workspace struct {

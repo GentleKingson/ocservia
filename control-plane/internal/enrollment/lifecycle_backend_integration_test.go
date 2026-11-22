@@ -19,7 +19,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -93,18 +92,19 @@ func (f lifecycleFixture) job(t *testing.T) enrollmentstore.TrustJob {
 		return s.InsertEndpoint(context.Background(), id, v.EndpointID, at)
 	})
 	f.trust(t, func(s enrollmentstore.TrustStore) error {
-		return s.Enqueue(context.Background(), v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+		return s.Enqueue(context.Background(), v, time.Unix(0, 0).UTC())
 	})
 	return v
 }
 
 type trustSnapshot struct {
-	Revision                  uint64
-	Attempts                  int
-	Update, Required, Close   bool
-	Until, Available, Updated value.Timestamp
-	Worker                    *uuid.UUID
-	Error                     *string
+	Revision                uint64
+	Attempts                int
+	Update, Required, Close bool
+	Until                   *time.Time
+	Available, Updated      time.Time
+	Worker                  *uuid.UUID
+	Error                   *string
 }
 
 func (f lifecycleFixture) snapshot(t *testing.T, id uuid.UUID) trustSnapshot {
@@ -147,7 +147,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		}
 	}
 	t.Run("expired-unclaimed", func(t *testing.T) {
-		f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+		f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 		stale(t, v)
 	})
 	t.Run("same-worker-new-attempt", func(t *testing.T) {
@@ -164,7 +164,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		defer rollback(lock)
 		at, err := database.WallTime(ctx, lock)
 		testutil.NoError(t, err)
-		until, _ := at.Add(300 * time.Millisecond)
+		until := at.Add(300 * time.Millisecond)
 		if _, err := lock.Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, until, v.NodeID); err != nil {
 			t.Fatal(err)
 		}
@@ -192,7 +192,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		old := v
 		v.Revision++
 		f.trust(t, func(s enrollmentstore.TrustStore) error {
-			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+			return s.Enqueue(ctx, v, time.Unix(0, 0).UTC())
 		})
 		v = claim(t)
 		stale(t, old)
@@ -210,7 +210,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 			}
 			return s.Release(ctx, v, worker, 0, "close retry")
 		})
-		f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+		f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 		v = claim(t)
 		if !v.UpdateApplied || !v.CloseRequired || v.CloseApplied {
 			t.Fatal("lost retry progress", v)
@@ -316,7 +316,7 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 					// Neither uncertain RPC results nor a subsequent lost owner
 					// can manufacture the missing acknowledgement.
 					if code != codes.OK {
-						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 						transport.update = func(context.Context) error { updates++; return ownersession.ErrNotOwner }
 						transport.close = func(context.Context) error { return ownersession.ErrNotOwner }
 						if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
@@ -434,7 +434,7 @@ func TestTrustSupersededResultBackendIntegration(t *testing.T) {
 		v.EndpointID = bytes.Repeat([]byte{9}, 32)
 		v.Reason = "superseding intent"
 		f.trust(t, func(s enrollmentstore.TrustStore) error {
-			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+			return s.Enqueue(ctx, v, time.Unix(0, 0).UTC())
 		})
 		return nil
 	}}
@@ -479,7 +479,7 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 		case <-timer.C:
 		}
 		after := f.snapshot(t, v.NodeID)
-		if after.Until.Micros <= before.Until.Micros || after.Attempts != before.Attempts {
+		if after.Until == nil || before.Until == nil || !after.Until.After(*before.Until) || after.Attempts != before.Attempts {
 			return errors.New("in-flight lease was not renewed")
 		}
 		return nil
@@ -496,7 +496,7 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 	transport.update = func(ctx context.Context) error {
 		v.Revision++
 		f.trust(t, func(s enrollmentstore.TrustStore) error {
-			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+			return s.Enqueue(ctx, v, time.Unix(0, 0).UTC())
 		})
 		select {
 		case <-ctx.Done():
@@ -593,7 +593,7 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 	if recorded, err := service.RecordRevocationSynchronized(ctx, trust, v.Reason, true); err != nil || !recorded {
 		t.Fatal(recorded, err)
 	}
-	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 	settled := f.snapshot(t, v.NodeID)
 	if !settled.Update || !settled.Close {
 		t.Fatal("synchronous revocation not settled", settled)

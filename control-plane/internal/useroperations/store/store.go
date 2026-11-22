@@ -3,9 +3,9 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -13,12 +13,14 @@ type Policy struct {
 	NodeID                                uuid.UUID
 	Username, QuotaPeriod, QuotaDirection string
 	QuotaBytes, Version                   int64
-	ExpiresAt, CreatedAt, UpdatedAt       value.Timestamp
+	ExpiresAt                             *time.Time
+	CreatedAt, UpdatedAt                  time.Time
 }
 
 type PolicyState struct {
 	Policy
-	PeriodStart, ObservedAt          value.Timestamp
+	PeriodStart                      time.Time
+	ObservedAt                       *time.Time
 	ObservedRXBytes, ObservedTXBytes int64
 	NodeStatus                       string
 	DesiredEnabled                   bool
@@ -33,14 +35,14 @@ type Mutation struct {
 	Username, IdempotencyKey string
 	Hash                     []byte
 	Version                  int64
-	At                       value.Timestamp
+	At                       time.Time
 }
 
 type Candidate struct {
 	NodeID                                      uuid.UUID
 	Username, Cause                             string
 	PolicyVersion, UserVersion, EnforcedVersion int64
-	PeriodStart                                 value.Timestamp
+	PeriodStart                                 time.Time
 	Enabled                                     bool
 }
 
@@ -50,11 +52,11 @@ type Store interface {
 	LockPolicy(context.Context, uuid.UUID, string) (int64, error)
 	PutPolicy(context.Context, Policy) error
 	InsertMutation(context.Context, Mutation) error
-	Policy(context.Context, uuid.UUID, string, value.Timestamp) (PolicyState, error)
+	Policy(context.Context, uuid.UUID, string, time.Time) (PolicyState, error)
 	ActiveOperations(context.Context) (int, error)
-	ResetCandidates(context.Context, value.Timestamp, value.Timestamp, int) ([]Candidate, error)
-	EnforcementCandidates(context.Context, value.Timestamp, value.Timestamp, int) ([]Candidate, error)
-	EnsureEnforcement(context.Context, Candidate, value.Timestamp) error
+	ResetCandidates(context.Context, time.Time, time.Time, int) ([]Candidate, error)
+	EnforcementCandidates(context.Context, time.Time, time.Time, int) ([]Candidate, error)
+	EnsureEnforcement(context.Context, Candidate, time.Time) error
 	DeleteEnforcement(context.Context, Candidate, bool) error
 	CompleteEnforcement(context.Context, Candidate, uuid.UUID, int64) error
 	FindUserOperation(context.Context, uuid.UUID, string, string, string) (uuid.UUID, error)
