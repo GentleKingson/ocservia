@@ -8,7 +8,7 @@ stream {
     resolver_timeout 2s;
     map $ssl_preread_server_name $destination {
         ${OCSERV_PUBLIC_HOST} gateway:8443;
-        ${OCSERV_RELAY_PUBLIC_HOST} 127.0.0.1:9443;
+${OCSERV_RELAY_MAP_ENTRY}
         default 127.0.0.1:9444;
     }
     server {

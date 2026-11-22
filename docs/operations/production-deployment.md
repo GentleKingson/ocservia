@@ -255,8 +255,8 @@ application URL and CA certificate.
 | Install path | Manual only | Manual, or Quick (new host) |
 | Lifecycle user | Launcher with Docker access, or `--root-lifecycle` | Root: `--root-lifecycle`; `compose.sh` rejects non-root |
 | Manifest / Compose | v1 or v2 manifest; `docker compose up --wait` | v2 manifest only; Compose >= 2.24.4 |
-| DNS names | Controller name | Two distinct lowercase names: `OCSERV_PUBLIC_HOST`, `OCSERV_RELAY_PUBLIC_HOST` |
-| Controller / Relay TLS | `tls.crt` and `tls.key` in `OCSERV_SECRET_DIR`; ACME is not supported | Manual: those files in `OCSERV_SECRET_DIR` and `OCSERV_RELAY_SECRET_DIR`; or `OCSERV_TLS_MODE=acme` with `OCSERV_ACME_EMAIL` (Quick always uses ACME) |
+| DNS names | Controller name | Lowercase `OCSERV_PUBLIC_HOST` and `OCSERV_RELAY_PUBLIC_HOST` (distinct or shared) |
+| Controller / Relay TLS | `tls.crt` and `tls.key` in `OCSERV_SECRET_DIR`; ACME is not supported | Manual: `tls.crt` and `tls.key` in `OCSERV_SECRET_DIR` (and `OCSERV_RELAY_SECRET_DIR` when domains differ); or `OCSERV_TLS_MODE=acme` with `OCSERV_ACME_EMAIL` (Quick always uses ACME) |
 | Relay | Operator-run HTTPS Relay: `OCSERV_RELAY_URL_A` required | Bundled single Relay; URL derived from `OCSERV_RELAY_PUBLIC_HOST` |
 | Signer | External HTTPS endpoint in `OCSERV_CERTIFICATE_SIGNER_URL` plus `certificate-signer-token`, on a [private listener](#signer-runtime-contract) | Bundled Signer at `https://signer:9443/sign`; manual: operator-prepared Signer files; Quick: generated |
 | Published ports | TCP 443 | TCP 443 (Edge) and UDP 7842 (Relay) |
@@ -305,9 +305,10 @@ A manual installation needs:
 - `wget` or `curl`, GNU `tar`, `gzip`, `sha256sum`, and Docker Engine with the Compose v2 plugin. The installer can
   install Docker on most supported distributions, but on Ubuntu 20.04 you must
   install a compatible Docker yourself before you run the script.
-- A DNS name and HTTPS certificate for the Controller. Integrated mode needs a
-  second, distinct DNS name for its co-located Relay. With Integrated ACME
-  enabled, it can obtain both certificate pairs automatically.
+- A DNS name and HTTPS certificate for the Controller. Integrated mode accepts
+  either a separate DNS name for its co-located Relay or the same DNS name
+  shared with the Controller. With Integrated ACME enabled, it obtains the
+  required certificates automatically.
 - Local authentication configuration (`OCSERV_LOCAL_AUTH_ENABLED=true` plus secret keys).
 - In Standalone mode, an external certificate Signer endpoint and one dedicated
   HTTPS Relay. In Integrated mode, both run on the Controller host.
@@ -713,8 +714,9 @@ lets preflight inspect UID-65532-only Signer material without broadening its
 permissions or adding a privileged helper. Non-root Integrated launch is
 rejected before host bootstrap; standalone launcher behavior is unchanged.
 
-Set `OCSERV_PUBLIC_HOST` to a distinct lowercase Controller DNS name. Omit
-`OCSERV_RELAY_URL_A` and `OCSERV_CERTIFICATE_SIGNER_URL`:
+Set `OCSERV_PUBLIC_HOST` to a lowercase Controller DNS name; `OCSERV_RELAY_PUBLIC_HOST`
+may either be a separate lowercase DNS name or match `OCSERV_PUBLIC_HOST` to share
+a single domain. Omit `OCSERV_RELAY_URL_A` and `OCSERV_CERTIFICATE_SIGNER_URL`:
 the launcher derives the single Relay URL and `https://signer:9443/sign`. Conflicting
 values are rejected because only one dedicated Relay is supported. Controller's trusted proxy must remain the
 Gateway's application `/32`, not Edge or an entire subnet.
@@ -728,8 +730,10 @@ intermediate and Signer HTTPS identity). Quick creates no Gateway or Relay TLS
 identity either; ACME obtains those.
 
 The Relay secret directory is launcher-owned mode 0700 and contains nonempty
-single-link `tls.crt` and `tls.key` (manual mode only), launcher-owned mode
-0444. Its access token is the existing Controller `relay-access-token`, not a
+single-link `tls.crt` and `tls.key` in distinct-domain manual mode (launcher-owned
+mode 0444); when Controller and Relay share a domain, Relay reuses the Controller
+certificate from `OCSERV_SECRET_DIR` in manual mode or Gateway's ACME volume in
+ACME mode, so `OCSERV_RELAY_SECRET_DIR` may be empty. Its access token is the existing Controller `relay-access-token`, not a
 second Relay token. Signer secret and state directories are UID:GID
 65532:65532, mode 0700, canonical paths with protected ancestry. Signer
 requires `issuer-chain.pem`, `issuer-key.pem`, `tls-cert.pem`, `tls-key.pem`
@@ -781,9 +785,13 @@ OCSERV_ACME_EMAIL=ops@example.com
 ```
 
 Gateway (Caddy) and Relay (iroh-relay) each obtain and renew a certificate for
-their own name from Let's Encrypt (the default directory) with TLS-ALPN-01.
-HTTP-01 is never used. Edge already routes the validation connection by SNI, so
-port 443 stays the only TCP port; nothing listens on port 80. Both names must
+their own name from Let's Encrypt (the default directory) with TLS-ALPN-01 when
+using distinct domains. When Controller and Relay share a domain, Gateway
+obtains and renews the single certificate via TLS-ALPN-01, proxies `/relay`,
+`/ping`, and `/generate_204` to Relay internally, and mounts `gateway-acme`
+read-only into Relay so Relay can reload that certificate for UDP 7842 QUIC
+Address Discovery. HTTP-01 is never used. Edge already routes the validation connection by SNI, so
+port 443 stays the only TCP port; nothing listens on port 80. The configured name(s) must
 resolve to this host before installation. `tls.crt` and `tls.key` are then
 neither required in `OCSERV_SECRET_DIR` nor in `OCSERV_RELAY_SECRET_DIR`; the
 Relay secret directory itself must still exist (it may be empty) with the same
@@ -877,7 +885,7 @@ TLS, Local authentication, and the root lifecycle. To use it, pass `--quick` to
 ```bash
 bash "$bootstrap_file" --quick \
   --controller-domain vpn.example.com \
-  --relay-domain relay.example.com \
+  [--relay-domain relay.example.com] \
   --acme-email ops@example.com \
   [--version vX.Y.Z] [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--check]
 ```
@@ -888,8 +896,10 @@ that is, a stable or RC release after v1.2.0. Releases up to v1.2.0 reject
 external PostgreSQL database, or manual TLS certificates,
 use the manual workflow above.
 
-At the bootstrap launcher layer, the script validates only argument syntax: two distinct
-lowercase DNS names, a well-formed email address, and absolute paths for the
+At the bootstrap launcher layer, the script validates only argument syntax:
+lowercase DNS names (omitting `--relay-domain`, or passing the same value as
+`--controller-domain`, shares one domain between Controller and Relay), a
+well-formed email address, and absolute paths for the
 optional Root CA arguments (without reading the passphrase file or export
 directory). Passing `--quick` implies `--root-lifecycle`. Quick-specific flags
 are rejected unless `--quick` is set, and the node bootstrap launcher script rejects all
@@ -1464,19 +1474,21 @@ origin matching `OCSERV_PUBLIC_HOST`.
 
 ### Integrated host network
 
-In an Integrated deployment, one host and public IP serve two distinct DNS
-names. Both names must resolve to the host, and upstream cloud firewalls must
-allow inbound TCP 443 and UDP 7842. Routing and trust boundaries are in
+In an Integrated deployment, one host and public IP serve either two distinct
+DNS names or one shared DNS name. All configured names must resolve to the host,
+and upstream cloud firewalls must allow inbound TCP 443 and UDP 7842. Routing
+and trust boundaries are in
 [Integrated deployment](../architecture.md#integrated-deployment). No host
 ports are added for Gateway, Signer, the database, Controller HTTP, or
 observability services.
 
-Both lowercase DNS names must be distinct. Gateway accepts the configured
+Both lowercase DNS names may be distinct or identical. Gateway accepts the configured
 Controller hostname with an optional explicit `:443` port in the HTTP Host or
 HTTP/2 authority header, and accepts PROXY metadata only from Edge's dedicated
 `/32` (`OCSERV_EDGE_GATEWAY_IP`, default `172.30.241.2`). Reserve the Edge
 address outside the dynamic allocation range, and keep the subnet and range
-overrides disjoint from other networks. Relay sees Edge's internal IP, so do
+overrides disjoint from other networks. Relay sees an internal container IP
+(Edge with distinct domains, or Gateway with a shared domain), so do
 not rely on Relay for original-IP abuse controls.
 
 Never substitute raw IP URLs or disable certificate verification to work around

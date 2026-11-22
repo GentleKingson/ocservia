@@ -1,0 +1,29 @@
+# Shared-domain overlay, applied after integrated/compose.yaml (and ACME
+# overlays if enabled) when OCSERV_PUBLIC_HOST == OCSERV_RELAY_PUBLIC_HOST.
+# Gateway terminates HTTPS for the shared hostname and proxies Relay paths
+# (/relay, /ping, /generate_204) to Relay over the internal gateway-relay
+# network while Relay still serves QUIC Address Discovery on UDP 7842.
+services:
+  gateway:
+    volumes:
+      - ./integrated/relay.caddy:/etc/caddy/relay.caddy:ro
+    networks:
+      gateway-relay: {}
+
+  relay:
+    command: !override ["--dev", "--config-path", "/etc/iroh-relay/relay.toml"]
+    secrets: !override
+      - source: relay_access_token
+        target: relay_access_token
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+      - source: tls_certificate
+        target: relay_tls_certificate
+      - source: tls_private_key
+        target: relay_tls_private_key
+    networks: !override [edge-relay, gateway-relay]
+
+networks:
+  gateway-relay:
+    internal: true

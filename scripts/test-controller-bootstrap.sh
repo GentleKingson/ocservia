@@ -195,3 +195,109 @@ cmp "${fixture}/environment" "${fixture}/manual-environment"
 cp "${fixture}/quick-handoff" "${fixture}/interactive-handoff"
 run "${quick[@]}" --root-ca-export-dir /root/ocservia-root-ca
 cmp "${fixture}/handoff" "${fixture}/interactive-handoff"
+# Shared Controller and Relay domain: explicit, defaulted, interactive wizard,
+# launcher asset, and manual Integrated mode must all succeed.
+run --quick --controller-domain vpn.example.test --relay-domain vpn.example.test --acme-email ops@example.test --check
+run --quick --controller-domain vpn.example.test --acme-email ops@example.test
+grep -Fq -- '--controller-domain vpn.example.test --acme-email ops@example.test --relay-domain vpn.example.test' "${fixture}/handoff"
+(
+  cd "${fixture}/config"
+  PATH="${bin}" bash "${fixture}/assets/install-controller" --quick \
+    --controller-domain vpn.example.test --relay-domain vpn.example.test --acme-email ops@example.test --check
+  PATH="${bin}" bash "${fixture}/assets/install-controller" --quick \
+    --controller-domain vpn.example.test --acme-email ops@example.test --check
+)
+(
+  export OCSERV_DEPLOYMENT_MODE=integrated OCSERV_RELAY_PUBLIC_HOST=vpn.example.test
+  export OCSERV_RELAY_SECRET_DIR="${fixture}/secrets" OCSERV_SIGNER_SECRET_DIR="${fixture}/secrets" OCSERV_SIGNER_STATE_DIR="${fixture}/secrets"
+  run --non-interactive --root-lifecycle --check
+)
+python3 - "${bootstrap}" "${bin}" "${fixture}" <<'PTY_SHARED'
+import os, pty, select, subprocess, sys, time
+script, bindir, root = sys.argv[1:]
+master, slave = pty.openpty()
+env = dict(os.environ, PATH=bindir, OCSERV_CONTROLLER_SOURCE_ROOT=root+'/wizard-releases')
+child = subprocess.Popen(['bash', script], stdin=slave, stdout=slave, stderr=slave, cwd=root+'/config', env=env)
+os.close(slave)
+# Choose quick explicitly (install.env exists now), enter Controller domain, press Enter to share it for Relay.
+os.write(master, b'quick\nvpn.example.test\n\nops@example.test\n\n\ny\n')
+output = b''
+deadline = time.monotonic()+20
+try:
+    while time.monotonic() < deadline:
+        if select.select([master], [], [], .1)[0]:
+            try: output += os.read(master, 65536)
+            except OSError: break
+        if child.poll() is not None: break
+    assert child.wait(timeout=1) == 0, output.decode()
+finally:
+    if child.poll() is None: child.kill(); child.wait()
+    os.close(master)
+handoff = open(root+'/handoff').read()
+assert '--controller-domain vpn.example.test --relay-domain vpn.example.test' in handoff, handoff
+PTY_SHARED
+# Edge and Relay entrypoint rendering for shared and distinct domains.
+python3 - "${ROOT}" "${fixture}" <<'ENTRYPOINTS'
+from pathlib import Path
+import os, subprocess, sys
+root, fixture = Path(sys.argv[1]), Path(sys.argv[2])
+edge_dir = fixture / 'edge-test'
+edge_bin = edge_dir / 'bin'
+edge_bin.mkdir(parents=True)
+(edge_bin / 'nginx').write_text('#!/usr/bin/env bash\nexit 0\n')
+(edge_bin / 'envsubst').write_text('''#!/usr/bin/env python3
+import os, re, sys
+allowed = set(re.findall(r'\\$\\{([A-Z0-9_]+)\\}', sys.argv[1]))
+text = sys.stdin.read()
+for name in allowed:
+    text = text.replace('${' + name + '}', os.environ.get(name, ''))
+sys.stdout.write(text)
+''')
+for tool in ('nginx', 'envsubst'):
+    (edge_bin / tool).chmod(0o755)
+edge_script = (root / 'deploy/production/integrated/edge-entrypoint.sh').read_text()
+edge_script = edge_script.replace('/etc/nginx/ocservia.conf.template', str(root / 'deploy/production/integrated/nginx.conf.template'))
+edge_script = edge_script.replace('/tmp/nginx.conf', str(edge_dir / 'nginx.conf'))
+edge_copy = edge_dir / 'edge-entrypoint.sh'
+edge_copy.write_text(edge_script)
+edge_copy.chmod(0o755)
+env = dict(os.environ, PATH=f"{edge_bin}:{os.environ['PATH']}", OCSERV_PUBLIC_HOST='vpn.example.test', OCSERV_RELAY_PUBLIC_HOST='vpn.example.test')
+subprocess.run(['sh', str(edge_copy)], env=env, check=True)
+shared_conf = (edge_dir / 'nginx.conf').read_text()
+assert shared_conf.count('vpn.example.test') == 1, shared_conf
+assert '127.0.0.1:9443;' not in shared_conf, shared_conf
+env['OCSERV_RELAY_PUBLIC_HOST'] = 'relay.example.test'
+subprocess.run(['sh', str(edge_copy)], env=env, check=True)
+distinct_conf = (edge_dir / 'nginx.conf').read_text()
+assert 'vpn.example.test gateway:8443;' in distinct_conf, distinct_conf
+assert 'relay.example.test 127.0.0.1:9443;' in distinct_conf, distinct_conf
+
+relay_dir = fixture / 'relay-test'
+acme_cert_dir = relay_dir / 'caddy-acme/certificates/acme-v02.api.letsencrypt.org-directory/vpn.example.test'
+acme_cert_dir.mkdir(parents=True)
+(acme_cert_dir / 'vpn.example.test.crt').write_text('-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n')
+(acme_cert_dir / 'vpn.example.test.key').write_text('-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n')
+(relay_dir / 'token').write_text('a' * 40)
+relay_stub = relay_dir / 'iroh-relay-stub'
+relay_stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "' + str(relay_dir / 'relay-args') + '"\n')
+relay_stub.chmod(0o755)
+relay_script = (root / 'deploy/production/relay-entrypoint.sh').read_text()
+relay_script = relay_script.replace('/tmp/relay.toml', str(relay_dir / 'relay.toml'))
+relay_script = relay_script.replace('/usr/local/bin/iroh-relay', str(relay_stub))
+relay_copy = relay_dir / 'relay-entrypoint.sh'
+relay_copy.write_text(relay_script)
+relay_copy.chmod(0o755)
+relay_env = dict(
+    os.environ,
+    IROH_RELAY_ACCESS_TOKEN_FILE=str(relay_dir / 'token'),
+    OCSERV_RELAY_CONFIG_TEMPLATE=str(root / 'deploy/production/integrated/relay.shared-acme.toml'),
+    OCSERV_RELAY_PUBLIC_HOST='vpn.example.test',
+    OCSERV_RELAY_SHARED_ACME_DIR=str(relay_dir / 'caddy-acme'),
+)
+subprocess.run(['bash', str(relay_copy), '--dev', '--config-path', str(relay_dir / 'relay.toml')], env=relay_env, check=True)
+rendered = (relay_dir / 'relay.toml').read_text()
+assert 'cert_mode = "Reloading"' in rendered, rendered
+assert f'manual_cert_path = "{acme_cert_dir}/vpn.example.test.crt"' in rendered, rendered
+assert f'manual_key_path = "{acme_cert_dir}/vpn.example.test.key"' in rendered, rendered
+assert '@OCSERV_RELAY_' not in rendered, rendered
+ENTRYPOINTS

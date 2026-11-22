@@ -277,21 +277,31 @@ Signer payload limits, policy, and file paths are in [Certificates and Signer](r
 
 ### Integrated deployment
 
-Integrated mode runs the Controller stack, one Relay, and the Signer on a single host with one public IP and two DNS names. Edge, Gateway, the Controller, transportd, Relay, and Signer stay separate processes. Standalone is the default topology, and the lifecycle tools never convert between modes automatically.
+Integrated mode runs the Controller stack, one Relay, and the Signer on a single host with one public IP and either two distinct DNS names or one shared DNS name. Edge, Gateway, the Controller, transportd, Relay, and Signer stay separate processes. Standalone is the default topology, and the lifecycle tools never convert between modes automatically.
 
 ```text
+Distinct DNS names:
 public TCP443 -> Edge:8443 (SNI only, PROXY output)
   Controller name -> Gateway:8443 (PROXY then TLS) -> control-plane:8080
   Relay name      -> Edge loopback:9443 (strip PROXY) -> Relay:8443 (TLS)
 public UDP7842 -----------------------------------> Relay:7842
+
+Shared DNS name (OCSERV_PUBLIC_HOST == OCSERV_RELAY_PUBLIC_HOST):
+public TCP443 -> Edge:8443 (SNI only, PROXY output)
+  Shared name     -> Gateway:8443 (PROXY then TLS)
+                       /api/*, /healthz, /readyz -> control-plane:8080
+                       /relay, /ping, /generate_204 -> Relay:8080 (internal)
+                       /* -> static Web console
+public UDP7842 -----------------------------------> Relay:7842 (TLS for QAD)
+
 unknown/missing SNI or plaintext -> closed connection
 ```
 
 - Only Edge publishes TCP 443 and only Relay publishes UDP 7842. Edge routes on the plaintext ClientHello SNI without TLS keys, a Docker socket, or privileges, and it fails closed on missing or unknown SNI and on non-TLS traffic.
-- Gateway terminates Controller TLS and checks the Host or authority header before any API or static handler. Edge attaches PROXY metadata for Gateway only, Gateway overwrites `X-Ocservia-Client-IP`, and the Controller trusts that header only from Gateway's application address. Edge strips the PROXY header toward Relay, so Relay sees Edge's internal IP and cannot support original-IP abuse controls. Relay admission uses exact SNI and token authentication.
-- Dedicated internal networks separate Edge and Gateway, Edge and Relay, and Controller and Signer. Same-host transport still connects through the Relay's HTTPS hostname with full certificate verification, never a raw IP or disabled verification.
-- Key material stays partitioned. Gateway holds the Controller TLS keys. Relay holds the Relay TLS keys and shares the Relay token with transportd and nodes. Signer owns its issuing key, HTTPS key, and ledger. Controller and Signer share only the API token. No token or TLS key is mounted into Edge.
-- Certificates come from files (`OCSERV_TLS_MODE=manual`, the default) or from TLS-ALPN-01 through Edge's SNI routing (`OCSERV_TLS_MODE=acme`, Integrated only). The mode cannot change after installation.
+- Gateway terminates Controller TLS and checks the Host or authority header before any API, Relay, or static handler. Edge attaches PROXY metadata for Gateway only, Gateway overwrites `X-Ocservia-Client-IP`, and the Controller trusts that header only from Gateway's application address. With distinct names, Edge strips the PROXY header toward Relay; with a shared name, Gateway proxies `/relay`, `/ping`, and `/generate_204` to Relay over the internal `gateway-relay` network. In both layouts Relay sees an internal container IP and cannot support original-IP abuse controls; Relay admission uses exact SNI (and Host in shared-domain mode) plus token authentication.
+- Dedicated internal networks separate Edge and Gateway, Gateway and Relay (shared-domain mode), and Controller and Signer. Same-host transport still connects through the Relay's HTTPS hostname with full certificate verification, never a raw IP or disabled verification.
+- Key material stays partitioned where domains are distinct: Gateway holds the Controller TLS keys, Relay holds the Relay TLS keys and shares the Relay token with transportd and nodes, and Signer owns its issuing key, HTTPS key, and ledger. When Controller and Relay share a single domain, Gateway and Relay share the single TLS certificate for that hostname (via the manual TLS secrets or read-only access to `gateway-acme` for UDP 7842 QUIC Address Discovery). Controller and Signer share only the API token. No token or TLS key is mounted into Edge.
+- Certificates come from files (`OCSERV_TLS_MODE=manual`, the default) or from TLS-ALPN-01 through Edge's SNI routing (`OCSERV_TLS_MODE=acme`, Integrated only). With a shared domain under ACME, Gateway obtains and renews the certificate via TLS-ALPN-01 and Relay reloads it for UDP 7842. The mode cannot change after installation.
 - The mode, backend, topology, and ACME setting are bound in `deployment-profile.json`, and a conflicting change aborts preflight before services stop. Lifecycle scripts never reverse schema or state after a partial activation, reset node or Signer identity, or lower a recorded checkpoint.
 
 Configuration and procedures are in [Integrated configuration](operations/production-deployment.md#integrated-configuration), and recovery is in [incident recovery](operations/incident-recovery.md). The contract does not establish runtime acceptance on its own ([Business validation](development/release-checks.md#business-validation)).

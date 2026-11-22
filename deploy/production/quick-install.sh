@@ -11,7 +11,7 @@
 # record of a Quick installation; a different deployment is refused.
 #
 # Usage (normally through controller-bootstrap.sh --quick):
-#   quick-install.sh --controller-domain NAME --relay-domain NAME
+#   quick-install.sh --controller-domain NAME [--relay-domain NAME]
 #     --acme-email ADDRESS [--root-ca-passphrase-file PATH]
 #     [--root-ca-export-dir PATH] [--release-file PATH]
 # --release-file activates a local release manifest with controller.sh instead
@@ -56,8 +56,9 @@ while (($#)); do
   esac
   shift 2
 done
-[[ -n "${controller_domain}" && -n "${relay_domain}" && -n "${acme_email}" ]] ||
-  fail "--controller-domain, --relay-domain and --acme-email are required"
+[[ -n "${controller_domain}" && -n "${acme_email}" ]] ||
+  fail "--controller-domain and --acme-email are required"
+[[ -n "${relay_domain}" ]] || relay_domain="${controller_domain}"
 [[ -z "${release_file}" || ("${release_file}" == /* && -f "${release_file}") ]] ||
   fail "--release-file must be an absolute path to a release manifest"
 

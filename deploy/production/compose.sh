@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES
 export COMPOSE_DISABLE_ENV_FILE=1
 deployment_mode="${OCSERV_DEPLOYMENT_MODE:-standalone}"
+shared_domain=false
 case "${deployment_mode}" in
   standalone) ;;
   integrated)
@@ -22,7 +23,7 @@ case "${deployment_mode}" in
     fi
     for hostname in "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_RELAY_PUBLIC_HOST:-}"; do
       if [[ ${#hostname} -gt 253 || ! "${hostname}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; then
-        echo "Integrated requires two lowercase DNS names" >&2
+        echo "Integrated requires valid lowercase DNS names" >&2
         exit 2
       fi
       IFS=. read -ra labels <<<"${hostname}"
@@ -30,8 +31,10 @@ case "${deployment_mode}" in
         (( ${#label} <= 63 )) || exit 2
       done
     done
-    if [[ "${OCSERV_PUBLIC_HOST}" == "${OCSERV_RELAY_PUBLIC_HOST}" \
-      || "${OCSERV_RELAY_URL_A:-https://${OCSERV_RELAY_PUBLIC_HOST}}" != "https://${OCSERV_RELAY_PUBLIC_HOST}" \
+    if [[ "${OCSERV_PUBLIC_HOST}" == "${OCSERV_RELAY_PUBLIC_HOST}" ]]; then
+      shared_domain=true
+    fi
+    if [[ "${OCSERV_RELAY_URL_A:-https://${OCSERV_RELAY_PUBLIC_HOST}}" != "https://${OCSERV_RELAY_PUBLIC_HOST}" \
       || "${OCSERV_CERTIFICATE_SIGNER_URL:-https://signer:9443/sign}" != https://signer:9443/sign \
       || "${OCSERV_PUBLIC_ORIGIN:-https://${OCSERV_PUBLIC_HOST}}" != "https://${OCSERV_PUBLIC_HOST}" \
       || "${OCSERV_AUTH_TRUSTED_PROXY_CIDRS-${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}/32}" != "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}/32" ]]; then
@@ -203,7 +206,7 @@ if [[ "${deployment_mode}" == integrated ]]; then
     done
   done
   relay_tls=(tls.crt tls.key)
-  [[ "${tls_mode}" == manual ]] || relay_tls=()
+  [[ "${tls_mode}" == manual && "${shared_domain}" == false ]] || relay_tls=()
   for secret in "${relay_tls[@]}"; do
     path="${OCSERV_RELAY_SECRET_DIR}/${secret}"
     [[ -s "${path}" && -f "${path}" && ! -L "${path}" \
@@ -289,13 +292,19 @@ if [[ "${deployment_mode}" == integrated ]]; then
   if [[ "${acme_ca}" == true ]]; then
     compose+=(-f "${ROOT}/deploy/production/integrated/compose.acme-ca.yaml")
   fi
+  if [[ "${shared_domain}" == true ]]; then
+    compose+=(-f "${ROOT}/deploy/production/integrated/compose.shared-domain.yaml")
+    if [[ "${tls_mode}" == acme ]]; then
+      compose+=(-f "${ROOT}/deploy/production/integrated/compose.shared-domain.acme.yaml")
+    fi
+  fi
 fi
 if [[ "${otel_enabled}" == true || "${teardown}" == true ]]; then
   compose+=(--profile observability)
 fi
 if [[ "${deployment_mode}" == integrated ]]; then
   # Check the merged model, not individual overlays or Compose list-merge assumptions.
-  "${compose[@]}" config --format json | jq -e --arg tls_mode "${tls_mode}" '
+  "${compose[@]}" config --format json | jq -e --arg tls_mode "${tls_mode}" --arg shared_domain "${shared_domain}" '
     ([.services | to_entries[] | .key as $service | .value.ports[]? |
       [$service, .target, (.published | tostring), .protocol]] | sort) ==
       [["edge", 8443, "443", "tcp"], ["relay", 7842, "7842", "udp"]] and
@@ -303,6 +312,7 @@ if [[ "${deployment_mode}" == integrated ]]; then
     (.networks.signer.internal == true) and
     (.services.signer.networks | keys == ["signer"]) and
     (.services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca") and
+    ($shared_domain == "false" or (.networks["gateway-relay"].internal == true)) and
     ($tls_mode == "manual" or ([.services.gateway, .services.relay | .secrets[]?.source |
       select(test("tls_"))] == []))
   ' >/dev/null || { echo "Integrated rendered deployment contract rejected" >&2; exit 2; }
