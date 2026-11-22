@@ -106,7 +106,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	defer closeWorkerTransport()
 	telemetryService := telemetry.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
-	userStateService := userstate.NewWithSignerBackend(backend, commandSigner)
+	userStateService := userstate.NewWithOperationsBackend(backend, commandSigner, operationService)
 	userOperationsService := useroperations.NewWithConcurrencyBackend(backend, userStateService, cfg.UserOperationConcurrency)
 	var controlTransport *transportclient.Client
 	if cfg.ControllerEndpointID != "" {

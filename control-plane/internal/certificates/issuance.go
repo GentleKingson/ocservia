@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,11 +26,11 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	if s.signer == nil {
 		return Certificate{}, ErrSignerUnavailable
 	}
-	workspaceID, nodeID, csrDER, requestHash, err := s.prepareIssue(ctx, &request)
+	workspaceID, nodeID, csrDER, issueVersion, err := s.prepareIssue(ctx, &request)
 	if err != nil {
 		return Certificate{}, err
 	}
-	approved, err := s.signingReceipt(ctx, request.CertificateID, nodeID, csrDER, requestHash)
+	approved, err := s.signingReceipt(ctx, request.CertificateID, nodeID, csrDER, issueVersion)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -42,7 +41,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 			if storeErr != nil {
 				return storeErr
 			}
-			return store.SignerUnavailable(context.WithoutCancel(ctx), request.CertificateID, requestHash, s.now())
+			return store.SignerUnavailable(context.WithoutCancel(ctx), request.CertificateID, issueVersion, s.now())
 		})
 		return Certificate{}, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
@@ -57,14 +56,14 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		}
 		now := s.now()
 		current, err := store.LockReceipt(ctx, request.CertificateID)
-		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || !bytes.Equal(current.RequestHash, requestHash) {
+		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || current.IssueVersion != issueVersion {
 			return ErrNotReady
 		}
 		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey, now.UTC())
 		if err != nil || !active {
 			return ErrNotReady
 		}
-		changed, err := store.CompleteIssue(ctx, certificatestore.Issued{ID: request.CertificateID, Chain: result.CertificateChainPEM, RequestHash: requestHash, Serial: leaf.SerialNumber.String(), NotBefore: leaf.NotBefore.UTC(), NotAfter: leaf.NotAfter.UTC(), At: now})
+		changed, err := store.CompleteIssue(ctx, certificatestore.Issued{ID: request.CertificateID, Chain: result.CertificateChainPEM, IssueVersion: issueVersion, Serial: leaf.SerialNumber.String(), NotBefore: leaf.NotBefore.UTC(), NotAfter: leaf.NotAfter.UTC(), At: now})
 		if err != nil {
 			return err
 		}
@@ -79,7 +78,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	return s.Get(ctx, request.CertificateID)
 }
 
-func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (workspaceID, nodeID uuid.UUID, csrDER, requestHash []byte, err error) {
+func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (workspaceID, nodeID uuid.UUID, csrDER []byte, issueVersion int64, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
@@ -110,18 +109,18 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 		}
 		switch stored.State {
 		case "csr_ready":
-			requestHash = certificateIssueBinding(request.CertificateID, stored.Version, csrDER, stored.ReceiptDigest)
+			issueVersion = stored.Version
 			now := s.now()
-			if err := store.StartIssue(ctx, certificatestore.Signing{ID: request.CertificateID, ActorID: request.ActorIdentityID, RequestHash: requestHash, Version: stored.Version, At: now}); err != nil {
+			if err := store.StartIssue(ctx, certificatestore.Signing{ID: request.CertificateID, ActorID: request.ActorIdentityID, Version: issueVersion, At: now}); err != nil {
 				return err
 			}
-			return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(sha256Bytes(csrDER)))), At: now})
+			return audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorIdentityID.String(), SessionID: &request.ActorSessionID, Action: "certificate.issue", ResourceType: "certificate", ResourceID: request.CertificateID, NodeID: &nodeID, RequestID: request.RequestID, Result: "intent", Reason: request.Reason, AfterSummary: json.RawMessage(fmt.Sprintf(`{"csr_sha256":%q,"state":"signing"}`, hex.EncodeToString(csrDigest[:]))), At: now})
 		case "signing", "signer_unavailable":
 			if stored.IssueVersion == nil || *stored.IssueVersion < 1 {
 				return ErrNotReady
 			}
-			requestHash = certificateIssueBinding(request.CertificateID, *stored.IssueVersion, csrDER, stored.ReceiptDigest)
-			if stored.ActorID == nil || *stored.ActorID != request.ActorIdentityID || !bytes.Equal(stored.RequestHash, requestHash) {
+			issueVersion = *stored.IssueVersion
+			if stored.ActorID == nil || *stored.ActorID != request.ActorIdentityID {
 				return ErrNotReady
 			}
 			if stored.State == "signer_unavailable" {
@@ -133,19 +132,9 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 		}
 	})
 	if err != nil {
-		return uuid.Nil, uuid.Nil, nil, nil, err
+		return uuid.Nil, uuid.Nil, nil, 0, err
 	}
 	return
-}
-
-func certificateIssueBinding(certificateID uuid.UUID, version int64, csrDER, receiptDigest []byte) []byte {
-	value := []byte("ocservia/certificate-issue-approval/v2\x00")
-	value = append(value, certificateID[:]...)
-	value = binary.BigEndian.AppendUint64(value, uint64(version))
-	value = append(value, sha256Bytes(csrDER)...)
-	value = append(value, receiptDigest...)
-	digest := sha256.Sum256(value)
-	return digest[:]
 }
 
 func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations.Operation, bool, error) {
@@ -220,7 +209,7 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	return op, replay, nil
 }
 
-func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid.UUID, csrDER, requestHash []byte) (certificatestore.IssueReceipt, error) {
+func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid.UUID, csrDER []byte, issueVersion int64) (certificatestore.IssueReceipt, error) {
 	var approved certificatestore.IssueReceipt
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
@@ -230,8 +219,7 @@ func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid
 		approved, err = store.SigningReceipt(ctx, certificateID)
 		return err
 	})
-	csrDigest := sha256.Sum256(csrDER)
-	if err != nil || approved.NodeID != nodeID || !approved.Current || !approved.KeyActive || !bytes.Equal(approved.RequestHash, requestHash) || !bytes.Equal(approved.CSRDigest, csrDigest[:]) {
+	if err != nil || approved.NodeID != nodeID || !approved.Current || !approved.KeyActive || approved.IssueVersion != issueVersion || !bytes.Equal(approved.CSR, csrDER) {
 		return approved, ErrNotReady
 	}
 	return approved, nil

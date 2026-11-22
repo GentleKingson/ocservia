@@ -20,7 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID uuid.UUID, created time.Time) error {
+func validateConfigurationIntent(ctx context.Context, tx database.Tx, request CreateRequest, workspaceID uuid.UUID, created time.Time) error {
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
 		configStore, err := configurationstore.FromTransaction(tx)
@@ -31,20 +31,11 @@ func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStor
 		if err != nil {
 			return fmt.Errorf("read configuration revision: %w", err)
 		}
-		if state.Revision < 0 || uint64(state.Revision) != payload.PlanRevision {
+		if state.Revision < 0 || uint64(state.Revision) != payload.Candidate.Revision() {
 			return ErrStaleRevision
 		}
 		if state.OcservVersion != payload.OcservVersion {
 			return ErrStaleRevision
-		}
-		for _, required := range payload.PlanCapabilities {
-			approved, err := intentStore.HasCapability(ctx, request.NodeID, required)
-			if err != nil {
-				return fmt.Errorf("recheck configuration capability: %w", err)
-			}
-			if !approved {
-				return ErrCapabilityMissing
-			}
 		}
 	case ConfigApplyPayload:
 		configStore, err := configurationstore.FromTransaction(tx)
@@ -56,15 +47,11 @@ func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStor
 			return fmt.Errorf("lock configuration plan: %w", err)
 		}
 		var validation agentv1.ConfigPlanResult
-		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.PlanRevision || !bytes.Equal(plan.CandidateHash, payload.CandidateHash) || plan.ExpiresAt.IsZero() || !plan.ExpiresAt.After(created) || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
+		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.Candidate.Revision() || !bytes.Equal(plan.CandidateHash, payload.Candidate.Digest()) || plan.ExpiresAt.IsZero() || !plan.ExpiresAt.After(created) || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
 			return ErrStaleRevision
 		}
-		if payload.CompleteCandidate != nil {
-			if !proto.Equal(timestamppb.New(plan.ExpiresAt.UTC()), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
-				return ErrStaleRevision
-			}
-		} else if len(validation.GetMaterializedHash()) != 0 {
-			return ErrInvalidRequest
+		if !proto.Equal(timestamppb.New(plan.ExpiresAt.UTC()), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
+			return ErrStaleRevision
 		}
 		state, err := configStore.State(ctx, request.NodeID)
 		if err != nil {
@@ -117,7 +104,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return err
 		}
-		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.PlanRevision, CandidateHash: payload.CandidateHash, CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: warnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
+		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.Candidate.Revision(), CandidateHash: payload.Candidate.Digest(), CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: warnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration plan: %w", err)
 		}
 	case ConfigApplyPayload:
@@ -125,7 +112,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return err
 		}
-		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: payload.ApplyMetadata.PlanID, ExpectedRevision: payload.PlanRevision, DesiredRevision: payload.DesiredRevision, CandidateHash: payload.CandidateHash, PreviousHash: payload.ExpectedCurrentHash, CreatedAt: created}); err != nil {
+		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: payload.ApplyMetadata.PlanID, ExpectedRevision: payload.Candidate.Revision(), DesiredRevision: payload.DesiredRevision, CandidateHash: payload.Candidate.Digest(), PreviousHash: payload.ExpectedCurrentHash, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration apply: %w", err)
 		}
 		advanced, err := configStore.AdvanceDesiredRevision(ctx, request.NodeID, payload.DesiredRevision, created)
@@ -152,7 +139,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return err
 		}
-		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, RequestHash: payload.ArtifactMetadata.RequestHash, ExpiresAt: payload.ArtifactMetadata.ExpiresAt.UTC(), CreatedAt: created}); err != nil {
+		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, ExpiresAt: payload.ArtifactMetadata.ExpiresAt.UTC(), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	case AgentUpgradePayload:
@@ -220,7 +207,7 @@ func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operat
 	if err != nil {
 		return nil, err
 	}
-	if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion || !bytes.Equal(rollout.RequestHash, upgrade.RolloutRequestHash) {
+	if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion {
 		return nil, ErrRolloutState
 	}
 
@@ -233,9 +220,9 @@ func appendIntentAudit(ctx context.Context, tx database.Tx, request CreateReques
 	var auditSummary json.RawMessage
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
-		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", payload.CandidateHash), "expected_revision": payload.PlanRevision})
+		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", payload.Candidate.Digest()), "expected_revision": payload.Candidate.Revision()})
 	case ConfigApplyPayload:
-		auditSummary, _ = json.Marshal(map[string]any{"plan_id": payload.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", payload.CandidateHash), "previous_hash": fmt.Sprintf("%x", payload.ExpectedCurrentHash), "desired_revision": payload.DesiredRevision})
+		auditSummary, _ = json.Marshal(map[string]any{"plan_id": payload.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", payload.Candidate.Digest()), "previous_hash": fmt.Sprintf("%x", payload.ExpectedCurrentHash), "desired_revision": payload.DesiredRevision})
 	case AgentUpgradePayload:
 		summary := map[string]any{"from_version": fromVersion, "target_version": payload.TargetVersion, "architecture": payload.Architecture, "package_sha256": fmt.Sprintf("%x", payload.PackageSHA256)}
 		if payload.RolloutID != uuid.Nil {

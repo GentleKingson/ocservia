@@ -239,32 +239,24 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 	} else if err != nil {
 		return false, fmt.Errorf("lock telemetry node: %w", err)
 	}
-	documents := make([]json.RawMessage, 0, 3+len(batch.Security))
-	documents = append(documents, batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path)
+	events := make([]telemetrystore.SecurityEvent, 0, len(batch.Security))
 	for _, e := range batch.Security {
-		documents = append(documents, e.Detail)
-	}
-	if err := store.ValidateJSON(ctx, documents); err != nil {
-		if errors.Is(err, telemetrystore.ErrInvalidJSON) {
-			return false, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
-		}
-		return false, err
-	}
-	inserted, err := store.InsertBatch(ctx, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
-	if err != nil {
-		return false, fmt.Errorf("insert telemetry batch: %w", err)
-	}
-	if !inserted {
-		return false, nil
+		events = append(events, telemetrystore.SecurityEvent{ID: e.ID, ObservedAt: e.ObservedAt.UTC(), Severity: e.Severity, Type: e.Type, Detail: e.Detail})
 	}
 	snap := batch.Snapshot
-	updated, err := store.UpsertSnapshot(ctx, batch.NodeID, telemetrystore.Snapshot{
+	inserted, updated, err := store.InsertObservation(ctx, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, payloadBytes, telemetrystore.Snapshot{
 		ObservedAt: snap.ObservedAt, BootID: snap.BootID, AgentInstance: snap.AgentInstance,
 		AgentVersion: snap.AgentVersion, OcservVersion: snap.OcservVersion, OSRelease: snap.OSRelease, Architecture: snap.Architecture,
 		Ocserv: snap.Ocserv, System: snap.System, Path: snap.Path, Security: snap.Dropped.Security, Health: snap.Dropped.Health, Aggregate: snap.Dropped.Aggregate, Raw: snap.Dropped.Raw,
-	})
+	}, events)
+	if errors.Is(err, telemetrystore.ErrInvalidJSON) {
+		return false, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+	}
 	if err != nil {
-		return false, fmt.Errorf("upsert observed snapshot: %w", err)
+		return false, fmt.Errorf("insert telemetry observation: %w", err)
+	}
+	if !inserted {
+		return false, nil
 	}
 	if updated {
 		usage := make([]userstore.UsageSample, 0, len(batch.Sessions))
@@ -299,7 +291,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, users); err != nil {
 			return false, err
 		}
-		if err := replaceObservedGroups(ctx, tx, store, batch); err != nil {
+		if err := replaceObservedGroups(ctx, store, batch); err != nil {
 			return false, fmt.Errorf("replace observed groups: %w", err)
 		}
 
@@ -320,9 +312,6 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		if err := store.InsertUpgrade(ctx, batch.NodeID, telemetrystore.Upgrade{OperationID: report.OperationID, State: report.State, TargetVersion: report.TargetVersion, Detail: report.Detail, CompletedAt: verification.CompletedAt, Proof: verification.EncodedProof, PackageSHA256: verification.PackageSHA256}); err != nil {
 			return false, err
 		}
-	}
-	if err := insertObservedSecurity(ctx, store, batch); err != nil {
-		return false, fmt.Errorf("insert security event: %w", err)
 	}
 	samples := make([]telemetrystore.Sample, 0, len(batch.Samples))
 	for _, sample := range batch.Samples {

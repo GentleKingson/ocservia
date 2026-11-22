@@ -43,33 +43,14 @@ type Template struct {
 type RenderInput struct {
 	Template      Template `json:"template"`
 	OcservVersion string   `json:"ocserv_version"`
-	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
-type Rendered struct {
-	CompleteCandidate    *agentv1.CompleteConfigCandidate
-	Candidate            []byte
-	Redacted             string
-	Hash                 [32]byte
-	Warnings             []string
-	RequiredCapabilities []string
-}
-
-func renderComplete(input RenderInput, nodeID uuid.UUID, revision uint64) (Rendered, error) {
+func renderComplete(input RenderInput, nodeID uuid.UUID, revision uint64) (configprofile.Normalized, error) {
 	if !validLabel(input.Template.Name, 128) {
-		return Rendered{}, ErrInvalid
+		return configprofile.Normalized{}, ErrInvalid
 	}
 	if _, _, observed, err := supportedVersion(input.OcservVersion); err != nil || !observed {
-		return Rendered{}, ErrInvalid
-	}
-	hasCapability := false
-	for _, capability := range input.Capabilities {
-		if capability == configprofile.PlanCapability {
-			hasCapability = true
-		}
-	}
-	if !hasCapability {
-		return Rendered{}, ErrCapability
+		return configprofile.Normalized{}, ErrInvalid
 	}
 	candidate := &agentv1.CompleteConfigCandidate{NodeId: nodeID[:], ExpectedRevision: revision}
 	for _, item := range input.Template.Directives {
@@ -81,38 +62,36 @@ func renderComplete(input RenderInput, nodeID uuid.UUID, revision uint64) (Rende
 			// SecretRef key is public binding metadata, not a filesystem path.
 			parts := strings.Split(ref.Key, "/")
 			if item.Value != "" || ref.Provider != configprofile.Provider || len(parts) != 4 || parts[0] != nodeID.String() {
-				return Rendered{}, ErrInvalid
+				return configprofile.Normalized{}, ErrInvalid
 			}
 			cert, err := hex.DecodeString(parts[1])
 			if err != nil {
-				return Rendered{}, ErrInvalid
+				return configprofile.Normalized{}, ErrInvalid
 			}
 			spki, err := hex.DecodeString(parts[2])
 			if err != nil {
-				return Rendered{}, ErrInvalid
+				return configprofile.Normalized{}, ErrInvalid
 			}
 			var ca []byte
 			if parts[3] != "none" {
 				ca, err = hex.DecodeString(parts[3])
 				if err != nil {
-					return Rendered{}, ErrInvalid
+					return configprofile.Normalized{}, ErrInvalid
 				}
 			}
 			if hex.EncodeToString(cert) != parts[1] || hex.EncodeToString(spki) != parts[2] || parts[3] != "none" && hex.EncodeToString(ca) != parts[3] {
-				return Rendered{}, ErrInvalid
+				return configprofile.Normalized{}, ErrInvalid
 			}
 			directive.Value = &agentv1.CompleteConfigDirective_Tls{Tls: &agentv1.NodeLocalTlsReference{SecretRefId: ref.ID[:], Version: ref.Version, CertificateSha256: cert, SpkiSha256: spki, CaSha256: ca}}
 		}
 		candidate.Directives = append(candidate.Directives, directive)
 	}
 	sort.Slice(candidate.Directives, func(i, j int) bool { return candidate.Directives[i].Name < candidate.Directives[j].Name })
-	canonical, err := configprofile.Canonical(candidate)
+	normalized, err := configprofile.Normalize(candidate)
 	if err != nil {
-		return Rendered{}, ErrInvalid
+		return configprofile.Normalized{}, ErrInvalid
 	}
-	hash, _ := configprofile.Hash(candidate)
-	redacted, _ := configprofile.Redacted(candidate)
-	return Rendered{Candidate: canonical, CompleteCandidate: candidate, Redacted: redacted, Hash: hash, Warnings: []string{}, RequiredCapabilities: []string{configprofile.PlanCapability}}, nil
+	return normalized, nil
 }
 
 func supportedVersion(value string) (major, minor int, observed bool, err error) {

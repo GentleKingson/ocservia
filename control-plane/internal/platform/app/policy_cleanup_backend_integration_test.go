@@ -36,9 +36,9 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 	queries := []string{
 		`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'cleanup',$2,$3,$4)`,
 		`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'cleanup','active',$3,$4)`,
-		`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'cleanup_orphan',false,1,1,$2,$3,$4)`,
+		`INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,'cleanup_orphan',false,1,1,$2,$3)`,
 	}
-	args := [][]any{{workspace, workspace.String(), at, at}, {node, workspace, at, at}, {node, make([]byte, 32), at, at}}
+	args := [][]any{{workspace, workspace.String(), at, at}, {node, workspace, at, at}, {node, at, at}}
 	for i, query := range queries {
 		if _, err := owner.Store.Exec(ctx, query, args[i]...); err != nil {
 			t.Fatal(err)

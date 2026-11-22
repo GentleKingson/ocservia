@@ -5,11 +5,10 @@ use ocservia_agent_protocol::{
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
-    VerifiedSessionGrant,
+    VerifiedCommand, VerifiedSessionGrant,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SemanticPayloadHashVersion,
-    SessionGrantV1, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SessionGrantV1, command_envelope,
 };
 use uuid::Uuid;
 
@@ -18,13 +17,8 @@ use crate::effect_binding::{effect_binding, error};
 
 pub(crate) enum ValidatedRequest<'a> {
     Read,
-    Execute(
-        &'a CommandEnvelope,
-        CommandAuthorizationV1,
-        prost_types::Timestamp,
-        u64,
-    ),
-    Reconcile(&'a CommandEnvelope, CommandAuthorizationV1),
+    Execute(VerifiedCommand<'a>, prost_types::Timestamp, u64),
+    Reconcile(VerifiedCommand<'a>),
     ArtifactRead(ArtifactGrantClaimsV1, u64),
     ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool, u64),
 }
@@ -73,10 +67,11 @@ pub(crate) fn validate_request<'a>(
         }
         let now_seconds = i64::try_from(now.as_secs())
             .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
-        let claims = command_keys
+        let verified = command_keys
             .verify_command(command, node_id, now_seconds)
             .map_err(|failure| authorization_error(&failure))?;
-        validate_privileged_payload(command, &claims)?;
+        let claims = verified.claims();
+        validate_privileged_payload(command, claims)?;
         let delivery = CommandDeliveryMode::try_from(command.delivery_mode)
             .unwrap_or(CommandDeliveryMode::Unspecified);
         match (mode, delivery) {
@@ -116,16 +111,16 @@ pub(crate) fn validate_request<'a>(
                         "session grant does not authorize this command",
                     ));
                 }
-                ValidatedRequest::Execute(command, claims, accepted, session.session_epoch)
+                ValidatedRequest::Execute(verified, accepted, session.session_epoch)
             }
             (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
-                if effect_binding(command, &claims).is_none() {
+                if effect_binding(command, claims).is_none() {
                     return Err(error(
                         ErrorKind::InvalidRequest,
                         "command does not support privileged reconciliation",
                     ));
                 }
-                ValidatedRequest::Reconcile(command, claims)
+                ValidatedRequest::Reconcile(verified)
             }
             _ => {
                 return Err(error(
@@ -321,17 +316,6 @@ fn validate_privileged_payload(
         }
     }
     match command.payload.as_ref() {
-        Some(
-            command_envelope::Payload::CompleteConfigPlan(_)
-            | command_envelope::Payload::CompleteConfigApply(_),
-        ) => {
-            if claims.semantic_hash_version != SemanticPayloadHashVersion::V2 as u32 {
-                return Err(error(
-                    ErrorKind::PermissionDenied,
-                    "complete_config_identity_invalid",
-                ));
-            }
-        }
         Some(command_envelope::Payload::SessionDisconnect(payload)) => {
             validate_session(&payload.session_id, &payload.boot_id)?;
         }
@@ -414,7 +398,9 @@ fn validate_privileged_payload(
         Some(
             command_envelope::Payload::ServiceReload(_)
             | command_envelope::Payload::UserDisable(_)
-            | command_envelope::Payload::UserEnable(_),
+            | command_envelope::Payload::UserEnable(_)
+            | command_envelope::Payload::CompleteConfigPlan(_)
+            | command_envelope::Payload::CompleteConfigApply(_),
         ) => {}
         Some(command_envelope::Payload::AgentUpgrade(payload)) => {
             validate_upgrade_release(payload)?;

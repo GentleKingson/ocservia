@@ -18,23 +18,6 @@ func (s configurationStore) Node(ctx context.Context, id uuid.UUID) (v configura
 	return
 }
 
-func (s configurationStore) Capabilities(ctx context.Context, id uuid.UUID) ([]string, error) {
-	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true AND capability='ocserv.config.complete.plan' ORDER BY capability`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []string
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
-}
-
 func (s configurationStore) Get(ctx context.Context, id uuid.UUID) (v configurationstore.Plan, err error) {
 	err = s.QueryRow(ctx, `SELECT p.id,p.workspace_id,p.node_id,p.operation_id,p.template_name,p.expected_revision,p.candidate_hash,
 		o.state,p.candidate_redacted,p.warnings,p.expires_at,p.created_at,

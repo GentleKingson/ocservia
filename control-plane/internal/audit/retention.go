@@ -76,47 +76,34 @@ func (m *Manager) CompactDetails(ctx context.Context, days int) error {
 		}
 		updates := []pending{}
 		for rows.Next() {
-			var record ChainRecord
-			var resourceID *uuid.UUID
-			var stamp time.Time
-			var compacted *time.Time
-			var before, after []byte
-			var previous, hash, originalMAC, oldCompactMAC []byte
-			var authVersion int16
-			var keyID, oldCompactKey *string
-			if err := rows.Scan(&record.WorkspaceID, &record.EventID, &stamp, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &previous, &hash, &authVersion, &keyID, &originalMAC, &compacted, &oldCompactKey, &oldCompactMAC); err != nil {
-				rows.Close()
-				return err
-			}
-			record.At = stamp.UTC().Truncate(time.Microsecond)
-			if resourceID != nil {
-				record.ResourceID = *resourceID
-			}
-			record.BeforeSummary, record.AfterSummary = before, after
-			payload, err := encodeChainPayload(previous, record)
+			event, err := scanEventRow(rows, uuid.Nil, true)
 			if err != nil {
 				rows.Close()
 				return err
 			}
-			digest := sha256.Sum256(payload)
-			if authVersion != eventAuthVersionV1 || keyID == nil || compacted != nil || oldCompactKey != nil || len(oldCompactMAC) != 0 || !hmac.Equal(hash, digest[:]) {
+			hashValid, err := m.validEventHash(event, event.previous)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			if event.authVersion != eventAuthVersionV1 || event.compactedAt != nil || !hashValid {
 				rows.Close()
 				return errors.New("audit retention: invalid original record")
 			}
-			key, ok := m.eventKeys[*keyID]
-			if !ok || !hmac.Equal(originalMAC, signEvent(key, hash)) {
+			if !m.validEventMAC(event) {
 				rows.Close()
 				return errors.New("audit retention: original authentication failed")
 			}
+			record := event.record
 			record.Reason = ""
 			record.BeforeSummary = nil
 			record.AfterSummary = nil
-			mac, err := compactionMAC(m.current.key, record, previous, hash, originalMAC, at)
+			mac, err := compactionMAC(m.current.key, record, event.previous, event.hash, event.mac, at)
 			if err != nil {
 				rows.Close()
 				return err
 			}
-			updates = append(updates, pending{record.EventID, hash, mac})
+			updates = append(updates, pending{record.EventID, event.hash, mac})
 		}
 		err = rows.Err()
 		rows.Close()

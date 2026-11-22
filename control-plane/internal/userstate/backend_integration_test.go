@@ -53,7 +53,8 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	}
 	exec(`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'key',$2,now())`, node, bytes.Repeat([]byte{1}, 32))
 	signer := testfixture.CommandSigner(2)
-	s := NewWithSignerBackend(b, signer)
+	queue := operations.NewBackend(b, 0, signer)
+	s := NewWithOperationsBackend(b, signer, queue)
 	request := func(kind MutationKind, name string, version int64) MutationRequest {
 		r := MutationRequest{NodeID: node, ActorIdentityID: identity, ActorSessionID: session, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 		if kind == UserCreate || kind == UserPasswordRotate {
@@ -61,11 +62,22 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		}
 		return r
 	}
+	if _, _, err := s.Mutate(ctx, request(UserCreate, "attestation-required", 0)); !errors.Is(err, ErrCapabilityMissing) {
+		t.Fatalf("missing attestation returned %v", err)
+	}
+	if _, err := testfixture.InstallKeyBackend(ctx, b, node); err != nil {
+		t.Fatal(err)
+	}
 	mutate := func(r MutationRequest) operations.Operation {
 		t.Helper()
 		op, replay, err := s.Mutate(ctx, r)
 		if err != nil || replay {
 			t.Fatalf("mutate %s: %+v %v %v", r.Kind, op, replay, err)
+		}
+		select {
+		case <-queue.Wakeup():
+		default:
+			t.Fatal("committed user operation did not wake the dispatcher")
 		}
 		return op
 	}
@@ -205,6 +217,10 @@ func TestUserStateBackendIntegration(t *testing.T) {
 			return err
 		}
 		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "logical", Version: 7, Revision: 3, Members: members, At: now}); err != nil {
+			return err
+		}
+		// A group without members still consumes one managed resource slot.
+		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "empty", Version: 1, Revision: 1, Members: []string{}, At: now}); err != nil {
 			return err
 		}
 		// Identical UPDATE is a matched row, not a not-found error.

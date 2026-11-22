@@ -53,7 +53,7 @@ type Store interface {
 	ManagementWorkspace(context.Context) (uuid.UUID, error)
 	SetPassword(context.Context, uuid.UUID, string, time.Time) error
 	RevokeIdentitySessions(context.Context, uuid.UUID, time.Time) error
-	BreakGlassUsed(context.Context, []byte) (bool, error)
+	BreakGlassUsed(context.Context, []byte, []byte) (bool, error)
 	BreakGlassIdentity(context.Context, uuid.UUID, time.Time) (uuid.UUID, error)
 	RecordBreakGlass(context.Context, []byte, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) error
 	Workspaces(context.Context) ([]uuid.UUID, error)

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"cmp"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -89,8 +88,8 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 			return nil, database.ErrNotFound
 		}
 		workspaceID, _, err = s.configPlans.Resource(r.Context(), planID)
-	case cmp.Or(r.PathValue("certificate_id"), r.PathValue("certificate_action")) != "":
-		certText := cmp.Or(r.PathValue("certificate_id"), r.PathValue("certificate_action"))
+	case r.PathValue("certificate_id") != "":
+		certText := r.PathValue("certificate_id")
 		certID, parseErr := parseUUIDv7(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(certText, ":revoke"), ":issue"), ":p12"))
 		if parseErr != nil || s.certificates == nil {
 			return nil, database.ErrNotFound
@@ -102,8 +101,8 @@ func (s *Server) authorizeRoute(r *http.Request, principal auth.Principal) (cont
 			return nil, database.ErrNotFound
 		}
 		workspaceID, _, err = s.certificates.ArtifactResource(r.Context(), artifactID)
-	case cmp.Or(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action")) != "":
-		secretText := cmp.Or(r.PathValue("secret_ref_id"), r.PathValue("secret_ref_action"))
+	case r.PathValue("secret_ref_id") != "":
+		secretText := r.PathValue("secret_ref_id")
 		secretID, parseErr := parseUUIDv7(strings.TrimSuffix(secretText, ":rotate"))
 		if parseErr != nil || s.certificates == nil {
 			return nil, database.ErrNotFound

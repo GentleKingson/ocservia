@@ -178,10 +178,12 @@ func TestOpenAPIRouteConformance(t *testing.T) {
 	}
 
 	// 1. Every registered non-compat route on the server must exist in OpenAPI (or root health aliases).
-	for _, rule := range s.registeredMethods {
-		shape := normalizeRouteShape(rule.path)
+	routes := &methodRegistrar{mux: http.NewServeMux(), paths: make(map[string]map[string]http.HandlerFunc)}
+	s.registerRoutes(routes)
+	for path := range routes.paths {
+		shape := normalizeRouteShape(path)
 		if !specShapes[shape] {
-			t.Errorf("live registered route %s is undocumented in openapi/openapi.yaml", rule.path)
+			t.Errorf("live registered route %s is undocumented in openapi/openapi.yaml", path)
 		}
 	}
 
@@ -191,10 +193,6 @@ func TestOpenAPIRouteConformance(t *testing.T) {
 		t.Run(pattern, func(t *testing.T) {
 			path := materializeOpenAPIPath(pattern)
 			wantAllow := strings.Join(wantMethods, ", ")
-			gotMethods, ok := s.routeMethods(path)
-			if !ok || gotMethods.allow() != wantAllow {
-				t.Fatalf("routeMethods(%q) = (%q, %v), want (%q, true)", path, gotMethods.allow(), ok, wantAllow)
-			}
 			for _, method := range wantMethods {
 				w := httptest.NewRecorder()
 				s.http.Handler.ServeHTTP(w, baselineRequest(method, path, nil))

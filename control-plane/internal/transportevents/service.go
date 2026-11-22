@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"time"
@@ -44,13 +42,13 @@ type Event = eventstore.Event
 type SimulationJob = eventstore.SimulationJob
 
 type Service struct {
-	backend                database.Backend
-	now                    func() time.Time
-	signer                 *commandauth.Signer
-	commandRecovery        CommandRecoverer
-	recoveryAuthority      RecoveryAuthority
-	resultCommitBarrierDir string
-	localSimulator         bool
+	backend           database.Backend
+	now               func() time.Time
+	signer            *commandauth.Signer
+	commandRecovery   CommandRecoverer
+	recoveryAuthority RecoveryAuthority
+	resultCommitFault
+	localSimulator bool
 }
 
 // CommandRecoverer is the narrow business-layer hook used after transportd
@@ -102,62 +100,6 @@ func NewBackendWithCommandRecovery(backend database.Backend, signer *commandauth
 // routine heartbeats do not run simulation updates.
 func (s *Service) SetLocalSimulator(enabled bool) {
 	s.localSimulator = enabled
-}
-
-// EnableResultCommitBarrier configures the development-harness barrier used
-// to stop a validated command result inside its still-open database
-// transaction. Production configuration rejects this hook before startup.
-func (s *Service) EnableResultCommitBarrier(directory string) error {
-	info, err := os.Stat(directory)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return errors.New("result commit barrier path is not a directory")
-	}
-	s.resultCommitBarrierDir = directory
-	return nil
-}
-
-func (s *Service) waitAtResultCommitBarrier(ctx context.Context, event *transportv1.TransportEvent, observedAt time.Time) error {
-	if s.resultCommitBarrierDir == "" || event.GetType() != transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT {
-		return nil
-	}
-	armed, err := os.ReadFile(filepath.Join(s.resultCommitBarrierDir, "arm"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read result commit barrier: %w", err)
-	}
-	var result agentv1.CommandResult
-	if err := proto.Unmarshal(event.GetPayload(), &result); err != nil {
-		return nil
-	}
-	commandID, err := uuid.FromBytes(result.GetCommandId())
-	if err != nil || string(bytes.TrimSpace(armed)) != commandID.String() {
-		return nil
-	}
-	received := []byte(commandID.String() + "\n" + observedAt.UTC().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(filepath.Join(s.resultCommitBarrierDir, "received"), received, 0o600); err != nil {
-		return fmt.Errorf("signal result commit barrier: %w", err)
-	}
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			release, readErr := os.ReadFile(filepath.Join(s.resultCommitBarrierDir, "release"))
-			if readErr == nil && string(bytes.TrimSpace(release)) == commandID.String() {
-				return nil
-			}
-			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-				return fmt.Errorf("read result commit barrier release: %w", readErr)
-			}
-		}
-	}
 }
 
 func invalidCommandResult(detail string) error {

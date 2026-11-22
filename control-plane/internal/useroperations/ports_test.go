@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
 )
 
@@ -31,7 +32,14 @@ func (r *recordingUserMutator) assertLast(t *testing.T, ctx context.Context, cou
 	if len(r.requests) != count {
 		t.Fatalf("Mutate calls = %d, want %d", len(r.requests), count)
 	}
-	if r.contexts[count-1] != ctx || !reflect.DeepEqual(r.requests[count-1], want) {
+	got := r.requests[count-1]
+	if want.Traceparent == "" {
+		if tracecontext.TraceID(got.Traceparent) == "" {
+			t.Fatalf("scheduler produced an invalid traceparent %q", got.Traceparent)
+		}
+		want.Traceparent = got.Traceparent
+	}
+	if r.contexts[count-1] != ctx || !reflect.DeepEqual(got, want) {
 		t.Fatalf("Mutate context preserved = %v, request = %+v, want %+v", r.contexts[count-1] == ctx, r.requests[count-1], want)
 	}
 }

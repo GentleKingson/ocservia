@@ -31,7 +31,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',1,$4,$5)`, node.id, node.workspace, node.id.String(), stamp, stamp)
 	}
 	for _, node := range []uuid.UUID{plan.NodeID, sibling, foreign} {
-		f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at) VALUES($1,'alice',true,1,1,$2,$3,$4)`, node, make([]byte, 32), stamp, stamp)
+		f.exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at) VALUES($1,'alice',true,1,1,$2,$3)`, node, stamp, stamp)
 	}
 	nodePath := "/api/v1/nodes/" + plan.NodeID.String()
 	policyPath, planPath := nodePath+"/users/alice/policy", "/api/v1/config-plans/"+plan.ID.String()

@@ -21,34 +21,35 @@ type Certificate struct {
 }
 
 type IssueState struct {
-	WorkspaceID, NodeID                        uuid.UUID
-	CSR, RequestHash, ReceiptDigest, CSRDigest []byte
-	State, ReceiptKey, CommonName              string
-	ActorID                                    *uuid.UUID
-	Version                                    int64
-	IssueVersion                               *int64
-	ReceiptCurrent                             bool
-	DNSNames                                   []byte
-	KeyBits                                    uint32
+	WorkspaceID, NodeID           uuid.UUID
+	CSR, ReceiptDigest, CSRDigest []byte
+	State, ReceiptKey, CommonName string
+	ActorID                       *uuid.UUID
+	Version                       int64
+	IssueVersion                  *int64
+	ReceiptCurrent                bool
+	DNSNames                      []byte
+	KeyBits                       uint32
 }
 
 type IssueReceipt struct {
-	NodeID                                     uuid.UUID
-	CSR, ReceiptDigest, CSRDigest, RequestHash []byte
-	ReceiptKey                                 string
-	Current, KeyActive                         bool
+	NodeID                        uuid.UUID
+	CSR, ReceiptDigest, CSRDigest []byte
+	ReceiptKey                    string
+	Current, KeyActive            bool
+	IssueVersion                  int64
 }
 
 type Signing struct {
 	ID, ActorID uuid.UUID
-	RequestHash []byte
 	Version     int64
 	At          time.Time
 }
 
 type Issued struct {
 	ID                      uuid.UUID
-	Chain, RequestHash      []byte
+	Chain                   []byte
+	IssueVersion            int64
 	Serial                  string
 	NotBefore, NotAfter, At time.Time
 }
@@ -63,7 +64,7 @@ type ActionBinding struct {
 type Artifact struct {
 	ID, OperationID uuid.UUID
 	ExpiresAt       time.Time
-	SameIntent      bool
+	RequestHash     []byte
 }
 
 type PendingCSR struct {
@@ -77,7 +78,7 @@ type PendingCSR struct {
 type PendingArtifact struct {
 	ID, WorkspaceID, NodeID, CertificateID, OperationID, RequesterID uuid.UUID
 	CertificateVersion                                               uint64
-	TokenSHA256, RequestHash                                         []byte
+	TokenSHA256                                                      []byte
 	ExpiresAt, CreatedAt                                             time.Time
 }
 
@@ -102,15 +103,14 @@ type Store interface {
 	KeyActive(context.Context, uuid.UUID, string, time.Time) (bool, error)
 	StartIssue(context.Context, Signing) error
 	ResumeIssue(context.Context, uuid.UUID, time.Time) error
-	SignerUnavailable(context.Context, uuid.UUID, []byte, time.Time) error
+	SignerUnavailable(context.Context, uuid.UUID, int64, time.Time) error
 	CompleteIssue(context.Context, Issued) (bool, error)
 	OperationExists(context.Context, uuid.UUID, string) (bool, error)
 	BeginRevocation(context.Context, uuid.UUID, time.Time) error
 	RevocationUnknown(context.Context, uuid.UUID, time.Time) error
 	ReleaseOperation(context.Context, uuid.UUID) error
 	P12Eligible(context.Context, uuid.UUID) (ActionBinding, error)
-	ArtifactByRequest(context.Context, uuid.UUID, string, []byte) (Artifact, error)
-	ArtifactByOperation(context.Context, uuid.UUID) (Artifact, error)
+	ArtifactByRequest(context.Context, uuid.UUID, string) (Artifact, error)
 	SealingKeyExists(context.Context, uuid.UUID, uint32, string) (bool, error)
 	InsertSecretReference(context.Context, SecretReference) error
 	RotateSecretReference(context.Context, uuid.UUID, string, time.Time) (SecretReference, error)

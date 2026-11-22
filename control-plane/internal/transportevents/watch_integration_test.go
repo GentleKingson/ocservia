@@ -466,11 +466,20 @@ func TestRunWatchQuarantinesPostgresUnsafeTelemetryIntegration(t *testing.T) {
 	testutil.NoError(t, err)
 	bootID, heartbeatID, documentID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	numericID, resultID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	acceptedBatchID, acceptedID, malformedReplayID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	acceptedBatch := buildTelemetry(acceptedBatchID, 4)
+	acceptedPayload, err := proto.Marshal(acceptedBatch)
+	testutil.NoError(t, err)
+	acceptedBatch.SecurityEvents = numericBatch.SecurityEvents
+	malformedReplayPayload, err := proto.Marshal(acceptedBatch)
+	testutil.NoError(t, err)
 	events := []*transportv1.TransportEvent{
 		{EventId: bootID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: bootPayload},
 		{EventId: heartbeatID[:], NodeId: healthyNodeID[:], EndpointId: healthyEndpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_HEARTBEAT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: []byte("healthy after PostgreSQL-unsafe text")},
 		{EventId: documentID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: documentPayload},
 		{EventId: numericID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: numericPayload},
+		{EventId: acceptedID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: acceptedPayload},
+		{EventId: malformedReplayID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_TELEMETRY, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: malformedReplayPayload},
 		{EventId: resultID[:], NodeId: fixture.nodeID[:], EndpointId: fixture.endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.New(now), Traceparent: fixture.traceparent, Payload: resultPayload},
 	}
 	assertWatchResumes(t, testCtx, fixture.service, events, resultID)
@@ -478,20 +487,20 @@ func TestRunWatchQuarantinesPostgresUnsafeTelemetryIntegration(t *testing.T) {
 	var quarantineCount, invalidBusinessEvents, validBusinessEvents int
 	var invalidBatches, snapshotCount, securityCount, resultCount, alertCount int
 	if err := fixture.pool.QueryRow(testCtx, `SELECT
-		(SELECT count(*) FROM transport_event_quarantine WHERE event_id IN($1,$2,$3) AND reason_code='invalid_telemetry'),
-		(SELECT count(*) FROM transport_events WHERE event_id IN($1,$2,$3)),
-		(SELECT count(*) FROM transport_events WHERE event_id IN($4,$5)),
+		(SELECT count(*) FROM transport_event_quarantine WHERE event_id IN($1,$2,$3,$10) AND reason_code='invalid_telemetry'),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($1,$2,$3,$10)),
+		(SELECT count(*) FROM transport_events WHERE event_id IN($4,$5,$11)),
 		(SELECT count(*) FROM telemetry_ingest_batches WHERE batch_id IN($6,$7,$8)),
 		(SELECT count(*) FROM node_observed_snapshots WHERE node_id=$9),
 		(SELECT count(*) FROM telemetry_security_events WHERE node_id=$9),
 		(SELECT count(*) FROM agent_command_results WHERE event_id=$5),
-		(SELECT count(*) FROM security_alerts WHERE kind='transport_event.permanent_invalid' AND node_id=$9 AND resource_id IN($1,$2,$3))`,
-		bootID, documentID, numericID, heartbeatID, resultID, bootBatchID, documentBatchID, numericBatchID, fixture.nodeID).Scan(
+		(SELECT count(*) FROM security_alerts WHERE kind='transport_event.permanent_invalid' AND node_id=$9 AND resource_id IN($1,$2,$3,$10))`,
+		bootID, documentID, numericID, heartbeatID, resultID, bootBatchID, documentBatchID, numericBatchID, fixture.nodeID, malformedReplayID, acceptedID).Scan(
 		&quarantineCount, &invalidBusinessEvents, &validBusinessEvents, &invalidBatches,
 		&snapshotCount, &securityCount, &resultCount, &alertCount); err != nil {
 		t.Fatal(err)
 	}
-	if quarantineCount != 3 || invalidBusinessEvents != 0 || validBusinessEvents != 2 || invalidBatches != 0 || snapshotCount != 0 || securityCount != 0 || resultCount != 1 || alertCount != 3 {
+	if quarantineCount != 4 || invalidBusinessEvents != 0 || validBusinessEvents != 3 || invalidBatches != 0 || snapshotCount != 1 || securityCount != 0 || resultCount != 1 || alertCount != 4 {
 		t.Fatalf("PostgreSQL-unsafe telemetry state quarantine=%d invalid=%d valid=%d invalid_batches=%d snapshots=%d security=%d results=%d alerts=%d",
 			quarantineCount, invalidBusinessEvents, validBusinessEvents, invalidBatches, snapshotCount, securityCount, resultCount, alertCount)
 	}
