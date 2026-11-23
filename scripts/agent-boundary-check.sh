@@ -19,7 +19,7 @@ fi
 
 # Check the program argument, not later test arguments such as TestCrashChild.
 if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.go' --include='*.rs' \
-  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|exec\.CommandContext\([^,)]*,[^,)]*(sh|bash)|docker\.sock' \
+  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|exec\.CommandContext\([^,]*,[^,)]*(sh|bash)|docker\.sock' \
   "${ROOT}/control-plane" "${ROOT}/signer" "${ROOT}/rust"; then
   echo "forbidden generic shell or Docker socket surface found" >&2
   exit 1

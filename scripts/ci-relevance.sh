@@ -118,7 +118,7 @@ classify_path() {
     rust/*|scripts/rust-check.sh|scripts/agent-boundary-check.sh|\
     scripts/check-agent-storage.sh|scripts/native-ocserv-integration.sh)
       run_rust=true ;;
-    control-plane/go.mod|go.work*)
+    control-plane/go.mod|go.work*|control-plane/*_test.go)
       run_go=true; run_database=true; tools_suite guards ;;
     control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*)
       run_go=true; run_database=true ;;

@@ -99,6 +99,7 @@ classify_path control-plane/internal/foo_test.go
 assert_flag "go test" run_go true
 assert_flag "go test" run_database true
 assert_flag "go test" run_controller_cache false
+assert_eq "go test ci_suites" guards "${ci_suites[*]}"
 
 reset_state
 classify_path .github/workflows/ci.yml
