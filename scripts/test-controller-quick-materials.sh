@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Focused checks for deploy/production/quick-materials.sh. Requires root or
+# Focused checks for deploy/lib/quick-materials.sh. Requires root or
 # passwordless sudo because the generator sets runtime UIDs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GENERATOR="${ROOT}/deploy/production/quick-materials.sh"
+if [[ "${1:-}" == --generate ]]; then
+  shift
+  # shellcheck source=deploy/lib/quick-materials.sh
+  source "${ROOT}/deploy/lib/quick-materials.sh"
+  generate_materials "$@"
+  exit
+fi
 
 if ((EUID == 0)); then
   as_root() { "$@"; }
@@ -32,8 +38,8 @@ new_case() {
 }
 
 generate() {
-  as_root env PATH="${generator_path:-${PATH}}" OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
-    OCSERV_SIGNER_STATE_DIR="${case_dir}/signer-state" "${GENERATOR}" \
+  as_root env OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
+    OCSERV_SIGNER_STATE_DIR="${case_dir}/signer-state" bash "${BASH_SOURCE[0]}" --generate \
     --root-ca-export-dir "${case_dir}/export" "$@"
 }
 
@@ -43,7 +49,8 @@ expect_stat() {
   [[ "${actual}" == "${expected}" ]] || die "${path}: ${actual} != ${expected}"
 }
 
-tree_digest() { as_root find "${case_dir}" -type f -exec sha256sum {} + | sort; }
+snapshot() { as_root cp -a -- "${case_dir}" "${case_dir}-before"; }
+assert_unchanged() { as_root diff --no-dereference -qr -- "${case_dir}-before/${1:-.}" "${case_dir}/${1:-.}"; }
 
 # Delegated custody: complete materials with the modes compose.sh requires.
 new_case delegated
@@ -106,14 +113,14 @@ record="$(as_root cat "${s}/quick-install.json")"
 expect_stat "${s}/quick-install.json" 0:0:400:1
 jq -e --arg root "$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")" \
   '.phase == "materials-complete" and .root_ca_custody == "delegated" and .root_ca_sha256 == $root
-   and (.controller_endpoint_id | test("^[0-9a-f]{64}$")) and (.files | length) == 20' <<<"${record}" >/dev/null ||
+   and (.controller_endpoint_id | test("^[0-9a-f]{64}$")) and (has("files") | not)' <<<"${record}" >/dev/null ||
   die "unexpected completion record"
 if as_root grep -rqF -- "${app_password}" "${s}/quick-install.json"; then die "record contains a secret value"; fi
 
 # A completed install is reused byte for byte and never regenerated.
-before="$(tree_digest)"
+snapshot
 generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>/dev/null
-[[ "$(tree_digest)" == "${before}" ]] || die "rerun changed materials"
+assert_unchanged || die "rerun changed materials"
 as_root rm -- "${s}/database-app-url"
 if generate --non-interactive 2>/dev/null; then die "missing material after completion must fail"; fi
 [[ ! -e "${s}/database-app-url" ]] || die "material regenerated after completion"
@@ -155,52 +162,6 @@ expect_stat "${case_dir}/export/root-ca.crt" 0:0:444:1
 if as_root grep -rlq 'ENCRYPTED PRIVATE KEY' "${case_dir}"; then die "root key remains on the host"; fi
 as_root jq -e '.root_ca_custody == "removed-from-host"' "${case_dir}/secrets/quick-install.json" >/dev/null ||
   die "custody was not recorded"
-
-# Publication is a pure rename of one staged file from the root-only staging
-# directory. When it fails the prepared CA is kept and the rerun reuses it.
-new_case publish
-shim="${case_dir}/shim"
-as_root install -d -m 0700 -- "${shim}"
-real_rename="$(command -v rename.ul)"
-# sudo drops the caller's environment, so the shim carries its paths literally.
-as_root tee "${shim}/rename.ul" >/dev/null <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$*" >>'${shim}/log'
-[[ "\${3:-}" != */issuer-key.pem ]] || exit 1
-exec '${real_rename}' "\$@"
-EOF
-as_root chmod 0700 -- "${shim}/rename.ul"
-if PATH="${shim}:${PATH}" \
-  generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>/dev/null; then
-  die "a failed publication must fail the run"
-fi
-expect_stat "${case_dir}/secrets/.quick-ca" 0:0:700:2
-as_root test -f "${case_dir}/secrets/.quick-ca/ready" || die "failed publication discarded the CA recovery source"
-[[ ! -e "${case_dir}/signer/issuer-key.pem" && ! -e "${case_dir}/secrets/quick-install.json" ]] ||
-  die "failed publication must not complete the install"
-while IFS= read -r line; do
-  read -r -a argv <<<"${line}"
-  [[ ${#argv[@]} == 4 && "${argv[0]}" == -- && "${argv[1]}" == "${argv[3]}" && "${argv[1]}" != "${argv[2]}" \
-    && "${argv[1]}" == "${case_dir}/secrets/.quick-stage/"* && "${argv[2]}" == /* ]] ||
-    die "unexpected rename.ul invocation: ${line}"
-done < <(as_root cat "${shim}/log")
-fingerprint="$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")"
-generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>/dev/null
-[[ "$(as_root jq -r .root_ca_sha256 "${case_dir}/secrets/quick-install.json")" == "${fingerprint}" ]] ||
-  die "the CA identity changed after a failed publication"
-[[ "$(as_root cut -d' ' -f1 "${case_dir}/export/root-ca.sha256")" == "${fingerprint}" ]] || die "root CA was regenerated"
-expect_stat "${case_dir}/signer/issuer-key.pem" 65532:65532:400:1
-
-# Without rename.ul nothing is generated.
-new_case norename
-farm="${case_dir}/farm"
-as_root install -d -m 0700 -- "${farm}"
-for tool in bash env openssl jq sha256sum od; do as_root ln -s -- "$(command -v "${tool}")" "${farm}/${tool}"; done
-if err="$(generator_path="${farm}" generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
-  die "a missing rename.ul must fail"
-fi
-grep -Fq 'rename.ul is required' <<<"${err}" || die "missing rename.ul was not reported: ${err}"
-[[ ! -e "${case_dir}/secrets" ]] || die "materials generated without rename.ul"
 
 # Fail-closed inputs.
 new_case ledger
@@ -250,14 +211,14 @@ as_root setpriv --reuid=65532 --regid=65532 --clear-groups -- test -w "${case_di
 as_root cp -a -- "${donor}" "${case_dir}/signer/.quick-ca"
 as_root chown -R 65532:65532 -- "${case_dir}/signer/.quick-ca"
 printf 'sentinel\n' | as_root tee "${case_dir}/signer/.quick-ca/sentinel" >/dev/null
-before="$(tree_digest)"
+snapshot
 if err="$(generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
   die "an untrusted CA recovery directory must be refused"
 fi
 grep -Fq 'cannot be trusted' <<<"${err}" || die "untrusted recovery directory was not reported: ${err}"
 [[ -z "$(as_root ls -A "${case_dir}/secrets")" && ! -e "${case_dir}/export" && ! -e "${case_dir}/signer/issuer-key.pem" ]] ||
   die "material was copied or generated despite the untrusted recovery directory"
-[[ "$(tree_digest)" == "${before}" ]] || die "the untrusted recovery directory was modified"
+assert_unchanged signer || die "the untrusted recovery directory was modified"
 expect_stat "${case_dir}/signer/.quick-ca/ready" 65532:65532:600:1
 
 new_case legacy-link
@@ -266,7 +227,7 @@ as_root install -d -o 65532 -g 65532 -m 0700 -- "${case_dir}/signer"
 as_root cp -a -- "${donor}" "${case_dir}/victim"
 printf 'sentinel\n' | as_root tee "${case_dir}/victim/sentinel" >/dev/null
 as_root ln -s -- "${case_dir}/victim" "${case_dir}/signer/.quick-ca"
-before="$(tree_digest)"
+snapshot
 if err="$(generate --root-ca-passphrase-file "${case_dir}/passphrase" --non-interactive 2>&1)"; then
   die "a symlinked CA recovery path must be refused"
 fi
@@ -274,7 +235,7 @@ grep -Fq 'cannot be trusted' <<<"${err}" || die "symlinked recovery path was not
 [[ -z "$(as_root ls -A "${case_dir}/secrets")" && ! -e "${case_dir}/export" && ! -e "${case_dir}/signer/issuer-key.pem" ]] ||
   die "material was copied or generated despite the symlinked recovery path"
 as_root test -L "${case_dir}/signer/.quick-ca" || die "the legacy recovery symlink was removed"
-[[ "$(tree_digest)" == "${before}" ]] || die "the symlink target was modified"
+assert_unchanged victim || die "the symlink target was modified"
 
 # Directories root writes into need a canonical, root-controlled ancestry.
 new_case open-ancestor

@@ -20,18 +20,8 @@
 # Debian 11 remain outside the verified native runtime baseline. Any other
 # platform fails closed before any host mutation.
 #
-# Launcher contract (mirrors deploy/production/install.sh): run as the
-# operator launcher user, not as a whole-script sudo invocation. Privileged
-# steps cross a scoped sudo boundary one command at a time with explicit
-# arguments only, so the operator environment is never handed to root as a
-# whole. Secrets cross only as protected root-owned file paths, and token or
-# key material is never printed. A deliberate whole-lifecycle-as-root run is
-# available through 'install.sh --root-lifecycle'.
-#
-# OCSERV_MANAGED_NODE_OS_RELEASE and OCSERV_MANAGED_NODE_SYSROOT are fixture
-# seams for scripts/test-managed-node-install.sh (the os-release source and a
-# staging prefix for the fixed node paths); they are not operator
-# configuration.
+# Elevate once before opening bootstrap state. Agent identity and enrollment
+# commands run as ocserv-agent.
 set -euo pipefail
 umask 077
 readonly DEFAULT_VERSION=""
@@ -48,13 +38,11 @@ JOIN_ORIGIN=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 DOWNLOAD_BASE="https://github.com/GentleKingson/ocservia/releases/download"
-OS_RELEASE_FILE="${OCSERV_MANAGED_NODE_OS_RELEASE:-/etc/os-release}"
-SYSROOT="${OCSERV_MANAGED_NODE_SYSROOT:-}"
-AGENT_BINARY="${SYSROOT}/usr/libexec/ocservia/ocservia-agent"
-PRIVD_BINARY="${SYSROOT}/usr/libexec/ocservia/ocservia-privd"
-RELAY_DROPIN="${SYSROOT}/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
-REQUEST_MARKER="${SYSROOT}/etc/ocservia/agent-install-production-relays"
-AGENT_CONF_DIR="${SYSROOT}/etc/ocservia-agent"
+AGENT_BINARY="/usr/libexec/ocservia/ocservia-agent"
+PRIVD_BINARY="/usr/libexec/ocservia/ocservia-privd"
+PRIVD_ATTESTATION_KEY="/var/lib/ocservia-privd/attestation.key"
+RELAY_DROPIN="/usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf"
+AGENT_CONF_DIR="/etc/ocservia-agent"
 AGENT_ENV_FILE="${AGENT_CONF_DIR}/agent.env"
 RELAYS_ENV_FILE="${AGENT_CONF_DIR}/relays.env"
 RELAY_TOKEN_FILE="${AGENT_CONF_DIR}/relay-access-token"
@@ -63,7 +51,7 @@ COMMAND_KEY_FILE="${AGENT_CONF_DIR}/controller-command-verification-key.pem"
 ENROLLMENT_TOKEN_FILE="${AGENT_CONF_DIR}/enrollment-token"
 USER_SEAL_KEY_FILE="${AGENT_CONF_DIR}/user-password-seal-private.pem"
 P12_SEAL_KEY_FILE="${AGENT_CONF_DIR}/p12-password-seal-private.pem"
-IDENTITY_DIR="${SYSROOT}/var/lib/ocservia-agent/identity"
+IDENTITY_DIR="/var/lib/ocservia-agent/identity"
 # The pristine placeholder relay URL installed by the verified package from
 # deploy/production/systemd/relays.env.example.
 PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
@@ -76,7 +64,8 @@ PACKAGE_FAMILY=""
 PACKAGE_MANAGER=""
 PACKAGE_FILE=""
 STAGING_DIR=""
-PACKAGE_STAGING_DIR=""
+PACKAGE_SPOOL="/var/lib/ocservia-upgrade/package-spool"
+PACKAGE_DOWNLOAD=""
 
 EXPECTED_PACKAGE_DIGEST=""
 AGENT_GID=""
@@ -85,15 +74,6 @@ ENROLLED_NODE_ID=""
 USER_SEAL_DESCRIPTOR=""
 P12_SEAL_DESCRIPTOR=""
 
-# Only fixture path seams and public sealing key identifiers cross sudo.
-# Controller configuration and secret paths are obtained after elevation.
-ROOT_LIFECYCLE_ENV_NAMES=(
-  OCSERV_MANAGED_NODE_OS_RELEASE
-  OCSERV_MANAGED_NODE_SYSROOT
-  USER_PASSWORD_SEAL_KEY_ID
-  P12_PASSWORD_SEAL_KEY_ID
-)
-
 fail() {
   echo "managed-node install: $1" >&2
   exit 1
@@ -101,7 +81,7 @@ fail() {
 
 usage() {
   echo "No arguments: hidden installation-token prompt (TTY required). --non-interactive: unattended, no prompts." >&2
-  echo "Options: --join-token (hidden prompt), --join-token-file PATH, --resume-install, --version vX.Y.Z." >&2
+  echo "Options: --join-token (hidden prompt), --join-token-file PATH, --resume-install, --version vX.Y.Z, --package-sha256 HEX." >&2
   echo "usage: deploy/managed-node/install.sh [--version vX.Y.Z] [--root-lifecycle] [--join-token | --join-token-file PATH | --resume-install]" >&2
   exit 2
 }
@@ -131,6 +111,10 @@ while (($# > 0)); do
       version_seen=true
       shift 2
       ;;
+    --package-sha256)
+      [[ -z "${EXPECTED_PACKAGE_DIGEST}" && $# -ge 2 && "$2" =~ ^[a-fA-F0-9]{64}$ ]] ||
+        fail "--package-sha256 requires one 64-character hexadecimal digest"
+      EXPECTED_PACKAGE_DIGEST="${2,,}"; shift 2 ;;
     --root-lifecycle)
       shift
       ;;
@@ -151,39 +135,16 @@ RELEASE_VERSION="${VERSION#v}"
 USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
 P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
 
-# Privileged steps run one command at a time: directly when this process is
-# already the deliberate root lifecycle, otherwise through sudo with explicit
-# arguments only. The node configuration directory is mode 0750
-# root:ocserv-agent, so existence probes and metadata reads below the
-# privileged boundary must also cross it.
-priv() {
-  if ((EUID == 0)); then
-    "$@"
-  else
-    if [[ "${NON_INTERACTIVE}" == true ]]; then sudo -n "$@"; else sudo "$@"; fi
-  fi
-}
-
-# The Agent binary refuses to run as root, so the offline identity
-# preparation and the one-shot enrollment always run as ocserv-agent.
-as_agent() {
-  if ((EUID == 0)); then
-    runuser -u ocserv-agent -- "$@"
-  else
-    if [[ "${NON_INTERACTIVE}" == true ]]; then sudo -n -u ocserv-agent "$@"; else sudo -u ocserv-agent "$@"; fi
-  fi
-}
-
 path_exists() {
-  priv test -e "$1" || priv test -L "$1"
+  test -e "$1" || test -L "$1"
 }
 
 stat_string() {
-  priv stat -c '%u:%g:%a:%h' -- "$1"
+  stat -c '%u:%g:%a:%h' -- "$1"
 }
 
 forward_root_lifecycle() {
-  local variable allowed
+  local variable
   local -a forwarded_environment=()
   local -a reexec_arguments=(--root-lifecycle)
   case "${JOIN_TOKEN_FILE}" in
@@ -196,19 +157,16 @@ forward_root_lifecycle() {
   # configuration: it re-crosses the privilege boundary as the same explicit
   # command-line argument instead of an environment variable.
   reexec_arguments+=(--version "${VERSION}")
-  while IFS= read -r variable; do
-    for allowed in "${ROOT_LIFECYCLE_ENV_NAMES[@]}"; do
-      [[ "${variable}" == "${allowed}" ]] || continue
-      forwarded_environment+=("${variable}=${!variable}")
-      break
-    done
-  done < <(compgen -e)
+  [[ -z "${EXPECTED_PACKAGE_DIGEST}" ]] || reexec_arguments+=(--package-sha256 "${EXPECTED_PACKAGE_DIGEST}")
+  for variable in USER_PASSWORD_SEAL_KEY_ID P12_PASSWORD_SEAL_KEY_ID; do
+    [[ -z "${!variable}" ]] || forwarded_environment+=("${variable}=${!variable}")
+  done
   command -v sudo >/dev/null 2>&1 ||
     fail "sudo is required for --root-lifecycle when the installer is not already running as root"
   # Re-execute this exact release asset without passing the operator environment.
   local -a sudo_args=()
   [[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
-  exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+  exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]}" \
     bash "${INSTALLER_PATH}" "${reexec_arguments[@]}"
 }
 
@@ -222,10 +180,10 @@ resolve_architecture() {
 
 detect_platform() {
   local os_id os_version_id
-  [[ -r "${OS_RELEASE_FILE}" ]] ||
-    fail "cannot read the OS release file ${OS_RELEASE_FILE}; supported hosts are ${SUPPORTED_HOSTS}"
+  [[ -r "/etc/os-release" ]] ||
+    fail "cannot read the OS release file /etc/os-release; supported hosts are ${SUPPORTED_HOSTS}"
   # shellcheck disable=SC1090
-  . "${OS_RELEASE_FILE}"
+  . "/etc/os-release"
   # shellcheck disable=SC2154
   os_id="${ID:-}"
   # shellcheck disable=SC2154
@@ -252,20 +210,6 @@ detect_platform() {
   command -v "${PACKAGE_MANAGER}" >/dev/null 2>&1 ||
     fail "${PACKAGE_MANAGER} is required to install the native package"
   echo "platform: ${os_id} ${os_version_id} (${PACKAGE_FAMILY}, ${ARCH_WORD})"
-}
-
-validate_sysroot() {
-  if [[ -n "${SYSROOT}" ]]; then
-    case "${SYSROOT}" in
-      /*) ;;
-      *) fail "OCSERV_MANAGED_NODE_SYSROOT must be an absolute staging prefix" ;;
-    esac
-    case "${SYSROOT}" in
-      / | */ | *//* | */./* | */../* | */..)
-        fail "OCSERV_MANAGED_NODE_SYSROOT must be a canonical path without traversal"
-        ;;
-    esac
-  fi
 }
 
 require_commands() {
@@ -325,22 +269,6 @@ validate_bootstrap_token_source() {
     fail "BOOTSTRAP_TOKEN_SOURCE must not be accessible by group or other users (found mode ${bootstrap_mode})"
 }
 
-download_native_package() {
-  local input actual_digest
-  echo "downloading ${DOWNLOAD_BASE}/${VERSION}/${PACKAGE_FILE}"
-  curl -fsSL --proto '=https' --tlsv1.2 \
-    --output "${STAGING_DIR}/${PACKAGE_FILE}" "${DOWNLOAD_BASE}/${VERSION}/${PACKAGE_FILE}"
-  input="${STAGING_DIR}/${PACKAGE_FILE}"
-  [[ -f "${input}" && ! -L "${input}" && -s "${input}" ]] ||
-    fail "downloaded package must be a nonempty regular file"
-  EXPECTED_PACKAGE_DIGEST="$(sha256sum -- "${input}" | awk '{print $1}')"
-  priv install -o root -g root -m 0644 -- "${input}" "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}"
-  actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
-  [[ "${actual_digest}" == "${EXPECTED_PACKAGE_DIGEST}" ]] ||
-    fail "the package changed while entering root-owned staging"
-  echo "HTTPS package staged: ${PACKAGE_FILE}"
-}
-
 installed_package_version() {
   local status
   case "${PACKAGE_FAMILY}" in
@@ -350,17 +278,13 @@ installed_package_version() {
       dpkg-query -W -f='${Version}' ocservia-agent 2>/dev/null || true
       ;;
     rpm)
-      rpm -q --qf '%{VERSION}' ocservia-agent 2>/dev/null || true
+      rpm -qa --qf '%{VERSION}-%{RELEASE}\n' ocservia-agent
       ;;
   esac
 }
 
 expected_installed_version() {
-  case "${PACKAGE_FAMILY}" in
-    # nFPM encodes the supported RC suffix with ~; RPM stores Release separately.
-    deb) echo "${RELEASE_VERSION/-rc./~rc.}-1" ;;
-    rpm) echo "${RELEASE_VERSION/-rc./~rc.}" ;;
-  esac
+  echo "${RELEASE_VERSION/-rc./~rc.}-1"
 }
 
 native_package_satisfied() {
@@ -373,37 +297,39 @@ native_package_satisfied() {
   [[ "${installed_version}" == "$(expected_installed_version)" ]] ||
     fail "ocservia-agent ${installed_version} is installed but this bootstrap targets release ${RELEASE_VERSION} (native ${PACKAGE_FAMILY} version $(expected_installed_version)); the bootstrap neither upgrades nor downgrades an installed package — use the Agent release lifecycle (docs/operations/agent-lifecycle.md)"
   [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
-    fail "the installed ocservia-agent ${installed_version} lacks the production relay drop-in ${RELAY_DROPIN}; it was installed without the production request — reinstall it through the release lifecycle with /etc/ocservia/agent-install-production-relays present"
+    fail "the installed ocservia-agent ${installed_version} lacks the production relay drop-in ${RELAY_DROPIN}; restore the installed native package"
   return 0
 }
 
 install_native_package() {
-  local actual_digest
-  # Re-check the digest on the frozen root-owned copy immediately before the
-  # package manager, so the exact bytes about to be installed are still the
-  # downloaded HTTPS bytes; every read since the freeze
-  # step targets the root-owned staging the launcher cannot reach.
-  actual_digest="$(priv sha256sum -- "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" | awk '{print $1}')"
-  [[ "${actual_digest}" == "${EXPECTED_PACKAGE_DIGEST}" ]] ||
-    fail "the package digest changed after verification; refusing to invoke the package manager"
-  priv install -d -o root -g root -m 0755 -- "$(dirname -- "${REQUEST_MARKER}")"
-  priv touch -- "${REQUEST_MARKER}"
+  local package="${PACKAGE_SPOOL}/${PACKAGE_FILE}"
+  install -d -o root -g root -m 0700 -- "${PACKAGE_SPOOL}"
+  PACKAGE_DOWNLOAD="$(mktemp "${PACKAGE_SPOOL}/.download.XXXXXX")"
+  curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --output "${PACKAGE_DOWNLOAD}" "${DOWNLOAD_BASE}/${VERSION}/${PACKAGE_FILE}"
+  [[ -s "${PACKAGE_DOWNLOAD}" ]] || fail "empty native package download"
+  if [[ -n "${EXPECTED_PACKAGE_DIGEST}" ]]; then
+    printf '%s  %s\n' "${EXPECTED_PACKAGE_DIGEST}" "${PACKAGE_DOWNLOAD}" | sha256sum --check --status ||
+      fail "the downloaded native package does not match --package-sha256"
+  fi
+  # Publish the complete rollback package before installing. A crash immediately
+  # after dpkg/rpm commits must still leave the installed version available.
+  mv -fT -- "${PACKAGE_DOWNLOAD}" "${package}"
+  PACKAGE_DOWNLOAD=""
   case "${PACKAGE_FAMILY}" in
-    deb) priv dpkg -i "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" ;;
-    rpm) priv rpm -ivh "${PACKAGE_STAGING_DIR}/${PACKAGE_FILE}" ;;
+    deb) dpkg -i "${package}" ;;
+    rpm) rpm -U "${package}" ;;
   esac
-  [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" ]] ||
-    fail "the native package install did not produce the production relay drop-in ${RELAY_DROPIN}"
-  [[ -x "${AGENT_BINARY}" ]] ||
-    fail "the native package install did not install ${AGENT_BINARY}"
-  echo "native package installed: ${PACKAGE_FILE} (production relay contract requested)"
+  [[ -f "${RELAY_DROPIN}" && ! -L "${RELAY_DROPIN}" && -x "${AGENT_BINARY}" ]] ||
+    fail "native package did not install the Agent and production relay unit"
+  echo "native package installed: ${PACKAGE_FILE}"
 }
 
 ensure_sealing_key() {
   local path="$1" purpose="$2" metadata
   if path_exists "${path}"; then
     metadata="$(stat_string "${path}")"
-    if ! priv test -f "${path}" || priv test -L "${path}"; then
+    if ! test -f "${path}" || test -L "${path}"; then
       fail "the existing ${purpose} sealing key ${path} is not a regular file; refusing to overwrite or reuse it"
     fi
     [[ "${metadata}" == "0:0:600:1" ]] ||
@@ -411,31 +337,31 @@ ensure_sealing_key() {
     echo "preserved existing ${purpose} sealing key"
     return
   fi
-  priv install -o root -g root -m 0600 -- /dev/null "${path}"
-  priv openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${path}"
+  install -o root -g root -m 0600 -- /dev/null "${path}"
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${path}"
   echo "generated ${purpose} sealing key (${path})"
 }
 
 sealing_descriptor() {
-  priv openssl rsa -in "$1" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}'
+  openssl rsa -in "$1" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}'
 }
 
 write_config_atomic() {
   local source="$1" target="$2" mode="$3"
-  priv install -o root -g ocserv-agent -m "${mode}" -- "${source}" "${target}.new"
-  priv mv -f -- "${target}.new" "${target}"
+  install -o root -g ocserv-agent -m "${mode}" -- "${source}" "${target}.new"
+  mv -f -- "${target}.new" "${target}"
 }
 
 ensure_relays_env() {
   local metadata existing_a staging
   if path_exists "${RELAYS_ENV_FILE}"; then
     metadata="$(stat_string "${RELAYS_ENV_FILE}")"
-    if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
+    if ! test -f "${RELAYS_ENV_FILE}" || test -L "${RELAYS_ENV_FILE}"; then
       fail "the existing ${RELAYS_ENV_FILE} is not a regular file"
     fi
     [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
       fail "the existing ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-    existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+    existing_a="$(sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
     if [[ "${existing_a}" == "${RELAY_URL_A}" ]]; then
       echo "preserved existing relay configuration (${RELAYS_ENV_FILE})"
       return
@@ -453,7 +379,7 @@ ensure_protected_install() {
   local source="$1" target="$2" purpose="$3" metadata
   if path_exists "${target}"; then
     metadata="$(stat_string "${target}")"
-    if ! priv test -f "${target}" || priv test -L "${target}"; then
+    if ! test -f "${target}" || test -L "${target}"; then
       fail "the existing ${purpose} ${target} is not a regular file"
     fi
     [[ "${metadata}" == "0:${AGENT_GID}:640:1" || "${metadata}" == "0:${AGENT_GID}:440:1" ]] ||
@@ -461,30 +387,26 @@ ensure_protected_install() {
     echo "preserved existing ${purpose} (${target})"
     return
   fi
-  priv install -o root -g ocserv-agent -m 0640 -- "${source}" "${target}"
+  install -o root -g ocserv-agent -m 0640 -- "${source}" "${target}"
   echo "installed ${purpose} (${target})"
 }
 
 prepare_bootstrap_token() {
-  local metadata source_digest target_digest
+  local metadata
   [[ -z "${ENROLLED_NODE_ID}" ]] || return 0
   [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]] || return 0
   if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
     metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
-    if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}"; then
+    if ! test -f "${ENROLLMENT_TOKEN_FILE}" || test -L "${ENROLLMENT_TOKEN_FILE}"; then
       fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} is not a regular file"
     fi
     [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
       fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} must be root:ocserv-agent mode 0640 (found ${metadata})"
-    source_digest="$(priv sha256sum -- "${BOOTSTRAP_TOKEN_SOURCE}" | awk '{print $1}')" ||
-      fail "cannot hash the protected bootstrap token source"
-    target_digest="$(priv sha256sum -- "${ENROLLMENT_TOKEN_FILE}" | awk '{print $1}')" ||
-      fail "cannot hash the already staged bootstrap token"
-    [[ "${source_digest}" == "${target_digest}" ]] ||
+    cmp -s -- "${BOOTSTRAP_TOKEN_SOURCE}" "${ENROLLMENT_TOKEN_FILE}" ||
       fail "the protected bootstrap token source does not match the already staged token; resolve the conflicting secret deliberately"
     return
   fi
-  priv install -o root -g ocserv-agent -m 0640 -- "${BOOTSTRAP_TOKEN_SOURCE}" "${ENROLLMENT_TOKEN_FILE}"
+  install -o root -g ocserv-agent -m 0640 -- "${BOOTSTRAP_TOKEN_SOURCE}" "${ENROLLMENT_TOKEN_FILE}"
   echo "protected node bootstrap token staged for enrollment"
 }
 
@@ -497,12 +419,12 @@ detect_enrolled_node() {
   ENROLLED_NODE_ID=""
   path_exists "${AGENT_ENV_FILE}" || return 0
   metadata="$(stat_string "${AGENT_ENV_FILE}")"
-  if ! priv test -f "${AGENT_ENV_FILE}" || priv test -L "${AGENT_ENV_FILE}"; then
+  if ! test -f "${AGENT_ENV_FILE}" || test -L "${AGENT_ENV_FILE}"; then
     fail "the existing ${AGENT_ENV_FILE} is not a regular file"
   fi
   [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
     fail "the existing ${AGENT_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-  node_id="$(priv sed -n 's/^NODE_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  node_id="$(sed -n 's/^NODE_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ -n "${node_id}" ]] ||
     fail "the existing ${AGENT_ENV_FILE} has no NODE_ID line; resolve it deliberately instead of overwriting node configuration"
   if is_final_node_id "${node_id}"; then
@@ -526,7 +448,7 @@ validate_enrolled_sealing_keys() {
     if ! path_exists "${path}"; then
       fail "the enrolled node is missing its ${purpose} sealing private key ${path}; regenerating it would no longer match the enrolled Controller binding — restore the key from protected backups or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
     fi
-    if ! priv test -f "${path}" || priv test -L "${path}"; then
+    if ! test -f "${path}" || test -L "${path}"; then
       fail "the existing ${purpose} sealing key ${path} is not a regular file; refusing to reuse it"
     fi
     metadata="$(stat_string "${path}")"
@@ -537,20 +459,20 @@ validate_enrolled_sealing_keys() {
   P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")"
   [[ "${USER_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ && "${P12_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "an enrolled sealing key is not a usable RSA private key; resolve it deliberately instead of regenerating it"
-  expected="$(priv sed -n 's/^USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  expected="$(sed -n 's/^USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the enrolled ${AGENT_ENV_FILE} has no valid USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
   [[ "${USER_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
     fail "the user-password sealing key re-derives ${USER_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
-  expected="$(priv sed -n 's/^P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  expected="$(sed -n 's/^P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the enrolled ${AGENT_ENV_FILE} has no valid P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
   [[ "${P12_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
     fail "the p12-password sealing key re-derives ${P12_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
   # Replays use the identifiers bound with these keys, even when the launcher
   # no longer exports the first attempt's optional public key names.
-  USER_PASSWORD_SEAL_KEY_ID="$(priv sed -n 's/^USER_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
-  P12_PASSWORD_SEAL_KEY_ID="$(priv sed -n 's/^P12_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  USER_PASSWORD_SEAL_KEY_ID="$(sed -n 's/^USER_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  P12_PASSWORD_SEAL_KEY_ID="$(sed -n 's/^P12_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ "${USER_PASSWORD_SEAL_KEY_ID}" =~ ^[A-Za-z0-9._-]{1,128}$ &&
      "${P12_PASSWORD_SEAL_KEY_ID}" =~ ^[A-Za-z0-9._-]{1,128}$ &&
      "${USER_PASSWORD_SEAL_KEY_ID}" != "${P12_PASSWORD_SEAL_KEY_ID}" ]] ||
@@ -574,14 +496,14 @@ validate_enrolled_identity() {
   # same key the Controller bound at enrollment.
   local file output endpoint_id enrolled_endpoint_id
   for file in "${IDENTITY_DIR}/endpoint.key" "${IDENTITY_DIR}/controller.endpoint"; do
-    if ! path_exists "${file}" || ! priv test -f "${file}" || priv test -L "${file}"; then
+    if ! path_exists "${file}" || ! test -f "${file}" || test -L "${file}"; then
       fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
     fi
   done
-  enrolled_endpoint_id="$(priv sed -n 's/^AGENT_ENDPOINT_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  enrolled_endpoint_id="$(sed -n 's/^AGENT_ENDPOINT_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ "${enrolled_endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the enrolled ${AGENT_ENV_FILE} has no valid AGENT_ENDPOINT_ID enrollment binding; resolve it deliberately instead of trusting an unbound enrolled identity (docs/operations/agent-lifecycle.md#enroll-the-node)"
-  output="$(as_agent "${AGENT_BINARY}" \
+  output="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
     --prepare-enrollment)" ||
@@ -603,13 +525,13 @@ validate_enrolled_relays() {
   if ! path_exists "${RELAYS_ENV_FILE}"; then
     fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md#install-a-managed-node)"
   fi
-  if ! priv test -f "${RELAYS_ENV_FILE}" || priv test -L "${RELAYS_ENV_FILE}"; then
+  if ! test -f "${RELAYS_ENV_FILE}" || test -L "${RELAYS_ENV_FILE}"; then
     fail "the enrolled relay configuration ${RELAYS_ENV_FILE} is not a regular file"
   fi
   metadata="$(stat_string "${RELAYS_ENV_FILE}")"
   [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
     fail "the enrolled relay configuration ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-  existing_a="$(priv sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+  existing_a="$(sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
   [[ "${existing_a}" == "${RELAY_URL_A}" ]] ||
     fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>}, not the configured dedicated relay; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
 }
@@ -623,13 +545,13 @@ validate_enrolled_relay_token() {
   if ! path_exists "${RELAY_TOKEN_FILE}"; then
     fail "the enrolled node is missing its relay access token ${RELAY_TOKEN_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun"
   fi
-  if ! priv test -f "${RELAY_TOKEN_FILE}" || priv test -L "${RELAY_TOKEN_FILE}"; then
+  if ! test -f "${RELAY_TOKEN_FILE}" || test -L "${RELAY_TOKEN_FILE}"; then
     fail "the enrolled relay access token ${RELAY_TOKEN_FILE} is not a regular file"
   fi
   metadata="$(stat_string "${RELAY_TOKEN_FILE}")"
   [[ "${metadata}" == "0:${AGENT_GID}:640:1" || "${metadata}" == "0:${AGENT_GID}:440:1" ]] ||
     fail "the enrolled relay access token ${RELAY_TOKEN_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640 or 0440"
-  priv test -s "${RELAY_TOKEN_FILE}" ||
+  test -s "${RELAY_TOKEN_FILE}" ||
     fail "the enrolled relay access token ${RELAY_TOKEN_FILE} is empty"
 }
 
@@ -639,16 +561,12 @@ validate_enrolled_key_ancestry() {
   # group/world-writable, so Agent-writable ancestry cannot silently swap
   # the trust anchor the running services load.
   local ancestor uid mode
-  local -a ancestors=(/etc /etc/ocservia-agent)
-  if [[ -z "${SYSROOT}" ]]; then
-    ancestors=(/ /etc /etc/ocservia-agent)
-  fi
-  for ancestor in "${ancestors[@]}"; do
-    if ! priv test -d "${SYSROOT}${ancestor}" || priv test -L "${SYSROOT}${ancestor}"; then
+  for ancestor in / /etc /etc/ocservia-agent; do
+    if ! test -d "${ancestor}" || test -L "${ancestor}"; then
       fail "the enrolled command key ancestor ${ancestor} must be a real directory"
     fi
-    uid="$(priv stat -c '%u' -- "${SYSROOT}${ancestor}")"
-    mode="$(priv stat -c '%a' -- "${SYSROOT}${ancestor}")"
+    uid="$(stat -c '%u' -- "${ancestor}")"
+    mode="$(stat -c '%a' -- "${ancestor}")"
     if [[ "${uid}" != 0 ]] || (( (8#${mode} & 8#022) != 0 )); then
       fail "the enrolled command key ancestor ${ancestor} must stay root-owned and not group/world-writable (found uid=${uid} mode=${mode})"
     fi
@@ -666,27 +584,27 @@ validate_enrolled_command_key() {
   # or replaces it — rotating the command trust anchor is a deliberate
   # operation with old/new key overlap (docs/operations/agent-lifecycle.md).
   local configured matches metadata uid gid mode links size description
-  matches="$(priv grep -c '^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=' "${AGENT_ENV_FILE}" || true)"
+  matches="$(grep -c '^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=' "${AGENT_ENV_FILE}" || true)"
   [[ "${matches}" == 1 ]] ||
     fail "the enrolled ${AGENT_ENV_FILE} must contain exactly one CONTROLLER_COMMAND_VERIFICATION_KEY_FILE assignment"
-  configured="$(priv sed -n 's/^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  configured="$(sed -n 's/^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
   [[ "${configured}" == "${COMMAND_KEY_FILE}" ]] ||
     fail "the enrolled agent.env pins the command verification key ${configured:-<none>}, not the installed ${COMMAND_KEY_FILE}; resolve the mismatch deliberately"
   validate_enrolled_key_ancestry
   if ! path_exists "${COMMAND_KEY_FILE}"; then
     fail "the enrolled node is missing its Controller command verification key ${COMMAND_KEY_FILE}; restoring the command trust anchor is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md)"
   fi
-  if ! priv test -f "${COMMAND_KEY_FILE}" || priv test -L "${COMMAND_KEY_FILE}"; then
+  if ! test -f "${COMMAND_KEY_FILE}" || test -L "${COMMAND_KEY_FILE}"; then
     fail "the enrolled Controller command verification key ${COMMAND_KEY_FILE} is not a regular file"
   fi
   metadata="$(stat_string "${COMMAND_KEY_FILE}")"
   IFS=: read -r uid gid mode links <<<"${metadata}"
-  size="$(priv stat -c '%s' -- "${COMMAND_KEY_FILE}")"
+  size="$(stat -c '%s' -- "${COMMAND_KEY_FILE}")"
   [[ "${links}" == 1 && "${size}" -ge 1 && "${size}" -le 4096 ]] ||
     fail "the enrolled Controller command verification key must be a one-link regular file containing 1..4096 bytes"
   [[ "${uid}" == 0 && "${gid}" == "${AGENT_GID}" && ( "${mode}" == 440 || "${mode}" == 640 ) ]] ||
     fail "the enrolled Controller command verification key must be root:ocserv-agent mode 0440 or 0640 so Agent and privd can both load it (found ${metadata})"
-  description="$(priv openssl pkey -pubin -in "${COMMAND_KEY_FILE}" -noout -text 2>/dev/null)" ||
+  description="$(openssl pkey -pubin -in "${COMMAND_KEY_FILE}" -noout -text 2>/dev/null)" ||
     fail "the enrolled Controller command verification key ${COMMAND_KEY_FILE} is not a readable public key PEM"
   [[ "${description}" == "ED25519 Public-Key:"* ]] ||
     fail "the enrolled Controller command verification key must contain an Ed25519 SubjectPublicKeyInfo public key"
@@ -721,7 +639,7 @@ prepare_production_node() {
 
 prepare_identity() {
   local output
-  output="$(as_agent "${AGENT_BINARY}" \
+  output="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
     --prepare-enrollment)" ||
@@ -739,11 +657,11 @@ is_final_node_id() {
 
 cleanup_enrollment_copy() {
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then return; fi
-  if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}" \
+  if ! test -f "${ENROLLMENT_TOKEN_FILE}" || test -L "${ENROLLMENT_TOKEN_FILE}" \
     || [[ "$(stat_string "${ENROLLMENT_TOKEN_FILE}")" != "0:${AGENT_GID}:640:1" ]]; then
     fail "registered node has an unsafe enrollment token copy; inspect ${ENROLLMENT_TOKEN_FILE} deliberately (expected one-link root:ocserv-agent 0640)"
   fi
-  priv rm -f -- "${ENROLLMENT_TOKEN_FILE}"
+  rm -f -- "${ENROLLMENT_TOKEN_FILE}"
   echo "removed the known stale token copy after confirming the local enrollment binding"
 }
 
@@ -753,12 +671,12 @@ converge_enrollment() {
   # from the Relay or replaced by an installer rerun.
   if path_exists "${RELAY_CA_FILE}"; then
     validate_enrolled_key_ancestry
-    if ! priv test -f "${RELAY_CA_FILE}" || priv test -L "${RELAY_CA_FILE}" \
-      || ! priv test -s "${RELAY_CA_FILE}" \
+    if ! test -f "${RELAY_CA_FILE}" || test -L "${RELAY_CA_FILE}" \
+      || ! test -s "${RELAY_CA_FILE}" \
       || [[ "$(stat_string "${RELAY_CA_FILE}")" != 0:0:444:1 ]]; then
       fail "the Relay CA must be a nonempty one-link root:root regular file with mode 0444"
     fi
-    priv openssl x509 -in "${RELAY_CA_FILE}" -noout >/dev/null 2>&1 ||
+    openssl x509 -in "${RELAY_CA_FILE}" -noout >/dev/null 2>&1 ||
       fail "the Relay CA must contain a readable PEM certificate"
     relay_args+=(--relay-ca-file "${RELAY_CA_FILE}")
   fi
@@ -771,12 +689,12 @@ converge_enrollment() {
   path_exists "${ENROLLMENT_TOKEN_FILE}" ||
     fail "derived enrollment credential is missing; preserve identity and rerun --resume-install"
   metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
-  if ! priv test -f "${ENROLLMENT_TOKEN_FILE}" || priv test -L "${ENROLLMENT_TOKEN_FILE}"; then
+  if ! test -f "${ENROLLMENT_TOKEN_FILE}" || test -L "${ENROLLMENT_TOKEN_FILE}"; then
     fail "the enrollment token ${ENROLLMENT_TOKEN_FILE} is not a regular file"
   fi
   [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
     fail "the enrollment token ${ENROLLMENT_TOKEN_FILE} must be root:ocserv-agent mode 0640 (found ${metadata})"
-  node_id="$(as_agent "${AGENT_BINARY}" \
+  node_id="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
     --enrollment-token-file "${ENROLLMENT_TOKEN_FILE}" \
@@ -801,7 +719,7 @@ converge_enrollment() {
   write_config_atomic "${staging}" "${AGENT_ENV_FILE}" 0640
   cleanup_enrollment_copy
   if [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]]; then
-    priv rm -f -- "${BOOTSTRAP_TOKEN_SOURCE}"
+    rm -f -- "${BOOTSTRAP_TOKEN_SOURCE}"
   fi
   echo "enrollment complete; final ${AGENT_ENV_FILE} written and the one-time token file consumed"
   node_bootstrap_complete "${node_id}"
@@ -810,7 +728,6 @@ converge_enrollment() {
 # Every source enters the same root lifecycle before reading token state.
 ((EUID == 0)) || forward_root_lifecycle
 unset SUDO_USER
-validate_sysroot
 echo "release identity: ${VERSION}"
 resolve_architecture
 detect_platform
@@ -818,23 +735,20 @@ require_commands
 node_bootstrap_prepare
 validate_operator_inputs
 
-STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-managed-node.XXXXXX")"
-trap '[[ -z "${PACKAGE_STAGING_DIR:-}" ]] || priv rm -rf -- "${PACKAGE_STAGING_DIR}"; [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"' EXIT INT TERM
+STAGING_DIR="$(mktemp -d /var/tmp/ocservia-managed-node.XXXXXX)"
+trap 'rm -rf -- "${STAGING_DIR}"; if [[ -n "${PACKAGE_DOWNLOAD}" ]]; then rm -f -- "${PACKAGE_DOWNLOAD}"; fi' EXIT
+trap 'exit 1' HUP INT TERM
 if native_package_satisfied; then
   echo "native package ocservia-agent $(expected_installed_version) already installed; skipping the release download and package installation"
 else
-  # A fixed root-owned sticky parent prevents the launcher from replacing
-  # the protected staging directory through an operator-controlled TMPDIR.
-  PACKAGE_STAGING_DIR="$(priv mktemp -d /var/tmp/ocservia-managed-node-pkg.XXXXXX)"
-  download_native_package
   install_native_package
 fi
 # The verified native payload owns host validation. Run as root, before any
 # registration identity, sealing material, final configuration or token use.
 [[ -x "${PRIVD_BINARY}" ]] || fail "the native package did not install ${PRIVD_BINARY}"
-priv "${PRIVD_BINARY}" --host-preflight ||
+"${PRIVD_BINARY}" --host-preflight ||
   fail "host preflight failed before enrollment; follow the resource diagnostic, correct the host deliberately, and rerun"
-AGENT_GID="$(priv id -g ocserv-agent 2>/dev/null)" ||
+AGENT_GID="$(id -g ocserv-agent 2>/dev/null)" ||
   fail "the ocserv-agent group does not exist; the native package lifecycle must create it"
 [[ "${AGENT_GID}" =~ ^[0-9]+$ ]] ||
   fail "cannot resolve the ocserv-agent group id"

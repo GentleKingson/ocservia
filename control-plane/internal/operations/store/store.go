@@ -68,15 +68,15 @@ type RolloutClaim struct {
 }
 
 type AgentObservation struct {
-	Architecture, AgentVersion string
-	LastHeartbeatAt            *time.Time
+	Architecture, AgentVersion, OSRelease string
+	LastHeartbeatAt                       *time.Time
 }
 
 type RolloutObservation struct {
-	NodeID                             uuid.UUID
-	Status, Architecture, AgentVersion string
-	LastHeartbeatAt                    *time.Time
-	CapabilityOK, UpgradeActive        bool
+	NodeID                                        uuid.UUID
+	Status, Architecture, AgentVersion, OSRelease string
+	LastHeartbeatAt                               *time.Time
+	CapabilityOK, UpgradeActive                   bool
 }
 
 type PendingUpgrade struct {

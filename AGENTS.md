@@ -15,7 +15,7 @@
 | `web/src/` | Vue 控制台、工作区状态与手写 `api/*.ts` 适配层。 |
 | `proto/`、`openapi/openapi.yaml` | 协议唯一权威源；禁手改 `control-plane/gen/proto`、`rust/crates/contracts/src/generated`、`web/src/api/generated`。 |
 
-部署配置与脚本位于 `deploy/`、`scripts/`；跨模块改动先查[职责与调用方向](docs/architecture.md#ownership-and-task-navigation)。
+节点二进制、hook 与 systemd 单元由原生 DEB/RPM 管理。部署配置与脚本位于 `deploy/`、`scripts/`；跨模块改动先查[职责与调用方向](docs/architecture.md#ownership-and-task-navigation)。
 
 ## 改动必须保留的边界
 
@@ -23,8 +23,8 @@
 
 - **部署与存储范围**：生产仅支持单 Controller、一个 PostgreSQL 18.x 数据库、一个 Signer 和一个专用 Relay。[生产支持范围](docs/operations/production-deployment.md#support-scope)
 - **三层独立鉴权与隔离**：HTTP 入口校验会话与 `Origin`，领域服务事务内复验身份、归属与状态，节点独立验证命令签名、`SessionGrantV1` 与连接所有权 fence。保持 Go 无 Iroh、`transportd` 无数据库、`privd` 无网络/数据库/通用 Shell 表面；改一层须保留其余层校验。
-- **命令语义与加密转录**：已接受或已派发均不证明执行成功；`unknown` 先按原命令 ID `RECONCILE_ONLY` 对账，保留 Agent journal 与已签名 `privd` 回执。命令签名与语义哈希须用各版本冻结的规范化字节输入，禁用 Protobuf 序列化字节。[命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)
-- **数据库迁移与权限**：`control-plane/migrations/` 仅留 `schema.sql`（空库初始化）和 `upgrade.sql`（自 `v1.2.0` 检查点前向升级）。owner 经 `--migrate-only` 串行迁移并校验来源、内容与历史回执；Controller 运行期仅用受限角色。[数据库契约](docs/reference/stable-contracts.md#database)
+- **命令语义与加密转录**：已接受或已派发均不证明执行成功；`unknown` 先按原命令 ID `RECONCILE_ONLY` 对账，保留 Agent journal 与已签名 `privd` 回执。命令签名与语义哈希须用各版本冻结的规范化字节输入（新版转录使用 RFC 8949 确定性 CBOR），禁用 Protobuf 序列化字节。[命令与恢复](docs/reference/stable-contracts.md#commands-and-recovery)
+- **数据库迁移与权限**：v2.0.0 从空库建立 Goose 基线。owner 经 `--migrate-only` 在 PostgreSQL 会话咨询锁内按序执行 `control-plane/migrations/sql/` 的编号迁移。Controller 运行时以受限角色核对 `goose_db_version`。[数据库契约](docs/reference/stable-contracts.md#database)
 
 ## 验证与交付
 

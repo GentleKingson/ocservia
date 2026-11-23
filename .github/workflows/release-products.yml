@@ -44,16 +44,11 @@ jobs:
         with:
           profiles: native-packages
           key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
-      - name: Resolve isolated Agent target cache
-        id: agent-target
-        run: |
-          builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
-          echo "path=rust/target/agent-${{ inputs.arch }}-${builder_hash}" >>"${GITHUB_OUTPUT}"
       - name: Restore Rocky Agent compilation cache
         id: agent-target-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: ${{ steps.agent-target.outputs.path }}
+          path: rust/target/agent-${{ inputs.arch }}-*
           key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
           restore-keys: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Validate package version & source epoch
@@ -80,7 +75,7 @@ jobs:
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: ${{ steps.agent-target.outputs.path }}
+          path: rust/target/agent-${{ inputs.arch }}-*
           key: ${{ steps.agent-target-cache.outputs.cache-primary-key }}
       - name: Bind agent product identity and digests
         id: identity
@@ -117,17 +112,11 @@ jobs:
         with:
           profiles: native-packages
           key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
-      - name: Resolve isolated Agent target cache
-        id: agent-target
-        if: inputs.run_rc_lifecycle
-        run: |
-          builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
-          echo "path=rust/target/agent-${{ inputs.arch }}-${builder_hash}" >>"${GITHUB_OUTPUT}"
       - name: Restore Rocky Agent compilation cache
         if: inputs.run_rc_lifecycle
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: ${{ steps.agent-target.outputs.path }}
+          path: rust/target/agent-${{ inputs.arch }}-*
           key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
           restore-keys: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Download and verify immutable package set for smoke

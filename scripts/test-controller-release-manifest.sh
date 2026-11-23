@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GENERATOR="${ROOT}/scripts/generate-controller-release-manifest.mjs"
+GENERATOR="${ROOT}/scripts/controller_release_manifest.py"
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "${fixture}"' EXIT
 
@@ -26,13 +26,13 @@ image_args=(
 
 run_manifest() {
   local output="$1"
-  node "${GENERATOR}" --output "${output}" "${common_args[@]}" "${image_args[@]}"
+  python3 "${GENERATOR}" --output "${output}" "${common_args[@]}" "${image_args[@]}"
 }
 
 assert_rejected() {
   local label="$1"
   shift
-  if node "${GENERATOR}" --output "${fixture}/${label}.json" "$@" >/dev/null 2>&1; then
+  if python3 "${GENERATOR}" --output "${fixture}/${label}.json" "$@" >/dev/null 2>&1; then
     echo "expected manifest generation to fail: ${label}" >&2
     exit 1
   fi
@@ -59,7 +59,7 @@ integrated_args=()
 for role in edge relay signer; do
   integrated_args+=(--image "${role}=registry.test/${role}@${digest}")
 done
-node "${GENERATOR}" --output "${fixture}/manifest-v2.json" --manifest-version 2 \
+python3 "${GENERATOR}" --output "${fixture}/manifest-v2.json" --manifest-version 2 \
   "${common_args[@]}" "${image_args[@]}" "${integrated_args[@]}"
 jq -e '.manifest_version == 2 and .signer_state_version == 1 and
   (.images | keys == ["backup", "control", "edge", "gateway", "otel", "postgres", "relay", "signer", "transport"])' \
@@ -70,7 +70,7 @@ assert_rejected v1-extra-images "${common_args[@]}" "${image_args[@]}" "${integr
 assert_rejected v2-missing-images --manifest-version 2 "${common_args[@]}" "${image_args[@]}"
 assert_rejected v3 --manifest-version 3 "${common_args[@]}" "${image_args[@]}"
 arm64_args[9]=linux/arm64
-node "${GENERATOR}" --output "${fixture}/manifest-arm64.json" "${arm64_args[@]}" "${image_args[@]}"
+python3 "${GENERATOR}" --output "${fixture}/manifest-arm64.json" "${arm64_args[@]}" "${image_args[@]}"
 jq -e '.platform == "linux/arm64"' "${fixture}/manifest-arm64.json" >/dev/null
 platform_changes="$(diff -u "${fixture}/manifest-a.json" "${fixture}/manifest-arm64.json" \
   | grep -E '^[+-][^+-]' || true)"
@@ -115,7 +115,7 @@ assert_rejected release-tag "${bad_tag_args[@]}" "${image_args[@]}"
 rc_args=("${common_args[@]}")
 rc_args[1]=0.2.0-rc.1
 rc_args[3]=v0.2.0-rc.1
-node "${GENERATOR}" --output "${fixture}/rc.json" "${rc_args[@]}" "${image_args[@]}"
+python3 "${GENERATOR}" --output "${fixture}/rc.json" "${rc_args[@]}" "${image_args[@]}"
 jq -e '.release_version == "0.2.0-rc.1" and .release_tag == "v0.2.0-rc.1" and
   all(.images[]; test("@sha256:[0-9a-f]{64}$"))' "${fixture}/rc.json" >/dev/null
 for invalid in 0.2.0-rc.0 0.2.0-rc.01 0.2.0-rc1 0.2.0-beta.1 0.2.0+build 0.2.0-rc.1+build; do

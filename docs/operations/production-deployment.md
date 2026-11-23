@@ -119,27 +119,7 @@ identity and monotonic revisions, and atomic database transactions all remain
 mandatory. Removing legacy deployment auto-conversion likewise means removing
 the automatic network, configuration, and data mutations that accompanied it.
 
-Database schema-source admission is still enforced: the owner migration runner
-rejects unknown schema epochs, revisions, or checksums, schema drift, and
-non-empty databases that lack a valid migration receipt. The only supported
-prior database checkpoint is the fixed `v1.2.0` schema defined in the
-[upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint). It
-is an immutable schema baseline and does not define a minimum Controller or
-Agent runtime version. Freshly initialized databases and databases upgraded
-from the `v1.2.0` checkpoint must converge to the exact same schema while
-retaining their respective execution receipts. Empty-database initialization
-never overwrites an existing database.
-
-Release acceptance validates the current candidate across the supported
-architectures, deployment modes, and PostgreSQL 18.x database topologies through
-security, integration, and resilience suites. Beyond the single bounded `v1.2.0`
-database schema transition, historical upgrade, downgrade, and migration paths
-are not tested. Running mismatched component versions can fail or corrupt state
-even without a version-admission gate. Operators must never reverse database
-migrations, reset node or Signer identities, or overwrite persistent state to
-force a rollout, and changing deployment topologies requires a clean
-redeployment. The manual installer sets up a fresh deployment and does not
-convert historical layouts.
+The v2.0.0 database baseline initializes a fresh PostgreSQL 18 database. The owner applies numbered Goose migrations under a PostgreSQL advisory lock. The runtime checks the applied version in `goose_db_version`. Preserve a verified backup before an upgrade. For legacy databases consult the [upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
 
 The [published 1.0 policy](https://github.com/GentleKingson/ocservia/blob/d420b22018596d6741d55fa56bd19c4a767e5817/docs/reference/support-policy.md)
 remains in git history as the record of the original 1.0 line, without
@@ -147,8 +127,7 @@ governing `v1.1.0` or later releases. Nothing in this policy certifies an
 unreleased commit or an unexecuted validation suite for production use.
 
 The `v1` line is end of life: it receives no further patch releases, security
-backports, compatibility matrices or new migration paths, and `v1.2.0` remains
-relevant only as the fixed database checkpoint described above. `v2.0.0`
+backports, compatibility matrices or new migration paths, and its legacy schema predates the Goose baseline. `v2.0.0`
 release candidates are prereleases for evaluation and do not constitute a
 stable supported production release; see [SECURITY.md](../../SECURITY.md),
 which also holds the security-fix support line.
@@ -163,8 +142,9 @@ tag and GitHub Release while retaining the RC tags in history.
 
 ### Database support
 
-At startup, the production launcher pairs `deploy/production/compose.yaml` with
-a single PostgreSQL 18.x database descriptor. The default bundled PostgreSQL 18
+The production launcher selects the database profile in `deploy/production/compose.yaml`. Use `bundled-postgres` for the local PostgreSQL 18 service or `external-postgres` for the operator-managed database. The installer selects the appropriate profile from `OCSERV_DATABASE_DEPLOYMENT`. The `acme` profile enables automatic certificate provisioning.
+
+The default bundled PostgreSQL 18
 configuration runs the HTTPS gateway, control plane, transport service,
 PostgreSQL server, and backup worker together, keeping database, application,
 and observability traffic on internal Docker networks. Its Compose descriptor
@@ -283,7 +263,7 @@ interchangeable.
 
 | Aspect | Manual installation | Quick mode |
 | --- | --- | --- |
-| Release | Any exact stable or RC release | A Release that ships `deploy/production/quick-install.sh` |
+| Release | Any exact stable or RC release | A Release that ships `deploy/production/install.sh --quick` |
 | Host | New host or an existing deployment's lifecycle | New host only |
 | Configuration | You write `./install.env` | Ignores `./install.env`; writes `/etc/ocservia/install.env` |
 | Secrets and keys | You provision every protected file | Generated, including Signer material |
@@ -315,9 +295,8 @@ A manual installation needs:
 - Protected host directories for secrets and database backups.
 
 Running `bootstrap-host.sh check` performs a read-only inspection. Its
-`install` command uses apt to install missing `jq`, `flock`, `rename.ul`
-(`util-linux`, or `util-linux-extra` on Ubuntu 26.04), `curl`, `openssl`, and CA
-certificates. When Docker is absent on a bootstrappable host, `install`
+`install` command uses apt to install missing `jq`, `flock` (util-linux), Python 3, `curl`,
+`openssl`, and CA certificates. When Docker is absent on a bootstrappable host, `install`
 configures Docker's distribution-specific official apt repository; it preserves
 compatible existing Docker installations and aborts without uninstalling
 anything if it finds conflicting runtimes or an unavailable Compose v2 plugin.
@@ -445,8 +424,7 @@ obtained by ACME) along with the Signer files, and leaves OTEL unconfigured.
 When the Relay uses a private CA, provision the public PEM bundle at
 `${OCSERV_SECRET_DIR}/relay-ca.pem` as a nonempty, one-link `root:root` regular
 file with mode `0444` and the same safe directory ancestry. `compose.sh`
-includes the shipped `compose.relay-ca.yaml` overlay only when this file exists,
-and it mounts the file into transportd alone. Unsafe files fail closed in the
+selects this secret for transportd when the file exists. Unsafe files fail closed in the
 launcher, and invalid PEM causes transportd to refuse startup. Omitting
 `relay-ca.pem` keeps the existing public root trust (TLS is never disabled).
 Providing it adds trust roots without enabling certificate pinning. Distribute
@@ -599,8 +577,8 @@ recovery steps.
 #### Quick install materials
 
 For an initial integrated installation using bundled PostgreSQL and root-managed
-lifecycle scripts, `deploy/production/quick-install.sh` invokes
-`deploy/production/quick-materials.sh`. The script runs as root before service
+lifecycle scripts, `deploy/production/install.sh --quick` invokes
+`deploy/lib/quick-materials.sh`. The script runs as root before service
 activation, using `OCSERV_SECRET_DIR`, `OCSERV_SIGNER_SECRET_DIR`, and
 `OCSERV_SIGNER_STATE_DIR`. It creates any missing Controller and Signer secrets
 with the exact ownership and file modes verified by `compose.sh`, and it leaves
@@ -630,7 +608,7 @@ Gateway and Relay TLS identities to their own provisioning paths.
 Staged files and the prepared CA (`.quick-ca`, used to resume an interrupted
 run with the same CA) live under the root-only `OCSERV_SECRET_DIR`. Its
 ancestors must be canonical, root-owned, and not group/world writable. Files are
-published by `rename.ul` with no copy fallback, so a failed publication keeps
+published by atomic rename with no copy fallback, so a failed publication keeps
 the prepared CA.
 
 The script never trusts a `.quick-ca` left by an earlier version inside the
@@ -640,8 +618,7 @@ operator must inspect and deal with it deliberately.
 Re-running the script reuses existing files and completes any interrupted
 setup, including an exported root CA awaiting confirmation. Once setup
 succeeds, `quick-install.json` in the Controller secret directory records the
-custody mode, root fingerprint, Controller endpoint ID, and file SHA-256
-digests without storing secret values. After `quick-install.json` or a Signer
+custody mode, root certificate fingerprint, and Controller endpoint ID. After `quick-install.json` or a Signer
 ledger exists, the script refuses to regenerate material and fails closed if
 any required file is missing. Signer `init` remains the authority that
 validates the CA chain during startup.
@@ -855,25 +832,12 @@ Compose configuration before starting, see [Troubleshooting](#troubleshooting).
 Running `install` requires Docker Compose v2 with `docker compose up --wait`
 support. `install` runs these steps in order:
 
-1. Acquires an exclusive local lock in `/var/lib/ocservia-controller`.
-2. Rejects any existing `current-release.json`.
-3. Verifies the runtime version, file inventory and manifest `source_commit`.
-4. Runs the guarded Compose preflight.
-5. Atomically records the target and lifecycle phase in `pending-release.json`
-   before activation.
-6. Pulls the manifest's SHA-256 image references.
-7. Starts the dependency graph with `up -d --wait`.
-8. Runs `deploy/production/controller-release-smoke.sh`, which checks Compose
-   health, probes the public HTTPS `/api/v1/readyz` and `/api/v1/version`
-   routes to confirm the target version and source commit, and verifies the
-   transport socket and backup freshness health boundaries.
-9. Only after that smoke check passes, commits the manifest as
-   `current-release.json` (and, for upgrades, `previous-release.json`), all with
-   mode `0600`.
+1. Acquire the lifecycle lock, check the release manifest, runtime and daemon architecture, and resolve the deployment profile.
+2. Pull the selected digest-pinned images and initialize the Signer on its first Integrated installation.
+3. Start the Compose project with `up -d --wait` and run the public release smoke check.
+4. Once the target version and commit pass the checks, atomically save both the current and previous manifests in `release-history.json`.
 
-If an install fails, `pending-release.json` remains on disk with failure
-evidence and permits only a retry against the identical target (see
-[Pending state and recovery](#pending-state-and-recovery)).
+Run `controller.sh health` to check the current deployment. If startup fails, see [Pending state and recovery](#pending-state-and-recovery).
 
 ### Quick mode
 
@@ -890,7 +854,7 @@ bash "$bootstrap_file" --quick \
   [--version vX.Y.Z] [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--check]
 ```
 
-Quick mode requires a Release that ships `deploy/production/quick-install.sh`,
+Quick mode requires a Release that ships `deploy/production/install.sh --quick`,
 that is, a stable or RC release after v1.2.0. Releases up to v1.2.0 reject
 `--quick` before modifying the host. If you need a Standalone topology, an
 external PostgreSQL database, or manual TLS certificates,
@@ -928,14 +892,14 @@ when invoked with `--check`):
   ports.
 
 After the preflight succeeds, the versioned installer invokes the release's
-`deploy/production/quick-install.sh`, which:
+`deploy/production/install.sh --quick`, which:
 
 1. Prepares the host.
 2. Invokes `quick-materials.sh` to generate the protected material (see
    [Quick install materials](#quick-install-materials)).
 3. Writes `/etc/ocservia/install.env` (configuring Integrated mode, bundled
    PostgreSQL, ACME, and Local authentication).
-4. Runs `install.sh --root-lifecycle`.
+4. Activates the selected release with `controller.sh install`.
 5. Provisions the management workspace.
 6. Creates the Local administrator `admin` with an eight-character random password.
 
@@ -966,14 +930,7 @@ PostgreSQL and OpenTelemetry dependencies use SHA-256 digest references. GHCR
 version tags remain publication aliases, but release manifests never depend on
 their mutable resolution.
 
-Manifest validation rejects unknown fields, unrecognized roles or state
-versions, missing required roles, invalid SemVer, platform, or source revisions,
-and noncanonical JSON formatting (while historical `current-release.json` and
-`previous-release.json` records saved by earlier v2 releases remain readable
-during PostgreSQL upgrades, starts, and uninstalls if they still carry retired
-`mysql_backup` or `mariadb_backup` image keys). Older lifecycle readers reject
-v2 manifests. Manifests never contain secret values. Compose pulls only the
-images needed by the selected services.
+Manifest validation checks the required roles, digest references, schema, source commit, platform and exact release tag. When upgrading a host with legacy release state, finish any pending lifecycle operation with its original launcher first. The new launcher reads the existing confirmed manifests and writes the new history on a successful activation.
 
 Formal GitHub Releases publish:
 
@@ -1123,28 +1080,7 @@ deploy/production/controller.sh upgrade \
   --release-file /protected/release/controller-release-<arch>.json
 ```
 
-An `upgrade` run first validates the confirmed current state and target
-manifest, checks the target `source_commit` against the verified runtime before any
-Compose operation, and verifies the current deployment's dependency and backup
-health. While the current release stays online, `upgrade` records the pending
-state, renders the target Compose configuration and pulls the target images,
-then executes the forward database migration and starts the `up -d --wait`
-dependency graph. Always deploy the exact images declared in the release
-manifest instead of substituting caller-selected tags. Passing a manifest
-identical to the active release is a no-op. Any different artifact (whether its
-version string is lower, equal, or higher) follows the full execution path.
-Once the release smoke check passes, `upgrade` atomically rolls the complete
-manifests into `previous-release.json` and `current-release.json`.
-
-Once image pulling and container activation start, a failure can leave the host
-with partially replaced containers. The confirmed release state on disk stays
-unchanged, but the running services are no longer guaranteed to match it. Any
-failure after activation returns non-zero without redeploying old images,
-running down migrations, or altering confirmed release state (see
-[Pending state and recovery](#pending-state-and-recovery)). In an Integrated
-deployment, the upgrade verifies, preflights and pulls before stopping
-services. Activation, container recreation and rollback interrupt requests and
-streams, so reconnect clients after readiness returns.
+The launcher validates the target runtime and architecture and pulls the selected images. Compose applies the target graph and its forward migration. A passing public smoke check commits the new current release and retains the former current release as the rollback target. Reapplying an identical target preserves the previous release.
 
 #### Runtime database grants
 
@@ -1156,12 +1092,7 @@ Controller containers retain only runtime credentials. Keep your
 authentication configuration, session and audit keys, database TLS files, and
 backend/role settings intact across upgrades.
 
-Only a new, verifiably empty database is initialized from the current
-`schema.sql`. Existing databases are validated and advanced strictly through
-unapplied forward migrations and revisions; an updated snapshot file in a new
-release is never a reason to overwrite an existing schema. If schema provenance
-is missing or inconsistent, normal startup stops. Do not erase metadata tables
-or alter checksums to force startup past those checks.
+The owner runs the embedded Goose migrations in ascending version order, starting with `control-plane/migrations/sql/0001_initial_schema.sql` on an empty database. The runtime requires the exact embedded head. Preserve migration history across updates.
 
 Policy cleanup requires `DELETE` privilege on `user_policy_enforcements`,
 granted to the configured runtime role on PostgreSQL. The grant itself is at
@@ -1178,17 +1109,7 @@ historical cleanup of the table.
 
 #### Database cutover
 
-Before a major database cutover, first upgrade existing environments to the
-stable v1.2.0 checkpoint at `169102557cd610847c9f6ac2083336cdcf82c483`, confirm
-its epoch-1/revision-0 receipt, and retain a verified backup, because the
-epoch-2 binary cannot replay earlier migrations. Keep the production audit
-event and checkpoint keys intact: historical audit events remain business data,
-and startup verifies the chain and refuses an unauthenticated legacy tail
-unless that exact tail is checkpointed. Never rewrite audit evidence or schema
-receipts to bypass either check. Stop old writers before migration and use the
-normal owner migration process, starting the new runtime only after a
-verified cutover succeeds; if rollback is required, restore the compatible
-backup with the old binary instead of attempting a schema downgrade.
+Provision a fresh PostgreSQL 18 database for the v2.0.0 baseline. Keep the old installation, audit keys and a verified backup together for recovery. Running the Goose migrator against a legacy v1 schema is unsupported. For subsequent v2 updates, stop writers, run the owner migration and verify readiness before admitting traffic.
 
 #### Privileged command rollout
 
@@ -1213,57 +1134,17 @@ migrations leaves the older images running against the already-migrated
 database, which may not be compatible. Reverting database state requires the
 separate [database restore](incident-recovery.md#database-recovery) procedure.
 
-Before rolling back, stop new writes if the incident requires it, reconcile
-every Unknown operation, and evaluate the risks across the current and previous
-database state, configuration, and backups. The host must have the protected
-`previous-release.json` and its exact source commit available; a fresh
-installation has no previous release record, and rollback refuses to run
-without one. Like `upgrade`, `rollback` first runs the database and backup
-service health check. A changed database or deployment contract, or
-insufficient backup and recovery state, can refuse rollback. Retain both source
-commits and bundles until the recovery window ends.
+Check the backup and database compatibility of the previous release before rolling back. Retain both release runtimes. Run:
 
 ```bash
 deploy/production/controller.sh rollback
 ```
 
-The `rollback` command always targets the protected `previous-release.json` on
-disk and never takes an operator-supplied manifest. It enforces no version
-ordering, equal migration counts, or descriptor equality checks, and runs no
-historical database compatibility preflight, so rollback does not guarantee that
-an arbitrary previous release can operate against the existing database state.
-It uses the retained target runtime matching the manifest's exact source commit for Docker Compose and smoke checks. Missing or modified runtime files, invalid platforms, and configuration or runtime failures remain hard errors.
-
-Provided the exact target source and images remain available and satisfy the
-deployment's requirements, `rollback` renders and pulls the previous image
-references and starts the normal target Compose graph with `up -d --wait`
-(including required forward initialization, never a database down migration,
-restore, Signer identity reset, or legacy Docker network conversion). It swaps
-the confirmed state files only after the functional release smoke check confirms
-the previous version and source commit. When a rollback succeeds, the restored
-release becomes current and the replaced release becomes `previous`, so running
-`rollback` a second time returns to the newer release. If the target release is
-identical to the active one, the command exits as a no-op (matching version
-strings alone do not establish artifact identity). If rollback fails after
-activation, confirmed state remains unchanged and pending failure evidence is
-retained for a same-target retry without automatically redeploying the current
-images. Full database restoration belongs to
-[database recovery](incident-recovery.md#database-recovery) as a separate
-disaster-recovery boundary outside application rollback.
+The launcher reads the previous manifest from the protected release history, activates it and checks public health. Once the smoke check passes, the restored release becomes current and the replaced release becomes previous.
 
 ### Pending state and recovery
 
-If an install, upgrade, or rollback fails, `pending-release.json` remains on
-disk with failure evidence and permits only a retry against the identical
-target. During an upgrade, the pending file also records the pre-activation
-current manifest so recovery can populate `previous-release.json` before
-clearing completed evidence. The script preserves the confirmed release state.
-Until a retry or recovery pass completes the smoke check, treat the running
-containers as unconfirmed, as they may be a mix of old and new images. Fix the
-underlying cause and retry the exact same target release. Do not run `install`
-on an existing deployment, delete the pending state files, replay an Unknown
-operation, initialize another Signer ledger, or manually force old images into
-the stack.
+An interrupted Compose activation may leave mixed containers. The last confirmed manifests are in `release-history.json`. Correct the reported failure and retry the original command. Confirm the public version and readiness before restoring traffic. Preserve node, Signer and database state throughout recovery.
 
 When recovering to the same target is impossible, apply a forward fix or run an
 isolated [database restore](incident-recovery.md#database-recovery). Before
@@ -1285,7 +1166,7 @@ deploy/production/controller.sh start
 ```
 
 `start` resolves the image inventory and exact source from
-`current-release.json`, runs the target Compose graph with `up -d --wait` and
+`.current` in `release-history.json`, runs the target Compose graph with `up -d --wait` and
 release smoke verification, and leaves confirmed state unchanged. Keep the
 production environment, secrets, and backup directory available.
 
@@ -1320,8 +1201,7 @@ deploy/production/controller.sh uninstall --purge-data
 
 In Standalone mode, `--purge-data` removes the production project volumes
 (including bundled database data, which cannot be recovered afterwards without
-an off-host backup) and the lifecycle state files (`current-release.json`,
-`previous-release.json`, `pending-release.json`, and the deployment profile)
+an off-host backup) and the lifecycle state files (`release-history.json` and the deployment profile)
 after a clean shutdown. It keeps the lock, secrets, backup directory, external
 databases, off-host backups, runtime bundles (and any legacy runtime bundles), container images, and unrelated Docker volumes intact.
 Volume purge is neither a secure erase nor a database recovery mechanism.
@@ -1501,8 +1381,7 @@ not rely on Relay for original-IP abuse controls.
 
 Never substitute raw IP URLs or disable certificate verification to work around
 routing failures, even when Controller and Relay share a machine. Inspect the
-rendered network attachments and permitted egress whenever external database
-overlays are added.
+rendered network attachments and permitted egress when selecting the external database profile.
 
 Gateway and Relay names resolve through Docker DNS every five seconds for new
 connections. Recreating a container is disruptive: existing streams can break
@@ -1576,7 +1455,7 @@ services to force a new layout to fit.
 
 The repository maintains two bootstrap launchers:
 
-- `deploy/bootstrap/install-controller`
+- `deploy/production/controller-bootstrap.sh` (published as both `install-controller` and `controller-bootstrap.sh`)
 - `deploy/bootstrap/install-node`
 
 The standard installation uses fixed GitHub Release assets directly. Operators may also host exact copies of the version-stamped `install-controller`, `install-node` and `install.env.example` assets from a deliberately selected stable Release. Example `get.ocservia.example` endpoints below are placeholders, active only when deployed by an operator. Do not resolve a Release dynamically from `latest` or a branch.
@@ -1589,12 +1468,9 @@ per-user templating, query-parameter tokens, embedded secrets, or server-side
 session state. Publish the selected stable Release assets unchanged.
 
 After deploying the files, verify that the served bytes match the expected
-source artifacts. `check-release-bootstrap.sh` first checks that the downloaded
-Release asset differs from the Git source at that tag only in its stamped
-default version:
+version-stamped Release assets:
 
 ```bash
-scripts/check-release-bootstrap.sh "$RELEASE_ASSETS/install-controller" vX.Y.Z
 scripts/verify-bootstrap-endpoint.sh \
   https://get.ocservia.example/install-controller \
   "$RELEASE_ASSETS/install-controller"
@@ -1612,18 +1488,11 @@ deployed SHA-256 digest for the deployment record.
 
 ### Bootstrap launcher trust model
 
-The bootstrap launcher uses its embedded exact Release tag or an explicit `--version vX.Y.Z`, builds the corresponding GitHub Release URL, and hands off to `controller-bootstrap.sh` or `managed-node-bootstrap.sh`. The bootstrap launcher itself never reads
-`install.env`, installs packages, runs the Controller lifecycle, enrolls or
-approves a node, starts services, or crosses a privilege boundary; the versioned installer owns
-all configuration, installation, enrollment, activation, and package or
-lifecycle validation.
-
-During the handoff, the bootstrap launcher fetches the versioned installer script over HTTPS with TLS
-verification enabled, rejects download errors or empty responses, and runs the
-downloaded file from a private temporary directory. Download authenticity in
-this phase relies on the HTTPS endpoint and its PKI without separate release
-keys, fingerprints, signed checksum manifests, or detached signatures, and
-the bootstrap launcher imposes no additional OpenSSL version requirement.
+Both installers default to the release tag embedded at build time and accept
+an explicit exact version. The Controller entrypoint collects configuration,
+downloads the pinned Controller runtime over HTTPS, verifies the release archive
+and invokes its installer. The node launcher downloads the versioned
+`managed-node-bootstrap.sh` installer over HTTPS.
 
 Operators should download the bootstrap launcher locally, inspect its contents, and invoke it
 with its stamped release or an explicit exact version tag. Never resolve the version dynamically from
@@ -1640,11 +1509,11 @@ bash install.sh
 # Managed nodes use managed-node-bootstrap.sh with --join-token-file or --resume-install; see Agent lifecycle.
 ```
 
-`install-controller` and `install-node` remain optional thin bootstrap launcher wrappers with an embedded fixed version. With no arguments, the Controller collects configuration and the node requests a hidden installation token. Controller `--config PATH` and node `--join-token-file PATH` or `--resume-install` are the unattended inputs; node `--config` is retired. Neither stage selects `latest` or `main`.
+`install-controller` is another name for the complete Controller installer. `install-node` launches the versioned node installer. With no arguments, the Controller collects configuration and the node requests a hidden installation token. Controller `--config PATH` and node `--join-token-file PATH` or `--resume-install` are the unattended inputs; node `--config` is retired. Neither stage selects `latest` or `main`.
 
 The interaction follows the explicit unattended switches and confirmation model of [Rustup](https://rust-lang.github.io/rustup/installation/index.html) and [Homebrew](https://docs.brew.sh/Installation#unattended-installation). The default configuration wizard and hidden token prompt require a TTY. Each installer delegates interactive and unattended inputs to its own single lifecycle flow.
 
-Release preparation stamps both wrappers and both standalone versioned installer scripts. The Controller installer downloads `controller-runtime-vX.Y.Z.tar.gz` and its published `.sha256`, verifies archive paths/types, version and checksums, and retains the bundle under the existing `OCSERV_CONTROLLER_SOURCE_ROOT` path. The bundle holds only production Compose, lifecycle scripts and public bind-mount configuration. Its `RELEASE` records the release tag and source commit; `SHA256SUMS` detects local drift. These hashes detect corruption and do not add a separate signing authority beyond HTTPS and immutable Release publication. The Agent installer continues to download the platform-native package and freeze it in protected staging.
+Release preparation stamps each installer with its exact version. The Controller installer downloads `controller-runtime-vX.Y.Z.tar.gz` and its published `.sha256`, verifies archive paths/types, version and checksums, and retains the bundle under the existing `OCSERV_CONTROLLER_SOURCE_ROOT` path. The bundle holds only production Compose, lifecycle scripts and public bind-mount configuration. Its `RELEASE` records the release tag and source commit; `SHA256SUMS` detects local drift. These hashes detect corruption and do not add a separate signing authority beyond HTTPS and immutable Release publication. The Agent installer continues to download the platform-native package and freeze it in protected staging.
 
 ## Troubleshooting
 

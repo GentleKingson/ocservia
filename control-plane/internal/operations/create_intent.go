@@ -175,7 +175,7 @@ func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operat
 		}
 		return nil, fmt.Errorf("lock rollout node observation: %w", err)
 	}
-	observation := rolloutNodeObservation{NodeID: request.NodeID, Status: nodeStatus, Architecture: observed.Architecture, AgentVersion: observed.AgentVersion, LastHeartbeatAt: observed.LastHeartbeatAt}
+	observation := rolloutNodeObservation{NodeID: request.NodeID, Status: nodeStatus, Architecture: observed.Architecture, OSRelease: observed.OSRelease, AgentVersion: observed.AgentVersion, LastHeartbeatAt: observed.LastHeartbeatAt}
 	observation.CapabilityOK, err = intentStore.LockUpgradeCapability(ctx, request.NodeID)
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrCapabilityMissing

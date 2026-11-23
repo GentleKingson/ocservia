@@ -226,7 +226,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		// Match application assembly: configure recommendation and catalog on
 		// the existing service, then supply it before route registration.
 		manifest := filepath.Join(t.TempDir(), "releases.json")
-		if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("0", 64)+`"}]}`), 0600); err != nil {
+		if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_format":"deb","package_sha256":"`+strings.Repeat("0", 64)+`"}]}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		catalog, err := releasecatalog.Load(manifest)

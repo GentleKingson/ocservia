@@ -56,8 +56,7 @@ export OCSERV_RELAY_URL_A="https://${OCSERV_RELAY_PUBLIC_HOST}"
 export OCSERV_CERTIFICATE_SIGNER_URL=https://signer:9443/sign
 export OCSERV_RELAY_SECRET_DIR="${work}/relay-secrets"
 export OCSERV_SIGNER_SECRET_DIR="${work}/production-signer/secrets" OCSERV_SIGNER_STATE_DIR="${work}/production-signer/data"
-unset OCSERV_OTEL_BACKEND_ENDPOINT OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH \
-  OCSERV_MANAGED_NODE_SYSROOT OCSERV_MANAGED_NODE_OS_RELEASE
+unset OCSERV_OTEL_BACKEND_ENDPOINT OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH
 
 registry="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-registry"
 export OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="business-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-relay"
@@ -248,8 +247,6 @@ scenario transport_ready
 
 next_stage native_node
 deb="${PRODUCTS_DIR}/ocservia-agent_${VERSION}-1_${CONTROLLER_ARCH}.deb"
-sudo install -d -m 755 /etc/ocservia
-sudo touch /etc/ocservia/agent-install-production-relays
 sudo dpkg -i "${deb}"
 sudo install -o root -g root -m 444 "${work}/ca.crt" /etc/ocservia-agent/relay-ca.pem
 export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}"
@@ -331,15 +328,14 @@ printf 'Additional public Relay CA: one-link root:root 0444 on Controller and no
 cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/ocservia-agent-relays
 [[ ! -e /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf ]]
 
-identity_digest() {
-  sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint
-}
-enrolled_identity="$(identity_digest)"
+identity_dir=/var/lib/ocservia-agent/identity
+sudo install -d -m 0700 "${work}/unchanged"
+sudo cp -- "${identity_dir}/endpoint.key" "${identity_dir}/controller.endpoint" "${work}/unchanged/"
 scenario bootstrap_verify
 bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-rerun.log"
 grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-rerun.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-rerun.log"
-[[ "$(identity_digest)" == "${enrolled_identity}" ]]
+scenario check_enrolled_identity
 record bootstrap_token_enrollment_and_rerun_identity
 record official_managed_enrollment_and_unchanged_launchers
 
@@ -362,7 +358,7 @@ record production_signer_active_binding
 bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-active.log"
-[[ "$(identity_digest)" == "${enrolled_identity}" ]]
+scenario check_enrolled_identity
 record native_node_services
 
 next_stage browser

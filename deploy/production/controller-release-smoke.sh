@@ -82,7 +82,9 @@ if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundle
   services=(postgres control-plane transportd backup)
 fi
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
-  services+=(relay signer)
+  relay=relay
+  [[ "${OCSERV_TLS_MODE:-manual}" != acme ]] || relay="relay-acme"
+  services+=("${relay}" signer)
 fi
 health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")" ||
   fail "cannot inspect Compose health"

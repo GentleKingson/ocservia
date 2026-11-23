@@ -210,7 +210,7 @@ node_bootstrap_request() {
 node_bootstrap_prepare() {
   ((EUID == 0)) || fail 'token installation requires the root lifecycle'
   command -v python3 >/dev/null || fail 'Python 3 is required for bounded bootstrap JSON parsing'
-  JOIN_STATE_DIR="${SYSROOT}/var/lib/ocservia-bootstrap"
+  JOIN_STATE_DIR="/var/lib/ocservia-bootstrap"
   command -v flock >/dev/null || fail 'flock is required to serialize installation recovery'
   node_bootstrap_data state "${JOIN_STATE_DIR}" || fail 'unsafe bootstrap state directory'
   exec {JOIN_LOCK_FD}>"${JOIN_STATE_DIR}/lock"
@@ -236,7 +236,7 @@ node_bootstrap_prepare() {
 
 node_bootstrap_complete() {
   local node_id="$1" challenge nonce context registered key_path
-  key_path="${SYSROOT}/var/lib/ocservia-privd/attestation.key"
+  key_path="${PRIVD_ATTESTATION_KEY}"
   node_bootstrap_request attestation "${node_id}" "${ENDPOINT_ID}"
   challenge="$(node_bootstrap_data challenge "${JOIN_STATE_DIR}")" || fail 'invalid privd registration challenge'
   nonce="${challenge%%$'\n'*}"

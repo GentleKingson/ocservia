@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+COMPOSE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-unset COMPOSE_PROFILES COMPOSE_ENV_FILES
+unset COMPOSE_PROFILES COMPOSE_ENV_FILES OCSERV_RELAY_TRUST_SECRET OCSERV_RELAY_TRUST_TARGET \
+  OCSERV_DATABASE_NETWORK OCSERV_DATABASE_TLS_CA_FILE OCSERV_DATABASE_BUNDLED_POSTGRES \
+  OCSERV_CERTIFICATE_SIGNER_CA_FILE OCSERV_DATABASE_CA_SECRET OCSERV_SIGNER_CA_SECRET \
+  OCSERV_RELAY_TEMPLATE OCSERV_RELAY_ACME_VOLUME OCSERV_RELAY_SHARED_ACME_DIR OCSERV_RELAY_ROUTE_PREFIX \
+  OCSERV_RELAY_MODE_ARG OCSERV_BACKUP_SSLMODE OCSERV_RELAY_TLS_DIR IROH_RELAY_ACME_CA
 export COMPOSE_DISABLE_ENV_FILE=1
 deployment_mode="${OCSERV_DEPLOYMENT_MODE:-standalone}"
 shared_domain=false
@@ -47,7 +51,6 @@ case "${deployment_mode}" in
   *) echo "OCSERV_DEPLOYMENT_MODE must be standalone or integrated" >&2; exit 2 ;;
 esac
 tls_mode="${OCSERV_TLS_MODE:-manual}"
-acme_ca=false
 case "${deployment_mode}:${tls_mode}" in
   *:manual)
     if [[ -n "${OCSERV_ACME_EMAIL:-}${OCSERV_ACME_DIRECTORY_URL:-}${OCSERV_ACME_CA_FILE:-}" ]]; then
@@ -67,11 +70,10 @@ case "${deployment_mode}:${tls_mode}" in
     if [[ -n "${OCSERV_ACME_CA_FILE:-}" ]]; then
       path="${OCSERV_ACME_CA_FILE}"
       if [[ -z "${OCSERV_ACME_DIRECTORY_URL:-}" || "${path}" != /* || ! -f "${path}" || -L "${path}" || ! -s "${path}" \
-        || "$(stat -c '%u:%a:%h' "${path}")" != "$(id -u):444:1" ]]; then
+        || "$(stat -c '%u:%a:%h' "${path}")" != "${EUID}:444:1" ]]; then
         echo "OCSERV_ACME_CA_FILE must be a nonempty launcher-owned mode-0444 single-link file for OCSERV_ACME_DIRECTORY_URL" >&2
         exit 2
       fi
-      acme_ca=true
     fi
     ;;
   *) echo "OCSERV_TLS_MODE must be manual, or acme with Integrated" >&2; exit 2 ;;
@@ -88,8 +90,15 @@ fi
 database_backend="${OCSERV_DATABASE_BACKEND:-postgres}"
 database_deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
 case "${database_backend}:${database_deployment}" in
-  postgres:bundled) database_overlay="compose.postgres.yaml" ;;
-  postgres:external) database_overlay="compose.external-postgres.yaml" ;;
+  postgres:bundled)
+    unset OCSERV_DATABASE_BACKUP_HOST OCSERV_DATABASE_BACKUP_PORT OCSERV_DATABASE_BACKUP_NAME OCSERV_DATABASE_BACKUP_USER
+    ;;
+  postgres:external)
+    : "${OCSERV_DATABASE_BACKUP_HOST:?set the external PostgreSQL backup host}"
+    export OCSERV_DATABASE_NETWORK=database-egress OCSERV_DATABASE_BUNDLED_POSTGRES=false
+    export OCSERV_DATABASE_CA_SECRET=database_ca OCSERV_DATABASE_TLS_CA_FILE=/run/secrets/database_ca
+    export OCSERV_BACKUP_SSLMODE=verify-full
+    ;;
   *)
     echo "OCSERV_DATABASE_BACKEND must be postgres and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
     exit 2
@@ -109,27 +118,29 @@ for variable in "${image_variables[@]}"; do
   fi
 done
 
-secret_dir="${OCSERV_SECRET_DIR:-}"
-if [[ -z "${secret_dir}" || ! -d "${secret_dir}" || -L "${secret_dir}" \
-  || "$(stat -c '%u:%a' "${secret_dir}")" != "$(id -u):700" ]]; then
-  echo "OCSERV_SECRET_DIR must be an existing mode-0700 directory owned by the launcher user" >&2
-  exit 2
-fi
-if [[ "${secret_dir}" != /* || "$(realpath -e -- "${secret_dir}")" != "${secret_dir}" ]]; then
-  echo "OCSERV_SECRET_DIR must be an absolute canonical path without symlink ancestry" >&2
-  exit 2
-fi
-ancestor="${secret_dir}"
-while true; do
-  IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
-  if [[ "${ancestor_uid}" != "0" && "${ancestor_uid}" != "$(id -u)" ]] \
-    || (( (8#${ancestor_mode} & 8#022) != 0 )); then
-    echo "OCSERV_SECRET_DIR ancestry must be root- or launcher-owned and not group/world writable" >&2
-    exit 2
+declare -A protected_ancestors=()
+protected_directory() {
+  local path="$1" expected="$2" format="$3" ancestor owner mode
+  if [[ "${path}" != /* || ! -d "${path}" || "$(realpath -e -- "${path}")" != "${path}" ||
+    "$(stat -c "${format}" -- "${path}")" != "${expected}" ]]; then
+    echo "${path} must be a canonical directory with ${format}=${expected}" >&2
+    return 2
   fi
-  [[ "${ancestor}" == "/" ]] && break
-  ancestor="$(dirname -- "${ancestor}")"
-done
+  ancestor="$(dirname -- "${path}")"
+  while [[ -z "${protected_ancestors[${ancestor}]:-}" ]]; do
+    IFS=: read -r owner mode < <(stat -c '%u:%a' -- "${ancestor}")
+    if [[ "${owner}" != 0 && "${owner}" != "${EUID}" ]] || (( (8#${mode} & 8#022) != 0 )); then
+      echo "${ancestor} must be root- or launcher-owned and protected from other writers" >&2
+      return 2
+    fi
+    protected_ancestors[${ancestor}]=1
+    [[ "${ancestor}" != / ]] || break
+    ancestor="$(dirname -- "${ancestor}")"
+  done
+}
+
+secret_dir="${OCSERV_SECRET_DIR:-}"
+protected_directory "${secret_dir}" "${EUID}:700" '%u:%a'
 general_secrets=(database-owner-url database-app-url session-key audit-checkpoint-key certificate-signer-token)
 if [[ "${tls_mode}" == manual ]]; then
   general_secrets+=(tls.crt tls.key)
@@ -144,7 +155,7 @@ if [[ "${otel_enabled}" == true ]]; then
 fi
 for secret in "${general_secrets[@]}"; do
   path="${secret_dir}/${secret}"
-  if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%a' "${path}")" != "$(id -u):444" ]]; then
+  if [[ ! -f "${path}" || -L "${path}" || "$(stat -c '%u:%a' "${path}")" != "${EUID}:444" ]]; then
     echo "${path} must be a launcher-owned regular file with mode 0444 inside the private secret directory" >&2
     exit 2
   fi
@@ -185,32 +196,16 @@ done
 if [[ "${deployment_mode}" == integrated ]]; then
   for variable in OCSERV_RELAY_SECRET_DIR OCSERV_SIGNER_SECRET_DIR OCSERV_SIGNER_STATE_DIR; do
     path="${!variable:-}"
-    expected_owner="$(id -u):700"
+    expected_owner="${EUID}:700"
     [[ "${variable}" == OCSERV_RELAY_SECRET_DIR ]] || expected_owner=65532:700
-    if [[ "${path}" != /* || ! -d "${path}" || -L "${path}" \
-      || "$(realpath -e -- "${path}")" != "${path}" \
-      || "$(stat -c '%u:%a' "${path}")" != "${expected_owner}" ]]; then
-      echo "${variable} must be a canonical mode-0700 directory with owner ${expected_owner%:*}" >&2
-      exit 2
-    fi
-    ancestor="$(dirname -- "${path}")"
-    while true; do
-      IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
-      if [[ "${ancestor_uid}" != 0 && "${ancestor_uid}" != "$(id -u)" ]] \
-        || (( (8#${ancestor_mode} & 8#022) != 0 )); then
-        echo "Integrated directory ancestry must be protected" >&2
-        exit 2
-      fi
-      [[ "${ancestor}" == / ]] && break
-      ancestor="$(dirname -- "${ancestor}")"
-    done
+    protected_directory "${path}" "${expected_owner}" '%u:%a'
   done
   relay_tls=(tls.crt tls.key)
   [[ "${tls_mode}" == manual && "${shared_domain}" == false ]] || relay_tls=()
   for secret in "${relay_tls[@]}"; do
     path="${OCSERV_RELAY_SECRET_DIR}/${secret}"
     [[ -s "${path}" && -f "${path}" && ! -L "${path}" \
-      && "$(stat -c '%u:%a:%h' "${path}")" == "$(id -u):444:1" ]] || {
+      && "$(stat -c '%u:%a:%h' "${path}")" == "${EUID}:444:1" ]] || {
       echo "Relay TLS files must be nonempty launcher-owned mode-0444 single-link files" >&2; exit 2;
     }
   done
@@ -228,101 +223,67 @@ if [[ "${deployment_mode}" == integrated ]]; then
   }
 fi
 
-prepare_transport_runtime=false
-teardown=false
-for argument in "$@"; do
-  case "${argument}" in
-    build|--build)
-      echo "production lifecycle only consumes prebuilt sha256 images" >&2
-      exit 2
-      ;;
-  esac
-done
-for argument in "$@"; do
-  case "${argument}" in
-    down)
-      teardown=true
-      break
-      ;;
-    up|create|run)
-      backup_dir="${OCSERV_BACKUP_DIR:-}"
-      if [[ -z "${backup_dir}" || ! -d "${backup_dir}" || -L "${backup_dir}" ]]; then
-        echo "OCSERV_BACKUP_DIR must be an existing real directory" >&2
-        exit 2
-      fi
-      if [[ "$(stat -c '%u:%g:%a' "${backup_dir}")" != "999:999:700" ]]; then
-        echo "OCSERV_BACKUP_DIR must be owned by uid:gid 999:999 with mode 0700" >&2
-        exit 2
-      fi
-      if [[ "${backup_dir}" != /* || "$(realpath -e -- "${backup_dir}")" != "${backup_dir}" ]]; then
-        echo "OCSERV_BACKUP_DIR must be an absolute canonical path without symlink ancestry" >&2
-        exit 2
-      fi
-      ancestor="$(dirname -- "${backup_dir}")"
-      while true; do
-        IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
-        if [[ "${ancestor_uid}" != 0 && "${ancestor_uid}" != "$(id -u)" ]] \
-          || (( (8#${ancestor_mode} & 8#022) != 0 )); then
-          echo "OCSERV_BACKUP_DIR ancestry must be root- or launcher-owned and not group/world writable" >&2
-          exit 2
-        fi
-        [[ "${ancestor}" == / ]] && break
-        ancestor="$(dirname -- "${ancestor}")"
-      done
-      if [[ "${argument}" == "up" ]]; then
-        prepare_transport_runtime=true
-      fi
-      break
-      ;;
-  esac
-done
-
 compose=(docker compose --env-file /dev/null -p ocservia-production
-  -f "${ROOT}/deploy/production/compose.yaml"
-  -f "${ROOT}/deploy/production/${database_overlay}")
+  -f "${COMPOSE_ROOT}/deploy/production/compose.yaml" --profile "${database_deployment}-postgres")
 if [[ "${relay_ca}" == true ]]; then
-  compose+=(-f "${ROOT}/deploy/production/compose.relay-ca.yaml")
+  export OCSERV_RELAY_TRUST_SECRET=relay_ca OCSERV_RELAY_TRUST_TARGET=relay_ca
 fi
 if [[ "${deployment_mode}" == integrated ]]; then
-  compose+=(-f "${ROOT}/deploy/production/integrated/compose.signer.yaml"
-    -f "${ROOT}/deploy/production/integrated/compose.yaml")
-  if [[ "${tls_mode}" == acme ]]; then
-    compose+=(-f "${ROOT}/deploy/production/integrated/compose.acme.yaml")
+  compose+=(--profile "${tls_mode}")
+  if [[ -n "${OCSERV_ACME_CA_FILE:-}" ]]; then
+    export IROH_RELAY_ACME_CA=/run/secrets/acme_ca
   fi
-  if [[ "${acme_ca}" == true ]]; then
-    compose+=(-f "${ROOT}/deploy/production/integrated/compose.acme-ca.yaml")
-  fi
+  export OCSERV_SIGNER_CA_SECRET=certificate_signer_ca OCSERV_CERTIFICATE_SIGNER_CA_FILE=/run/secrets/certificate_signer_ca
   if [[ "${shared_domain}" == true ]]; then
-    compose+=(-f "${ROOT}/deploy/production/integrated/compose.shared-domain.yaml")
+    export OCSERV_RELAY_MODE_ARG=--dev OCSERV_RELAY_TLS_DIR="${secret_dir}"
+    export OCSERV_RELAY_ROUTE_PREFIX=relay
     if [[ "${tls_mode}" == acme ]]; then
-      compose+=(-f "${ROOT}/deploy/production/integrated/compose.shared-domain.acme.yaml")
+      export OCSERV_RELAY_ACME_VOLUME=gateway-acme:/var/lib/caddy-acme:ro
+      export OCSERV_RELAY_SHARED_ACME_DIR=/var/lib/caddy-acme OCSERV_RELAY_TEMPLATE=./integrated/relay.shared-acme.toml
     fi
   fi
+else
+  compose+=(--profile standalone)
 fi
-if [[ "${otel_enabled}" == true || "${teardown}" == true ]]; then
+if [[ "${otel_enabled}" == true ]]; then
   compose+=(--profile observability)
 fi
-if [[ "${deployment_mode}" == integrated ]]; then
-  # Check the merged model, not individual overlays or Compose list-merge assumptions.
-  "${compose[@]}" config --format json | jq -e --arg tls_mode "${tls_mode}" --arg shared_domain "${shared_domain}" '
-    ([.services | to_entries[] | .key as $service | .value.ports[]? |
-      [$service, .target, (.published | tostring), .protocol]] | sort) ==
-      [["edge", 8443, "443", "tcp"], ["relay", 7842, "7842", "udp"]] and
-    all(.services[]; (has("build") | not) and (.image | test("^[^\\s@]+@sha256:[0-9a-f]{64}$"))) and
-    (.networks.signer.internal == true) and
-    (.services.signer.networks | keys == ["signer"]) and
-    (.services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca") and
-    ($shared_domain == "false" or (.networks["gateway-relay"].internal == true)) and
-    ($tls_mode == "manual" or ([.services.gateway, .services.relay | .secrets[]?.source |
-      select(test("tls_"))] == []))
-  ' >/dev/null || { echo "Integrated rendered deployment contract rejected" >&2; exit 2; }
-fi
-if [[ "${prepare_transport_runtime}" == true ]]; then
-  if [[ "${otel_enabled}" == false ]]; then
-    "${compose[@]}" --profile observability rm --stop --force otel-collector
-  fi
-  "${compose[@]}" stop control-plane transportd
-  "${compose[@]}" run --rm --no-deps transport-runtime-init
-fi
 
-exec "${compose[@]}" "$@"
+backup_checked=false
+production_compose() {
+  local argument
+  for argument; do
+    case "${argument}" in
+      build|--build) echo "production lifecycle only consumes prebuilt images" >&2; return 2 ;;
+    esac
+  done
+  case "$1" in
+    run|create|up)
+      if [[ "${backup_checked}" == false ]]; then
+        protected_directory "${OCSERV_BACKUP_DIR:-}" 999:999:700 '%u:%g:%a' || return
+        backup_checked=true
+      fi ;;
+    down)
+      "${compose[@]}" --profile observability "$@"
+      return ;;
+  esac
+  if [[ "$1" == up ]]; then
+    if [[ "${otel_enabled}" == false ]]; then
+      "${compose[@]}" --profile observability rm --stop --force otel-collector
+    fi
+    # Release the public sockets and static IP held by a pre-profile gateway
+    # or relay when upgrading a standalone or ACME deployment.
+    if [[ "${deployment_mode}" == standalone ]]; then
+      "${compose[@]}" --profile manual rm --stop --force gateway
+    elif [[ "${tls_mode}" == acme ]]; then
+      "${compose[@]}" --profile manual rm --stop --force gateway relay
+    fi
+    "${compose[@]}" stop control-plane transportd
+    "${compose[@]}" run --rm --no-deps transport-runtime-init
+  fi
+  "${compose[@]}" "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  production_compose "$@"
+fi

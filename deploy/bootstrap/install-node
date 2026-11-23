@@ -10,7 +10,7 @@ fail() {
 
 usage() {
   echo "No arguments: hidden installation-token prompt (TTY required). --non-interactive: unattended, no prompts." >&2
-  echo "Options: --join-token, --join-token-file PATH, --resume-install, --version vX.Y.Z (Release default embedded)." >&2
+  echo "Options: --join-token, --join-token-file PATH, --resume-install, --package-sha256 HEX, --version vX.Y.Z (Release default embedded)." >&2
   echo "usage: install-node --version vX.Y.Z [--root-lifecycle]" >&2
   exit 2
 }
@@ -42,6 +42,9 @@ main() {
     case "$1" in
       --join-token|--resume-install)
         installer_args+=("$1"); shift ;;
+      --package-sha256)
+        [[ $# -ge 2 && "$2" =~ ^[a-fA-F0-9]{64}$ ]] || fail "--package-sha256 requires a 64-character hexadecimal digest"
+        installer_args+=("$1" "$2"); shift 2 ;;
       --join-token-file)
         [[ $# -ge 2 && -f "$2" ]] || fail "--join-token-file requires an existing protected file"
         installer_args+=(--join-token-file "$2"); shift 2 ;;

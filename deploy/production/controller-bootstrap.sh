@@ -248,8 +248,6 @@ select_lifecycle() {
 check_release_installer() {
   [[ -x "${TARGET}/deploy/production/install.sh" && ! -L "${TARGET}/deploy/production/install.sh" ]] ||
     fail "release ${VERSION} at ${TARGET} does not ship the production installer (deploy/production/install.sh is missing or not executable); use a release that does"
-  [[ "${QUICK}" == false || ( -x "${TARGET}/deploy/production/quick-install.sh" && ! -L "${TARGET}/deploy/production/quick-install.sh" ) ]] ||
-    fail "release ${VERSION} at ${TARGET} does not support --quick (deploy/production/quick-install.sh is missing); use a release that does"
 }
 
 require_run_tools() {
@@ -363,9 +361,9 @@ hand_off() {
   # Values already loaded under the invoking user's privileges.
   install_args+=(--config "${CONFIG_FILE}")
   if [[ "${QUICK}" == true ]]; then
-    echo "handing off to the Quick installer: ${TARGET}/deploy/production/quick-install.sh"
+    echo "handing off to the production installer: ${installer} --quick"
     [[ "${NON_INTERACTIVE}" == false ]] || QUICK_ARGS+=(--non-interactive)
-    exec "${TARGET}/deploy/production/quick-install.sh" "${QUICK_ARGS[@]}"
+    exec "${installer}" --quick "${QUICK_ARGS[@]}"
   fi
   if [[ "${ROOT_LIFECYCLE}" == true ]]; then
     # The installer performs its own controlled sudo re-exec for the root
@@ -413,8 +411,8 @@ fi
 resolve_source_root
 select_lifecycle
 [[ "${QUICK}" == false ]] || quick_preflight
-walk_source_root false
 if [[ "${CHECK_ONLY}" == true ]]; then
+  walk_source_root false
   check_root="$(mktemp -d)"
   trap 'rm -rf -- "${check_root}"' EXIT
   runtime_fetch "${check_root}/runtime" "${VERSION}"

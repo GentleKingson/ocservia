@@ -144,7 +144,7 @@ func (s *Service) rolloutNodeEligibility(now time.Time, node rolloutNodeObservat
 	case node.Architecture == "":
 		return "missing_release_metadata", [sha256.Size]byte{}, false
 	}
-	digest, trusted := s.releaseCatalog.Lookup(target, node.Architecture)
+	digest, trusted := s.releaseCatalog.Lookup(target, node.Architecture, node.OSRelease)
 	if !trusted {
 		return "missing_release_metadata", [sha256.Size]byte{}, false
 	}

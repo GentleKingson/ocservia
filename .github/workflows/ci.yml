@@ -193,8 +193,7 @@ jobs:
           persist-credentials: false
       - name: Relay launcher and installer contracts
         run: |
-          bash scripts/test-managed-node-install.sh
-          TEST_RELEASE_VERSION=0.2.1-rc.1 bash scripts/test-managed-node-install.sh release-contracts
+          python3 scripts/test-node-bootstrap.py
           bash scripts/test-controller-install.sh
           bash scripts/test-controller-bootstrap.sh
           bash scripts/test-controller-host-bootstrap.sh
@@ -205,9 +204,6 @@ jobs:
           docker run --rm --network none -v "$PWD:/source:ro" \
             python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
             python3 /source/scripts/test-relay-launchers.py
-          docker run --rm --network none -v "$PWD:/source:ro" \
-            python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
-            bash /source/scripts/test-agent-upgrade-retry.sh
 
   web:
     needs: ci-relevance

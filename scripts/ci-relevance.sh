@@ -125,12 +125,11 @@ classify_path() {
     # Installer-only contracts (avoids running unrelated release contract suites).
     .gitignore|deploy/managed-node/install.sh|deploy/production/install.sh|\
     deploy/production/controller-bootstrap.sh|deploy/lib/install-*.sh|\
-    deploy/lib/node-bootstrap.sh|deploy/lib/controller-runtime.sh|\
+    deploy/lib/node-bootstrap.sh|deploy/lib/quick-materials.sh|deploy/lib/controller-runtime.sh|\
     deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|\
     scripts/prepare-bootstrap-release-assets.sh|\
-    scripts/package-agent.sh|scripts/verify-agent-package.sh|\
-    scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|\
+    scripts/test-installer-common.sh|scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
     scripts/test-controller-host-bootstrap.sh|scripts/test-controller-lifecycle.sh|\
     scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-vpn-audit.py)
@@ -141,8 +140,7 @@ classify_path() {
       tools_suite guards; tools_suite release; run_installers=true ;;
     install.env.example|\
     scripts/*release*|scripts/*controller*|scripts/*agent-upgrade*|\
-    scripts/build-agent-binaries.sh|scripts/install-agent.sh|scripts/upgrade-agent.sh|\
-    scripts/rollback-agent.sh|scripts/uninstall-agent.sh|scripts/agent-package-smoke.sh|\
+    scripts/build-agent-binaries.sh|\
     scripts/package-native-agent.sh|scripts/verify-bootstrap-endpoint.sh|\
     deploy/package/*|deploy/systemd/*|deploy/bootstrap/*|deploy/managed-node/*|\
     deploy/production/*|deploy/prepare-transport-runtime.sh)
@@ -162,12 +160,12 @@ classify_path() {
   # Orthogonal checks independent of each file's primary behavior suite.
   case "${path}" in
     scripts/*.sh|scripts/*.py|deploy/*.sh|deploy/*.py|\
-    deploy/bootstrap/install-controller|deploy/bootstrap/install-node|\
+    deploy/bootstrap/install-node|\
     deploy/database-e2e/systemctl|deploy/managed-node/vpn-session-hook)
       tools_suite source-style ;;
   esac
   case "${path}" in
-    scripts/generate-controller-release-manifest.mjs|scripts/redact-release-upgrade-log.mjs|\
+    scripts/redact-release-upgrade-log.mjs|\
     scripts/release-business-browser.mjs|scripts/test-release-upgrade.mjs|\
     .github/actions/build-cache-credentials/index.js)
       run_web=true ;;

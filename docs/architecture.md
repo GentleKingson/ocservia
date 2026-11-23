@@ -10,6 +10,8 @@ A supported production deployment consists of one Controller instance, a relatio
 
 Control and data planes remain separate at runtime. Client VPN sessions terminate on the ocserv nodes, and tunnel payloads never pass through the Controller, transportd, or the Relay. If the control plane goes offline, administrative writes, validation, and new command dispatch stop. Established client VPN tunnels stay up unless the local node crashes or an invalid ocserv reload disrupts the daemon. Production deployments require pre-provisioned cryptographic keys, working DNS and TLS, PostgreSQL 18, and the Signer service.
 
+The v2.0.0 Controller holds a PostgreSQL session advisory lock for single-instance scheduling. The schema owner applies numbered Goose migrations. The runtime role checks the applied version on startup. Command authorization and enrollment use versioned, domain-separated transcripts with matching deterministic CBOR encoders in Go and Rust. Connection ownership still binds a command to its authenticated node session.
+
 ## High-level view
 
 ```mermaid
@@ -129,7 +131,7 @@ Before tuning concurrency settings or splitting services, measure queue depth, m
 ## Safety model
 
 - Production deployments pin immutable release tags or container image digests.
-- Managed-node packages are verified against an expected SHA-256 digest (supplied by the operator or a signed Controller upgrade command) before installation; a plain checksum guards against file corruption and does not grant execution authority.
+- The native DEB or RPM owns the node binaries, hooks and units. First-install verification accepts an operator-supplied digest. Controller-driven upgrades require the signed command’s digest and use a cached native package for recovery.
 - Private keys, TLS certificates, relay access tokens, and database or admin credentials are provisioned out of band in protected host directories.
 - One authenticated workspace Admin can authorize management writes. Transaction-time identity, session and resource checks remain enforced, along with exact operation intent, revisions, idempotency and signed root receipts ([authorization boundary](reference/stable-contracts.md#single-admin-authorization-boundary)).
 - Audit events commit in the same database transaction as the state changes they record.
@@ -145,12 +147,12 @@ Each subsection names who owns a behavior and where the boundary sits. Exact rul
 
 - The HTTP server serves the API and event streams.
 - The worker runs the operation outbox worker, ingests transport events, runs trust convergence, and serves the trust socket that transportd calls.
-- The scheduler runs one maintenance session at a time under a database leadership lease, ticking every 30 seconds. The fixed steps are user operations, Agent rollouts, telemetry rollups, certificate maintenance, audit checkpoints, and history retention. Only a rollout error lets the rest of the pass continue.
+- The scheduler runs one maintenance session at a time in the single active Controller, ticking every 30 seconds. The fixed steps are user operations, Agent rollouts, telemetry rollups, certificate maintenance, audit checkpoints, and history retention. Only a rollout error lets the rest of the pass continue.
 - On `SIGINT`/`SIGTERM` or the first runtime task error, the process stops HTTP admission and event streams, closes the trust socket, and waits up to `OCSERV_SHUTDOWN_TIMEOUT` for in-flight tasks.
 
-The scheduler classifies a failed maintenance session in [`scheduler.go`](../control-plane/internal/platform/app/scheduler.go). Leadership loss, a policy enforcement cleanup failure, and a temporarily unavailable database are logged and wait for the next tick. A cleanup failure also skips the remaining steps of that pass. During a database outage the HTTP server stays running so readiness can report it, and the scheduler neither replays transaction callbacks nor claims a known commit outcome. Any other error is logged as `alert_kind=user_operations.scheduler_failed` and ends the scheduler, so the process exits and the service supervisor restarts it. Cancellation of the process context ends the loop in every case.
+The scheduler classifies a failed maintenance session in [`scheduler.go`](../control-plane/internal/platform/app/scheduler.go). A policy enforcement cleanup failure and a temporarily unavailable database are logged and wait for the next tick. A cleanup failure also skips the remaining steps of that pass. During a database outage the HTTP server stays running so readiness can report it, and the scheduler neither replays transaction callbacks nor claims a known commit outcome. Any other error is logged as `alert_kind=user_operations.scheduler_failed` and ends the scheduler, so the process exits and the service supervisor restarts it. Cancellation of the process context ends the loop in every case.
 
-Database ownership is split between two entry points. A separate one-shot `--migrate-only` run uses the owner connection to apply schema changes, verify checksums and receipts, check audit event authentication, and only then grant access to the unprivileged runtime role. The long-running process holds only runtime credentials. Normal startup validates the deployment and audit authenticity, and `/readyz` reads the core tables. Neither is evidence of full checksum or receipt verification. The rules are in [Database](reference/stable-contracts.md#database).
+Database ownership is split between two entry points. A separate one-shot `--migrate-only` run uses the owner connection to apply pending Goose migrations, check audit event authentication, and only then grant access to the unprivileged runtime role. The long-running process holds only runtime credentials. Normal startup validates the deployment and audit authenticity, and `/readyz` reads the core tables. Startup also checks the applied Goose version. The rules are in [Database](reference/stable-contracts.md#database).
 
 The development stack in `deploy/compose` pairs the Controller with a Rust transport stub and a bounded node simulator, and avoids Iroh, ocserv, and privileged execution. The simulator is off unless `OCSERV_LOCAL_SIMULATOR=true` and is rejected in production builds. Development bearer authentication carries no persisted identity, so it cannot perform identity-bound administrative mutations. Production rejects both. The [README](../README.md#development) has the setup overview.
 
@@ -167,11 +169,11 @@ Each domain service owns its business invariants and opens its own transaction. 
 | `api.Server` config-plan handlers | `Plans.Create/Get/Apply` | The existing domain services. |
 | Parent authorization | `configPlanLookup.Resource` | Resource authorization stays in the parent; mutation authorization is rechecked inside the operation transaction. |
 
-- `platform/app` passes the configured service instances together with the caller's original request or scheduler context, which keeps any leadership fence active. Read-only and validation paths can run without a writer. A nil writer never falls back to another path and never lets a write succeed.
+- `platform/app` passes the configured service instances together with the caller's original request or scheduler context. Read-only and validation paths can run without a writer. A nil writer never falls back to another path and never lets a write succeed.
 - All stores that take part in one business operation bind to the same `database.Tx` inside `database.Within`. Business locks use PostgreSQL transaction advisory locks. A commit acknowledgement error leaves the outcome unknown, so callers do not replay writes blindly. Only database-only claim, completion, reaping, and lease work uses the retrying helper.
 - Upgrade preparation belongs to Operations. `PrepareAgentUpgrade` resolves the target through `operations/store.Store.UpgradeNode` and the operator-provisioned release catalog. `Create` still takes the locks, checks versions and replay state, validates node capabilities and attestation, revalidates mutation authority, and enforces the active-upgrade guard; preparing a target binds a trusted catalog entry without promising that the target is newer than the node's build.
 - `configplan.Service` (`Create`, `Get`, `Apply`, `Resource`) validates plan status and expiry against the service clock while the HTTP routes check workspace administrator authorization and domain services own prechecks, desired-revision allocation, and transaction-time authorization.
-- Lease and fence checks read a fresh database time after taking their locks. Takeovers increment the retained epoch in place, so stale holders keep failing their owner and epoch predicates.
+- Each new node connection increments its stored epoch. Connection ownership checks bind the node ID, connection ID, epoch and active state.
 
 ### HTTP layer
 
@@ -217,7 +219,7 @@ Users and groups belong to one node. The Controller persists desired state and t
 - The node owns the effect. Password and group changes go through privd, which keeps a root-only desired-effect store at `/var/lib/ocservia-privd/desired-effects.sqlite3`. Recovery reads that store and returns `UNKNOWN` when evidence is missing, so it never authorizes a retry on its own.
 - Password ciphertexts are sealed to enrolled node keys, and only privd holds the private keys. Each purpose has its own key pair.
 - The Agent records the last applied desired revision in its journal next to the command result and reports it in telemetry. A resource has converged only when that revision and the public state fingerprint both match desired state.
-- Telemetry ingestion converts per-session byte counters into durable monthly and lifetime usage. The scheduler enforces quota and expiry under its leadership lease by enqueuing typed `user_disable` operations, and re-enables users through deterministic enable operations at the start of a UTC month. Uncertain outcomes follow normal Unknown reconciliation.
+- Telemetry ingestion converts per-session byte counters into durable monthly and lifetime usage. The scheduler enforces quota and expiry by enqueuing typed `user_disable` operations, and re-enables users through deterministic enable operations at the start of a UTC month. Uncertain outcomes follow normal Unknown reconciliation.
 - Rolling back user or group state is a new forward desired-state mutation. Desired and observed rows, Agent journals, the privd desired-effect store, and policy, usage, and enforcement history stay intact.
 
 Request rules, limits, quota and expiry formats, and authorization checks are in [Users, groups and policy](reference/stable-contracts.md#users-groups-and-policy).

@@ -52,7 +52,7 @@ release_publish_local_manifest() {
       export "OCSERV_${name^^}_IMAGE=${ref}"
     fi
   done
-  node "${root}/scripts/generate-controller-release-manifest.mjs" --output "${output}" \
+  python3 "${root}/scripts/controller_release_manifest.py" --output "${output}" \
     --release-version "${version}" --release-tag "v${version}" --source-commit "${source_commit}" \
     --migration-dir "${root}/control-plane/migrations" --platform "linux/${arch}" \
     --manifest-version 2 "${manifest_args[@]}"

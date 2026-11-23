@@ -110,6 +110,9 @@ class BootstrapTest(unittest.TestCase):
             self.assertIn('--root-lifecycle', arguments)
             self.assertIn(source[0], arguments)
             self.assertNotIn('--join-token', arguments)
+        digest = 'a' * 64
+        forwarded = dispatch(['--resume-install', '--package-sha256', digest])
+        self.assertEqual(forwarded[forwarded.index('--package-sha256') + 1], digest)
         result = subprocess.run(['bash', installer, '--non-interactive'], cwd=self.work,
                                 env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -213,7 +216,7 @@ source "{ROOT}/deploy/lib/node-bootstrap.sh"
 fail() {{ echo "$1" >&2; exit 1; }}
 JOIN_STATE_DIR="$TEST_STATE"
 JOIN_ORIGIN=https://controller.example.test:8443
-SYSROOT="$TEST_STATE"
+PRIVD_ATTESTATION_KEY="$TEST_STATE/var/lib/ocservia-privd/attestation.key"
 PRIVD_BINARY="{privd}"
 ENDPOINT_ID={'6' * 64}
 USER_PASSWORD_SEAL_KEY_ID=user-v1

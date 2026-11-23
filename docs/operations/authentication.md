@@ -159,7 +159,7 @@ request bodies, or raw response headers.
 Ocservia ships with no default administrator password. On a manual
 installation, operators initialize the single Local administrator through a
 separate one-shot command outside the normal install and restart path. A
-Quick installation (`quick-install.sh`) runs the equivalent initialization
+Quick installation (`install.sh --quick`) runs the equivalent initialization
 automatically. It provisions the management workspace using the owner one-shot
 below, generates an eight-character random password, and runs `--bootstrap-local-admin` to
 create `admin` and bind it in `workspace_admins`. Its credential is
@@ -185,7 +185,7 @@ a Quick host, because Quick reruns accept an already-initialized database.
    For candidate deployments, source `scripts/release-common.sh` only in
    the Bash process that generates the candidate manifest. Run administrator
    initialization in a separate Bash process and export the image references from
-   the installed `current-release.json` (under `/var/lib/ocservia-controller`
+   the `.current.images` object of `release-history.json` (under `/var/lib/ocservia-controller`
    by default) before calling Compose. The release helper declares the PostgreSQL
    and OpenTelemetry image variables read-only in its shell.
 2. Obtain the UUIDv7 of the management workspace. `--bootstrap-local-admin`

@@ -139,50 +139,28 @@ bootstrap launcher -> exact vX.Y.Z versioned installer -> HTTPS native package
         -> active node + privd attestation -> service activation
 ```
 
-The bootstrap launcher and the initial versioned installer and native package downloads rely on HTTPS. Before invoking the package manager, the installer copies the downloaded native package into root-owned staging and verifies that its bytes remain unchanged. That transport check applies only to initial installation; an AgentUpgrade instead verifies against the SHA256 carried in the already-authorized Controller command. The `oit1_` installation token authorizes the complete automatic flow, issuing a derived `obt2_` Agent credential, immediately activating `nodes.status = 'active'`, and registering the root-owned `privd` attestation key via `/api/v1/node-bootstrap/{attestation,register}`. The fixed Release installer and native package need no source checkout or Git. The bootstrap launcher plays no role in ongoing lifecycle operations.
-
-The verifier copies only the archive into a unique `root:root` mode `0700` directory below `/var/lib/ocservia-upgrade/package-staging`, compares the copied archive SHA256 with the caller-supplied expected digest, rejects unsafe archive paths and member types, and extracts that root-owned copy. Install and upgrade scripts accept only the verified directory printed by the verifier; never extract or run installers from a download directory, and remove the verified staging directory after the lifecycle operation succeeds. `PACKAGE_ARCH` pins the package architecture (`amd64` or `arm64`), which the MANIFEST records as `arch=`. On a real host install (no `DESTDIR`), the verifier also checks host architecture equivalence (`x86_64` for `amd64`, `aarch64` for `arm64`) and rejects a foreign-architecture package before anything is staged.
+The installer downloads the pinned native package over HTTPS. To verify it against an independently obtained digest, pass `--package-sha256 HEX`. It stages the file under root ownership and retains the package in `/var/lib/ocservia-upgrade/package-spool/` for rollback. A one-token installation then provisions identity, exchanges the installation token, registers privd attestation and activates the services.
 
 ### Build a package locally
 
-Formal Releases build inside the isolated Rocky Linux builder via `scripts/build-release-agent.sh` in the Release workflow after [Release Check](../development/release-checks.md) passes. For a local development build on a native Linux host, build all three node binaries natively on the package's target architecture, then create a deterministic package. Set one explicit SemVer `VERSION` so the compiled Rust binaries (`OCSERV_AGENT_RELEASE_VERSION`), `package-agent.sh` (`VERSION`, checked against each binary's `--version` output), the archive name, and the SHA-256 verification input all match:
+Build the release binaries on their target architecture, then package those binaries using the pinned nFPM tool:
 
 ```bash
-: "${VERSION:?set the SemVer package version, such as 1.2.3}"
-(cd rust && OCSERV_AGENT_RELEASE_VERSION="${VERSION}" cargo build --locked --release \
-  --package ocservia-agent --package ocservia-privd --package ocservia-upgrader)
-OUTPUT_DIR=dist \
-  VERSION="${VERSION}" PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200 scripts/package-agent.sh
-# A plain checksum detects transfer corruption; it is not an authorization key.
-EXPECTED_SHA256="$(awk '{print $1}' "dist/ocservia-agent-${VERSION}-linux-amd64.tar.gz.sha256")"
-VERIFIED_PACKAGE="$(sudo scripts/verify-agent-package.sh \
-  "dist/ocservia-agent-${VERSION}-linux-amd64.tar.gz" "${EXPECTED_SHA256}")"
-sudo INSTALL_PRODUCTION_RELAYS=true \
-  "${VERIFIED_PACKAGE}/scripts/install-agent.sh"
+source scripts/env.sh
+export VERSION=2.0.0 PACKAGE_ARCH=amd64 SOURCE_DATE_EPOCH=1786147200
+export OUTPUT_DIR="$PWD/dist"
+(cd rust && OCSERV_AGENT_RELEASE_VERSION="$VERSION" cargo build --locked --release \
+  -p ocservia-agent -p ocservia-privd -p ocservia-upgrader)
+bash scripts/package-native-agent.sh
 ```
-
-Build native packages from the archive and checksum created above using the same `VERSION`:
-
-```bash
-OUTPUT_DIR=dist VERSION="${VERSION}" PACKAGE_ARCH=amd64 \
-  SOURCE_DATE_EPOCH=1786147200 scripts/package-native-agent.sh
-```
-
-Package file names are listed under Package names in [Contract owners](../reference/stable-contracts.md#contract-owners).
 
 ### Native installer packages
 
-Each release publishes the node archive and its plain `.sha256`, plus native DEB and RPM installers for both `amd64` and `arm64`.
-
-The `.deb` and `.rpm` packages embed only the archive, its plain checksum, and the verifier under `/usr/share/ocservia-agent`, and depend on `openssl`, `python3`, and `util-linux`. Their scriptlets contain no layout logic: `postinst` refuses a host-architecture mismatch, verifies the archive into trusted staging, and runs the verified `install-agent.sh` on a fresh host or `upgrade-agent.sh` on an existing installation.
-
-Installing or upgrading a package never enables or starts the Agent or privd units outside the one-token bootstrap flow. Operators using manual archive provisioning must first provision `/etc/ocservia-agent/agent.env` and the keys, then enable both units manually. An upgrade or an identical-package retry runs `systemctl try-restart` on `ocservia-privd` and `ocservia-agent`, restarting units that are already running while leaving stopped units stopped.
-
-A production managed node requests the relay contract before invoking the package manager by creating `/etc/ocservia/agent-install-production-relays` as a regular file. `postinst` then passes `INSTALL_PRODUCTION_RELAYS=true` into the verified lifecycle on both fresh installs and upgrades, sourcing the production relay drop-in and `relays.env` exclusively from the verified embedded payload (never from a source checkout). This marker file is consumed only after the verified lifecycle succeeds, keeping a failed install or upgrade retryable. A real package removal (as opposed to an upgrade) deletes any unconsumed request so it cannot affect a later plain install. Once installed, the drop-in records the standing production intent, and subsequent upgrades reinstall it whenever the drop-in is already present, with or without the marker. Without the marker or an existing drop-in, a native install stays relay-free.
+Each release publishes DEB and RPM packages for amd64 and arm64. The package manager owns the binaries, hook files and systemd units. Inspect an installed file with `dpkg -S /usr/libexec/ocservia/ocservia-agent` or `rpm -qf /usr/libexec/ocservia/ocservia-agent`. On RPM systems, `rpm -V ocservia-agent` verifies the installed payload against the package database. Complete enrollment and provisioning before enabling the services.
 
 ### Manual trust provisioning
 
-For the manual archive path, provision trust before service activation. The commands below install existing key material that was provisioned independently (do not use generated example keys).
+For a manual native installation, provision trust before service activation. The commands below install existing key material that was provisioned independently (do not use generated example keys).
 
 Before enabling the units, install the independently provisioned Controller command verification key and two distinct RSA private keys for user-password and P12-password unsealing. Edit `/etc/ocservia-agent/agent.env` with the Controller key path, controller EndpointID, node UUID, distinct sealing key IDs, and the lowercase SHA-256 of each public key's DER encoding:
 
@@ -360,79 +338,15 @@ If an operator changes any startup-only setting during maintenance, `ocserv` mus
 
 ## Upgrade and rollback
 
-Upgrade an existing managed node by installing an explicitly selected Agent package, or through a Controller-driven upgrade. The v1.1.0 scripts remove source-version windows and target-version ordering checks, but cross-version operation is still not guaranteed to be safe. Previously installed older scripts retain their original checks, and the lifecycle does not convert historical deployments; see the [version policy](production-deployment.md#version-policy). The package scripts do not automatically enroll keys, reset node identity, or purge existing certificate artifacts, and the former upgrade-time enrollment environment variables and marker are no longer used. Removing historical layout checks does not make arbitrary cross-version operations safe or grant an installed binary capabilities it does not implement.
-
 ### Upgrade
 
-Native package installation runs the same verified repository lifecycle as the archive installer. An upgrade installs the matching complete node package: the Agent, privd and upgrader binaries, the rollback and verification tools, the production Relay launcher, and the systemd units. It keeps the existing identity, configuration and durable state. It does not enroll or authorize the node, and it cannot recover state left behind by a failed upgrade (use [Rollback](#rollback) for recovery).
-
-Before you begin:
-
-- Confirm that the verified target package matches the host architecture.
-- Obtain the architecture-specific native package over HTTPS from the selected GitHub Release in accordance with [Native installer packages](#native-installer-packages). During installation, the native scriptlets verify the plain checksum of their embedded archive in protected staging. A Controller-driven AgentUpgrade instead verifies `package_sha256` directly from its already-authorized command.
-- Check that `/etc/ocservia-agent/agent.env` and its trust and sealing keys are valid. Command protocol `1.1` fails closed: provision the Controller command verification public key before upgrading the Agent and privd pair. Both services load the key independently, and privd also pins `NODE_ID`. Schedule the binary rollout and Controller signing-key enablement within a single maintenance window, because new binaries reject unsigned legacy mutations at both the command journal and root-effect boundaries. During a signing-key rotation, keep both the old and new public keys pinned until old authorizations expire and all Unknown outcomes are reconciled.
-- Schedule a current recovery window so you can verify the node after restart. Upgrading restarts both a running Agent and `privd`, which briefly interrupts the node's Relay session and any in-flight operation.
-- Make sure no earlier install attempt on the node was left unfinished. An interrupted install can leave an `installing-package` record under `/var/lib/ocservia-upgrade`. While it exists, the lifecycle refuses any different package until you run a verified [rollback](#rollback). Retrying the exact same verified package clears the record.
-
-Set `RELEASE_DIR` to the directory holding the architecture-specific native package you downloaded and verified, and `AGENT_PACKAGE` to its file name. Pass that exact verified path to the package manager; do not point it at another copy over a relative path.
-
-On Debian or Ubuntu:
-
-```bash
-sudo dpkg -i "$RELEASE_DIR/$AGENT_PACKAGE"
-```
-
-On an RPM-based system:
-
-```bash
-sudo rpm -Uvh "$RELEASE_DIR/$AGENT_PACKAGE"
-```
-
-Before changing backups, binaries, systemd units, or services, `upgrade-agent.sh` runs a strict preflight against the existing trust configuration. It verifies that `agent.env` contains a single absolute `CONTROLLER_COMMAND_VERIFICATION_KEY_FILE` and that the referenced Ed25519 public key satisfies the combined Agent and privd requirements for file type, ownership, mode, link count, symlinks, size, and directory ancestry. The shared key must be independently provisioned as `root:ocserv-agent` mode `0440` or `0640` beneath root-controlled ancestry; an Agent-owned legacy key is rejected and never promoted into a root trust anchor. The preflight also requires two distinct enrolled sealing key IDs and public-key fingerprints, derives each fingerprint from its root-owned private key, and rejects missing, reused, mismatched, symlinked, or unsafe key files. A legacy two-line `agent.env` or an invalid key therefore halts the upgrade with provisioning instructions before installing an Agent that would fail to restart. These checks enforce current trust requirements regardless of the source software version.
-
-Once the preflight passes, the script saves one matched snapshot under the root-only `/var/lib/ocservia-upgrade/upgrade-backup` hierarchy covering the previous Agent and privd binaries, both base systemd units, the production relay drop-in and launcher, the durable upgrader binary and unit, the verifier, the VPN session wrapper, the audit collector and the network audit unit. Keeping this directory outside privd's systemd-managed `StateDirectory` prevents service startup from rewriting rollback evidence ownership. A root-owned manifest binds the 12 snapshot digests, and rollback rejects unsafe ancestry, symlinks, hard links, ownership, modes, or file replacement. Optional files carry explicit `.previous` or `.absent` records that tell rollback whether to restore or remove the installed file. Upgrading to a different package overwrites the previous snapshot, leaving only the most recent pre-upgrade state available for restoration. Reinstalling an identical verified package keeps the existing snapshot intact and restarts the running services.
-
-Before modifying package-owned files, the upgrade script persists the complete snapshot, atomically publishes the verified standalone rollback driver, and records the verified target digest in `/var/lib/ocservia-upgrade/installing-package`. If an upgrade is interrupted, a subsequent direct or native-package retry refuses to overwrite the existing snapshot; run the verified rollback first to restore the host, then retry the package operation. A matching completed retry clears a stale `installing-package` record only after verifying the installation commit, every package-owned file, and the rollback snapshot, while rollback clears the record only after all restores and removals are synced across filesystems. Neither path alters Controller binding authority or reverses database migrations.
-
-To verify an upgrade, check the local units:
-
-```bash
-systemctl status ocservia-privd.service ocservia-agent.service
-```
-
-Then check the Controller inventory to confirm that the node is online with a fresh target-version observation. Local `systemctl` status only proves the services started on the host; you still need the Controller inventory to verify node trust and fresh data.
-
-If preflight validation detects an unsafe trust configuration, host architecture, or upgrade snapshot, the package lifecycle aborts before modifying the installation. Fix the reported prerequisite and retry the same package. If the new binaries have already been installed and must be reverted, run the [rollback](#rollback) command. Never use a package-manager downgrade as a rollback mechanism, because it skips the matched snapshot contract.
+Use the pinned native package for the node's architecture and distribution. Keep the previous package in the root-owned package spool, together with backups of the node's configuration, keys and journals. On Debian systems install the candidate with `dpkg -i /path/to/package.deb`. On RPM systems use `rpm -U /path/to/package.rpm`. Verify the installed version and the health of both node services.
 
 ### Rollback
 
-Rollback restores the complete matched snapshot captured during the most recent upgrade. Both upgrade and rollback preserve endpoint identity, the durable Agent database, the command journal, and configuration. Rollback modifies only the installed Agent-side files on the host, leaving the Controller, its database, and the node's identity and enrollment state untouched.
+To recover a manual upgrade, reinstall the previous DEB with `dpkg -i`, or the previous RPM with `rpm -U --oldpackage`. Check the Agent and privd units and confirm the observed Agent version on the Controller. The package manager restores package-owned files. Restoring operator configuration or application data requires a compatible backup.
 
-Before you begin:
-
-- Place the node in a controlled recovery window.
-- Confirm that the root-only upgrade snapshot at `/var/lib/ocservia-upgrade/upgrade-backup` is present and unmodified.
-- Reconcile any Controller operation affected by the outage. Running rollback stops the Agent, `privd`, and active upgrader units, and marks every non-terminal (`accepted` or `running`) local upgrade operation `rolled_back` so it cannot be re-applied afterwards.
-- Check the manifest format. Current snapshots contain 12 entries. Four are required (Agent and privd binaries and base units). Eight record prior presence or absence for the Relay drop-in and launcher, upgrader binary and unit, verifier, `vpn-session-hook`, `vpn-audit.py` and `ocservia-network-audit.service`. The current driver also accepts complete legacy 9-entry snapshots for restoration. Legacy 8-entry snapshots support verification only.
-- To validate the snapshot before changing anything on disk, run `sudo /usr/libexec/ocservia/ocservia-agent-rollback --verify-only`.
-
-To roll back the complete matched snapshot, run:
-
-```bash
-sudo /usr/libexec/ocservia/ocservia-agent-rollback
-```
-
-The rollback command validates the complete snapshot and target destinations before stopping services. It restores binaries and units together (including the production relay drop-in and launcher state), reloads systemd, and starts privd before the Agent unconditionally, even if those services were stopped before rollback began. When a current snapshot records that the network collector unit was absent, rollback disables and removes it. If the session wrapper was absent, rollback installs a success-only executable at its path so a running ocserv can still invoke its configured hook. The local audit queue survives rollback. The command clears any pending `installing-package` record. The standalone rollback driver itself remains on disk so it can finish executing and re-read the snapshot if invoked again. Restoring binaries without their matching units is unsupported because the CLI and local wire contract can change together; never restore one binary on its own.
-
-The verifier and rollback script do not infer a software version from a missing Relay launcher or reject a snapshot on that basis alone. Any launcher referenced by a service unit must still exist on disk, and all snapshot integrity, trust, and configuration checks continue to apply. Operator configuration, node identity, and persistent state are preserved without silent conversion or reset. Removing the version check does not guarantee that the restored binary will work with the current configuration or on-disk data, and older scripts already installed on the host keep their original behavior.
-
-Rollback coordinates directly with the [durable upgrade state](#durable-self-upgrade-runner): it stops any running `ocservia-upgrader@*.service` instance, marks non-terminal operations `rolled_back` so a stale runner cannot re-apply the rolled-back release, and restores or removes the upgrader binary, the `ocservia-upgrader@.service` unit, and the installed verifier according to the matched snapshot (`.previous` restored, `.absent` removed).
-
-A rollback also restores the previous release's security properties, so treat it as a temporary recovery measure and move to a fixed release promptly. The privd attestation rollback requirements are in [Privd receipt v1](../reference/stable-contracts.md#privd-receipt-v1).
-
-To verify the rollback, run `systemctl status ocservia-privd.service ocservia-agent.service`. Before sending new work to the node, confirm in the Controller that the node has reconnected under the expected previous version and is reporting fresh capabilities and trust state. Completing the local rollback does not by itself prove that the Controller accepts the node.
-
-If rollback fails, stop immediately and preserve both the snapshot and host diagnostics instead of repeatedly rerunning the upgrade or rollback commands. Rollback validates the entire snapshot before changing any files, so an error reported during validation leaves the installed files untouched. A failure after services have been stopped can leave the node offline. Never replace the snapshot with files from an arbitrary download directory.
+When moving a node from a release with the archive-based runner, install the first native-managed release with the system package manager. Keep that DEB or RPM under its release filename in the root-owned package spool (mode 0600) before issuing the next Controller-driven upgrade.
 
 ### Controller-driven single-node upgrade
 
@@ -444,13 +358,14 @@ The console exposes one reconciled upgrade endpoint per node: `POST /api/v1/node
     {
       "version": "1.2.3",
       "architecture": "amd64",
+      "package_format": "deb",
       "package_sha256": "<64 lowercase hex characters>"
     }
   ]
 }
 ```
 
-This manifest is the only digest source for the workflow and must list between 1 and 512 unique `(version, architecture)` entries; once `OCSERV_AGENT_RELEASE_MANIFEST` is set, a missing, unreadable, malformed, or ambiguous file aborts Controller startup. The Controller does not synchronize with GitHub or container registries, so preparing an upgrade consists of placing the archive in each node's local spool (see [Durable self-upgrade runner](#durable-self-upgrade-runner)) and adding its exact digest to the manifest. Under the v1.1.0 policy reset, the Controller accepts any explicit trusted target regardless of whether it is lower, equal, or higher than the current version or whether the source version is unknown; version classifications shown in the UI are informational and do not govern execution. Each request must still supply the node's current revision (`If-Match`) and preserve the exact `node + version + digest + architecture` release identity.
+This manifest is the only digest source for the workflow and must list between 1 and 512 unique `(version, architecture, package_format)` entries; once `OCSERV_AGENT_RELEASE_MANIFEST` is set, a missing, unreadable, malformed, or ambiguous file aborts Controller startup. The Controller does not synchronize with GitHub or container registries, so the operator records the exact digest of each target DEB or RPM from the pinned release. Under the v1.1.0 policy reset, the Controller accepts any explicit trusted target regardless of whether it is lower, equal, or higher than the current version or whether the source version is unknown; version classifications shown in the UI are informational and do not govern execution. Each request must still supply the node's current revision (`If-Match`) and preserve the exact `node + version + digest + architecture` release identity.
 
 To dispatch the upgrade, the Controller requires the node's typed-command capability (`ocserv.agent.upgrade.v2` or `ocserv.agent.upgrade.v1`, preferring v2 when both are active) and binds that exact capability name into the signed command. Nodes advertising only v1 remain eligible despite lacking the former software downgrade fence; the Controller never fabricates capabilities or converts historical payloads. The already-installed runner executes the command, so previously installed code retains its own runtime behavior. Advertising a command capability does not guarantee cross-version safety or certify historical version combinations.
 
@@ -464,9 +379,7 @@ Controller-driven upgrades run outside the Agent and privd processes. When privd
 
 Each operation directory contains three fixed `root:root` mode `0600` records written atomically via write, fsync, and rename: `intent` (holding the schema version, operation and command IDs, target version, package digest, architecture, and semantic payload hash, all immutable once committed), `state` (one of `accepted`, `running`, `succeeded`, `failed`, or `rolled_back`), and `result` (terminal evidence written upon completion). Replaying the same operation ID with an identical signed identity converges on the committed intent. Reusing an operation ID with a different identity is rejected. Only one active operation may exist per node. If privd loses its effect journal between committing the intent and recording journal completion, the durable intent store serves as the idempotency authority for this command family.
 
-The runner loads packages exclusively from the fixed local spool directory `/var/lib/ocservia-upgrade/package-spool`, without performing URL fetches or accepting caller-supplied paths. Before issuing the upgrade command, the operator or provisioning pipeline must place `ocservia-agent-<version>-linux-<arch>.tar.gz` in that spool as a non-empty regular file (no symlinks or hard links, within the runner's size limit) owned by root and not writable by group or world; otherwise the upgrade fails with unsafe spool metadata. The runner verifies that the spool archive digest equals `package_sha256` in the durable intent and passes that exact digest to `/usr/libexec/ocservia/ocservia-agent-verify`, which copies the archive into root-owned staging, re-checks its SHA256, and extracts it safely. Any digest mismatch fails closed before the lifecycle runs. Once the verified marker matches the intent, the runner executes the package's `upgrade-agent.sh` script, re-verifies the installed binaries against the verified package, restarts `ocservia-privd` and `ocservia-agent`, and writes the terminal result. If the runner crashes or restarts mid-flight, a `running` operation whose installation commit record and installed binaries already match the package skips repeating the destructive lifecycle, and any validation failure records `failed` evidence before exiting non-zero.
-
-All native DEB and RPM packages (`amd64` and `arm64`) include the durable runner: `install-agent.sh` installs the runner binary, the `ocservia-upgrader@.service` unit and the verifier, every package carries them, and `uninstall-agent.sh` removes them.
+On a cache miss, the runner downloads from the exact tag in the project’s GitHub Releases. It uses the installed native package format and the architecture and version from the authorized operation to select the release asset. It verifies the target against the signed SHA-256 digest before invoking the package manager. Keep the exact currently installed package in the root-owned spool under its release filename. This gives the runner a local downgrade path when a service health check fails. Inspect the terminal result and observed version after recovery.
 
 ### Fleet rolling upgrades
 
@@ -484,9 +397,7 @@ Rollout state persists across Controller restarts and console sessions. Viewing,
 
 ## Remove a node package
 
-Package removal (`dpkg -r`, `rpm -e`) runs the verified `uninstall-agent.sh`, which disables and stops the Agent, privd and optional network collector units. It removes the collector, units and production Relay launcher. The session wrapper stays in place for ocserv configurations that reference it. Identity, configuration and the pending audit queue survive ordinary removal. The Controller then shows the node offline. Neither `dpkg --purge` nor the package manager triggers the state purge; only `uninstall-agent.sh --purge-state` does so.
-
-Passing `--purge-state` is irreversible and should only be done after revoking the node identity on the Controller (see [Revoke a node](#revoke-a-node)) and archiving required audit material. It deletes the Agent and privd state directories, the VPN audit spool (including events awaiting upload), `/var/lib/ocservia-upgrade` (including the rollback snapshot, preventing any subsequent rollback), and `/etc/ocservia-agent` (`agent.env`, keys, and relay token), and then removes the `ocserv-agent` user and group. Purging local state does not update the Controller, so revoke the node record there separately.
+Run `dpkg -r ocservia-agent` or `rpm -e ocservia-agent` to stop the services and remove the package-owned files. Node identity, journals and operational state are separate from the installed payload. Revoke the node on the Controller before permanently retiring it, and archive any audit records required for retention.
 
 ## Diagnostics
 

@@ -93,8 +93,7 @@ for compose in production.rglob('compose*.yaml'):
 assert not (root / '.git').exists()
 assert not (root / 'control-plane').exists()
 DEPENDENCIES
-for entry in install.sh quick-install.sh; do
-  cat >"${fixture}/payload/deploy/production/${entry}" <<'MOCK'
+cat >"${fixture}/payload/deploy/production/install.sh" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"${TEST_ROOT}/handoff"
 printf '%s\n' "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_DATABASE_BACKEND:-}" >"${TEST_ROOT}/environment"
@@ -102,8 +101,7 @@ for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; d
   printf '%s=%s\n' "${name}" "${!name-<unset>}"
 done >"${TEST_ROOT}/auth-environment"
 MOCK
-  chmod 755 "${fixture}/payload/deploy/production/${entry}"
-done
+chmod 755 "${fixture}/payload/deploy/production/install.sh"
 pack() {
   (cd "${fixture}/payload" && find deploy install.env.example RELEASE -type f | sort | xargs sha256sum >SHA256SUMS)
   (cd "${fixture}/payload" && find deploy install.env.example RELEASE SHA256SUMS -type f | sort | tar -czf "${fixture}/assets/controller-runtime-v4.5.6.tar.gz" -T -)

@@ -275,7 +275,7 @@ func (s *Service) applyAgentUpgradeEligibility(node *Node, upgradeEligible bool)
 	if s.agentUpgradeCatalog == nil || node.ConnectionState != "online" || node.Freshness != "fresh" || node.Architecture == "" {
 		return
 	}
-	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture); !trusted {
+	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture, node.OSRelease); !trusted {
 		return
 	}
 	node.AgentUpgradeEligible = upgradeEligible

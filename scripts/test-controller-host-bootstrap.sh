@@ -20,7 +20,7 @@ stat -c '%u' . >/dev/null 2>&1 || {
 
 # Keep the fixture under HOME: /tmp is world-writable (mode 1777), which the
 # state root ancestry contract must reject.
-fixture="$(mktemp -d "${HOME}/.ocservia-bootstrap-test.XXXXXX")"
+fixture="$(mktemp -d "${TMPDIR:-${HOME}}/.ocservia-bootstrap-test.XXXXXX")"
 
 cleanup() {
   local status=$?
@@ -74,7 +74,7 @@ link_tool() {
   [[ -n "${path}" ]] || die "required test tool not found: ${tool}"
   ln -s "${path}" "${rootfs_bin}/${tool}"
 }
-for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm realpath env runuser rename.ul; do
+for tool in bash stat install mkdir chown dirname cat grep id chmod cp rm realpath env runuser; do
   link_tool "${tool}"
 done
 
@@ -255,6 +255,7 @@ mark_all_tools_installed() {
   cat >"${dpkg_db}" <<'EOF'
 jq
 util-linux
+python3
 curl
 openssl
 ca-certificates
@@ -470,27 +471,6 @@ EXTRA_ENV=("OCSERV_CONTROLLER_STATE_ROOT=${work}/link/state-root")
 capture self check
 assert_status 1 "symlink ancestry must fail the host check"
 assert_output "symlink ancestry"
-
-# rename.ul publishes the Quick materials, so a host without it fails the
-# check, and Ubuntu 26.04 needs util-linux-extra for it.
-provisioned_host
-install -d -m 0700 -- "${work}/state-root"
-rm -f -- "${rootfs_bin}/rename.ul"
-capture self check
-link_tool rename.ul
-assert_status 1 "a host without rename.ul must fail the host check"
-assert_output "rename.ul is not available"
-assert_log_empty "${apt_log}"
-
-reset_scenario
-os_release="${fixture}/os/ubuntu-26.04"
-install_docker_mock
-mark_all_tools_installed
-install -d -m 0700 -- "${work}/state-root"
-capture self check
-assert_status 1 "Ubuntu 26.04 without util-linux-extra must fail the host check"
-assert_output "required package 'util-linux-extra' is not installed"
-assert_log_empty "${apt_log}"
 
 # 10g. The backup writer rejects an unprotected backup path before it backs up and
 # never reuses an existing staging or output object.
@@ -766,15 +746,6 @@ PLATFORMS
   [[ ! -e "${work}/loose/state-root" ]] ||
     die "install created a state root under unsafe ancestry"
   echo "install refuses to create a state root under unsafe ancestry"
-  # 18b. an unobtainable rename.ul fails the install instead of continuing.
-  reset_scenario
-  rm -f -- "${rootfs_bin}/rename.ul"
-  capture sudo install
-  link_tool rename.ul
-  assert_status 1 "install must fail when rename.ul stays unavailable"
-  assert_output "rename.ul is unavailable"
-  echo "install fails closed when rename.ul cannot be obtained"
-
   # 18a. a correct 999:999 0700 leaf still needs protected ancestry.
   provisioned_host
   install -d -m 0700 -- "${work}/state-root"

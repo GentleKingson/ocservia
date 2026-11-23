@@ -7,7 +7,7 @@ VERSION="${VERSION:?VERSION is required}"
 [[ $# == 0 && "$VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]] || exit 2
 ASSET_DIR="$(cd -- "$ASSET_DIR" && pwd)"
 work="$(mktemp -d)"
-trap 'sudo rm -rf -- "$work"' EXIT INT TERM
+trap 'rm -rf -- "$work"' EXIT INT TERM
 require_asset() {
   [[ -f "$ASSET_DIR/$1" && ! -L "$ASSET_DIR/$1" && -s "$ASSET_DIR/$1" ]] || {
     echo "missing or unsafe release asset: $1" >&2
@@ -26,7 +26,7 @@ mkdir "$work/expected"
 for asset in install-controller install-node controller-bootstrap.sh managed-node-bootstrap.sh install.env.example; do
   cmp "$ASSET_DIR/$asset" "$work/expected/$asset"
 done
-"$ROOT/scripts/check-release-bootstrap.sh" "$ASSET_DIR/install-controller" "v$VERSION"
+cmp "$ASSET_DIR/install-controller" "$ASSET_DIR/controller-bootstrap.sh"
 # Reuse the installer's archive checks, reading local build assets here.
 # shellcheck source=deploy/lib/controller-runtime.sh
 source "$ROOT/deploy/lib/controller-runtime.sh"
@@ -37,35 +37,21 @@ tar -xOf "$work/expected/controller-runtime-v$VERSION.tar.gz" SHA256SUMS >"$work
 cmp "$work/runtime/SHA256SUMS" "$work/expected-runtime-checksums"
 for arch in amd64 arm64; do
   case "$arch" in amd64) rpm_arch=x86_64; elf_word=x86-64 ;; arm64) rpm_arch=aarch64; elf_word=aarch64 ;; esac
-  archive="ocservia-agent-$VERSION-linux-$arch.tar.gz"
   deb="ocservia-agent_${VERSION}-1_${arch}.deb"
   rpm="ocservia-agent-$VERSION-1.$rpm_arch.rpm"
-  for asset in "$archive" "$archive.sha256" "$deb" "$rpm"; do require_asset "$asset"; done
-  (cd "$ASSET_DIR" && sha256sum --check "$archive.sha256")
-  rootfs="$work/rootfs-$arch"
-  sudo install -d -o root -g root -m 0700 "$rootfs" "$rootfs/var/lib"
-  expected="$(awk '{print $1}' "$ASSET_DIR/$archive.sha256")"
-  package_root="$(sudo env DESTDIR="$rootfs" "$ROOT/scripts/verify-agent-package.sh" "$ASSET_DIR/$archive" "$expected")"
-  sudo grep -Fxq "arch=$arch" "$package_root/MANIFEST"
-  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
-    description="$(sudo file -b "$package_root/rust/target/release/$binary")"
-    [[ "$description" == *"$elf_word"* ]] || { echo "$binary is not native $arch" >&2; exit 1; }
-  done
+  require_asset "$deb"
+  require_asset "$rpm"
   [[ "$(dpkg-deb -f "$ASSET_DIR/$deb" Architecture)" == "$arch" ]]
   [[ "$(rpm -qp --qf '%{ARCH}' --nosignature "$ASSET_DIR/$rpm" 2>/dev/null)" == "$rpm_arch" ]]
   [[ "$(dpkg-deb -f "$ASSET_DIR/$deb" Version)" == "${VERSION/-rc./~rc.}-1" ]]
   [[ "$(rpm -qp --qf '%{VERSION}-%{RELEASE}' --nosignature "$ASSET_DIR/$rpm" 2>/dev/null)" == "${VERSION/-rc./~rc.}-1" ]]
   mkdir -p "$work/deb-$arch" "$work/rpm-$arch"
   dpkg-deb -x "$ASSET_DIR/$deb" "$work/deb-$arch"
-  # Some rpm2cpio versions return nonzero after writing a complete payload.
-  rpm2cpio "$ASSET_DIR/$rpm" >"$work/payload.cpio" || true
-  test -s "$work/payload.cpio"
-  (cd "$work/rpm-$arch" && cpio -idm --quiet --no-absolute-filenames <"$work/payload.cpio")
-  for family in deb rpm; do
-    payload="$work/$family-$arch/usr/share/ocservia-agent"
-    cmp "$payload/$archive" "$ASSET_DIR/$archive"
-    cmp "$payload/$archive.sha256" "$ASSET_DIR/$archive.sha256"
-    cmp "$payload/verify-agent-package.sh" "$ROOT/scripts/verify-agent-package.sh"
+  (cd "$work/rpm-$arch" && rpm2cpio "$ASSET_DIR/$rpm" | cpio -idm --quiet --no-absolute-filenames)
+  for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+    path="usr/libexec/ocservia/$binary"
+    [[ "$(file -b "$work/deb-$arch/$path")" == *"$elf_word"* ]]
+    cmp "$work/deb-$arch/$path" "$work/rpm-$arch/$path"
   done
- done
+done
 echo "Release package set PASS"

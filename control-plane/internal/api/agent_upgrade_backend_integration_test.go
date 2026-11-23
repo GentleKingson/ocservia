@@ -38,7 +38,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, node, capability)
 	}
 	manifest := filepath.Join(t.TempDir(), "releases.json")
-	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("43", 32)+`"},{"version":"2.0.0","architecture":"arm64","package_sha256":"`+strings.Repeat("44", 32)+`"},{"version":"1.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("45", 32)+`"}]}`), 0600); err != nil {
+	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_format":"deb","package_sha256":"`+strings.Repeat("43", 32)+`"},{"version":"2.0.0","architecture":"arm64","package_format":"deb","package_sha256":"`+strings.Repeat("44", 32)+`"},{"version":"1.0.0","architecture":"amd64","package_format":"deb","package_sha256":"`+strings.Repeat("45", 32)+`"}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := releasecatalog.Load(manifest)

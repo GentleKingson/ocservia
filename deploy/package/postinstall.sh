@@ -1,64 +1,19 @@
-#!/usr/bin/env bash
-# Rendered by scripts/package-native-agent.sh: @VERSION@/@ARCH@ are replaced
-# with the concrete package version and amd64|arm64 architecture.
-set -euo pipefail
-
-package_root="/usr/share/ocservia-agent"
-version="@VERSION@"
-package_arch="@ARCH@"
-
-# Debian and rpm both enforce package architecture, but refuse a mismatched
-# host before anything is staged or installed, mirroring verify-agent-package.
-case "$(uname -m)" in
-  x86_64) host_arch=amd64 ;;
-  aarch64) host_arch=arm64 ;;
-  *)
-    echo "ocservia-agent: unsupported host architecture $(uname -m)" >&2
-    exit 1
-    ;;
-esac
-if [[ "${package_arch}" != "${host_arch}" ]]; then
-  echo "ocservia-agent: package architecture ${package_arch} does not match host architecture ${host_arch}" >&2
-  exit 1
+#!/bin/sh
+set -eu
+systemd-sysusers ocservia-agent.conf
+systemd-tmpfiles --create ocservia-agent.conf
+if [ ! -e /etc/ocservia-agent/privd.env ]; then
+  umask 027
+  {
+    printf 'AGENT_UID=%s\n' "$(id -u ocserv-agent)"
+    echo 'PRIVD_ATTESTATION_KEY_FILE=/var/lib/ocservia-privd/attestation.key'
+    echo 'USER_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/user-password-seal-private.pem'
+    echo 'P12_PASSWORD_SEAL_PRIVATE_KEY_FILE=/etc/ocservia-agent/p12-password-seal-private.pem'
+  } >/etc/ocservia-agent/privd.env
 fi
-
-archive="${package_root}/ocservia-agent-${version}-linux-${package_arch}.tar.gz"
-expected_digest="$(awk '{print $1}' "${archive}.sha256")"
-verified_root="$("${package_root}/verify-agent-package.sh" "${archive}" "${expected_digest}")"
-
-# install-agent.sh remains the only install-layout authority; the native
-# package just hands the verified staging scripts control. A production
-# managed-node install is requested before the package runs by creating
-# /etc/ocservia/agent-install-production-relays; the drop-in it installs then
-# carries the standing intent, and upgrades keep it through the presence
-# check below.
-production=false
-if [[ -f /etc/ocservia/agent-install-production-relays && ! -L /etc/ocservia/agent-install-production-relays ]]; then
-  production=true
-fi
-if [[ -x /usr/libexec/ocservia/ocservia-agent ]]; then
-  if [[ "${production}" == true || -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf ]]; then
-    INSTALL_PRODUCTION_RELAYS=true "${verified_root}/scripts/upgrade-agent.sh"
-  else
-    "${verified_root}/scripts/upgrade-agent.sh"
-  fi
-else
-  if [[ "${production}" == true ]]; then
-    INSTALL_PRODUCTION_RELAYS=true "${verified_root}/scripts/install-agent.sh"
-  else
-    "${verified_root}/scripts/install-agent.sh"
-  fi
-fi
-
-if [[ "${production}" == true ]]; then
-  # One-shot request: consume it only after the lifecycle succeeded, so a
-  # failed install or upgrade leaves the production request retryable.
-  rm -f -- /etc/ocservia/agent-install-production-relays
-fi
-
-rm -rf -- "${verified_root%%/extracted/*}"
-if [[ -e /usr/lib/systemd/system/ocservia-agent.service.d/10-production-relays.conf ]]; then
-  echo "ocservia-agent ${version} installed; /etc/ocservia-agent/agent.env, relays.env, and the relay token are required before enabling ocservia-agent.service"
-else
-  echo "ocservia-agent ${version} installed; /etc/ocservia-agent/agent.env is required before enabling ocservia-agent.service"
+# Remove the two unowned helpers left by the v1 tar installer.
+rm -f /usr/libexec/ocservia/ocservia-agent-verify /usr/libexec/ocservia/ocservia-agent-rollback
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload
+  systemctl try-restart ocservia-privd.service ocservia-agent.service ocservia-network-audit.service
 fi

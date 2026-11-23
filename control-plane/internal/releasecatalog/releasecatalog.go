@@ -1,7 +1,7 @@
 // Package releasecatalog loads the operator-provisioned trusted agent
 // release manifest. It is the only source of package digests for single-node
 // agent upgrades: callers never accept a digest, URL, or path from the
-// network, and lookups are exact (version, architecture) pairs.
+// network, and lookups are exact (version, architecture, native package format) tuples.
 package releasecatalog
 
 import (
@@ -18,10 +18,11 @@ import (
 // ErrInvalidManifest reports a manifest that failed fail-closed validation.
 var ErrInvalidManifest = errors.New("agent release manifest is invalid")
 
-// Release is one trusted (version, architecture) release identity.
+// Release is one trusted (version, architecture, native package format) release identity.
 type Release struct {
 	Version       string `json:"version"`
 	Architecture  string `json:"architecture"`
+	PackageFormat string `json:"package_format"`
 	PackageSHA256 string `json:"package_sha256"`
 }
 
@@ -37,11 +38,12 @@ type Catalog struct {
 type releaseKey struct {
 	version      string
 	architecture string
+	format       string
 }
 
 // Load reads and validates the manifest at the fixed operator-provisioned
 // path. A configured path that is missing, unreadable, malformed, or contains
-// a duplicate (version, architecture) entry is a startup failure.
+// a duplicate (version, architecture, native package format) entry is a startup failure.
 func Load(path string) (*Catalog, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -61,6 +63,9 @@ func Load(path string) (*Catalog, error) {
 	}
 	catalog := &Catalog{digests: make(map[releaseKey][32]byte, len(file.Releases))}
 	for _, release := range file.Releases {
+		if release.PackageFormat != "deb" && release.PackageFormat != "rpm" {
+			return nil, fmt.Errorf("%w: package_format must be deb or rpm", ErrInvalidManifest)
+		}
 		if !semanticpayload.ValidAgentUpgradeTargetVersion(release.Version) ||
 			!semanticpayload.ValidAgentUpgradeArchitecture(release.Architecture) {
 			return nil, fmt.Errorf("%w: release version or architecture is invalid", ErrInvalidManifest)
@@ -69,7 +74,7 @@ func Load(path string) (*Catalog, error) {
 		if decodeErr != nil {
 			return nil, fmt.Errorf("%w: release %s/%s digest is invalid", ErrInvalidManifest, release.Version, release.Architecture)
 		}
-		key := releaseKey{version: release.Version, architecture: release.Architecture}
+		key := releaseKey{version: release.Version, architecture: release.Architecture, format: release.PackageFormat}
 		if _, exists := catalog.digests[key]; exists {
 			return nil, fmt.Errorf("%w: duplicate release %s/%s", ErrInvalidManifest, release.Version, release.Architecture)
 		}
@@ -78,13 +83,21 @@ func Load(path string) (*Catalog, error) {
 	return catalog, nil
 }
 
-// Lookup resolves the exact trusted package digest for one (version,
-// architecture) pair.
-func (c *Catalog) Lookup(version, architecture string) ([32]byte, bool) {
+// Lookup resolves native packages using the authenticated node snapshot’s /etc/os-release ID.
+func (c *Catalog) Lookup(version, architecture, osRelease string) ([32]byte, bool) {
 	if c == nil {
 		return [32]byte{}, false
 	}
-	digest, ok := c.digests[releaseKey{version: version, architecture: architecture}]
+	var format string
+	switch osRelease {
+	case "debian", "ubuntu":
+		format = "deb"
+	case "rocky":
+		format = "rpm"
+	default:
+		return [32]byte{}, false
+	}
+	digest, ok := c.digests[releaseKey{version: version, architecture: architecture, format: format}]
 	return digest, ok
 }
 
