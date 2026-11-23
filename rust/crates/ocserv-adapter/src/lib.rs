@@ -544,6 +544,16 @@ impl Adapter {
         self.with_effect_store(false, |store| store.complete_authorized(identity, response))
     }
 
+    /// Allocates the next durable, HMAC-authenticated monotonic receipt
+    /// sequence number for a newly settled privileged effect.
+    ///
+    /// # Errors
+    ///
+    /// Rejects uninitialized, tampered, or unavailable effect stores.
+    pub fn next_receipt_sequence(&self) -> Result<u64, AdapterError> {
+        self.with_effect_store(true, EffectStore::next_receipt_sequence)
+    }
+
     /// Reads the exact authenticated terminal response for reconciliation.
     /// It never creates, advances, or retries a privileged effect.
     ///

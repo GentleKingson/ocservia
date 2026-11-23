@@ -1610,3 +1610,82 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
         (32, ed25519_dalek::SIGNATURE_LENGTH)
     );
 }
+
+#[tokio::test]
+async fn distinct_commands_at_same_revision_allocate_unique_monotonic_effect_sequences() {
+    let signing = SigningKey::from_bytes(&[19; 32]);
+    let keys = keyring(&signing);
+    let node_id = *Uuid::now_v7().as_bytes();
+    let now = unix_seconds();
+    let fx = PrivdFixture::new();
+
+    let first = signed_service_reload(&signing, node_id, now, now + 60);
+    let second = signed_service_reload(&signing, node_id, now, now + 60);
+    assert_eq!(first.expected_revision, second.expected_revision);
+
+    let first_resp = dispatch(
+        command_request(first.clone(), &signing),
+        &node_id,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
+    let first_proof = first_resp
+        .privileged_result_proof
+        .clone()
+        .expect("first attested proof");
+    let first_seq = first_proof
+        .receipt_v1
+        .as_ref()
+        .expect("first receipt")
+        .effect_sequence;
+
+    let second_resp = dispatch(
+        command_request(second.clone(), &signing),
+        &node_id,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
+    let second_proof = second_resp
+        .privileged_result_proof
+        .clone()
+        .expect("second attested proof");
+    let second_seq = second_proof
+        .receipt_v1
+        .as_ref()
+        .expect("second receipt")
+        .effect_sequence;
+
+    assert_eq!(first_seq, 1);
+    assert_eq!(second_seq, 2);
+
+    // Replaying an already completed command must return its exact original
+    // cached receipt without consuming a new effect_sequence.
+    let replayed = dispatch(
+        reconcile_request(first, &signing),
+        &node_id,
+        &keys,
+        &fx.adapter,
+    )
+    .await;
+    assert_eq!(replayed.privileged_result_proof, Some(first_proof));
+
+    // A third distinct command after restart continues monotonically.
+    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
+    let third = signed_service_reload(&signing, node_id, now, now + 60);
+    let third_resp = dispatch(
+        command_request(third, &signing),
+        &node_id,
+        &keys,
+        &restarted,
+    )
+    .await;
+    let third_seq = third_resp
+        .privileged_result_proof
+        .expect("third attested proof")
+        .receipt_v1
+        .expect("third receipt")
+        .effect_sequence;
+    assert_eq!(third_seq, 3);
+}

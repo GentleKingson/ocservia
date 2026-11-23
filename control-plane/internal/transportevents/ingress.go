@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
@@ -219,13 +220,22 @@ func quarantineTransportEvent(ctx context.Context, store transportstore.IngressS
 		if existing.NodeID != nodeID || existing.Type != v.Type || !bytes.Equal(existing.PayloadHash, payloadHash[:]) {
 			return errors.New("transport event ID collides with different quarantine evidence")
 		}
-	} else if workspaceID != uuid.Nil {
-		alertID, err := uuid.NewV7()
-		if err != nil {
-			return fmt.Errorf("generate transport quarantine alert ID: %w", err)
-		}
-		if err := store.QuarantineAlert(ctx, alertID, workspaceID, v); err != nil {
-			return fmt.Errorf("emit transport quarantine security alert: %w", err)
+	} else {
+		slog.WarnContext(ctx, "transport event quarantined",
+			"event_id", eventID,
+			"node_id", nodeID,
+			"event_type", event.GetType().String(),
+			"reason_code", failure.reasonCode,
+			"reason_detail", failure.detail,
+		)
+		if workspaceID != uuid.Nil {
+			alertID, err := uuid.NewV7()
+			if err != nil {
+				return fmt.Errorf("generate transport quarantine alert ID: %w", err)
+			}
+			if err := store.QuarantineAlert(ctx, alertID, workspaceID, v); err != nil {
+				return fmt.Errorf("emit transport quarantine security alert: %w", err)
+			}
 		}
 	}
 	return store.AdvanceCursor(ctx, eventID, at)

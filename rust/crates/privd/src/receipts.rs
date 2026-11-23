@@ -11,19 +11,20 @@ use ocservia_privd_attestation::{result_payload_cbor_hash, sign_receipt_with_key
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
-use crate::effect_binding::CommandEffectBinding;
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_result_proof(
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
     accepted_at: &prost_types::Timestamp,
     node_id: &[u8; 16],
-    binding: &CommandEffectBinding,
+    effect_sequence: u64,
     result: &privd_response::Result,
     key: &SigningKey,
     attestation_key_id: &str,
 ) -> Result<PrivilegedResultProof, ()> {
+    if effect_sequence == 0 {
+        return Err(());
+    }
     let completed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
@@ -61,7 +62,7 @@ pub(crate) fn build_result_proof(
         },
         result_cbor_sha256,
         error_code,
-        effect_sequence: binding.effect_revision.max(claims.expected_revision).max(1),
+        effect_sequence,
         accepted_at: Some(*accepted_at),
         completed_at: Some(completed_at),
         replayed: false,

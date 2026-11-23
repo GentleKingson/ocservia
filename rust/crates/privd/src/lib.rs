@@ -564,12 +564,16 @@ async fn execute_command(
     let Some(binding) = binding.as_ref() else {
         return response_error(ErrorKind::Unavailable, "root effect identity unavailable");
     };
+    let effect_sequence = match adapter.next_receipt_sequence() {
+        Ok(sequence) => sequence,
+        Err(failure) => return adapter_error_response(failure),
+    };
     let Ok(proof) = build_result_proof(
         command,
         claims,
         accepted_at,
         node_id,
-        binding,
+        effect_sequence,
         &result,
         attestation_key,
         attestation_key_id,

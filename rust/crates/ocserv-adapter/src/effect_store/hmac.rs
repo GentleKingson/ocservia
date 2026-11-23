@@ -44,6 +44,13 @@ pub(crate) fn authenticate_store_identity(key: &[u8; 32], store_id: &[u8; 16]) -
     finalize_mac(mac)
 }
 
+pub(crate) fn authenticate_receipt_sequence(key: &[u8; 32], sequence: u64) -> [u8; 32] {
+    let mut mac = new_mac(key);
+    mac.update(b"ocservia.receipt-sequence.v1\0");
+    mac.update(&sequence.to_be_bytes());
+    finalize_mac(mac)
+}
+
 pub(crate) fn authenticate_owner_fence_record(
     key: &[u8; 32],
     record: &OwnerFenceRecord,

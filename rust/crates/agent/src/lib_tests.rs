@@ -434,9 +434,12 @@ fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
     let mut ctx = context(node, 100);
     ctx.capabilities = capabilities(&[config_profile::APPLY_CAPABILITY]);
     let mut executor = journal.open();
-    let recovered = executor
+    let ExternalPreparation::Execute(recovered) = executor
         .begin_attested_recovery(&env, &ctx)
-        .expect("recover");
+        .expect("recover")
+    else {
+        panic!("expected recovery execution");
+    };
     let res_bytes = observed_result(&env);
     let outcome = executor
         .complete_external_applied_attested(
@@ -450,6 +453,21 @@ fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
         )
         .expect("rebuild");
     assert_eq!(outcome.record.state, CommandState::Succeeded);
+    // A subsequent RECONCILE_ONLY delivery for an already-settled command must
+    // replay the persisted attested outcome instead of rejecting with
+    // reconciliation_state_invalid.
+    let ExternalPreparation::Replay(replayed) = executor
+        .begin_attested_recovery(&env, &ctx)
+        .expect("replay settled attested command")
+    else {
+        panic!("expected replay for already-succeeded command");
+    };
+    assert!(replayed.replayed);
+    assert_eq!(replayed.record.state, CommandState::Succeeded);
+    assert_eq!(
+        replayed.record.privileged_result_proof.as_deref(),
+        Some(b"root-receipt".as_slice())
+    );
     assert_eq!(
         executor
             .journal()
@@ -707,7 +725,11 @@ fn external_command_replay_and_password_reconcile_recovery() {
     }
     ctx.now_unix_seconds = 102;
     let mut ex2 = j2.open();
-    let rec_cmd = ex2.begin_attested_recovery(&rot2, &ctx).expect("attested");
+    let ExternalPreparation::Execute(rec_cmd) =
+        ex2.begin_attested_recovery(&rot2, &ctx).expect("attested")
+    else {
+        panic!("expected attested recovery execution");
+    };
     let rec = ex2
         .complete_external_applied_attested(
             &rec_cmd,
@@ -776,7 +798,11 @@ fn password_revision_supersession_and_stale_retry_block() {
         ex.prepare_external(&newer, &ctx),
         Err(CommandError::Rejected("revision_gap"))
     ));
-    let rec_old = ex.begin_attested_recovery(&old, &ctx).expect("rec old");
+    let ExternalPreparation::Execute(rec_old) =
+        ex.begin_attested_recovery(&old, &ctx).expect("rec old")
+    else {
+        panic!("expected old attested recovery execution");
+    };
     ex.complete_external_applied_attested(
         &rec_old,
         "user",
