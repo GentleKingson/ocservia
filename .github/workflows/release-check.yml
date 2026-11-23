@@ -14,40 +14,80 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      agent_id: ${{ steps.record.outputs.agent_id }}
-      agent_digest: ${{ steps.record.outputs.agent_digest }}
-      controller_id: ${{ steps.record.outputs.controller_id }}
-      controller_digest: ${{ steps.record.outputs.controller_digest }}
+      agent_id: ${{ steps.find.outputs.agent_amd64 }}
+      controller_id: ${{ steps.find.outputs.controller_amd64 }}
+      agent_arm_id: ${{ steps.find.outputs.agent_arm64 }}
     steps:
-      - name: Find build receipt from benchmark run
+      - name: Find exact admitted artifacts from the benchmark jobs
         id: find
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")
           attempt=$(jq -er --arg sha "$BUILD_SHA" 'select(.head_sha == $sha and .status == "completed") | .run_attempt' <<<"$run")
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100" |
-            jq -e 'any(.jobs[]; .name == "assets" and .conclusion == "success")'
-          name="release-build-$BUILD_RUN_ID-$attempt"
-          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100" |
-            jq -er --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | select(length == 1) | .[0].id')
-          printf 'receipt_id=%s\n' "$id" >>"$GITHUB_OUTPUT"
+          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100")
+          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100")
+          for arch in amd64 arm64; do
+            for job in "Build Agent Packages" "Smoke Agent Packages" "Smoke Synthetic RC Lifecycle" "Build Controller Images"; do
+              name="build-$arch / $job ($arch)"
+              jq -e --arg name "$name" 'any(.jobs[]; .name == $name and .conclusion == "success")' <<<"$jobs"
+            done
+            for kind in agent controller; do
+              if [[ "$kind" == agent ]]; then prefix=agent-packages; else prefix=controller-images; fi
+              name="$prefix-$arch-$BUILD_RUN_ID-$attempt"
+              id=$(jq -er --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false and (.digest | test("^sha256:[0-9a-f]{64}$")))] | select(length == 1) | .[0].id' <<<"$artifacts")
+              printf '%s_%s=%s\n' "$kind" "$arch" "$id" >>"$GITHUB_OUTPUT"
+            done
+          done
+  assets:
+    name: Verify fixed asset assembly
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.BUILD_SHA }}
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
-          artifact-ids: ${{ steps.find.outputs.receipt_id }}
+          artifact-ids: ${{ needs.prepare.outputs.agent_id }}
           github-token: ${{ github.token }}
           run-id: ${{ env.BUILD_RUN_ID }}
-          path: ${{ runner.temp }}/receipt
+          path: ${{ runner.temp }}/agent-amd64
           merge-multiple: true
-      - name: Extract exact artifact coordinates
-        id: record
+      - name: Verify exact Agent artifact (amd64)
         run: |
-          file="$RUNNER_TEMP/receipt/release-build.json"
-          jq -e --arg sha "$BUILD_SHA" --arg version "$VERSION" --argjson id "$BUILD_RUN_ID"             '.schema == 1 and .candidate.sha == $sha and .candidate.version == $version and .candidate.run_id == $id' "$file"
-          for kind in agent controller; do
-            id=$(jq -er --arg key "${kind}_amd64" '.products[$key].id | select(type == "number" and . > 0)' "$file")
-            digest=$(jq -er --arg key "${kind}_amd64" '.products[$key].manifest_sha256 | select(test("^[0-9a-f]{64}$"))' "$file")
-            printf '%s_id=%s\n%s_digest=%s\n' "$kind" "$id" "$kind" "$digest" >>"$GITHUB_OUTPUT"
+          path="$RUNNER_TEMP/agent-amd64"
+          digest="$(sha256sum "$path/product-identity.json" | cut -d' ' -f1)"
+          python3 scripts/release-product-identity.py verify --kind agent --directory "$path" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$digest"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.agent_arm_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BUILD_RUN_ID }}
+          path: ${{ runner.temp }}/agent-arm64
+          merge-multiple: true
+      - name: Verify exact Agent artifact (arm64)
+        run: |
+          path="$RUNNER_TEMP/agent-arm64"
+          digest="$(sha256sum "$path/product-identity.json" | cut -d' ' -f1)"
+          python3 scripts/release-product-identity.py verify --kind agent --directory "$path" --source "$BUILD_SHA" --version "$VERSION" --arch arm64 --manifest-sha256 "$digest"
+      - name: Prepare bootstrap and package assets
+        env:
+          ASSET_DIR: ${{ runner.temp }}/assets
+        run: |
+          mkdir -p "$ASSET_DIR"
+          for arch in amd64 arm64; do
+            find "$RUNNER_TEMP/agent-$arch" -maxdepth 1 -type f ! -name 'product-identity.json' -exec mv -t "$ASSET_DIR" -- {} +
+          done
+          scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends rpm cpio
+          scripts/validate-release-packages.sh
+      - name: Check pre-publication asset inventory
+        id: check-assets
+        run: python3 scripts/publish-release.py check-assets
   business:
     name: Business Smoke (amd64)
     needs: prepare
@@ -73,9 +113,9 @@ jobs:
       - name: Verify exact agent artifact
         env:
           PRODUCT_PATH: ${{ runner.temp }}/business-packages
-          DIGEST: ${{ needs.prepare.outputs.agent_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          DIGEST="$(sha256sum "$PRODUCT_PATH/product-identity.json" | cut -d' ' -f1)"
           python3 scripts/release-product-identity.py verify --kind agent --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
@@ -87,9 +127,9 @@ jobs:
       - name: Verify exact controller artifact
         env:
           PRODUCT_PATH: ${{ runner.temp }}/business-controller-images
-          DIGEST: ${{ needs.prepare.outputs.controller_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          DIGEST="$(sha256sum "$PRODUCT_PATH/product-identity.json" | cut -d' ' -f1)"
           python3 scripts/release-product-identity.py verify --kind controller --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
       - uses: ./.github/actions/setup-tools
         with:
@@ -192,9 +232,9 @@ jobs:
       - name: Verify exact controller artifact
         env:
           PRODUCT_PATH: ${{ runner.temp }}/quick-controller-images
-          DIGEST: ${{ needs.prepare.outputs.controller_digest }}
         run: |
           test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          DIGEST="$(sha256sum "$PRODUCT_PATH/product-identity.json" | cut -d' ' -f1)"
           python3 scripts/release-product-identity.py verify --kind controller --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
       - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
