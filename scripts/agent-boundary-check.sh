@@ -12,15 +12,15 @@ fi
 
 if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.rs' \
   'shell\.exec|command\.run|occtl\.raw|systemctl\.raw|journalctl\.raw|Command::new\([^)]*(request|input|argument)' \
-  "${ROOT}/rust/crates/agent" "${ROOT}/rust/crates/privd" "${ROOT}/rust/crates/ocserv-adapter"; then
+  "${ROOT}/rust/crates/agent" "${ROOT}/rust/crates/privd" "${ROOT}/rust/crates/ocserv-adapter" "${ROOT}/rust/crates/upgrader"; then
   echo "generic execution capability found in Agent privilege boundary" >&2
   exit 1
 fi
 
 # Check the program argument, not later test arguments such as TestCrashChild.
 if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.go' --include='*.rs' \
-  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|docker\.sock' \
-  "${ROOT}/control-plane" "${ROOT}/rust"; then
+  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|exec\.CommandContext\([^,)]*,[^,)]*(sh|bash)|docker\.sock' \
+  "${ROOT}/control-plane" "${ROOT}/signer" "${ROOT}/rust"; then
   echo "forbidden generic shell or Docker socket surface found" >&2
   exit 1
 fi

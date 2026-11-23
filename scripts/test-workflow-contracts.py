@@ -56,11 +56,12 @@ def check_step(errors, label, step, valid_profiles):
                         errors.append(f'{label}: unknown setup-tools profile "{profile}"')
     run_text = step.get('run')
     if isinstance(run_text, str):
-        for line in run_text.splitlines():
+        normalized_run = re.sub(r'\\\n\s*', ' ', run_text)
+        for line in normalized_run.splitlines():
             stripped = line.strip()
             if stripped.startswith('#'):
                 continue
-            for match in re.finditer(r'(?:^|\s)docker\s+run\b([^\n\\]*)', stripped):
+            for match in re.finditer(r'(?:^|\s)docker\s+run\b([^\n]*)', stripped):
                 tokens = match.group(1).split()
                 for token in tokens:
                     cleaned = token.strip('"\'')
@@ -147,6 +148,39 @@ def check_specific_contracts(errors):
             errors.append('security.yml: npm-security audit must not enable cache-npm')
 
 
+def check_required_go_tests(errors):
+    manifest = ROOT / 'scripts/required-go-tests.txt'
+    pkg_sources = {}
+    for lineno, raw_line in enumerate(manifest.read_text(encoding='utf-8').splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        if len(parts) != 3:
+            errors.append(f'required-go-tests.txt:{lineno}: expected 3 fields, got {len(parts)}')
+            continue
+        _, rel_pkg, test_spec = parts
+        pkg_dir = ROOT / 'control-plane' / rel_pkg
+        if not pkg_dir.is_dir():
+            errors.append(f'required-go-tests.txt:{lineno}: missing package directory control-plane/{rel_pkg}')
+            continue
+        if rel_pkg not in pkg_sources:
+            pkg_sources[rel_pkg] = '\n'.join(
+                p.read_text(encoding='utf-8') for p in sorted(pkg_dir.glob('*_test.go'))
+            )
+        src = pkg_sources[rel_pkg]
+        segments = test_spec.split('/')
+        parent = segments[0]
+        if not re.search(rf'\bfunc\s+{re.escape(parent)}\s*\(', src):
+            errors.append(f'required-go-tests.txt:{lineno}: missing Go test {parent} in control-plane/{rel_pkg}')
+            continue
+        for subtest in segments[1:]:
+            if f'"{subtest}"' not in src:
+                errors.append(
+                    f'required-go-tests.txt:{lineno}: missing Go subtest "{subtest}" in control-plane/{rel_pkg}'
+                )
+
+
 def main():
     errors = []
     valid_profiles = bootstrap_profiles()
@@ -154,6 +188,7 @@ def main():
     check_actions(errors, valid_profiles)
     check_web_e2e_coverage(errors)
     check_specific_contracts(errors)
+    check_required_go_tests(errors)
     if errors:
         for err in errors:
             print(f'workflow-contract FAIL: {err}', file=sys.stderr)

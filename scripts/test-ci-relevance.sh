@@ -123,6 +123,34 @@ assert_eq "release business scenarios profiles" "source-style node" "${ci_tools_
 assert_eq "release business scenarios label" "source-style-node" "${ci_tools_cache_label}"
 assert_flag "release business scenarios" run_installers true
 
+reset_state
+classify_path deploy/systemd/ocservia-privd.service
+assert_flag "systemd unit" run_rust true
+assert_flag "systemd unit" run_installers true
+assert_eq "systemd unit ci_suites" release "${ci_suites[*]}"
+
+reset_state
+classify_path deploy/lib/quick-materials.sh
+assert_flag "quick materials" run_installers true
+assert_eq "quick materials ci_suites" "release source-style" "${ci_suites[*]}"
+
+reset_state
+classify_path web/e2e/node-install.spec.ts
+assert_flag "web e2e spec" run_web true
+assert_flag "web e2e spec" run_web_browser true
+assert_eq "web e2e spec ci_suites" guards "${ci_suites[*]}"
+
+reset_state
+classify_path scripts/required-go-tests.txt
+assert_flag "required go tests" run_database true
+assert_eq "required go tests ci_suites" guards "${ci_suites[*]}"
+
+reset_state
+classify_path scripts/go-test-environment.sh
+assert_flag "go test env" run_go true
+assert_flag "go test env" run_database true
+assert_eq "go test env ci_suites" "guards source-style" "${ci_suites[*]}"
+
 # Every shell/Python source scanned by scripts/lint.sh source-style must trigger source-style.
 while IFS= read -r -d '' path; do
   [[ -f "${path}" ]] || continue

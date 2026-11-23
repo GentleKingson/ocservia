@@ -275,23 +275,25 @@ install_gitleaks() {
 install_syft() {
   local artifact archive
   artifact="syft_$(version syft)_${syft_platform}.tar.gz"
-  if ! version_output_contains "$(version syft)" "${TOOLS}/bin/syft" --version; then
+  if ! version_output_contains "$(version syft)" "${TOOLS}/bin/syft" \
+    "${TOOLS}/bin/syft" --version; then
     archive="$(download "https://github.com/anchore/syft/releases/download/v$(version syft)/${artifact}" "${artifact}")"
     tar -xzf "${archive}" -C "${TOOLS}/bin" syft
     chmod 0755 "${TOOLS}/bin/syft"
   fi
-  "${TOOLS}/bin/syft" --version >/dev/null
+  [[ "$("${TOOLS}/bin/syft" --version)" == *"$(version syft)"* ]]
 }
 
 install_grype() {
   local artifact archive
   artifact="grype_$(version grype)_${grype_platform}.tar.gz"
-  if ! version_output_contains "$(version grype)" "${TOOLS}/bin/grype" --version; then
+  if ! version_output_contains "$(version grype)" "${TOOLS}/bin/grype" \
+    "${TOOLS}/bin/grype" --version; then
     archive="$(download "https://github.com/anchore/grype/releases/download/v$(version grype)/${artifact}" "${artifact}")"
     tar -xzf "${archive}" -C "${TOOLS}/bin" grype
     chmod 0755 "${TOOLS}/bin/grype"
   fi
-  "${TOOLS}/bin/grype" --version >/dev/null
+  [[ "$("${TOOLS}/bin/grype" --version)" == *"$(version grype)"* ]]
 }
 
 install_oasdiff() {

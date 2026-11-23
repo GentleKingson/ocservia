@@ -65,9 +65,13 @@ classify_path() {
     scripts/ci-tools-check.sh)
       for suite in guards release source-style contracts; do tools_suite "${suite}"; done ;;
     scripts/ci-go-cache-key.sh) run_go=true; tools_suite guards ;;
+    scripts/*required-go-tests*)
+      run_database=true; tools_suite guards ;;
+    scripts/go-test-environment.sh)
+      run_go=true; run_database=true; tools_suite guards ;;
     .github/workflows/ci.yml|.github/workflows/security.yml|\
     .tool-versions|.nvmrc|.node-version|Makefile|\
-    scripts/ci-*|scripts/*required-go-tests*|scripts/go-test-environment.sh|\
+    scripts/ci-*|\
     scripts/test-ci-relevance.sh|scripts/test-toolchain-consistency.sh|\
     scripts/test-workflow-contracts.py|scripts/check-public-repository.sh|\
     scripts/license-check.sh|scripts/test.sh|scripts/verify.sh)
@@ -108,6 +112,7 @@ classify_path() {
 
     # Web, Rust, Go and Signer modules.
     web/package.json) run_web=true; tools_suite guards ;;
+    web/e2e/*|web/test/run-auth-browser.mjs) run_web=true; tools_suite guards ;;
     web/*|scripts/web-check.sh|scripts/e2e.sh) run_web=true ;;
     rust/rust-toolchain.toml) run_rust=true; tools_suite guards ;;
     rust/*|scripts/rust-check.sh|scripts/agent-boundary-check.sh|\
@@ -125,7 +130,7 @@ classify_path() {
     # Installer-only contracts (avoids running unrelated release contract suites).
     .gitignore|deploy/managed-node/install.sh|deploy/production/install.sh|\
     deploy/production/controller-bootstrap.sh|deploy/lib/install-*.sh|\
-    deploy/lib/node-bootstrap.sh|deploy/lib/quick-materials.sh|deploy/lib/controller-runtime.sh|\
+    deploy/lib/node-bootstrap.sh|deploy/lib/controller-runtime.sh|\
     deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|\
     scripts/prepare-bootstrap-release-assets.sh|\
@@ -138,11 +143,14 @@ classify_path() {
     # Broader release/installer/packaging/deployment paths.
     .github/workflows/release*.yml)
       tools_suite guards; tools_suite release; run_installers=true ;;
+    deploy/systemd/*)
+      run_rust=true; tools_suite release; run_installers=true ;;
     install.env.example|\
     scripts/*release*|scripts/*controller*|\
     scripts/build-agent-binaries.sh|\
     scripts/package-native-agent.sh|scripts/verify-bootstrap-endpoint.sh|\
-    deploy/package/*|deploy/systemd/*|deploy/bootstrap/*|deploy/managed-node/*|\
+    deploy/lib/quick-materials.sh|\
+    deploy/package/*|deploy/bootstrap/*|deploy/managed-node/*|\
     deploy/production/*|deploy/prepare-transport-runtime.sh)
       tools_suite release; run_installers=true ;;
 
