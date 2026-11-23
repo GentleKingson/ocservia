@@ -20,7 +20,7 @@ relay_ipv4_rule=false
 relay_ipv6_rule=false
 
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted && "$EUID" == 0 ]]
-[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" && "$(ps -p 1 -o comm=)" == systemd ]]
 [[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia && ! -e /etc/ocservia ]]
 if getent passwd ocserv-agent >/dev/null; then
@@ -33,6 +33,7 @@ fi
 
 umask 077
 mkdir -m 700 "${ARTIFACT_DIR}"
+: >"${ARTIFACT_DIR}/scenario-timings.jsonl"
 export OCSERVIA_BUSINESS_TEST_WORK_DIR
 OCSERVIA_BUSINESS_TEST_WORK_DIR="$(mktemp -d "${HOME}/.ocservia-business-test-XXXXXX")"
 work="${OCSERVIA_BUSINESS_TEST_WORK_DIR}"
@@ -112,10 +113,12 @@ cleanup() {
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
+    --slurpfile scenario_timings "${ARTIFACT_DIR}/scenario-timings.jsonl" \
     '{source_commit:$source,version:$version,run_id:$run,run_attempt:$attempt,profile:"smoke",terminal:"revocation",
       ocserv_fixture:"distribution",execution_environment:"GitHub-hosted runner",
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
-      timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
+      timings:$timings[0],scenario_timings:$scenario_timings,
+      passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:"business-smoke",resilience_requested:true,
       resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),

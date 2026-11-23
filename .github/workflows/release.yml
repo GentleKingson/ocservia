@@ -1,18 +1,23 @@
 name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release build v{0}', inputs.version) || format('Publish {0}', github.ref_name) }}
 on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       version:
-        description: Build-only test version without v; this dispatch never publishes
+        description: Build-only version without v; this dispatch never publishes
         type: string
         required: true
         default: '0.0.0'
+      expected_sha:
+        description: Expected main commit when dispatched by Release Check
+        type: string
+        required: false
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('build-{0}-{1}', github.sha, inputs.version) || github.ref }}
   cancel-in-progress: false
 jobs:
   prepare:
@@ -24,18 +29,30 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      qualification_id: ${{ steps.qualify-release.outputs.qualification_id }}
+      build_run_id: ${{ steps.qualify-release.outputs.build_run_id }}
+      controller_amd64_id: ${{ steps.qualify-release.outputs.controller_amd64_id }}
+      controller_amd64_sha256: ${{ steps.qualify-release.outputs.controller_amd64_sha256 }}
+      controller_arm64_id: ${{ steps.qualify-release.outputs.controller_arm64_id }}
+      controller_arm64_sha256: ${{ steps.qualify-release.outputs.controller_arm64_sha256 }}
+      assets_id: ${{ steps.qualify-release.outputs.assets_id }}
     steps:
       - id: version
         env:
           EVENT: ${{ github.event_name }}
           TAG: ${{ github.ref_name }}
           TEST_VERSION: ${{ inputs.version }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
           if [[ "$EVENT" == push ]]; then
             [[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
             version="${TAG#v}"
           else
             version="$TEST_VERSION"
+            if [[ -n "$EXPECTED_SHA" ]]; then
+              test "$GITHUB_REF" = refs/heads/main
+              test "$GITHUB_SHA" = "$EXPECTED_SHA"
+            fi
           fi
           [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
           is_prerelease=false
@@ -47,7 +64,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Require successful Release Check before building
+      - name: Require a successful Release Check and available build artifacts
+        id: qualify-release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,23 +73,23 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: python3 scripts/publish-release.py qualify
   build-amd64:
+    if: github.event_name == 'workflow_dispatch'
     needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: amd64
-      run_rc_lifecycle: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.is_prerelease == 'true' }}
+      run_rc_lifecycle: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
   build-arm64:
+    if: github.event_name == 'workflow_dispatch'
     needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
-      run_rc_lifecycle: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.is_prerelease == 'true' }}
+      run_rc_lifecycle: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
   assets:
     needs: [prepare, build-amd64, build-arm64]
-    outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -121,8 +139,28 @@ jobs:
           path: ${{ runner.temp }}/assets
           if-no-files-found: error
           retention-days: 7
+      - name: Record the verified build artifacts
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          AGENT_AMD64_ID: ${{ needs.build-amd64.outputs.agent_packages_artifact_id }}
+          AGENT_AMD64_SHA256: ${{ needs.build-amd64.outputs.agent_packages_manifest_sha256 }}
+          AGENT_ARM64_ID: ${{ needs.build-arm64.outputs.agent_packages_artifact_id }}
+          AGENT_ARM64_SHA256: ${{ needs.build-arm64.outputs.agent_packages_manifest_sha256 }}
+          CONTROLLER_AMD64_ID: ${{ needs.build-amd64.outputs.controller_images_artifact_id }}
+          CONTROLLER_AMD64_SHA256: ${{ needs.build-amd64.outputs.controller_images_manifest_sha256 }}
+          CONTROLLER_ARM64_ID: ${{ needs.build-arm64.outputs.controller_images_artifact_id }}
+          CONTROLLER_ARM64_SHA256: ${{ needs.build-arm64.outputs.controller_images_manifest_sha256 }}
+          ASSETS_ID: ${{ steps.upload.outputs.artifact-id }}
+          ASSETS_SHA256: ${{ steps.upload.outputs.artifact-digest }}
+        run: python3 scripts/release_evidence.py record-build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-build.json
+          if-no-files-found: error
+          retention-days: 7
   publish:
-    needs: [prepare, build-amd64, build-arm64, assets]
+    needs: prepare
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -138,18 +176,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Require successful Release Check for the tag commit
-        id: qualify-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/publish-release.py qualify
       - name: Download and verify amd64 Controller images
         uses: ./.github/actions/download-release-product
         with:
-          artifact-id: ${{ needs.build-amd64.outputs.controller_images_artifact_id }}
-          manifest-sha256: ${{ needs.build-amd64.outputs.controller_images_manifest_sha256 }}
+          run-id: ${{ needs.prepare.outputs.build_run_id }}
+          artifact-id: ${{ needs.prepare.outputs.controller_amd64_id }}
+          manifest-sha256: ${{ needs.prepare.outputs.controller_amd64_sha256 }}
           kind: controller
           version: ${{ needs.prepare.outputs.version }}
           arch: amd64
@@ -157,8 +189,9 @@ jobs:
       - name: Download and verify arm64 Controller images
         uses: ./.github/actions/download-release-product
         with:
-          artifact-id: ${{ needs.build-arm64.outputs.controller_images_artifact_id }}
-          manifest-sha256: ${{ needs.build-arm64.outputs.controller_images_manifest_sha256 }}
+          run-id: ${{ needs.prepare.outputs.build_run_id }}
+          artifact-id: ${{ needs.prepare.outputs.controller_arm64_id }}
+          manifest-sha256: ${{ needs.prepare.outputs.controller_arm64_sha256 }}
           kind: controller
           version: ${{ needs.prepare.outputs.version }}
           arch: arm64
@@ -171,7 +204,9 @@ jobs:
           done
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
-          artifact-ids: ${{ needs.assets.outputs.artifact_id || 'missing' }}
+          artifact-ids: ${{ needs.prepare.outputs.assets_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.prepare.outputs.build_run_id }}
           path: ${{ runner.temp }}/assets
           merge-multiple: true
       - name: Record Docker publication runtime
@@ -202,6 +237,13 @@ jobs:
             [[ "$base" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
           fi
           echo "base=$base" >>"$GITHUB_OUTPUT"
+      - name: Confirm qualification immediately before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REQUIRE_QUALIFICATION_ID: ${{ needs.prepare.outputs.qualification_id }}
+        run: python3 scripts/publish-release.py qualify
       - name: Create new draft Release
         id: draft-release
         env:
