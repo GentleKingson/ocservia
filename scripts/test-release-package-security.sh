@@ -69,6 +69,9 @@ require('needs: [prepare, build-amd64, build-arm64]' in assets_job and
         'needs.build-amd64.outputs.agent_packages_manifest_sha256' in assets_job and
         'needs.build-arm64.outputs.agent_packages_manifest_sha256' in assets_job,
         'release assets must download and verify exact agent artifacts only after both reusable workflows pass')
+require(re.search(r'-exec\s+[^\n]*\{\}\s+\S+[^\n]*\+', assets_job) is None and
+        '-exec mv -t "$ASSET_DIR" -- {} +' in assets_job,
+        'release assets must pass {} immediately before + in find -exec')
 require('needs: [prepare, build-amd64, build-arm64, assets]' in publish_job and
         'uses: ./.github/actions/download-release-product' in publish_job and
         'needs.build-amd64.outputs.controller_images_manifest_sha256' in publish_job and
