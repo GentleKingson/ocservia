@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { CheckCircle2, CircleAlert } from "@lucide/vue";
-import type { BuildInfo, Workspace } from "@ocservia/api-client";
+import type { BuildInfo, Workspace } from "@/api/models";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import DataState from "../components/common/DataState.vue";

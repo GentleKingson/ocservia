@@ -3,7 +3,7 @@ import type {
   Certificate,
   NodeObservedState,
   Operation,
-} from "@ocservia/api-client";
+} from "@/api/models";
 import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   createCertificate,
@@ -29,12 +29,11 @@ import {
   readCertificateGrant,
   rememberCertificateGrant,
 } from "../node-workflow";
-import type { WorkspaceContext } from "../../api/workspace";
 
 interface CertificatesInputs {
   currentNode: Readonly<Ref<NodeObservedState | undefined>>;
   readReady: Readonly<Ref<boolean>>;
-  workspaceContext: () => WorkspaceContext;
+  workspaceId: () => string | undefined;
   trackOperation: (id: string) => Promise<void>;
   t: (key: string) => string;
 }
@@ -42,7 +41,7 @@ interface CertificatesInputs {
 export function useNodeCertificates({
   currentNode,
   readReady,
-  workspaceContext,
+  workspaceId,
   trackOperation,
   t,
 }: CertificatesInputs) {
@@ -62,7 +61,7 @@ export function useNodeCertificates({
   const certificateWorkflow = createNodeWorkflow(
     () => currentNode.value?.id,
     () => certificateDialog.value,
-    workspaceContext,
+    workspaceId,
   );
   let certificateContext: NodeWorkflowContext | undefined;
 
@@ -117,7 +116,7 @@ export function useNodeCertificates({
       if (record) {
         if (
           record.nodeId !== context.nodeId ||
-          record.workspaceId !== context.workspace.id
+          record.workspaceId !== context.workspaceId
         )
           return;
         await pollCertificate(context, record);
@@ -189,12 +188,14 @@ export function useNodeCertificates({
       const value = await createCertificate(node.id, {
         expectedVersion: node.version,
         commonName: certificateCommonName.value.trim(),
-        dnsNames: new Set(
-          certificateDnsNames.value
-            .split(",")
-            .map((name) => name.trim())
-            .filter(Boolean),
-        ),
+        dnsNames: [
+          ...new Set(
+            certificateDnsNames.value
+              .split(",")
+              .map((name) => name.trim())
+              .filter(Boolean),
+          ),
+        ],
         keyBits: 3072,
         reason: certificateReason.value.trim(),
       });
@@ -269,7 +270,7 @@ export function useNodeCertificates({
     certificateError.value = "";
     try {
       const exportKey = JSON.stringify([
-        context.workspace.id,
+        context.workspaceId,
         context.nodeId,
         current.id,
       ]);

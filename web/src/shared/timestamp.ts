@@ -1,4 +1,3 @@
-const isoYearPrefix = /^\d{4}-/;
 const isoFraction = /T\d{2}:\d{2}:\d{2}(\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const isoMillisZ = /\.\d{3}Z$/;
 const maxCachedFormatters = 16;
@@ -17,10 +16,9 @@ function getRelativeFormatter(locale: string): Intl.RelativeTimeFormat {
   return formatter;
 }
 
-// Extended timestamps stay textual. Ordinary timestamps display in UTC,
-// retaining their original fractional precision instead of Date milliseconds.
-export function formatTimestamp(value: string): string {
-  if (!isoYearPrefix.test(value)) return value;
+// Show RFC 3339 timestamps in UTC with the server’s fractional precision.
+export function formatTimestamp(value?: string): string {
+  if (!value) return "—";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   const fraction = isoFraction.exec(value)?.[1] ?? "";
@@ -37,14 +35,12 @@ const relativeUnits: [Intl.RelativeTimeFormatUnit, number][] = [
   ["minute", 60_000],
 ];
 
-// Relative wording for ordinary timestamps only; extended and infinite values
-// return undefined so callers fall back to formatTimestamp.
 export function relativeTimestamp(
-  value: string,
+  value: string | undefined,
   now: number,
   locale: string,
 ): string | undefined {
-  if (!isoYearPrefix.test(value)) return undefined;
+  if (!value) return undefined;
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return undefined;
   const elapsed = parsed - now;

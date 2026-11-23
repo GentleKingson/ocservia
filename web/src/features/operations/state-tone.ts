@@ -1,8 +1,4 @@
-import type {
-  AgentRollout,
-  AgentRolloutNode,
-  Operation,
-} from "@ocservia/api-client";
+import type { AgentRollout, AgentRolloutNode, Operation } from "@/api/models";
 
 // Presentation only: the tone never decides polling or terminal state. A
 // plain operation's unknown is still being recovered (warning), while the

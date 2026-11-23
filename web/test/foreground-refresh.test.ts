@@ -29,7 +29,7 @@ describe("foreground refresh", () => {
     vi.unstubAllGlobals();
   });
 
-  it("pauses on blur/hidden and resumes once immediately, then every 15 seconds", async () => {
+  it("keeps polling when blurred, pauses when hidden and resumes once, then every 15 seconds", async () => {
     const refresh = vi.fn().mockResolvedValue(undefined);
     const pause = vi.fn();
     const polling = createForegroundRefresh(refresh, 15_000, pause);
@@ -39,26 +39,29 @@ describe("foreground refresh", () => {
     expect(refresh).toHaveBeenCalledTimes(2);
     focused = false;
     window.dispatchEvent(new Event("blur"));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(pause).not.toHaveBeenCalled();
     hidden = true;
     document.dispatchEvent(new Event("visibilitychange"));
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledTimes(3);
     expect(pause).toHaveBeenCalledTimes(1);
     focused = true;
     window.dispatchEvent(new Event("focus"));
-    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledTimes(3);
     hidden = false;
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("focus"));
     window.dispatchEvent(new Event("pageshow"));
     await vi.advanceTimersByTimeAsync(0);
-    expect(refresh).toHaveBeenCalledTimes(3);
-    await vi.advanceTimersByTimeAsync(15_000);
     expect(refresh).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
     polling.stop();
     window.dispatchEvent(new Event("focus"));
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(refresh).toHaveBeenCalledTimes(5);
   });
 
   it("does not overlap slow reads and retries after failures", async () => {
@@ -77,10 +80,10 @@ describe("foreground refresh", () => {
     stop = polling.stop;
     polling.start();
     await vi.advanceTimersByTimeAsync(60_000);
-    focused = false;
-    window.dispatchEvent(new Event("blur"));
-    focused = true;
-    window.dispatchEvent(new Event("focus"));
+    hidden = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+    hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
     expect(refresh).toHaveBeenCalledTimes(1);
     finish();
     await vi.advanceTimersByTimeAsync(0);
@@ -89,8 +92,8 @@ describe("foreground refresh", () => {
     expect(refresh).toHaveBeenCalledTimes(3);
   });
 
-  it("defers an initially background page until focus returns", async () => {
-    focused = false;
+  it("defers an initially background page until it becomes visible", async () => {
+    hidden = true;
     const refresh = vi.fn().mockResolvedValue(undefined);
     const polling = createForegroundRefresh(refresh);
     stop = polling.stop;
@@ -98,8 +101,8 @@ describe("foreground refresh", () => {
     polling.start();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(refresh).not.toHaveBeenCalled();
-    focused = true;
-    window.dispatchEvent(new Event("focus"));
+    hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
     await vi.advanceTimersByTimeAsync(0);
     expect(refresh).toHaveBeenCalledTimes(1);
   });

@@ -1,4 +1,4 @@
-import type { Operation } from "@ocservia/api-client";
+import type { Operation } from "@/api/models";
 
 // The reconciled upgrade lifecycle gets its own progress words: an
 // acknowledged schedule is only the restart window, never success, and

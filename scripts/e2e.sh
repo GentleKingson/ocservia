@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT="${COMPOSE_PROJECT:-ocservia-e2e-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROJECT="${COMPOSE_PROJECT:-ocservia-e2e-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 COMPOSE=(docker compose -p "${PROJECT}" -f "${ROOT}/deploy/compose/compose.yaml")
 

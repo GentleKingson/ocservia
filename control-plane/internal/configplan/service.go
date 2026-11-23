@@ -55,7 +55,7 @@ type Plan struct {
 	Warnings         []json.RawMessage `json:"warnings"`
 	CurrentUnchanged bool              `json:"current_unchanged"`
 	StagingCleaned   bool              `json:"staging_cleaned"`
-	CurrentHash      string            `json:"current_hash,omitempty"`
+	CurrentHash      string            `json:"-"`
 	ExpiresAt        time.Time         `json:"expires_at"`
 	CreatedAt        time.Time         `json:"created_at"`
 }

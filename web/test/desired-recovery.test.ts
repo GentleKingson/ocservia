@@ -1,4 +1,4 @@
-import type { UserGroupResourceState } from "@ocservia/api-client";
+import type { UserGroupResourceState } from "@/api/models";
 import { describe, expect, it } from "vitest";
 
 import {

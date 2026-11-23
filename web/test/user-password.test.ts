@@ -4,7 +4,7 @@ import {
   privateDecrypt,
   constants,
 } from "node:crypto";
-import type { UserPasswordSealingKey } from "@ocservia/api-client";
+import type { UserPasswordSealingKey } from "@/api/models";
 import { describe, expect, it } from "vitest";
 import { sealUserPassword } from "../src/features/user-password";
 

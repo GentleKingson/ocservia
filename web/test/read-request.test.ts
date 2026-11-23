@@ -1,15 +1,5 @@
-import { afterEach, expect, it, vi } from "vitest";
-const workspace = vi.hoisted(() => ({ id: "a", generation: 1 }));
-vi.mock("../src/api/workspace", async (original) => ({
-  ...(await original<typeof import("../src/api/workspace")>()),
-  workspaceContext: () => workspace,
-}));
+import { expect, it } from "vitest";
 import { createReadRequest } from "../src/shared/read-request";
-
-afterEach(() => {
-  workspace.id = "a";
-  workspace.generation = 1;
-});
 
 it("fences late results and cleanup when a transport ignores cancellation", async () => {
   const reads = createReadRequest();
@@ -32,14 +22,6 @@ it("fences late results and cleanup when a transport ignores cancellation", asyn
   expect(latest.finish()).toBe(true);
   expect(reads.pending).toBe(false);
   expect(displayed).toBe("new");
-});
-
-it("rejects an old workspace generation even after switching back to the same id", () => {
-  const reads = createReadRequest();
-  const request = reads.begin();
-  const context = { ...workspace };
-  workspace.generation += 2;
-  expect(request.current(context)).toBe(false);
 });
 
 it("keeps independent reads independent and invalidates settled read tokens on disposal", () => {

@@ -1,9 +1,3 @@
-import {
-  sameWorkspaceContext,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/workspace";
-
 // One owner per independent read channel. Data, lifecycle and retries belong
 // to the caller. Invalidation also fences transports that ignore cancellation.
 export function createReadRequest() {
@@ -27,10 +21,7 @@ export function createReadRequest() {
       const request = new AbortController();
       controller = request;
       const ticket = revision;
-      const current = (context?: WorkspaceContext): boolean =>
-        ticket === revision &&
-        !request.signal.aborted &&
-        (!context || sameWorkspaceContext(workspaceContext(), context));
+      const current = () => ticket === revision;
       return {
         signal: request.signal,
         current,

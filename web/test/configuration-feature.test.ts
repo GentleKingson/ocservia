@@ -1,5 +1,5 @@
 import { effectScope, nextTick, ref, type EffectScope } from "vue";
-import type { ConfigPlan, NodeObservedState } from "@ocservia/api-client";
+import type { ConfigPlan, NodeObservedState } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useNodeConfiguration } from "../src/features/configuration/useNodeConfiguration";
 
@@ -28,7 +28,6 @@ function setup(revision: unknown = 7) {
   if (revision !== omitted) node.configRevision = revision;
   const currentNode = ref(node as unknown as NodeObservedState);
   const readReady = ref(true);
-  const workspace = ref({ id: "workspace-a", generation: 1 });
   const trackOperation = vi.fn().mockResolvedValue(undefined);
   const scope = effectScope();
   scopes.push(scope);
@@ -36,13 +35,13 @@ function setup(revision: unknown = 7) {
     useNodeConfiguration({
       currentNode,
       readReady,
-      workspaceContext: () => workspace.value,
+      workspaceId: () => "workspace-a",
       trackOperation,
       t: (key) => key,
     }),
   );
   if (!feature) throw new Error("Configuration scope did not start");
-  return { feature, currentNode, readReady, workspace, trackOperation, scope };
+  return { feature, currentNode, readReady, trackOperation, scope };
 }
 
 beforeEach(() => {
@@ -159,16 +158,15 @@ describe("configuration feature without a page or store", () => {
     expect(feature.configError.value).toBe("stale revision");
   });
 
-  it.each(["read", "node", "workspace"])(
+  it.each(["read", "node"])(
     "uses the supplied %s boundary rather than global state",
     async (kind) => {
-      const { feature, currentNode, readReady, workspace } = setup();
+      const { feature, currentNode, readReady } = setup();
       await feature.openConfigPlan();
       feature.configReason.value = "plan";
       if (kind === "read") readReady.value = false;
       else if (kind === "node")
         currentNode.value = { ...currentNode.value, id: "node-b" };
-      else workspace.value = { id: "workspace-a", generation: 3 };
       await feature.submitConfigPlan();
       expect(api.createConfigPlan).not.toHaveBeenCalled();
     },

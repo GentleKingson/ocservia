@@ -1,34 +1,23 @@
 import {
-  OperationsApi,
-  AgentRolloutExclusionFromJSON,
-  AgentRolloutFromJSON,
-  type NodeObservedState,
-  type Operation,
+  fromWire,
   type AgentRollout,
-  type AgentRolloutPage,
-} from "@ocservia/api-client";
-import { configuration, newIdempotencyKey, requestInit } from "./transport";
+  type NodeObservedState,
+  type Schemas,
+} from "./models";
+import { client, newIdempotencyKey, read, ResponseError } from "./transport";
 import { getWorkspaceId } from "./workspace";
 
 export type RolloutDetail = Omit<AgentRollout, "excluded"> & {
   excluded: Array<{ nodeId: string; reason: string; raw: string }>;
 };
 
-// Stored exclusions may predate the current protocol. Decode known shapes
-// once here and keep unfamiliar JSON visible rather than dropping history.
-function rolloutDetail(wire: unknown): RolloutDetail {
-  if (!wire || typeof wire !== "object" || Array.isArray(wire)) {
-    throw new Error("Invalid rollout response");
-  }
-  const excluded = "excluded" in wire ? wire.excluded : undefined;
-  if (excluded != null && !Array.isArray(excluded)) {
-    throw new Error("Invalid rollout exclusions");
-  }
+function rolloutDetail({
+  excluded,
+  ...rollout
+}: Schemas["AgentRollout"]): RolloutDetail {
   return {
-    // Generated converters implement the current model. Read stored exclusions
-    // from the raw response before conversion so historical values survive.
-    ...AgentRolloutFromJSON({ ...wire, excluded: undefined }),
-    excluded: (excluded ?? []).map((entry: unknown) => {
+    ...fromWire(rollout),
+    excluded: (excluded ?? []).map((entry) => {
       if (
         entry !== null &&
         typeof entry === "object" &&
@@ -37,122 +26,106 @@ function rolloutDetail(wire: unknown): RolloutDetail {
         "reason" in entry &&
         typeof entry.reason === "string"
       ) {
-        return { ...AgentRolloutExclusionFromJSON(entry), raw: "" };
+        return { nodeId: entry.node_id, reason: entry.reason, raw: "" };
       }
-      return {
-        nodeId: "",
-        reason: "",
-        raw: JSON.stringify(entry),
-      };
+      return { nodeId: "", reason: "", raw: JSON.stringify(entry) };
     }),
   };
 }
 
-async function rolloutResponse(
-  response: Promise<{ raw: Response }>,
-): Promise<RolloutDetail> {
-  const wire: unknown = await (await response).raw.json();
-  return rolloutDetail(wire);
+async function readRollout(
+  request: Promise<{ data?: Schemas["AgentRollout"]; response: Response }>,
+) {
+  const { data, response } = await request;
+  if (data === undefined) throw new ResponseError(response);
+  return rolloutDetail(data);
 }
 
-const operations = new OperationsApi(configuration);
-
-// The browser only names the trusted release; the Controller resolves the
-// package digest from its operator-provisioned catalog, and the reconciled
-// terminal outcome (including the conservative unknown) arrives through the
-// operation being tracked.
-export async function upgradeNodeAgent(
+export function upgradeNodeAgent(
   node: NodeObservedState,
   targetVersion: string,
   reason: string,
   signal?: AbortSignal,
-): Promise<Operation> {
-  return operations.upgradeNodeAgent(
-    {
-      nodeId: node.id,
-      idempotencyKey: newIdempotencyKey(),
-      ifMatch: `"revision-${String(node.version)}"`,
-      agentUpgradeRequest: { targetVersion, reason },
-    },
-    requestInit(signal),
+) {
+  return read(
+    client.POST("/nodes/{node_id}/agent-upgrade", {
+      params: {
+        path: { node_id: node.id },
+        header: {
+          "Idempotency-Key": newIdempotencyKey(),
+          "If-Match": `"revision-${String(node.version)}"`,
+        },
+      },
+      body: { target_version: targetVersion, reason },
+      signal: signal ?? null,
+    }),
   );
 }
 
-// Fleet rollouts are orchestrated server-side: the browser only selects the
-// target version, candidate nodes, and batch size, then tracks durable
-// rollout state that survives browser closure and Controller restart.
 export async function createAgentRollout(
   targetVersion: string,
   nodeIds: string[],
   batchSize: number,
   reason: string,
   signal?: AbortSignal,
-): Promise<AgentRollout> {
-  return rolloutResponse(
-    operations.createAgentRolloutRaw(
-      {
-        idempotencyKey: newIdempotencyKey(),
-        xWorkspaceID: await getWorkspaceId(),
-        agentRolloutCreateRequest: {
-          targetVersion,
-          nodeIds,
-          batchSize,
-          reason,
+) {
+  return readRollout(
+    client.POST("/agent-rollouts", {
+      params: {
+        header: {
+          "X-Workspace-ID": await getWorkspaceId(),
+          "Idempotency-Key": newIdempotencyKey(),
         },
       },
-      requestInit(signal),
-    ),
-  );
-}
-
-export async function listAgentRollouts(
-  limit?: number,
-  signal?: AbortSignal,
-): Promise<AgentRolloutPage> {
-  const xWorkspaceID = await getWorkspaceId();
-  const response = await operations.listAgentRolloutsRaw(
-    limit === undefined ? { xWorkspaceID } : { xWorkspaceID, limit },
-    requestInit(signal),
-  );
-  const wire: unknown = await response.raw.json();
-  if (
-    !wire ||
-    typeof wire !== "object" ||
-    !("rollouts" in wire) ||
-    !Array.isArray(wire.rollouts)
-  ) {
-    throw new Error("Invalid rollout page");
-  }
-  return { rollouts: wire.rollouts.map(rolloutDetail) };
-}
-
-export async function getAgentRollout(
-  rolloutId: string,
-  signal?: AbortSignal,
-): Promise<RolloutDetail> {
-  return rolloutResponse(
-    operations.getAgentRolloutRaw(
-      {
-        xWorkspaceID: await getWorkspaceId(),
-        rolloutId,
+      body: {
+        target_version: targetVersion,
+        node_ids: nodeIds,
+        batch_size: batchSize,
+        reason,
       },
-      requestInit(signal),
-    ),
+      signal: signal ?? null,
+    }),
+  );
+}
+
+export async function listAgentRollouts(limit?: number, signal?: AbortSignal) {
+  const { data, response } = await client.GET("/agent-rollouts", {
+    params: {
+      header: { "X-Workspace-ID": await getWorkspaceId() },
+      ...(limit === undefined ? {} : { query: { limit } }),
+    },
+    signal: signal ?? null,
+  });
+  if (data === undefined) throw new ResponseError(response);
+  return { rollouts: data.rollouts.map(rolloutDetail) };
+}
+
+export async function getAgentRollout(rolloutId: string, signal?: AbortSignal) {
+  return readRollout(
+    client.GET("/agent-rollouts/{rollout_id}", {
+      params: {
+        path: { rollout_id: rolloutId },
+        header: { "X-Workspace-ID": await getWorkspaceId() },
+      },
+      signal: signal ?? null,
+    }),
   );
 }
 
 export async function resumeAgentRollout(
   rolloutId: string,
   signal?: AbortSignal,
-): Promise<RolloutDetail> {
-  return rolloutResponse(
-    operations.resumeAgentRolloutRaw(
-      {
-        idempotencyKey: newIdempotencyKey(),
-        xWorkspaceID: await getWorkspaceId(),
-        rolloutId,
+) {
+  return readRollout(
+    client.POST("/agent-rollouts/{rollout_id}/resume", {
+      params: {
+        path: { rollout_id: rolloutId },
+        header: {
+          "X-Workspace-ID": await getWorkspaceId(),
+          "Idempotency-Key": newIdempotencyKey(),
+        },
       },
-      requestInit(signal),
-    ),
+      signal: signal ?? null,
+    }),
   );
 }

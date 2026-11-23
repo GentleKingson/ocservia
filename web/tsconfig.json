@@ -19,6 +19,5 @@
     "test/**/*.ts",
     "e2e/**/*.ts",
     "*.config.ts"
-  ],
-  "exclude": ["src/api/generated"]
+  ]
 }

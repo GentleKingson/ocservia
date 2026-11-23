@@ -1,24 +1,29 @@
-import {
-  PlatformApi,
-  type Readiness,
-  type BuildInfo,
-} from "@ocservia/api-client";
-import { configuration } from "./transport";
+import { client, read } from "./transport";
 
-const platform = new PlatformApi(configuration);
 let authenticationProbe: Promise<void> | undefined;
 
-export async function getReadiness(): Promise<Readiness> {
-  return platform.getReadiness();
+export function getReadiness() {
+  return read(client.GET("/readyz"));
 }
 
-export async function getVersion(): Promise<BuildInfo> {
-  return platform.getVersion();
+export function getVersion() {
+  return read(client.GET("/version"));
 }
 
-export async function probeAuthentication(): Promise<void> {
-  authenticationProbe ??= platform
-    .listAuthorizedWorkspaces()
+export async function loginLocal(
+  username: string,
+  password: string,
+): Promise<Response> {
+  const { response } = await client.POST("/auth/login", {
+    cache: "no-store",
+    body: { username, password },
+  });
+  return response;
+}
+
+export function probeAuthentication(): Promise<void> {
+  authenticationProbe ??= client
+    .GET("/workspaces")
     .then(() => undefined)
     .finally(() => {
       authenticationProbe = undefined;

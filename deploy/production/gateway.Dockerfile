@@ -1,7 +1,6 @@
 FROM node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS web-build
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-COPY web/src/api/generated ./src/api/generated
 RUN npm install --global npm@11.19.0 && npm ci
 COPY web/ ./
 RUN npm run build

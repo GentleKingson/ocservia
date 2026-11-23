@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Menu } from "@lucide/vue";
-import type { Workspace } from "@ocservia/api-client";
+import type { Workspace } from "@/api/models";
 import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
