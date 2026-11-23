@@ -1,6 +1,6 @@
 # Stable contracts
 
-This document lists the rules that must not break: invariants, protocol generation rules, receipts, and the database artifact and recovery contracts. Operator steps live in [Production deployment](../operations/production-deployment.md), [Agent lifecycle](../operations/agent-lifecycle.md), [Authentication](../operations/authentication.md) and [Incident recovery](../operations/incident-recovery.md). The frozen byte formats are [command authorization v1](../development/command-authorization-v1.md), [semantic hash v1](../development/command-semantic-hash-v1.md) and [semantic hash v2](../development/command-semantic-hash-v2.md).
+This document lists the rules that must not break: invariants, protocol generation rules, receipts, and the database artifact and recovery contracts. Operator steps live in [Production deployment](../operations/production-deployment.md), [Agent lifecycle](../operations/agent-lifecycle.md), [Authentication](../operations/authentication.md) and [Incident recovery](../operations/incident-recovery.md). The frozen byte formats are [command authorization v1](../development/command-authorization-v1.md) and [semantic hash v2](../development/command-semantic-hash-v2.md).
 
 The published [v1.1.0 policy reset](../operations/production-deployment.md#version-policy) replaced the software-version windows, historical release matrix, and schema-compatibility admission rules from the 1.0 policy, removing the software-version guards and legacy compatibility entrypoints. The [release notes](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0) record acceptance for `v1.1.0` itself, but every subsequent candidate must pass its own validation. Runtime protocol negotiation, command authorization, artifact digest checks, durable state invariants, migration content integrity, and live readiness probes remain active contracts without acting as a software-version fence.
 
@@ -15,7 +15,7 @@ Each candidate build is validated against its exact artifacts on the supported a
 | Installation and upgrade | The Controller installer prepares a protected deployment and the lifecycle wrapper applies the pinned Compose project. Managed nodes install native DEB or RPM packages. The upgrader verifies the native artifact against the signed command and retains the installed package for rollback. | Temporary staging paths and package build internals. |
 | Package names | DEB packages `ocservia-agent_X.Y.Z-1_{amd64,arm64}.deb`; RPM packages `ocservia-agent-X.Y.Z-1.{x86_64,aarch64}.rpm`; `controller-release-{amd64,arm64}.json` and the `amd64` alias `controller-release.json`. | Workspace crate versions such as `0.1.0`, temporary build directory names, or treating container image config IDs as registry manifest digests. |
 | Schema and transport | [`proto/ocserv/platform/agent/v1`](../../proto/ocserv/platform/agent/v1) defines the external Agent protocol message field numbers and enums under `FILE` breaking checks (see [Schema sources and generation](#schema-sources-and-generation)). Iroh ALPNs are `ocserv-platform/enroll/1` and `ocserv-platform/agent/1`, with enrollment proof version `1.1` and separately negotiated session versions. [`proto/ocserv/platform/transport/v1`](../../proto/ocserv/platform/transport/v1) (Go/`transportd` Unix socket) and the `Agent`/`privd` local socket are private IPC interfaces paired within a single release and unbound from cross-version breaking checks. | Calling Iroh directly from Go, connecting third-party clients to `transportd` or `privd`, or assuming signed commands accept unknown Protobuf fields automatically. |
-| Signing and hashes | [Command authorization v1](../development/command-authorization-v1.md), session and artifact grants, connection fence v2, fence binding v2, and [privd receipt v1](#privd-receipt-v1) use versioned canonical byte transcripts. The v2.0.0 Go and Rust encoders use RFC 8949 deterministic CBOR for the migrated transcripts. [Semantic hash v1](../development/command-semantic-hash-v1.md) remains frozen for historical verification while the Controller issues [v2](../development/command-semantic-hash-v2.md). Raw Protobuf wire bytes are never used as canonical signing input. | Mutating an existing hash or transcript version to cover new fields, or inferring semantic hash v2 support from the `command.semantic-hash.v1` capability string. |
+| Signing and hashes | [Command authorization v1](../development/command-authorization-v1.md), session grants (`SessionGrantV1` with `session_epoch`), artifact grants (`ArtifactGrantV1`), [semantic hash v2](../development/command-semantic-hash-v2.md), and [privd receipt v1](#privd-receipt-v1) all use RFC 8949 Core Deterministic CBOR transcripts preceded by versioned domain separators. Semantic hash v1 and pre-CBOR binary formats have been removed. Raw Protobuf wire bytes are never used as canonical signing input. | Mutating an existing hash or transcript version to cover new fields, or accepting removed semantic hash v1 inputs. |
 | Versions and durable state | Controller and `transportd` ship from a single release commit, and `Agent`, `privd`, and `upgrader` ship together in one verified node package. Cross-version combinations carry no compatibility guarantee. Upgrades and restarts preserve local journals, the root effect store, HMAC and receipt keys, endpoint identities, and revision/fence floors. | Swapping `Agent` and `privd` binaries independently, or using numeric version comparisons as dispatch authorization. |
 | Database | [Database contract](#database): PostgreSQL 18.x serialized owner-role migrations, least-privilege runtime role, durable execution receipts, Goose version history, and exact runtime schema-version admission. | Retired backends (including MySQL and MariaDB), down-migrations, automatic force-clean on dirty schemas, cross-engine data migration, or assuming additive DDL is backward compatible across versions. |
 
@@ -90,9 +90,8 @@ remain observation-only, and old signed `RETRY_IF_EFFECT_ABSENT` grants can only
 replay a retained root result. Missing or pruned results remain `unknown` and
 require operator reconciliation. Deploy matched Controller/transportd and
 Agent/privd packages; older nodes may reject the new command revision until
-upgraded. The semantic hash formats are frozen in
-[v1](../development/command-semantic-hash-v1.md) and
-[v2](../development/command-semantic-hash-v2.md).
+upgraded. The semantic hash format is frozen in
+[semantic hash v2](../development/command-semantic-hash-v2.md).
 
 Whenever a database commit acknowledgement is uncertain, the service performs a
 bounded readback of the original immutable intent, the specific attempt lease
@@ -111,9 +110,9 @@ only on the worker polling the PostgreSQL outbox every 200 ms and reaping
 expired leases once per second.
 
 On the Controller side, the configured database backend persists structured
-command results alongside their semantic hash version (`0` for legacy, `1` for
-canonical v1, or `2` for session-authority v2, which are protocol identifiers
-independent of database migration numbers). Every ingested `command_result`
+command results alongside their semantic hash version (`2` for canonical CBOR
+v2, or `0` for unspecified on legacy non-reconcilable metadata, independent of
+database migration numbers; version `1` has been removed and is rejected). Every ingested `command_result`
 event must decode cleanly and satisfy all state, identity, hash-version,
 digest, size, and timestamp checks, or the entire ingestion transaction rolls
 back. Development simulation runs use a separate `simulation_result` event
@@ -125,7 +124,7 @@ without overwriting Controller-observed authority timestamps.
 The Agent records command acceptance and terminal outcomes in its
 owner-controlled SQLite database, binding each side effect to a unique
 idempotency key, a unique command ID, and a semantic payload hash with its hash
-version (the Controller issues v2, while the Agent accepts both v1 and v2).
+version (v2 only; v1 has been removed and is rejected).
 The idempotency key and command ID are enforced as independent unique
 constraints, so only an exact match across all bound fields replays a stored
 result. Reusing either identifier for a different command, or resending the
@@ -200,11 +199,11 @@ The table below summarizes runtime admission rules enforced by [`enrollment.Serv
 | Privileged operation without registered receipt capability/key | Fail closed in production. Register the root receipt key, upgrade to a matched node package, and confirm the negotiated capability before dispatching mutations. | Attestation safety and missing-root-receipt tests. |
 | Unknown command field, wrong wire type or truncated nested message | Reject during wire decoding before journaling or executing any side effect, even if the outer signature or hash appears valid. | Shared strict-wire corpus and descriptor-drift checks. |
 | Uncertain non-idempotent mutation, including matched releases | Leave the operation in `Unknown` unless authenticated durable evidence proves the outcome, and pause conflicting writes until operator reconciliation finishes. | [Matched-release recovery boundary](#matched-release-recovery-boundary); strict recovery probes preserve their recorded outcomes. |
-| Semantic hash v1/v2 | Recompute and verify the declared hash version (the Controller currently emits v2). Unknown, missing, or mismatched hashes and same-ID cross-version journal collisions fail closed. Existing v1 journal entries stay as written and are never rewritten to v2. | Shared semantic hash goldens and Agent v1/hash-version-conflict tests. |
+| Semantic hash v2 | Recompute and verify semantic hash v2 (v1 has been removed and is rejected). Unknown, missing, or mismatched hashes and same-ID cross-version journal collisions fail closed. | Shared semantic hash v2 goldens and Agent hash-version-conflict tests. |
 | Config revision drift | Authorization revisions and applied configuration revisions are tracked separately: `Plan` binds `config_expected_revision`, and `Apply` binds the current and candidate hashes alongside the target revision. Stale or gapped transitions are rejected and recovered from durable evidence. | ConfigPlan lookup/Apply tests and Agent/adapter revision, restart, and recovery tests. |
 | Historical/unattested CSR or lost P12 credentials | Reject unattested migration-era CSRs and require a fresh attested CSR. Encrypted P12 bundles remain bounded and single-use, and web download credentials live only in the active browser tab's memory until expiry. | Certificate and secret integration tests, OpenSSL adapter tests, and Web certificate workflow-reference recovery tests. |
 
-The 20-payload strict-wire test corpus, Go reflection checks, Rust descriptor-mutation tests, and canonical signing/fence/receipt goldens cover all reachable command fields, including complete-configuration payloads; see [focused commands](../development/release-checks.md#command-wire-contracts). Passing wire-fixture tests verifies current decoder strictness and does not certify runtime compatibility with older published Agent binaries.
+The 26-vector strict-wire test corpus (covering all 20 command payload variants), Go reflection checks, Rust descriptor-mutation tests, and canonical CBOR signing/grant/receipt goldens cover all reachable command fields, including complete-configuration payloads; see [focused commands](../development/release-checks.md#command-wire-contracts). Passing wire-fixture tests verifies current decoder strictness and does not certify runtime compatibility with older published Agent binaries.
 
 ### Matched-release recovery boundary
 
@@ -302,29 +301,30 @@ unlock a safe retry. Synthesizing a privileged success or failure still requires
 the original receipt. If root evidence is missing or conflicting, the command
 stays Unknown.
 
-Privd signs a fixed binary transcript independent of Protobuf marshal output. The
-transcript starts with the ASCII domain string
-`ocservia/privd-result-receipt/v1` followed by a NUL byte. Enum and version
-fields are encoded as unsigned 32-bit big-endian integers, and the effect
-sequence uses an unsigned 64-bit big-endian integer. Every byte slice and UTF-8
-string is preceded by an unsigned 32-bit big-endian byte length. Timestamps
-consist of signed 64-bit seconds followed by unsigned 32-bit nanoseconds, both
-big-endian, where seconds must be nonnegative and nanoseconds less than one
-billion. Booleans and optional-presence markers occupy a single byte (`0` or
-`1`), keeping absent fields distinct from present-but-empty values.
+Privd signs an RFC 8949 Core Deterministic CBOR map preceded by the ASCII domain
+string `ocservia/privd-result-receipt/cbor.v1` and a NUL byte (`0x00`),
+independent of Protobuf marshal output. Result payload digests (`result_cbor_sha256`)
+are computed separately as SHA-256 over `ocservia/privd-result-payload/cbor.v1\0`
+followed by the deterministic CBOR encoding of `{result_kind, payload}` for the
+typed command result (empty map `{}` for `MUTATION` and `ERROR` result kinds).
 
-Fields appear in a fixed order: receipt version, node ID, key ID, command ID,
-operation ID, idempotency key, semantic-hash version and digest, command kind,
-result kind, terminal state, exact result digest, error-code digest, effect
-record ID and sequence, accepted and completed timestamps, replay marker, and
-the optional certificate binding. When present, the certificate binding orders
-the certificate ID, CSR digest, public-key digest, requested-subject digest,
-and root effect record ID. UUIDs are 16-byte UUIDv7 values, digests and Ed25519
-public keys are 32 bytes, effect IDs are 16 to 32 bytes, and signatures are 64
-bytes. The complete canonical transcript is bounded to 2048 bytes and the
-encoded proof to 64 KiB. Unknown receipt versions, out-of-range enums, lengths,
-or timestamps fail closed, and unknown Protobuf fields are excluded from the
-transcript.
+The `PrivdResultReceiptV1` CBOR map binds `receipt_version` (`uint32`),
+`node_id` (16B UUID), `privd_attestation_key_id` (UTF-8), `command_id` (16B),
+`operation_id` (16B), `idempotency_key` (16B), `semantic_payload_hash_version`
+(`uint32`), `semantic_payload_sha256` (32B), `command_kind` (`uint32`),
+`result_kind` (`uint32`), `terminal_state` (`uint32`), `result_cbor_sha256`
+(32B), `error_code` (UTF-8 string, max 128 bytes), `effect_sequence` (`uint64`),
+`accepted_at_seconds`/`accepted_at_nanos`,
+`completed_at_seconds`/`completed_at_nanos`, `replayed` (`bool`), and optional
+`certificate` (`null` when absent). When present, `certificate` is a CBOR map
+containing `certificate_id` (16B), `csr_der_sha256` (32B for successful
+`CERTIFICATE_CSR`; empty 0-byte string for `CERTIFICATE_P12`,
+`CERTIFICATE_REVOKE`, and failed CSR), and `public_key_sha256` (same length
+rule). UUIDs are 16-byte UUIDv7 values, digests and Ed25519
+public keys are 32 bytes, and signatures are 64 bytes. The complete canonical
+transcript is bounded to 2048 bytes and the encoded proof to 64 KiB. Unknown
+receipt versions, out-of-range enums, lengths, or timestamps fail closed, and
+unknown Protobuf fields are excluded from the transcript.
 
 Establishing key trust requires a random one-time Controller challenge
 bound to the installation token and consumed through
@@ -648,35 +648,29 @@ Controller event ingress checks every incoming event's node ID and `EndpointID`
 against active database trust, rejecting events from any lingering revoked
 session before convergence finishes.
 
-When the revocation request itself completes the fenced trust update and then
-the fenced connection close, it records them on the queued task for exactly that
+When the revocation request itself completes the trust update and then
+the connection close, it records them on the queued task for exactly that
 node, endpoint, revision and reason, so the worker does not retry a close whose
-connection, and with it the fencing owner, is already gone. A failed close stays
-pending. The worker never
-counts lost connection ownership as delivery, and any other intent stays with
-the worker.
+connection is already gone. A failed close stays pending, and any other intent
+stays with the worker.
 
 An RPC timeout, cancellation or unavailable response can occur before or after
-the mutation. Neither that error nor a later owner/connection snapshot proves
+the mutation. Neither that error nor a later connection snapshot proves
 the historical result. An identical trust update is idempotent for the same
-node, EndpointID, state and revision, but still requires a valid binding for its
-operation identity (which also covers the reason). Applying a higher revision
-can itself close the old connection, so a lost update acknowledgement can also
-remove the owner needed for a retry. Retries are conditional on fencing and
-cannot guarantee eventual completion.
+node, EndpointID, state and revision. Applying a higher revision can itself
+close the old connection.
 
-`CloseNode` verifies its binding before removing the current connection; its
-`NOT_FOUND` response is treated by the Go client as satisfied current absence.
-That response does not identify which earlier operation, if any, closed the
-connection. Accordingly, `close_applied` records satisfaction of the existing
-close contract, not a durable receipt for a particular historical close.
-`GetNodeConnection` and `GetOwnerFence` expose current in-memory snapshots, not
-operation receipts. Restart loads authoritative database trust into transportd's
-in-memory policy before accepting connections, but does not reconstruct lost
-RPC acknowledgements or settle queue records. A failed or nonmatching
-`RecordSynchronized` can leave work pending even after transport effects ran.
-The API logs a persistence error but does not undo committed revocation.
-See the [read-only incident checks](../operations/incident-recovery.md#revocation-committed-with-synchronization-pending).
+`CloseNode` removes the current connection; its `NOT_FOUND` response is treated
+by the Go client as satisfied current absence. That response does not identify
+which earlier operation, if any, closed the connection. Accordingly,
+`close_applied` records satisfaction of the existing close contract, not a
+durable receipt for a particular historical close. `GetNodeConnection` exposes
+a current in-memory snapshot, not an operation receipt. Restart loads
+authoritative database trust into transportd's in-memory policy before
+accepting connections, but does not reconstruct lost RPC acknowledgements or
+settle queue records. A failed or nonmatching `RecordSynchronized` can leave
+work pending even after transport effects ran. The API logs a persistence error
+but does not undo committed revocation. See the [read-only incident checks](../operations/incident-recovery.md#revocation-committed-with-synchronization-pending).
 
 When claiming trust-convergence work, the worker computes lease deadlines from
 a fresh database wall-clock read after acquiring the claim lock, and uses the
@@ -695,8 +689,9 @@ capabilities and the Controller returns the sorted intersection with the node's
 registered database capability set, so advertising unknown capabilities
 never blocks enrollment or connection. Under handshake protocol `1.1`, the
 Controller signs that negotiated subset, the `EndpointID`, node ID,
-authorization revision, and expiration time into `SessionGrantV1`. Protocol
-`1.0` sessions are restricted to read-only capabilities.
+authorization revision, `session_epoch`, and expiration time into
+`SessionGrantV1`. Protocol `1.0` and grantless sessions are retired and
+rejected (`INCOMPATIBLE_PROTOCOL`).
 
 Configuring `OCSERV_CONTROLLER_ENDPOINT_ID` enables the HTTP enrollment routes
 (which otherwise return `404`) and starts the trust service on
@@ -766,8 +761,9 @@ socket with exact UID, GID, and mode beneath trusted, non-writable parent
 directories, and both reject any pathname identity change during connection
 setup.
 
-`transportd` requires `--trust-socket` in production so all authorization and
-trust updates flow from the live Controller database, and refuses a missing or
+`transportd` always requires `--trust-socket` and one to eight
+`--controller-verification-key-file` flags so all authorization and trust
+updates flow from the live Controller database, and refuses a missing or
 unreachable trust socket. Under `--trust-socket`, the Controller issues signed
 protocol `1.1` session grants and revocations over the Unix socket boundary,
 which `transportd` cannot mint on its own.
@@ -824,10 +820,10 @@ published as telemetry. In every such case `transportd` emits the `unknown`
 result that the Controller must reconcile instead of treating it as a clean
 failure or resending it as a new command.
 
-When one to eight `--controller-verification-key-file` flags are configured, `transportd`
-also validates the Controller-signed owner-fence carriers on command, artifact,
-and trust-update requests. Once a node registers a fence, those carriers are
-mandatory on every subsequent call.
+`transportd` requires one to eight `--controller-verification-key-file` flags
+and uses those pinned public keys to verify every Controller-signed
+`SessionGrantV1` (including monotonic `session_epoch`) before authorizing
+Agent sessions.
 
 Trust synchronization calls return `applied`, `stale`, or `rejected` along with
 the exact retained state and revision, and connection side effects run only
@@ -836,9 +832,9 @@ after an authoritative transition advances that retained state. Once an
 neither a stale message nor a higher-revision `Active` update can reactivate or
 rebind a revoked endpoint.
 
-The Rust workspace pins Iroh in `Cargo.toml` (version in `toolchains.lock` and
-`Cargo.lock`) using a provenance-bound patch of that exact `crates.io` release,
-with the full dependency graph locked in `Cargo.lock`. Production Agent and
+The Rust workspace pins unmodified Iroh crates in `Cargo.toml` (version in
+`toolchains.lock` and `Cargo.lock`), with the full dependency graph locked in
+`Cargo.lock`. Production Agent and
 `transportd` launchers configure a single dedicated Relay URL (`RELAY_URL_A` /
 `OCSERV_RELAY_URL_A`), and production supports only one dedicated Relay (see
 [Dedicated Relay](../operations/production-deployment.md#dedicated-relay)).
@@ -1151,15 +1147,14 @@ These rules bind the Web console to the backend contracts above. Handwritten mod
 
 Session handling:
 
-- `api/transport.ts` configures the authenticated fetch wrapper with the `/api/v1` base URL, `same-origin` credentials, the development-only bearer header, optional request signal propagation, and idempotency key generation. When a call returns 401, the transport notifies the session coordinator (`shared/session.ts`) and returns the original response to the caller without retrying. The coordinator owns the unauthenticated redirect guard and the saved post-login return path.
-- Post-login return paths are validated as internal console routes and consumed at most once. Both the remembered Workspace ID and the login return path are stored in `sessionStorage` on a best-effort basis: if storage is unavailable or throws, the console proceeds without a saved preference and never blocks login, Workspace selection, or change notifications.
-- `api/platform.ts` provides an independent, in-flight-only authentication probe. Probing `/workspaces` through it checks session validity without mutating the cached Workspace list or current selection.
+- `api/transport.ts` configures the authenticated fetch wrapper with the `/api/v1` base URL, `same-origin` credentials, the development-only bearer header, optional request signal propagation, and idempotency key generation. When a call (other than `/auth/login`) returns 401, the transport notifies the session coordinator (`shared/session.ts`, `redirectToLogin`) and throws `ResponseError` without retrying. The coordinator owns the unauthenticated redirect guard and the saved post-login return path.
+- Post-login return paths are validated as internal console routes and consumed at most once. The login return path is stored in `sessionStorage` on a best-effort basis: if storage is unavailable or throws, the console proceeds without a saved return path and never blocks login or navigation.
+- `api/platform.ts` provides an independent, in-flight-only authentication probe. Probing `/workspaces` through it checks session validity without mutating cached Workspace state.
 - Certificate artifact downloads authenticate with their one-time grant token and the same-origin session cookie, without a Workspace header. SSE stream URLs never carry bearer tokens in query parameters.
 
-Workspace selection:
+Workspace discovery:
 
-- `api/workspace.ts` is the single source of truth for the active and authorized Workspace list, coalesced in-flight discovery, and the Workspace generation counter. Selecting a Workspace accepts only authorized IDs and increments the generation counter on every change.
-- Asynchronous callers fence their responses against both the active Workspace ID and the generation counter, so a switch away from and back to the same Workspace still invalidates earlier in-flight reads. Running the independent authentication probe never alters that Workspace state.
+- `api/workspace.ts` discovers and caches the single management Workspace (`getWorkspace`, `getWorkspaceId`, `cachedWorkspaceId`) with coalesced in-flight discovery. Running the independent authentication probe never alters cached Workspace state.
 
 Unconfirmed operations:
 
@@ -1285,7 +1280,7 @@ Authoritative database requirements live in [Database support](../operations/pro
 
 Adopting a new database patch release requires reviewing migrations, role permissions, SQL artifacts, and backup/restore behavior before updating the pinned digests, with runtime evidence captured in Business Smoke. Never wipe node SQLite journals to work around a database or package upgrade check.
 
-Additive schema changes do not by themselves guarantee cross-version compatibility, and operators must never edit published migration SQL or discard data to force a binary to start. Likewise, migration receipts are not backups, and an untested backup file is not a verified restore. The repository provides no down-migration SQL, so rolling back the Controller binary never reverses schema changes or guarantees that an older binary can read current database state. Recover through a forward fix or a planned isolated restore by following the [PostgreSQL recovery](../operations/incident-recovery.md#database-recovery) procedure (verified base backup with isolated restore), which does not claim HA or PITR equivalence, and review [schema provenance after restore](../operations/incident-recovery.md#schema-provenance-after-restore).
+Additive schema changes do not by themselves guarantee cross-version compatibility, and operators must never edit published migration SQL or discard data to force a binary to start. Likewise, Goose version rows are not backups, and an untested backup file is not a verified restore. The repository provides no down-migration SQL, so rolling back the Controller binary never reverses schema changes or guarantees that an older binary can read current database state. Recover through a forward fix or a planned isolated restore by following the [PostgreSQL recovery](../operations/incident-recovery.md#database-recovery) procedure (verified base backup with isolated restore), which does not claim HA or PITR equivalence, and review [schema provenance after restore](../operations/incident-recovery.md#schema-provenance-after-restore).
 
 ## Certificates and Signer
 
@@ -1293,7 +1288,7 @@ Additive schema changes do not by themselves guarantee cross-version compatibili
 
 Managed nodes generate certificate private keys locally and never expose them to the control plane. The Controller receives a signed CSR and public-key digest. It forwards the CSR to a configured external PKI signer after validating the Admin-authorized, content-bound operation.
 
-The Controller stores neither a CA private key nor any node private key, and a CSR self-signature alone does not prove privileged execution on the node. A request therefore enters `csr_ready` only after the Controller verifies a root privd receipt that binds the certificate ID, CSR and public-key digests, requested-subject digest, node, command, operation, idempotency key, and root effect record. Immediately before calling the external signer, the Controller locks the certificate row and rechecks the exact CSR digest, receipt-bound request and version, node, persisted authorization binding, and non-revoked key state. P12 export and certificate-key revocation enforce the same terminal-result attestation rule.
+The Controller stores neither a CA private key nor any node private key, and a CSR self-signature alone does not prove privileged execution on the node. A request therefore enters `csr_ready` only after the Controller verifies a root privd receipt that binds the certificate ID, CSR and public-key digests, node, command, operation, idempotency key, and `effect_sequence`. Immediately before calling the external signer, the Controller locks the certificate row and rechecks the exact CSR digest, receipt-bound request and version, node, persisted authorization binding, and non-revoked key state. P12 export and certificate-key revocation enforce the same terminal-result attestation rule.
 
 Managed-node certificates and secret sealing are distinct from the Controller's own HTTPS listener certificate (configured via manual files or ACME in Integrated mode), which the Signer neither issues nor serves.
 
@@ -1307,9 +1302,9 @@ Thirty days before `not_after`, a certificate enters `expiring` and triggers a h
 
 When exporting a P12 bundle, the Controller generates a fresh random password and an independent random artifact token, returning both only in the initial HTTP response and never persisting them in the Controller database. The password is sealed to the node's dedicated P12-password public key, which cannot be decrypted by the separate user-password key. On the node, privd decrypts the typed secret locally, writes an encrypted UUID-addressed artifact into its fixed root-owned spool, and records the certificate and version, operation, digest, byte size, expiry, and state in its authenticated effect store. The root mapping enters `prepared` before any staging file is created and advances to `available` only after the final artifact is published, so certificate revocation can clean up both interrupted staging files and completed artifacts.
 
-Downloading an exported P12 bundle requires standard node authorization, the separate `X-Artifact-Token` header, and a short-lived Controller-signed `ArtifactGrantV1` bound to the node, artifact, certificate and version, operation, requester, purpose, maximum size, and unique grant ID. Both the Agent and privd verify the grant independently. Only one grant may lease an artifact at a time, and an interrupted lease remains locked until its bounded expiry elapses. The root ledger also tracks the exact chunk offset so a second stream cannot replay the same grant from offset zero.
+Downloading an exported P12 bundle requires standard node authorization, the separate `X-Artifact-Token` header, and a short-lived Controller-signed `ArtifactGrantV1` bound to the node, artifact, certificate and version, operation, requester, purpose, maximum size, and unique grant ID. Both the Agent and privd verify the grant independently. Only one grant may lease an artifact at a time, and an interrupted lease remains locked until its bounded expiry elapses. `FetchArtifact` transfers the bounded artifact in a single request-response exchange (`ArtifactPayload`, at most 256 KiB).
 
-Streaming the bytes does not itself consume the artifact. Once the Control Plane receives the full stream and verifies its size and digest, it sends a separate finalize request carrying the same signed grant to the Agent and privd, which durably marks the grant consumed and deletes the local P12 file. Consumed grants cannot be used to fetch the artifact again. An exact finalize retry may still acknowledge the already-consumed root record without reopening the file or repeating deletion, so a dropped network response never strands the Controller lease.
+Fetching the payload does not itself consume the artifact. Once the Control Plane receives the complete payload and verifies its size and digest, it sends a separate `ConsumeArtifact` finalize request carrying the same signed grant to the Agent and privd, which durably marks the grant consumed and deletes the local P12 file. Consumed grants cannot be used to fetch the artifact again. An exact finalize retry may still acknowledge the already-consumed root record without reopening the file or repeating deletion, so a dropped network response never strands the Controller lease.
 
 Revoking a certificate invalidates all outstanding grants and deletes any mapped P12 and staging files. Time-based cleanup remains solely as crash recovery for expired or orphaned files.
 
@@ -1342,7 +1337,7 @@ Revocation commits the timestamp and exact reason string and rejects any later a
 
 Running `crl` reads durable revocations from the ledger and writes a signed PEM CRL to stdout with a one-hour `nextUpdate` window and the current audit revision as the CRL number. The operator steps are in [CRL refresh](../operations/incident-recovery.md#crl-refresh). The X.509 CRL reason code extension is omitted because the ledger stores free-form reason text. Receiving a `204` from `/sign/revoke` confirms only that the ledger recorded the revocation. It does not clean up node files, terminate active VPN sessions, or distribute the updated CRL, and the system exposes no public CRL endpoint or OCSP responder.
 
-The ledger uses state format version 1 backed by bbolt (version pinned in [`signer/go.mod`](../../signer/go.mod)) with an exclusive process lock, transaction-consistent snapshots, and default synchronous commits enabled. The underlying local filesystem must honor `fsync`; network filesystems, multi-node replication, and high-availability clustering are unsupported. Four buckets organize state: `meta` (schema version, issuer SHA-256, policy name, and record checksums), `issued` (certificate records keyed by UUID), `bindings` (node key mappings), and `audit` (monotonic revision log). On startup, Signer runs bbolt's consistency check and validates all record checksums, certificate signatures, CSR bindings, and imported key descriptors. These checksums detect accidental storage corruption; they do not defend against deliberate rewriting by an authorized owner of the state volume. Never edit or downgrade the ledger file by hand. Backup, restore floors, and the audit high-water mark are in [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore).
+The ledger uses state format version 1 backed by bbolt (version pinned in [`signer/go.mod`](../../signer/go.mod)) with an exclusive process lock, transaction-consistent snapshots, and default synchronous commits enabled. The underlying local filesystem must honor `fsync`; network filesystems, multi-node replication, and high-availability clustering are unsupported. Four buckets organize state: `meta` (schema version, issuer SHA-256, and policy name), `issued` (certificate records keyed by UUID), `bindings` (node key mappings), and `audit` (monotonic revision log). On startup, Signer runs bbolt's consistency check and validates `meta`, certificate signatures, CSR bindings, and imported key descriptors. Never edit or downgrade the ledger file by hand. Backup, restore floors, and the audit high-water mark are in [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore).
 
 ### Trusted public-key transfer
 
@@ -1379,11 +1374,7 @@ Buf lints with `STANDARD` (one documented exception in [`proto/buf.yaml`](../../
 
 Toolchain setup and the choice of checks are in [Choose the validation scope](../development/release-checks.md#choose-the-validation-scope). Contract breaking checks (`scripts/check-breaking.sh [base-ref]`, which normalizes retired pre-v2 baseline contracts and recognizes the exact v2.0.0 Agent schema transition) and generated-code cleanliness checks (`scripts/generated-clean.sh`) run in Basic CI when contract inputs or outputs change and on manual checks. CI supplies the PR merge-base or push before SHA; manual workflows require a non-self `contract_base_ref`. Standalone breaking checks default to `origin/main`. Regeneration requires a clean committed candidate and compares both staged and unstaged outputs with HEAD. For CI job routing, see [Path routing](../development/release-checks.md#path-routing). Passing a schema diff check does not replace release-level behavioral testing.
 
-### oneOf object-map conversion
-
-HTTP timestamps use RFC 3339. Group membership responses expose ordered member names.
-
-Regenerate with `scripts/generate.sh`. Do not edit generated TypeScript. Generated-client tests cover object content and typed arrays. Recheck this override whenever the generator is upgraded.
+HTTP timestamps use RFC 3339, and group membership responses expose ordered member names. Web TypeScript types are generated from `openapi/openapi.yaml` into `web/src/api/generated/schema.d.ts` by `openapi-typescript` via `scripts/generate.sh` and consumed with `openapi-fetch`; do not edit generated files by hand.
 
 ## Upstream adapters
 

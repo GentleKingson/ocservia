@@ -32,7 +32,7 @@ install, upgrade, rollback, and uninstall lifecycles.
 | Agent native packages | DEB on Ubuntu 22.04/24.04/26.04 and Debian 12/13, RPM on Rocky Linux 9, `amd64`/`arm64` | [Install a managed node](agent-lifecycle.md#install-a-managed-node), [Agent lifecycle](agent-lifecycle.md), [package validation](../development/release-checks.md) |
 | Databases | PostgreSQL 18.x bundled or external | [Database support](#database-support) |
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` (`1.6.0` parser fixtures unit-tested) | See the note below |
-| Relays | Dedicated relay hosts running the matched vendored `iroh`/`iroh-relay` release | [Dedicated Relay](#dedicated-relay) |
+| Relays | Dedicated relay hosts running the matched checksum-verified crates.io `iroh`/`iroh-relay` release | [Dedicated Relay](#dedicated-relay) |
 | Authentication | Local single administrator (`OCSERV_LOCAL_AUTH_ENABLED=true`) | [Production authentication](authentication.md) |
 | Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; CI runs Chromium plus Playwright Firefox and WebKit on the cross-engine specs | [Web validation](../development/release-checks.md#web-validation) |
 
@@ -55,7 +55,7 @@ Controller hosts:
 ### Deployment capability distinctions
 
 Every supported production deployment runs a single Controller instance, one
-PostgreSQL 18.x relational database, and one dedicated Relay (either on separate
+PostgreSQL 18.x relational database, one Signer service, and one dedicated Relay (either on separate
 hosts in Standalone mode or co-located in Integrated mode, with bundled or
 external PostgreSQL), managing one or more node Agents. Controller high availability, multi-relay failover, database replication clusters,
 automatic PostgreSQL failover, and point-in-time recovery (PITR) are outside the
@@ -377,8 +377,8 @@ print it into logs.
 
 ### Production secrets
 
-All prebuilt `OCSERV_*_IMAGE` settings must use explicit `vX.Y.Z` /
-`vX.Y.Z-rc.N` tags or SHA-256 references. Store secrets outside the runtime in
+All prebuilt `OCSERV_*_IMAGE` settings must use explicit `@sha256:` image digest
+references (version tags are rejected by production launchers). Store secrets outside the runtime in
 a canonical absolute `OCSERV_SECRET_DIR` whose ancestor directories are owned by
 root or the launcher user without group or world write permission. The launcher
 rejects missing files, symlinks, and ownership or mode mismatches. Credentials
@@ -389,7 +389,7 @@ before running the installer:
 
 - HTTPS server certificate and private key.
 - Database owner, runtime, and backup credentials (`database-owner-url`,
-  `database-app-url`, and `postgres.pgpass`; plus `postgres-password`,
+  `database-app-url`, and `postgres.pgpass`; plus `postgres-owner-password`,
   `postgres-app-password`, and `postgres-backup-password` for bundled
   PostgreSQL, or `database-ca.pem` when using external PostgreSQL).
 - Session key and audit keys.
@@ -439,8 +439,8 @@ the runtime before installing or upgrading to this descriptor (Quick mode
 generates it automatically). Place the private key in `OCSERV_SECRET_DIR` and
 write its Ed25519 SPKI public key to `controller-command-verification-key.pem`
 in the same directory as a one-link regular file owned by `0:65532` with mode
-`0440`. Only this public key is mounted into `transportd` to verify connection
-fences; `transportd` must never receive the private key. Rotate the
+`0440`. Only this public key is mounted into `transportd` to verify Controller-signed
+`SessionGrantV1` session grants (including monotonic `session_epoch`); `transportd` must never receive the private key. Rotate the
 verification key together with the matching signing key, and distribute the
 same public key to Agents through the node provisioning channel in
 [command authorization](../development/command-authorization-v1.md). Missing,
@@ -1172,9 +1172,9 @@ production environment, secrets, and backup directory available.
 
 ### Uninstall
 
-Before uninstalling, make sure no install, upgrade, or rollback transaction is
-pending, and retain all required backups, incident evidence, current release
-files, and production secrets.
+Before uninstalling, make sure no legacy `pending-release.json` transaction file
+from an older launcher remains unresolved, and retain all required backups,
+incident evidence, current release files, and production secrets.
 
 #### Retain data
 
@@ -1210,15 +1210,16 @@ material requires separate reconciliation.
 
 Both uninstall modes:
 
-- Refuse to run while a pending transaction exists.
+- Refuse to run while an unresolved legacy `pending-release.json` exists without `release-history.json`.
 - Leave confirmed state and data untouched if shutdown fails.
 - Retain lifecycle state if volume purge fails.
-- Report residual paths if state cleanup fails.
 - Never re-enter the bootstrap launcher.
 
-If Docker fails to remove a volume, the purge remains partial and the lifecycle
-state files are kept. If volume removal succeeds and only state-file cleanup
-fails, the script reports the leftover paths and exits non-zero.
+Current lifecycle commands update `release-history.json` atomically after smoke
+verification succeeds. If Docker fails to remove a volume, the purge remains
+partial and the lifecycle state files are kept; if volume removal succeeds,
+`--purge-data` removes the lifecycle state files (`release-history.json`,
+legacy release pointers, and `deployment-profile.json`).
 
 Verify that the uninstall command exits zero. After a data-retaining uninstall,
 confirm that the project containers are gone and that `start` restores the
@@ -1250,7 +1251,7 @@ deployment, the Relay runs on the Controller host and derives its URL from
 Public or default relays are never used as a production fallback. Any Relay
 recovery test must prove that traffic actually depends on the Relay path,
 because normal direct connectivity remains active alongside the Relay. The
-Relay image is built from the locked vendored `iroh-relay` (see
+Relay image is built from the checksum-verified crates.io `iroh-relay` release (see
 [Relay build](../architecture.md#relay-build)).
 
 Agent enrollment, Agent sessions, and transportd disable public endpoint address
@@ -1270,8 +1271,8 @@ Before you begin a Standalone Relay, have:
 - One independent Relay host with a DNS name and matching TLS certificate.
 - A single high-entropy relay access token provisioned to the Relay, the
   Controller transport service, and all enrolled Agents.
-- A prebuilt relay container image referenced by an explicit `vX.Y.Z` tag or
-  SHA256 digest.
+- A prebuilt relay container image referenced by an explicit `@sha256:` image
+  digest.
 
 #### Configure a Standalone Relay
 
@@ -1279,7 +1280,7 @@ Before you begin a Standalone Relay, have:
    directory with mode `0700` containing `tls.crt`, `tls.key`, and
    `relay-access-token`. Both TLS files must be owned by the launcher user with
    mode `0444`. `relay-access-token` must be owned by UID/GID 65532 with mode
-   `0400`. Export `OCSERV_RELAY_IMAGE` with an explicit version tag or SHA-256
+   `0400`. Export `OCSERV_RELAY_IMAGE` with an explicit `@sha256:` digest
    reference. Assign a DNS name to the host with its matching certificate and
    key, and use the checked-in `deploy/production/relay/relay.toml`
    configuration. The standalone Relay publishes TCP 80/443 and UDP 7842.
@@ -1314,10 +1315,12 @@ Before you begin a Standalone Relay, have:
    RELAY_URL_A=https://relay.example.com
    ```
 
-   Place this value in the managed node's `install.env` during initial
-   installation, or in `/etc/ocservia-agent/relays.env` when making an explicit
+   During initial installation, the managed-node installer retrieves
+   `RELAY_URL_A` from the Controller using the one-time `oit1_` token and writes
+   `/etc/ocservia-agent/relays.env` automatically (managed-node `install.env` is
+   retired). Edit `/etc/ocservia-agent/relays.env` only when making an explicit
    operator topology change. Never edit the released Compose file or place raw
-   token contents in either environment file.
+   token contents in environment files.
 
 The Standalone Relay runs as an independent service outside the Controller
 stack. Running a Standalone Relay and a Controller on the same host is not

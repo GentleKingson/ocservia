@@ -4,22 +4,21 @@ Under command protocols `1.1` and `1.2`, every command accepted by an Agent must
 Ed25519 authorization signed by the Controller. When forwarding a command,
 `transportd` checks the bounded Protobuf wire schema, the negotiated session
 mode, capability, revision, and expiry, and uses its pinned Controller public
-keys to verify the owner-fence carriers before relaying the command bytes.
-`transportd` never holds a Controller signing key, so it cannot mint or modify
-an executable command. Command authorization itself stays with the Agent and
-privd.
+keys to verify `SessionGrantV1` (including monotonic `session_epoch`) before
+relaying the command bytes. `transportd` never holds a Controller signing key,
+so it cannot mint or modify an executable command. Command authorization itself
+stays with the Agent and privd.
 
 The Controller signs a command only after finalizing single-Admin workspace
 authorization, operation identity, required capability, revision, delivery mode,
-and the semantic payload hash. The Controller signs semantic hash v2 for all
-newly issued commands. The Agent, privd, and the Controller result handler also
-accept v1 for historical compatibility. Both the Agent and privd
-pin Controller public keys independently: the Agent verifies the proof before
-recording the command in its local journal, and privd verifies the original
-proof again before reserving or executing any root effect, with no unsigned
-mutation fallback at either boundary. A valid proof authorizes a single
-command's execution; it does not by itself indicate that the command has been
-dispatched, executed, or confirmed.
+and the semantic payload hash. The Controller issues and signs semantic hash v2
+for all commands; semantic hash v1 has been removed and is rejected across the
+Controller, Agent, and privd. Both the Agent and privd pin Controller public keys
+independently: the Agent verifies the proof before recording the command in its
+local journal, and privd verifies the original proof again before reserving or
+executing any root effect, with no unsigned mutation fallback at either boundary.
+A valid proof authorizes a single command's execution; it does not by itself
+indicate that the command has been dispatched, executed, or confirmed.
 
 ## Key identity
 
@@ -37,41 +36,42 @@ referencing an unknown `key_id` fails closed.
 
 ## Canonical signing input
 
-Signatures are computed over the canonical `CommandAuthorizationV1` byte layout
-independent of Protobuf wire serialization, with every field encoded once in
-the order below:
+Signatures are computed over an RFC 8949 Core Deterministic CBOR map preceded by
+a null-terminated ASCII domain separator, independent of Protobuf wire
+serialization:
 
-| Field | Encoding |
+```
+ASCII("ocservia/controller-command/cbor.v1") || 0x00 || deterministic_cbor(CommandClaimsV1)
+```
+
+`CommandClaimsV1` is a deterministic CBOR text-keyed map containing the exact
+fields below (map keys sorted by RFC 8949 Core Deterministic CBOR rules):
+
+| CBOR key | Type / constraints |
 |---|---|
-| domain | ASCII `ocservia/controller-command/v1`, followed by `0x00` |
-| authorization version | unsigned 32-bit integer, big-endian; v1 is `1` |
-| `key_id` | unsigned 32-bit big-endian UTF-8 byte length, then exact UTF-8 bytes |
-| command protocol version | length-prefixed UTF-8; current `1.2`, historical `1.1` |
-| `command_id` | exactly 16 UUID bytes in network order |
-| `idempotency_key` | exactly 16 UUID bytes in network order |
-| `node_id` | exactly 16 UUID bytes in network order |
-| `operation_id` | exactly 16 UUID bytes in network order |
-| actor identity | length-prefixed UTF-8 |
-| action | length-prefixed UTF-8 |
-| required capability | length-prefixed UTF-8 |
-| approval ID | `0x00` if absent; otherwise `0x01` then exactly 16 UUID bytes |
-| approval request hash | `0x00` if absent; otherwise `0x01` then exactly 32 bytes |
-| Controller authorization revision | unsigned 64-bit integer, big-endian |
-| semantic hash version | unsigned 32-bit integer, big-endian |
-| semantic payload hash | exactly 32 bytes |
-| payload kind | unsigned 32-bit big-endian Protobuf oneof field number |
-| delivery mode | unsigned 32-bit big-endian enum value |
-| `issued_at.seconds` | signed 64-bit big-endian two's-complement integer |
-| `issued_at.nanos` | unsigned 32-bit big-endian integer, less than 1,000,000,000 |
-| `expires_at.seconds` | signed 64-bit big-endian two's-complement integer |
-| `expires_at.nanos` | unsigned 32-bit big-endian integer, less than 1,000,000,000 |
+| `version` | unsigned integer (`uint32`); v1 is `1` |
+| `key_id` | UTF-8 text string (`ed25519-sha256:...`) |
+| `protocol_version` | UTF-8 text string; current `1.2`, historical `1.1` |
+| `command_id` | 16-byte UUID byte string in network order |
+| `idempotency_key` | 16-byte UUID byte string in network order |
+| `node_id` | 16-byte UUID byte string in network order |
+| `operation_id` | 16-byte UUID byte string in network order |
+| `actor_identity` | UTF-8 text string |
+| `action` | UTF-8 text string |
+| `required_capability` | UTF-8 text string |
+| `expected_revision` | unsigned integer (`uint64`); Controller authorization revision |
+| `semantic_hash_version` | unsigned integer (`uint32`); v2 (`2`) |
+| `semantic_payload_sha256` | 32-byte SHA-256 byte string |
+| `payload_kind` | unsigned integer (`uint32`); Protobuf oneof field number |
+| `delivery_mode` | unsigned integer (`uint32`); enum value |
+| `issued_at_seconds` | signed integer (`int64`) |
+| `issued_at_nanos` | unsigned integer (`uint32`), less than 1,000,000,000 |
+| `expires_at_seconds` | signed integer (`int64`) |
+| `expires_at_nanos` | unsigned integer (`uint32`), less than 1,000,000,000 |
 
-String lengths measure raw UTF-8 byte counts that fit within `uint32`, and
-strings undergo no Unicode normalization. Optional fields always include their
-one-byte presence marker, though an approval request hash is invalid unless an
-approval ID is also present. The expiration timestamp must be strictly later
-than the issuance timestamp, and `CommandAuthorizationProof.signature` is
-excluded from the signing preimage.
+Strings undergo no Unicode normalization. The expiration timestamp must be
+strictly later than the issuance timestamp, and
+`CommandAuthorizationProof.signature` is excluded from the signing preimage.
 
 Binding the delivery mode into the signature stops an untrusted relay from
 converting an observation-only reconciliation request into an execution or
@@ -122,24 +122,29 @@ signing key of its own. The Agent refuses to enter a mutation-capable session
 until it verifies `SessionGrantV1` against the same pinned Controller keyring
 used for command verification.
 
-Like command proofs, the session grant is signed over a fixed canonical byte
-layout independent of Protobuf serialization, with fields ordered as follows:
+Like command proofs, the session grant is signed over an RFC 8949 Core
+Deterministic CBOR map preceded by a null-terminated domain separator,
+independent of Protobuf serialization:
 
-| Field | Encoding |
+```
+ASCII("ocservia/controller-session-grant/cbor.v1") || 0x00 || deterministic_cbor(SessionGrantV1)
+```
+
+| CBOR key | Type / constraints |
 |---|---|
-| domain | ASCII `ocservia/controller-session-grant/v1`, followed by `0x00` |
-| grant version | unsigned 32-bit integer, big-endian; v1 is `1` |
-| `key_id` | length-prefixed UTF-8 |
-| protocol major, protocol minor | two unsigned 32-bit integers, big-endian |
-| `node_id` | exactly 16 UUID bytes in network order |
-| Agent EndpointID | exactly 32 public-key bytes |
-| authorization revision | unsigned 64-bit integer, big-endian and nonzero |
-| capability count | unsigned 32-bit integer, big-endian |
-| capabilities | strictly sorted, unique, individually length-prefixed UTF-8 strings |
-| `issued_at.seconds` | signed 64-bit big-endian integer |
-| `issued_at.nanos` | unsigned 32-bit big-endian integer |
-| `expires_at.seconds` | signed 64-bit big-endian integer |
-| `expires_at.nanos` | unsigned 32-bit big-endian integer |
+| `version` | unsigned integer (`uint32`); v1 is `1` |
+| `key_id` | UTF-8 text string (`ed25519-sha256:...`) |
+| `protocol_major` | unsigned integer (`uint32`) |
+| `protocol_minor` | unsigned integer (`uint32`) |
+| `node_id` | 16-byte UUID byte string in network order |
+| `endpoint_id` | 32-byte Agent public-key byte string |
+| `authorization_revision` | unsigned integer (`uint64`), nonzero |
+| `session_epoch` | unsigned integer (`uint64`), monotonic session ownership epoch |
+| `negotiated_capabilities` | array of strictly sorted, unique UTF-8 text strings |
+| `issued_at_seconds` | signed integer (`int64`) |
+| `issued_at_nanos` | unsigned integer (`uint32`) |
+| `expires_at_seconds` | signed integer (`int64`) |
+| `expires_at_nanos` | unsigned integer (`uint32`) |
 
 Upon receiving the grant, the Agent validates the signature, `key_id`, node ID,
 EndpointID, protocol version, sorted capability list, issuance window, and
