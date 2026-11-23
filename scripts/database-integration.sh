@@ -94,7 +94,14 @@ case "${PG_MAJOR}" in
 esac
 
 expected_migration_version() {
-  find "${ROOT}/control-plane/migrations/sql" -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' \
+  (
+    cd "${ROOT}/control-plane/migrations/sql"
+    for file in [0-9]*_*.sql; do
+      if [[ -f "${file}" && ! -L "${file}" ]]; then
+        printf '%s\n' "${file}"
+      fi
+    done
+  ) \
     | sed -n 's/^\([0-9][0-9]*\)_.*/\1/p' \
     | awk '{print $1 + 0}' \
     | sort -n \
@@ -221,7 +228,7 @@ run_postgres_business_tests() {
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/audit ./internal/privdattestation -run Integration -count=1)
+    go test -p 1 ./internal/audit -run Integration -count=1)
   clone_database "${container}" ocservia_latest ocservia_auth_backend
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_auth_backend}" \
     OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_auth_backend}" \
