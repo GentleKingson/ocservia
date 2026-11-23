@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -140,17 +141,25 @@ func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [
 
 // CloseSession ends the session of exactly one (connectionID, epoch) term.
 func (m *Manager) CloseSession(ctx context.Context, nodeID [16]byte, connectionID [16]byte, epoch uint64) error {
+	if epoch == 0 || epoch > math.MaxInt64 {
+		return nil
+	}
 	unlock := m.lockNode(nodeID)
 	defer unlock()
 	m.mu.Lock()
 	session, ok := m.sessions[nodeID]
-	if !ok || session.term.ConnectionID() != connectionID || uint64(session.term.Epoch()) != epoch {
-		m.mu.Unlock()
-		return nil
+	if ok {
+		if session.term.ConnectionID() != connectionID || uint64(session.term.Epoch()) != epoch {
+			m.mu.Unlock()
+			return nil
+		}
+		delete(m.sessions, nodeID)
 	}
-	delete(m.sessions, nodeID)
 	m.mu.Unlock()
-	if err := session.term.ReleaseBackend(ctx, m.backend); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
+	// Controller restarts clear m.sessions while pre-restart transportd
+	// sessions remain active in PostgreSQL; ReleaseTermBackend atomically
+	// deactivates only the exact matching (nodeID, connectionID, epoch).
+	if err := connectionowner.ReleaseTermBackend(ctx, m.backend, nodeID, connectionID, int64(epoch)); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
 		return fmt.Errorf("ownersession: release node session: %w", err)
 	}
 	return nil

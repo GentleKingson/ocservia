@@ -190,6 +190,13 @@ pub(super) async fn finish_session(
         .map(|entry| (entry.connection_id, entry.session_epoch));
     if let Some((connection_id, session_epoch)) = finishing {
         registry.remove(node_id);
+        tracing::info!(
+            event_type = "agent_session_disconnected",
+            node_id = %hex::encode(node_id),
+            connection_id = %hex::encode(connection_id),
+            session_epoch,
+            "Agent session closed"
+        );
         shared
             .publish(event_with_session(
                 node_id,
