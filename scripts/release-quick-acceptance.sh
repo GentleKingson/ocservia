@@ -15,7 +15,7 @@ source "${ROOT}/scripts/release-common.sh"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 export SOURCE_COMMIT CONTROLLER_ARCH
-[[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+[[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" ]]
 [[ ! -e /etc/ocservia && ! -e /var/lib/ocservia-controller && ! -e /root/ocservia-initial-credentials ]]
 # As in quick-install.sh: the lifecycle belongs to root; SUDO_UID keeps git's

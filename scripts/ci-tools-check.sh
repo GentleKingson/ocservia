@@ -36,9 +36,13 @@ for suite in ${CI_SUITES}; do
       if [[ "${CONTRACT_EVENT:-}" == pull_request ]]; then
         baseline="$(git merge-base "${baseline}" "${CONTRACT_HEAD_SHA:?PR head is required}")"
       fi
+      base_sha="$(git rev-parse --verify --end-of-options "${baseline}^{commit}")"
       bash scripts/lint.sh contracts
-      bash scripts/check-breaking.sh "${baseline}"
+      bash scripts/check-breaking.sh "${base_sha}"
       bash scripts/generated-clean.sh
+      if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        printf 'contract_base_sha=%s\n' "${base_sha}" >>"${GITHUB_OUTPUT}"
+      fi
       ;;
     *) echo "unknown CI tool suite: ${suite}" >&2; exit 2 ;;
   esac

@@ -1,18 +1,21 @@
 name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release build v{0}', inputs.version) || format('Publish {0}', github.ref_name) }}
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       version:
-        description: Build-only test version without v; this dispatch never publishes
+        description: Build-only version without v; this dispatch never publishes
         type: string
         required: true
         default: '0.0.0'
+      expected_sha:
+        description: Expected main commit when dispatched by Release Check
+        type: string
+        required: false
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-perf-${{ github.event_name == 'workflow_dispatch' && format('build-{0}-{1}', github.sha, inputs.version) || github.ref }}
   cancel-in-progress: false
 jobs:
   prepare:
@@ -24,18 +27,30 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      qualification_id: ${{ steps.qualify-release.outputs.qualification_id }}
+      build_run_id: ${{ steps.qualify-release.outputs.build_run_id }}
+      controller_amd64_id: ${{ steps.qualify-release.outputs.controller_amd64_id }}
+      controller_amd64_sha256: ${{ steps.qualify-release.outputs.controller_amd64_sha256 }}
+      controller_arm64_id: ${{ steps.qualify-release.outputs.controller_arm64_id }}
+      controller_arm64_sha256: ${{ steps.qualify-release.outputs.controller_arm64_sha256 }}
+      assets_id: ${{ steps.qualify-release.outputs.assets_id }}
     steps:
       - id: version
         env:
           EVENT: ${{ github.event_name }}
           TAG: ${{ github.ref_name }}
           TEST_VERSION: ${{ inputs.version }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
           if [[ "$EVENT" == push ]]; then
             [[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
             version="${TAG#v}"
           else
             version="$TEST_VERSION"
+            if [[ -n "$EXPECTED_SHA" ]]; then
+              test "$GITHUB_REF" = refs/heads/main
+              test "$GITHUB_SHA" = "$EXPECTED_SHA"
+            fi
           fi
           [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
           is_prerelease=false
@@ -47,7 +62,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Require successful Release Check before building
+      - name: Require a successful Release Check and available build artifacts
+        id: qualify-release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,23 +71,23 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: python3 scripts/publish-release.py qualify
   build-amd64:
+    if: github.event_name == 'workflow_dispatch'
     needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: amd64
-      run_rc_lifecycle: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.is_prerelease == 'true' }}
+      run_rc_lifecycle: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
   build-arm64:
+    if: github.event_name == 'workflow_dispatch'
     needs: prepare
     uses: ./.github/workflows/release-products.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
-      run_rc_lifecycle: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.is_prerelease == 'true' }}
+      run_rc_lifecycle: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
   assets:
     needs: [prepare, build-amd64, build-arm64]
-    outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -121,119 +137,163 @@ jobs:
           path: ${{ runner.temp }}/assets
           if-no-files-found: error
           retention-days: 7
-  publish:
-    needs: [prepare, build-amd64, build-arm64, assets]
-    if: github.event_name == 'push'
+      - name: Record the verified build artifacts
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          AGENT_AMD64_ID: ${{ needs.build-amd64.outputs.agent_packages_artifact_id }}
+          AGENT_AMD64_SHA256: ${{ needs.build-amd64.outputs.agent_packages_manifest_sha256 }}
+          AGENT_ARM64_ID: ${{ needs.build-arm64.outputs.agent_packages_artifact_id }}
+          AGENT_ARM64_SHA256: ${{ needs.build-arm64.outputs.agent_packages_manifest_sha256 }}
+          CONTROLLER_AMD64_ID: ${{ needs.build-amd64.outputs.controller_images_artifact_id }}
+          CONTROLLER_AMD64_SHA256: ${{ needs.build-amd64.outputs.controller_images_manifest_sha256 }}
+          CONTROLLER_ARM64_ID: ${{ needs.build-arm64.outputs.controller_images_artifact_id }}
+          CONTROLLER_ARM64_SHA256: ${{ needs.build-arm64.outputs.controller_images_manifest_sha256 }}
+          ASSETS_ID: ${{ steps.upload.outputs.artifact-id }}
+          ASSETS_SHA256: ${{ steps.upload.outputs.artifact-digest }}
+        run: python3 scripts/release_evidence.py record-build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-build.json
+          if-no-files-found: error
+          retention-days: 7
+  security:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/security.yml
+  business:
+    name: Business Smoke (amd64)
+    needs: [build-amd64, assets, security]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    environment:
-      name: release-publishing
-      deployment: false
+    timeout-minutes: 60
     permissions:
-      contents: write
-      packages: write
+      contents: read
       actions: read
+    env:
+      VERSION: ${{ inputs.version }}
+      CONTROLLER_ARCH: amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-tools
+      - uses: ./.github/actions/download-release-product
         with:
-          profiles: node
-      - name: Require successful Release Check for the tag commit
-        id: qualify-release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/publish-release.py qualify
-      - name: Download and verify amd64 Controller images
-        uses: ./.github/actions/download-release-product
+          artifact-id: ${{ needs.build-amd64.outputs.agent_packages_artifact_id }}
+          manifest-sha256: ${{ needs.build-amd64.outputs.agent_packages_manifest_sha256 }}
+          kind: agent
+          version: ${{ inputs.version }}
+          arch: amd64
+          path: ${{ runner.temp }}/business-packages
+      - uses: ./.github/actions/download-release-product
         with:
           artifact-id: ${{ needs.build-amd64.outputs.controller_images_artifact_id }}
           manifest-sha256: ${{ needs.build-amd64.outputs.controller_images_manifest_sha256 }}
           kind: controller
-          version: ${{ needs.prepare.outputs.version }}
+          version: ${{ inputs.version }}
           arch: amd64
-          path: ${{ runner.temp }}/images-amd64
-      - name: Download and verify arm64 Controller images
-        uses: ./.github/actions/download-release-product
+          path: ${{ runner.temp }}/business-controller-images
+      - uses: ./.github/actions/setup-tools
         with:
-          artifact-id: ${{ needs.build-arm64.outputs.controller_images_artifact_id }}
-          manifest-sha256: ${{ needs.build-arm64.outputs.controller_images_manifest_sha256 }}
-          kind: controller
-          version: ${{ needs.prepare.outputs.version }}
-          arch: arm64
-          path: ${{ runner.temp }}/images-arm64
-      - name: Stage verified Controller image archives
+          profiles: npm-security
+          cache-npm: 'true'
+      - name: Exercise Integrated Business Smoke with candidate products
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
+          PRODUCTS_DIR: ${{ runner.temp }}/business-packages
+          IMAGES_DIR: ${{ runner.temp }}/business-controller-images
         run: |
-          mkdir -p "$RUNNER_TEMP/images"
-          for arch in amd64 arm64; do
-            mv -- "$RUNNER_TEMP/images-$arch"/*.tar "$RUNNER_TEMP/images/"
+          sudo --preserve-env=ARTIFACT_DIR,VERSION,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,PRODUCTS_DIR,IMAGES_DIR \
+            bash scripts/release-business-probe.sh
+      - name: Return task-owned diagnostics and caches to the runner
+        if: always()
+        run: |
+          for path in "$RUNNER_TEMP/business-diagnostics" .cache .tools web/node_modules; do
+            if [[ -d "$path" && ! -L "$path" ]]; then
+              sudo chown -R -- "$(id -u):$(id -g)" "$path"
+            fi
           done
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
+      - name: Summarize business timings and sanitized failures
+        if: always()
+        env:
+          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
+        run: |
+          if [[ -f "$DIAGNOSTICS/result.json" ]]; then
+            jq '{probe_status,last_stage,exit_code,timings,scenario_timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
+          fi
+          if [[ -f "$DIAGNOSTICS/api-checkpoints.jsonl" ]]; then
+            jq -c 'select(.name == "real_vpn_relay_recovery" or .name == "resilience_relay") | {name,time,status}' "$DIAGNOSTICS/api-checkpoints.jsonl"
+          fi
+          if [[ -f "$DIAGNOSTICS/probe.log" ]]; then
+            grep -E '^(RuntimeError:|AssertionError|probe failed at line)' "$DIAGNOSTICS/probe.log" || true
+          fi
+      - name: Require completed business and recovery scenarios
+        env:
+          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
+        run: |
+          test -s "$DIAGNOSTICS/probe.log"
+          if grep -rIEq '(obt2_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43})' "$DIAGNOSTICS"; then
+            echo 'diagnostics contain a node bootstrap token' >&2
+            exit 1
+          fi
+          jq -e '
+            . as $result |
+            .profile == "smoke" and .terminal == "revocation" and
+            .probe_status == "PASS" and .exit_code == 0 and
+            (.timings | type == "array" and length > 0) and
+            ([
+              "integrated_entry_and_internal_tls",
+              "production_signer_active_binding",
+              "bootstrap_token_enrollment_and_rerun_identity",
+              "real_browser_subset",
+              "config_apply_and_vpn_user",
+              "real_vpn_after_config_apply",
+              "real_node_revocation_and_disconnect"
+            ] - .passed_checkpoints | length) == 0 and
+            .resilience_requested == true and
+            .resilience_result == "PASS" and
+            .planned_topology.native_systemd_node == true and
+            (.resilience_scenarios | type == "array") and
+            all(["controller", "agent", "database", "relay"][];
+              . as $name |
+              ([$result.resilience_scenarios[] | select(.name == "resilience_" + $name)] | length == 1 and .[0].status == "PASS"))
+          ' "$DIAGNOSTICS/result.json" >/dev/null
+          jq -se 'any(.[]; .name == "production_signer_password_sealed" and .status == "PASS")' \
+            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
+          jq -se 'any(.[]; .name == "resilience_relay" and .status == "PASS" and .offline_queued_zero_side_effects == true and .idempotent_replay == true)' \
+            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
+      - name: Preserve business timings and sanitized diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          artifact-ids: ${{ needs.assets.outputs.artifact_id || 'missing' }}
-          path: ${{ runner.temp }}/assets
-          merge-multiple: true
-      - name: Record Docker publication runtime
-        run: |
-          docker version
-          docker info --format 'storage={{.Driver}} driver_status={{json .DriverStatus}}'
-          docker buildx version
-      - name: Reject existing Release and image version tags
-        id: preflight
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: python3 scripts/publish-release.py preflight
-      - name: Select Release notes base
-        id: notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          if [[ "$VERSION" =~ -rc[.]([1-9][0-9]*)$ && "${BASH_REMATCH[1]}" != 1 ]]; then
-            base="$(python3 scripts/publish-release.py previous-rc)"
-          else
-            # Exclude this release on reruns; do not use an RC as the final's base.
-            base="$(gh release list --exclude-drafts --exclude-pre-releases --limit 2 \
-              --json tagName --jq "[.[] | select(.tagName != \"v$VERSION\")][0].tagName // empty")"
-            [[ "$base" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
-          fi
-          echo "base=$base" >>"$GITHUB_OUTPUT"
-      - name: Create new draft Release
-        id: draft-release
-        env:
-          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
-          NOTES_BASE: ${{ steps.notes.outputs.base }}
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          flags=(--notes-start-tag "$NOTES_BASE")
-          if [[ "$IS_PRERELEASE" == true ]]; then
-            flags+=(--prerelease --latest=false)
-          fi
-          gh release create "v$VERSION" --draft --target "$GITHUB_SHA" --verify-tag --title "v$VERSION" --generate-notes "${flags[@]}"
+          name: business-smoke-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/business-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
 
-          # Preserve GitHub's category, PR and comparison output; drop repeated owner attribution only.
-          notes_before="$RUNNER_TEMP/release-notes-before.md"
-          notes_after="$RUNNER_TEMP/release-notes-after.md"
-          gh release view "v$VERSION" --json body --jq '.body' >"$notes_before"
-          python3 scripts/strip-release-owner-attribution.py <"$notes_before" >"$notes_after"
-          if ! cmp -s "$notes_before" "$notes_after"; then
-            gh release edit "v$VERSION" --notes-file "$notes_after"
-          fi
-      - name: Upload, verify and publish immutable Release
-        id: finish
+  quick:
+    name: Quick Install (Pebble ACME, amd64)
+    needs: [build-amd64, assets, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.build-amd64.outputs.controller_images_artifact_id }}
+          manifest-sha256: ${{ needs.build-amd64.outputs.controller_images_manifest_sha256 }}
+          kind: controller
+          version: ${{ inputs.version }}
+          arch: amd64
+          path: ${{ runner.temp }}/quick-controller-images
+      - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
+          IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
+          VERSION: ${{ inputs.version }}
+          CONTROLLER_ARCH: amd64
         run: |
-          source scripts/env.sh
-          python3 scripts/publish-release.py finish
+          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR \
+            bash scripts/release-quick-acceptance.sh

@@ -88,7 +88,8 @@ classify_path() {
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile|\
     scripts/buildx-cache.sh|\
     scripts/security-check.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config-runtime.sh|\
-    scripts/release-quick-acceptance.sh|scripts/resilience-capacity*.sh|scripts/security-acceptance-*|\
+    scripts/release-quick-acceptance.sh|scripts/release_evidence.py|scripts/test-release-evidence.py|\
+    scripts/resilience-capacity*.sh|scripts/security-acceptance-*|\
     scripts/perf-bench.sh)
       tools_suite release ;;
 

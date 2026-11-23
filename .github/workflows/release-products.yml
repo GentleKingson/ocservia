@@ -10,7 +10,7 @@ on:
         type: string
         required: true
       run_rc_lifecycle:
-        description: Also exercise synthetic RC -> RC -> final package lifecycle in smoke-agent-packages
+        description: Also exercise synthetic RC -> RC -> final package lifecycle
         type: boolean
         default: false
     outputs:
@@ -76,8 +76,8 @@ jobs:
           VERSION="${version}" PACKAGE_ARCH="${{ inputs.arch }}" \
             OUTPUT_DIR="${RUNNER_TEMP}/packages" \
             SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
-      - name: Save Rocky Agent compilation cache (main only)
-        if: ${{ success() && github.ref == 'refs/heads/main' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+      - name: Save Rocky Agent compilation cache (benchmark branch)
+        if: ${{ success() && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ steps.agent-target.outputs.path }}
@@ -102,6 +102,84 @@ jobs:
           if-no-files-found: error
   smoke-agent-packages:
     name: Smoke Agent Packages (${{ inputs.arch }})
+    needs: build-agent-packages
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Download and verify immutable package set for smoke
+        uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.build-agent-packages.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.build-agent-packages.outputs.manifest_sha256 }}
+          kind: agent
+          version: ${{ needs.build-agent-packages.outputs.version }}
+          arch: ${{ inputs.arch }}
+          path: ${{ runner.temp }}/packages
+      - name: Validate native package lifecycle (${{ inputs.arch }})
+        id: smoke-packages
+        env:
+          RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
+          PRODUCTS_DIR: ${{ runner.temp }}/packages
+          VERSION: ${{ needs.build-agent-packages.outputs.version }}
+        run: scripts/release-native-package-smoke.sh
+      - name: Upload native smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-smoke-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/native-smoke
+          retention-days: 7
+          if-no-files-found: warn
+  smoke-rc-lifecycle:
+    name: Smoke Synthetic RC Lifecycle (${{ inputs.arch }})
+    if: inputs.run_rc_lifecycle
+    # Restore the compilation cache saved by this run's package build.
+    needs: build-agent-packages
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: native-packages
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
+      - name: Resolve isolated Agent target cache
+        id: agent-target
+        run: |
+          builder_hash="$(sha256sum rust/agent-build.Dockerfile | cut -c1-16)"
+          echo "path=rust/target/agent-${{ inputs.arch }}-${builder_hash}" >>"${GITHUB_OUTPUT}"
+      - name: Restore Rocky Agent compilation cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.agent-target.outputs.path }}
+          key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock', 'rust/vendor/**') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock', 'rust/vendor/**') }}-
+      - name: Validate RC to final package lifecycle (${{ inputs.arch }})
+        env:
+          RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
+          RC_LIFECYCLE: 'true'
+        run: scripts/release-native-package-smoke.sh
+      - name: Upload synthetic RC lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rc-lifecycle-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/rc-lifecycle
+          retention-days: 7
+          if-no-files-found: warn
+  smoke-agent-packages-serial:
+    name: Serial baseline / Smoke Agent Packages (${{ inputs.arch }})
     needs: build-agent-packages
     runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 90
@@ -158,7 +236,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: native-smoke-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: native-smoke-serial-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/artifacts/native-smoke
             ${{ runner.temp }}/artifacts/rc-lifecycle

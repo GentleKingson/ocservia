@@ -4,6 +4,9 @@ inputs:
   artifact-id:
     description: Exact upload-artifact ID from the producer
     required: true
+  run-id:
+    description: Producer run ID for a cross-workflow download
+    required: false
   manifest-sha256:
     description: Product identity manifest SHA-256 from the producer
     required: true
@@ -34,6 +37,8 @@ runs:
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
       with:
         artifact-ids: ${{ inputs.artifact-id }}
+        github-token: ${{ inputs.run-id != '' && github.token || '' }}
+        run-id: ${{ inputs.run-id || github.run_id }}
         path: ${{ inputs.path }}
         merge-multiple: true
     - name: Verify exact product identity and bytes

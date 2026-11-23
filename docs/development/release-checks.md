@@ -14,13 +14,12 @@ a result from one layer never stands in for another:
   Basic CI.
 - Basic CI (required check `Basic CI Result`) checks the changed units of one
   pull request or `main` commit.
-- Release Check qualifies one exact merged `main` commit for release, with
-  Full CI, Security, dual-arch (`amd64` and `arm64`) native builds, image
-  security scans, and package/image smoke, plus primary-arch (`amd64`)
-  Integrated Business Smoke (including UDP-isolated sole-Relay offline-queue
-  recovery) and Pebble ACME Quick Install.
-- The Release workflow verifies the tag's Release Check qualification up front,
-  rebuilds from the tag, and publishes only after its gates pass.
+- Release Check qualifies one merged `main` commit and intended version. It
+  uses same-commit Quick CI and Security results, runs any missing release
+  contract and database checks, and accepts the dual-architecture build through
+  Integrated Business Smoke and Pebble ACME Quick Install on `amd64`.
+- The Release workflow builds on manual dispatch. On tag push it verifies the
+  matching Release Check qualification and publishes the accepted artifacts.
 
 ## Entry-point compatibility
 
@@ -225,11 +224,9 @@ PostgreSQL enforces runtime read access and owner-only DDL. Audit log
 authenticity, checkpointed-tail transitions and compaction remain required
 business checks.
 
-Before cutting over a major database change, qualify the exact candidate commit
-through Full Basic CI, Security, Business integration (with the production Signer
-and resilience enabled), and a build-only Release rehearsal, recording workflow
-URLs and commit SHAs. Branch diagnostic runs do not replace the main-branch
-Release Check, and publishing still requires explicit operator confirmation.
+Before cutting over a major database change, qualify the intended version and
+candidate commit on `main` through Release Check. It records the upstream CI,
+security and build runs and requires complete database and Business acceptance.
 Checkpoint and receipt identities are defined in the
 [upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
 
@@ -417,13 +414,11 @@ Go runs and containerized runs.
 ### Basic CI
 
 [`ci.yml`](../../.github/workflows/ci.yml) handles pull requests, pushes to
-main and manual dispatches. Manual Release Check also calls it as `full-ci` with
-`profile: full`. Automatic triggers run the Quick profile; manual dispatch
-accepts `quick|full` and defaults to Full. Full runs current-candidate checks
-across all supported units. It is not comprehensive release acceptance and
-leaves the product's database support scope unchanged. A new Quick run cancels
-older Quick runs on the same PR or branch; Full has its own concurrency group
-and never cancels Quick.
+`main` and manual dispatches. Automatic triggers run the Quick profile. Manual
+dispatch accepts `quick|full` and defaults to Full. Release Check uses Quick as
+its CI gate and reuses successful protocol and database checks from Full when
+available for the same commit. A new Quick run cancels older Quick runs on the
+same pull request or manual-dispatch branch. Full has its own concurrency group.
 
 The workflow file defines the matrices. The jobs and what they own:
 
@@ -506,8 +501,10 @@ Contract comparison uses the PR merge-base or the push event before SHA. Manual
 Basic CI requires an explicit `contract_base_ref` naming an existing commit
 different from the candidate. Release Check accepts an optional
 `contract_base_ref` and defaults to the latest `v*.*.*` tag reachable before
-`HEAD` (falling back to `HEAD~1`), forwarding the resolved baseline to Full CI.
-A missing, unresolvable or self baseline fails. `generated-clean.sh`
+`HEAD` (falling back to `HEAD~1`). A successful CI contract check records its
+baseline commit in the job steps. Release Check uses that result when the
+baseline SHA matches, and otherwise compares against the release baseline.
+An unresolvable or self baseline fails. `generated-clean.sh`
 requires a clean committed candidate before regenerating and rejects changed or
 untracked outputs. `--skip-generate` only compares with HEAD (including staged
 changes); it does not prove reproducible generation.
@@ -535,16 +532,17 @@ images.
 
 | File | Trigger / purpose |
 | --- | --- |
-| `ci.yml` | PR/main Quick; manual Quick/Full; called by Release Check as Full |
-| `security.yml` | Weekly/manual scans; reusable, and called by Release Check (not by `release.yml`) |
-| `release-check.yml` | Manual main Full CI, Security, dual-arch (`amd64`/`arm64`) Release products build/image-security/smoke, and primary-arch (`amd64`) Integrated Business Smoke with single-instance recovery and Quick Install (Pebble ACME) |
-| `release.yml` | Tag fail-fast Release Check qualification, dual-arch build/image-security/smoke/publish; manual build-only dry-run |
-| `release-products.yml` | Reusable native product build, image scan, and package/image smoke workflow called by `release-check.yml` and `release.yml` |
+| `ci.yml` | PR/main Quick and manual Quick/Full. Provides CI results for Release Check. |
+| `security.yml` | Weekly and manual scans. Provides security results for Release Check. |
+| `release-check.yml` | Manual `main` qualification for a commit and version. Resolves upstream results, runs missing contract and database checks, and runs Integrated Business Smoke and Quick Install on `amd64`. |
+| `release.yml` | Manual dual-architecture build and validation. Tag pushes publish the accepted build. |
+| `release-products.yml` | Native product build, image scan and package/image smoke called by the manual Release build. |
 
 ### Security checks
 
-`security.yml` runs on Mondays, on manual dispatch, and inside manual Release
-Check on main. Its read-only scan jobs use pinned bootstrap profiles and no
+`security.yml` runs on Mondays and on manual dispatch. Release Check uses the
+latest same-commit `main` result and dispatches a scan if there is no matching
+run. Its read-only scan jobs use pinned bootstrap profiles and no
 production secrets: full-history `scripts/security-check.sh` (including its
 Gitleaks rule regression check); `govulncheck ./...` in both Go modules;
 `cargo audit` against `rust/Cargo.lock` and `deploy/production/relay.Cargo.lock`
@@ -552,11 +550,8 @@ with `cargo deny --locked check advisories bans licenses sources` across the
 Rust workspace; `npm audit --package-lock-only` against `web/package-lock.json`,
 including development dependencies; and `scripts/license-check.sh --skip-rust`
 for Go (`control-plane` and `signer`) and Web dependency licenses. Any scan
-failure fails the workflow and blocks Release Check when called from it.
-`release.yml` neither invokes nor queries `security.yml`, so tag publication
-relies on the operator verifying a passing Release Check first. A pass reflects
-only what those scanners and their current advisory databases detect in the
-repository tree, not the security of a deployed environment.
+failure blocks qualification. The result reflects the advisory databases used
+at scan time.
 
 ### Caches
 
@@ -637,9 +632,9 @@ per-job timings.
 ## Business validation
 
 Integrated Business Smoke runs directly inside [`release-check.yml`](../../.github/workflows/release-check.yml)
-on the primary native `amd64` runner after `products-amd64` finishes (never
-blocked by `products-arm64`). It exercises the real Controller, production
-Signer sealing and internal TLS, dedicated Relay, native systemd
+on the native `amd64` runner once Security passes and the dual-architecture
+build is verified. It exercises the real Controller, production Signer
+sealing and internal TLS, dedicated Relay, native systemd
 Agent/`privd`/`ocserv` services, one Local Admin browser sign-in, Workspace
 isolation, VPN user creation, direct reload, ConfigPlan apply, an OpenConnect
 VPN session with ICMP, four single-instance recovery scenarios, and terminal
@@ -676,6 +671,11 @@ rejected anonymous/foreign-Origin requests, synchronous HTTP 200 trust
 convergence and connection close, owner lease invalidation, offline status while
 the same Agent PID stays up, and rejected post-revocation reloads with zero new
 `privd` side effects.
+
+The job summary reports `scenario_timings` in milliseconds. It lists each of
+the four recovery scenarios and separates the revocation request, owner lease
+invalidation and node offline waits. A timed phase that fails keeps its elapsed
+time and `FAIL` status in the diagnostic artifact.
 
 Sanitized diagnostic artifacts keep the environment inventory, stage timings and
 exit status for seven days on passing and failing runs. Logs stay private until
@@ -853,10 +853,9 @@ The extended manual integration profile replaces R1 through R4 with deeper
 variants: separate Controller and transport restarts, mutations submitted during
 the outage, unsent offline queueing, idempotent replay, exact native reload
 counts, and cross-checks across the API, database, Agent journal and root
-receipts. Release Smoke does not require them. Full CI separately runs the full
-database suite and the bundled and external PostgreSQL backup/restore smoke
-scripts, which validate database-level recovery but not Controller, Agent or
-Relay restarts.
+receipts. Release Check also requires the full database suite and the bundled
+and external PostgreSQL backup/restore smoke scripts. A successful same-commit
+Full CI can provide those database results.
 
 Acceptance relies on the Business job status and the scenario checkpoints in
 `result.json`; sanitized failure diagnostics are kept as seven-day Actions
@@ -973,67 +972,44 @@ Every release qualifies through a passing CI run along this pipeline:
 
 ```text
 PR -> Basic CI -> merge main
-   -> manual Release Check (contract_base_ref optional; defaults to latest tag or HEAD~1)
-      - Full CI (including release CI contract suite)
-      - Security
-      - amd64 and arm64 Release products: build + Controller image security
-        + package/image smoke (same reusable workflow as Release)
-      - amd64 Business Smoke + four finite single-instance recoveries (needs products-amd64)
-      - amd64 Quick Install against a Pebble ACME directory (needs products-amd64)
-   -> PASS -> operator version confirmation -> vX.Y.Z-rc.N or vX.Y.Z tag
-   -> Release
-      - fail-fast require a successful Release Check for the exact tag/build SHA
-      - amd64 build + Controller image security + install/image smoke
-      - arm64 build + Controller image security + install/image smoke
-      - re-verify Release Check qualification and publish Agent assets & GHCR images
+   -> manual Release Check (version required, contract_base_ref optional)
+      - reuse or dispatch same-commit Quick CI and Security
+      - reuse or run release contract and PostgreSQL acceptance and recovery
+      - reuse or dispatch the same-commit, same-version dual-architecture Release build
+      - run amd64 Business Smoke and Pebble ACME Quick Install on that build
+   -> PASS -> operator pushes the matching vX.Y.Z-rc.N or vX.Y.Z tag
+   -> Release verifies qualification and publishes the accepted artifacts
 ```
 
-On pull requests, `Basic CI Result` remains the required check. Once changes
-merge to `main`, an operator triggers Release Check manually via
-`workflow_dispatch` (with `contract_base_ref` optional; when omitted, `prepare`
-resolves the latest `v*.*.*` tag reachable before `HEAD`, or `HEAD~1`). Every
-required job must pass; a failure, cancellation or unexpected skip blocks
-qualification. Each run executes from scratch, without inheriting earlier
-results or nominating a persistent candidate. Full CI inside Release Check is
-the Basic CI Full profile (see [Basic CI](#basic-ci)), not comprehensive
-acceptance. In Release Check, each native architecture builds its Agent
-packages and Controller images once in `release-products.yml`. Image scanning,
-native image smoke and the package lifecycle gate finish before the products
-are uploaded. On primary architecture `amd64`, Business Smoke and Quick Install
-depend only on `products-amd64` (so `arm64` build time never delays them).
-Business Smoke consumes the verified `amd64` Agent packages and Controller
-images; Quick Install consumes the same `amd64` Controller image artifacts for
-Pebble ACME, reruns, upgrades and rollbacks. Both select exact artifact IDs
-returned by the producer, then verify the producer's identity-manifest SHA-256,
-candidate commit, version, architecture, complete file inventory and every
-file's SHA-256 before use. Missing or mismatched products fail without
-rebuilding. Explicit per-arch producer jobs avoid ambiguous matrix outputs, and
-failed-job reruns keep the successful producer's exact IDs rather than
-reconstructing artifact names from the new run attempt.
+On pull requests, `Basic CI Result` remains the required check. On `main`, run
+`gh workflow run release-check.yml --ref main -f version=1.4.0` with the version
+you intend to tag. Use `contract_base_ref` to override the latest `v*.*.*` tag
+reachable from `HEAD~1`, or `HEAD~1` itself when there is no such tag. Release
+Check waits on matching in-progress upstream runs and dispatches missing Quick
+CI, Security or build runs. A failed, cancelled or timed-out required run
+blocks qualification. If `main` advances before a missing run can start, start
+a new Release Check on the new candidate.
 
-Once Release Check succeeds on the target commit, the operator confirms the
-version and pushes the version tag. On tag push, the Release workflow's
-`prepare` job first calls `scripts/publish-release.py qualify` to fail fast if
-the tag does not match the build SHA or lacks a passing latest `Release Check`
-on `main`. Only after that gate passes does it build from the tag, scan the
-built Controller image archives on both native architectures, and run install
-and image smoke before publishing. Image scans gate on findings except entries
-approved in
+The build runs native package lifecycle checks, image scans, and image smoke
+on both `amd64` and `arm64`, and prepares the release assets. For RC versions,
+the synthetic upgrade lifecycle restores the compilation cache from the
+package build and runs alongside candidate package smoke. Both checks must
+pass before asset preparation. The build record names
+the exact artifact IDs. After Security passes, Business Smoke and Quick Install
+download from those IDs and verify the source, version, architecture, inventory
+and file digests.
+Release Check records the build and passing upstream runs after acceptance.
+Image scans apply approved entries in
 [`deploy/production/image-scan-exemptions.json`](../../deploy/production/image-scan-exemptions.json),
 each with a review deadline; an entry past its deadline fails the gate again.
 
-Inside the `release-publishing` environment, before any image or Release write,
-`publish` re-runs `scripts/publish-release.py qualify` to confirm that the tag
-still resolves to the build SHA and the latest `workflow_dispatch`
-`release-check.yml` run for that exact SHA on `main` is still completed
-successfully. Missing, failed, cancelled or unfinished qualification and API
-errors block publication, including reruns, and an older PASS cannot override a
-newer unsuccessful run. The accepted run URL and SHA are recorded in the job
-summary. Build-only dispatches are exempt, and Release does not rerun Full CI,
-Security or Business acceptance. Only the tag-triggered `publish` job receives
-`contents: write`, `packages: write` and access to the `release-publishing`
-environment, which is an approval and protection boundary without GitHub
-Deployment records.
+After Release Check passes, push the matching version tag. Release verifies
+the latest qualification for that exact SHA and version, downloads the images
+and assets from its recorded build, and verifies the same qualification again
+before writing to GitHub or GHCR. A newer failed or unfinished qualification
+blocks publication. Only the tag-triggered `publish` job receives
+`contents: write`, `packages: write` and access to the approval-protected
+`release-publishing` environment.
 
 Published release artifacts are Agent archives, plain archive checksums, DEB and
 RPM packages, Controller container images, minimal Controller runtime bundles
@@ -1116,8 +1092,8 @@ mutable Release; it is not a successful publication and must be investigated.
 
 Publication is one-shot: an existing Release (including a draft) or any
 exact-version GHCR tag blocks it. No asset upload uses `--clobber`, and a rerun
-never replaces an existing version. After the same-SHA Release Check gate and
-both native product builds, publication:
+never replaces an existing version. With a matching Release Check and its
+qualified native build, publication:
 
 1. Requires all expected pre-publication assets and image archives. Lists all GitHub Releases,
    including drafts, and probes every GHCR version tag (each image role has
@@ -1164,9 +1140,12 @@ If no Release or version image tags were created, rerunning failed jobs is safe
 while the required artifacts remain available. Consumers download the immutable
 artifact IDs returned by the successful upstream jobs, including jobs retained
 from an earlier attempt of the same run, and do not rebuild names from the
-consumer's incremented attempt number. Missing IDs fail closed, and expired
-artifacts require a full rerun. Once a draft or version image tag exists, even a
-full rerun is blocked by the one-shot preflight and needs a new version. GitHub
+consumer's incremented attempt number. Build and qualification artifacts are
+retained for seven days. If build artifacts are missing or expired, manually
+dispatch a Release build for the intended version on `main` and run Release
+Check again. If only the qualification record expired, run Release Check again.
+Once a draft or version image tag exists, the one-shot preflight requires a new
+version. GitHub
 creates its platform release attestation for an immutable Release; this flow adds
 no separate signing service, key management or custom attestation, and plain
 archive checksums keep their role.
@@ -1266,10 +1245,10 @@ repeat browser enrollment, automatic Controller activation or live Relay connect
 | Controller/transport, Agent/privd, bundled PostgreSQL and UDP-isolated sole-Relay offline-queue/exactly-once/idempotent-replay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Pebble ACME Quick Install, credential and root-CA custody, idempotent rerun, bootstrap resume, and `controller.sh` upgrade/rollback/upgrade | Quick Install (`release-check.yml`, `amd64`) |
-| DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on `amd64`/`arm64` | Native package build/install smoke (Release Check and Release) |
-| Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
+| DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on `amd64`/`arm64` | Manual Release build, reused by Release Check |
+| Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Manual Release build, reused by Release Check |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](#security-checks) | Security |
-| Fail-fast qualification, tagged-source build and GitHub/GHCR publication | Release |
+| Fail-fast qualification and publication of the recorded artifacts to GitHub/GHCR | Tag-triggered Release |
 
 Business and Quick Install workflows first require the runner, kernel, dpkg and
 Docker architectures to match and check every loaded Controller image's platform.

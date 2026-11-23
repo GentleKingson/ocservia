@@ -14,7 +14,7 @@ import sys
 import time
 import urllib.error
 
-from release_business_runtime import ROOT, api, client, environment, record, run, sql, wait_for
+from release_business_runtime import ROOT, api, client, environment, record, run, sql, timed, wait_for
 
 COMPOSE = str(ROOT / 'deploy/production/compose.sh')
 
@@ -518,26 +518,30 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
 
 
 def resilience():
-    before = owner()
-    run(COMPOSE, 'restart', 'control-plane', 'transportd')
-    wait_for('Controller stack readiness', ready)
-    transport_ready()
-    wait_for('fresh Controller stack session', lambda: fresh_owner(before))
-    authorized_reload('Controller stack recovery')
-    record('resilience_controller')
-    agent_stack_recovery()
-    try:
-        run(COMPOSE, 'stop', 'postgres')
-        outage = api('readyz', role='anonymous', status=503)
-        assert outage['type'] == 'https://ocservia.dev/problems/database-unavailable'
-    finally:
-        run(COMPOSE, 'start', 'postgres')
-    wait_for('database readiness recovered', ready)
-    wait_for('Agent online after database recovery', lambda: api(
-        'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])['connection_state'] == 'online')
-    authorized_reload('database reconnect business')
-    record('resilience_database', backend='postgres')
-    vpn_smoke('relay_recovery', relay_recovery=True)
+    with timed('controller_recovery'):
+        before = owner()
+        run(COMPOSE, 'restart', 'control-plane', 'transportd')
+        wait_for('Controller stack readiness', ready)
+        transport_ready()
+        wait_for('fresh Controller stack session', lambda: fresh_owner(before))
+        authorized_reload('Controller stack recovery')
+        record('resilience_controller')
+    with timed('agent_recovery'):
+        agent_stack_recovery()
+    with timed('database_recovery'):
+        try:
+            run(COMPOSE, 'stop', 'postgres')
+            outage = api('readyz', role='anonymous', status=503)
+            assert outage['type'] == 'https://ocservia.dev/problems/database-unavailable'
+        finally:
+            run(COMPOSE, 'start', 'postgres')
+        wait_for('database readiness recovered', ready)
+        wait_for('Agent online after database recovery', lambda: api(
+            'nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])['connection_state'] == 'online')
+        authorized_reload('database reconnect business')
+        record('resilience_database', backend='postgres')
+    with timed('relay_recovery'):
+        vpn_smoke('relay_recovery', relay_recovery=True)
 
 
 def assert_browser_csp(entries, evidence):
@@ -604,7 +608,8 @@ def revocation():
     # 200 means the revoked trust and the connection close were both applied in
     # the request. A 503 leaves them to the background worker, which never counts
     # lost ownership as delivery, so it never stands in for them.
-    api(path, body)
+    with timed('revocation_request'):
+        api(path, body)
     status, revision = sql(f"SELECT status||'|'||authorization_revision FROM nodes WHERE id='{node}';").split('|')
     assert status == 'revoked'
     assert sql(f"SELECT state FROM node_endpoint_keys WHERE node_id='{node}';") == 'revoked'
@@ -612,10 +617,12 @@ def revocation():
     # The request settled exactly this revoked intent with its fenced update and close.
     assert sql("SELECT desired_state='revoked' AND update_applied AND close_required AND close_applied FROM node_trust_convergence "
                f"WHERE node_id='{node}' AND revision={int(revision)};") == 't'
-    wait_for('revoked owner lease invalidation', lambda: sql(
-        "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
-        f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't')
-    wait_for('revoked node offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
+    with timed('revocation_owner_lease'):
+        wait_for('revoked owner lease invalidation', lambda: sql(
+            "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
+            f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't')
+    with timed('revocation_node_offline'):
+        wait_for('revoked node offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
     # The same Agent process keeps redialing, and no new session is admitted.
     assert run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip() == agent_pid
     assert run('systemctl', 'show', 'ocservia-agent', '-p', 'ActiveState', '--value').strip() == 'active'

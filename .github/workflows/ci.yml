@@ -1,4 +1,5 @@
 name: Basic CI
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Basic CI {0}', inputs.profile) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
 
 on:
   workflow_call:
@@ -25,6 +26,10 @@ on:
         description: Prior commit or tag; must differ from this candidate
         type: string
         required: true
+      expected_sha:
+        description: Expected main commit when dispatched by Release Check
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -55,6 +60,11 @@ jobs:
       run_controller_cache: ${{ steps.relevance.outputs.run_controller_cache }}
       controller_cache_images: ${{ steps.relevance.outputs.controller_cache_images }}
     steps:
+      - name: Verify dispatched candidate
+        if: inputs.expected_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: test "$GITHUB_REF" = refs/heads/main && test "$GITHUB_SHA" = "$EXPECTED_SHA"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: ${{ (github.event_name == 'workflow_dispatch' || inputs.profile == 'full') && 1 || 0 }}
@@ -99,12 +109,16 @@ jobs:
           cache-label: ${{ needs.ci-relevance.outputs.ci_tools_cache_label }}
           cache-npm: ${{ contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'true' || 'false' }}
       - name: CI guard and workflow contracts
+        id: check
         env:
           CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
           CONTRACT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || inputs.contract_base_ref }}
           CONTRACT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           CONTRACT_EVENT: ${{ github.event_name }}
         run: bash scripts/ci-tools-check.sh
+      - name: Contract baseline ${{ steps.check.outputs.contract_base_sha }}
+        if: steps.check.outputs.contract_base_sha != ''
+        run: ':'
 
   go:
     needs: ci-relevance

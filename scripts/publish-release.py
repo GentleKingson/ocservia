@@ -13,6 +13,9 @@ import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zipfile import BadZipFile
+
+import release_evidence
 
 ROLES = ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer')
 ARCHES = ('amd64', 'arm64')
@@ -274,33 +277,20 @@ def qualify(repo, tag, sha):
     tag_commit = api(f'repos/{repo}/commits/refs/tags/{tag}')['sha']
     require(source_commit == sha and tag_commit == source_commit,
             'Release tag no longer matches the build commit')
-    pages = api(
-        f'repos/{repo}/actions/workflows/release-check.yml/runs'
-        f'?head_sha={source_commit}&branch=main&event=workflow_dispatch&per_page=100',
-        '--paginate', '--slurp',
-    )
-    runs = [run for page in pages for run in page.get('workflow_runs', [])]
-    # A newer failed or unfinished qualification must not reuse an older PASS.
-    latest = max(runs, key=lambda run: run['run_number']) if runs else None
-    require(
-        latest is not None
-        and latest.get('head_sha') == source_commit
-        and latest.get('head_branch') == 'main'
-        and latest.get('event') == 'workflow_dispatch'
-        and latest.get('status') == 'completed'
-        and latest.get('conclusion') == 'success',
-        f'No successful latest Release Check on main for {source_commit}',
-    )
-    summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
-    if summary_path:
-        with open(summary_path, 'a') as summary:
-            summary.write(f"Release Check: {latest['html_url']} (SHA: {source_commit})\n")
+    evidence = release_evidence.qualify(repo, source_commit, tag.removeprefix('v'))
+    expected_id = os.environ.get('REQUIRE_QUALIFICATION_ID')
+    if expected_id is not None:
+        require(expected_id == str(evidence['qualification_id']), 'Release qualification changed; restart publication')
+    release_evidence.write_outputs(evidence)
+    with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+        summary.write(f"Release Check: {evidence['qualification_url']} (SHA: {source_commit}, tag: {tag})\n")
+        summary.write(f"Release build: {evidence['build_url']}\n")
 
 
 def main():
     phase = sys.argv[1]
     version = os.environ['VERSION']
-    require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?', version), 'Invalid version')
+    require(release_evidence.VERSION.fullmatch(version), 'Invalid version')
     if phase == 'qualify':
         qualify(os.environ['GH_REPO'], 'v' + version, os.environ['GITHUB_SHA'])
         return
@@ -325,6 +315,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError, BadZipFile, subprocess.CalledProcessError) as error:
         print(f'Release publication failed: {error}', file=sys.stderr)
         sys.exit(1)
