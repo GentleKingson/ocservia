@@ -101,7 +101,6 @@ case "${platform}" in
     rust_platform="aarch64-apple-darwin"
     ruff_platform="aarch64-apple-darwin"
     buf_platform="Darwin-arm64"
-    protoc_platform="osx-aarch_64"
     gitleaks_platform="darwin_arm64"
     oasdiff_platform="darwin_all"
     cargo_audit_platform="aarch64-apple-darwin"
@@ -116,7 +115,6 @@ case "${platform}" in
     rust_platform="x86_64-unknown-linux-gnu"
     ruff_platform="x86_64-unknown-linux-gnu"
     buf_platform="Linux-x86_64"
-    protoc_platform="linux-x86_64"
     gitleaks_platform="linux_x64"
     oasdiff_platform="linux_amd64"
     cargo_audit_platform="x86_64-unknown-linux-gnu"
@@ -131,7 +129,6 @@ case "${platform}" in
     rust_platform="aarch64-unknown-linux-gnu"
     ruff_platform="aarch64-unknown-linux-gnu"
     buf_platform="Linux-aarch64"
-    protoc_platform="linux-aarch_64"
     gitleaks_platform="linux_arm64"
     oasdiff_platform="linux_arm64"
     cargo_audit_platform="aarch64-unknown-linux-gnu"
@@ -244,20 +241,6 @@ install_ruff() {
     chmod 0755 "${TOOLS}/bin/ruff"
   fi
   [[ "$(ruff --version)" == "ruff $(version ruff)" ]]
-}
-
-install_protoc() {
-  local artifact archive
-  artifact="protoc-$(version protobuf)-${protoc_platform}.zip"
-  if ! version_output_equals "libprotoc $(version protobuf)" "${TOOLS}/protoc/bin/protoc" \
-    "${TOOLS}/protoc/bin/protoc" --version; then
-    verify_host_command unzip
-    archive="$(download "https://github.com/protocolbuffers/protobuf/releases/download/v$(version protobuf)/${artifact}" "${artifact}")"
-    rm -rf "${TOOLS}/protoc"
-    mkdir -p "${TOOLS}/protoc"
-    unzip -q "${archive}" -d "${TOOLS}/protoc"
-  fi
-  [[ "$(protoc --version)" == "libprotoc $(version protobuf)" ]]
 }
 
 install_gitleaks() {
@@ -394,7 +377,6 @@ case "${PROFILE}" in
     install_npm
     install_rust
     install_contract_tools
-    install_protoc
     install_gitleaks
     install_go_quality_tools
     install_rust_quality_tools
