@@ -317,8 +317,10 @@ The `PrivdResultReceiptV1` CBOR map binds `receipt_version` (`uint32`),
 `accepted_at_seconds`/`accepted_at_nanos`,
 `completed_at_seconds`/`completed_at_nanos`, `replayed` (`bool`), and optional
 `certificate` (`null` when absent). When present, `certificate` is a CBOR map
-containing `certificate_id` (16B), `csr_der_sha256` (32B), and
-`public_key_sha256` (32B). UUIDs are 16-byte UUIDv7 values, digests and Ed25519
+containing `certificate_id` (16B), `csr_der_sha256` (32B for successful
+`CERTIFICATE_CSR`; empty 0-byte string for `CERTIFICATE_P12`,
+`CERTIFICATE_REVOKE`, and failed CSR), and `public_key_sha256` (same length
+rule). UUIDs are 16-byte UUIDv7 values, digests and Ed25519
 public keys are 32 bytes, and signatures are 64 bytes. The complete canonical
 transcript is bounded to 2048 bytes and the encoded proof to 64 KiB. Unknown
 receipt versions, out-of-range enums, lengths, or timestamps fail closed, and
