@@ -181,8 +181,8 @@ that Signer.
 
 ```bash
 deploy/production/controller.sh uninstall
-SIGNER_IMAGE="$(jq -er '.images.signer' \
-  "$OCSERV_CONTROLLER_STATE_ROOT/current-release.json")"
+SIGNER_IMAGE="$(jq -er '.current.images.signer' \
+  "$OCSERV_CONTROLLER_STATE_ROOT/release-history.json")"
 # BACKUP_DIR is a new, canonical, protected directory, owned 65532:65532 mode 0700.
 signer_admin() {
   docker run --rm --network none --read-only --cap-drop ALL \

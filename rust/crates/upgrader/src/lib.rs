@@ -5,8 +5,8 @@
 //! Controller-signed `AgentUpgrade` command it commits an immutable intent
 //! below a fixed root-only hierarchy and starts the fixed
 //! `ocservia-upgrader@<operation>.service` unit. The standalone runner then
-//! resolves the trusted package, reuses the existing package verifier and
-//! lifecycle scripts, and persists the durable local result that survives the
+//! verifies the authorized native package, applies it through dpkg or RPM,
+//! and persists the durable local result that survives the
 //! Agent/privd restart performed by the upgrade.
 //!
 //! All state lives under `/var/lib/ocservia-upgrade/operations/<uuid>/` as
@@ -34,8 +34,6 @@ pub const RECORD_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_OPERATIONS_DIR: &str = "/var/lib/ocservia-upgrade/operations";
 /// Fixed operator-provisioned trusted package spool.
 pub const DEFAULT_SPOOL_DIR: &str = "/var/lib/ocservia-upgrade/package-spool";
-/// Fixed installed copy of the package verifier lifecycle script.
-pub const DEFAULT_VERIFIER: &str = "/usr/libexec/ocservia/ocservia-agent-verify";
 /// Fixed systemd template unit started per durable upgrade operation.
 pub const UPGRADE_UNIT_TEMPLATE: &str = "ocservia-upgrader@{operation}.service";
 
@@ -624,11 +622,6 @@ impl UpgradeRunner {
     }
 
     #[must_use]
-    pub fn is_real_host(&self) -> bool {
-        self.root == Path::new("/")
-    }
-
-    #[must_use]
     pub fn operations_dir(&self) -> PathBuf {
         self.root.join("var/lib/ocservia-upgrade/operations")
     }
@@ -636,22 +629,6 @@ impl UpgradeRunner {
     #[must_use]
     pub fn spool_dir(&self) -> PathBuf {
         self.root.join(DEFAULT_SPOOL_DIR.trim_start_matches('/'))
-    }
-
-    #[must_use]
-    pub fn verifier(&self) -> PathBuf {
-        self.root.join(DEFAULT_VERIFIER.trim_start_matches('/'))
-    }
-
-    fn installed_binary(&self, name: &str) -> PathBuf {
-        self.root.join(format!("usr/libexec/ocservia/{name}"))
-    }
-
-    /// The durable, package-digest-bound record the installer writes only
-    /// after every binary, verifier, and unit of one package is fully
-    /// installed and synced. Crash convergence trusts this record alone.
-    fn installation_commit(&self) -> PathBuf {
-        self.root.join("var/lib/ocservia-upgrade/installed-commit")
     }
 
     /// Executes (or replays) exactly one durable upgrade operation.
@@ -680,233 +657,241 @@ impl UpgradeRunner {
         self.execute(&operation_dir, &intent)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn execute(
         &self,
         operation_dir: &Path,
         intent: &UpgradeIntent,
     ) -> Result<OperationState, UpgradeStoreError> {
+        let (state, detail) = match self.apply_native(operation_dir, intent) {
+            Ok(result) => result,
+            Err(failure) => return refuse(operation_dir, intent, failure),
+        };
+        write_terminal(operation_dir, intent, state, &detail)?;
+        Ok(state)
+    }
+
+    fn apply_native(
+        &self,
+        operation_dir: &Path,
+        intent: &UpgradeIntent,
+    ) -> Result<(OperationState, String), UpgradeStoreError> {
         if ocservia_contracts::agent_upgrade::runtime_architecture()
             != Some(intent.architecture.as_str())
         {
-            return refuse(
-                operation_dir,
-                intent,
-                UpgradeStoreError::Package("intent architecture mismatches this host".to_owned()),
-            );
+            return Err(UpgradeStoreError::Package(
+                "intent architecture mismatches this host".into(),
+            ));
         }
-        let archive = self.spool_dir().join(format!(
-            "ocservia-agent-{}-linux-{}.tar.gz",
-            intent.target_version, intent.architecture
-        ));
-        if let Err(failure) = validate_spool_file(&archive) {
-            return refuse(operation_dir, intent, failure);
-        }
-        let digest = sha256_file(&archive)?;
-        if digest != intent.package_sha256 {
-            return refuse(
-                operation_dir,
-                intent,
-                UpgradeStoreError::Package(
-                    "spool package digest does not match the authorized intent".to_owned(),
-                ),
-            );
-        }
-        let package_root = match self.verify_package(&archive, &intent.package_sha256) {
-            Ok(root) => root,
-            Err(failure) => {
-                return refuse(
-                    operation_dir,
-                    intent,
-                    UpgradeStoreError::Package(format!("package verification failed: {failure}")),
-                );
-            }
-        };
-        if let Err(failure) = validate_verified_marker(&package_root, &digest) {
-            return refuse(operation_dir, intent, failure);
-        }
-        let agent_source = package_root.join("rust/target/release/ocservia-agent");
-        let privd_source = package_root.join("rust/target/release/ocservia-privd");
-        for source in [&agent_source, &privd_source] {
-            if let Err(failure) = validate_regular_executable(source) {
-                return refuse(operation_dir, intent, failure);
-            }
-        }
-        let expected_agent = sha256_file(&agent_source)?;
-        let expected_privd = sha256_file(&privd_source)?;
-        let installed_agent = sha256_if_present(&self.installed_binary("ocservia-agent"))?;
-        let installed_privd = sha256_if_present(&self.installed_binary("ocservia-privd"))?;
-        let agent_matched = installed_agent.is_some_and(|digest| digest == expected_agent);
-        let privd_matched = installed_privd.is_some_and(|digest| digest == expected_privd);
-        let committed = match read_installation_commit(&self.installation_commit())? {
-            Some(record) => record == hex::encode(digest),
-            None => false,
-        };
-        // Crash convergence is proven exclusively by the digest-bound
-        // installation commit record: matching agent and privd binaries
-        // alone can be a partial install (for example both binaries were
-        // replaced before the upgrader, verifier, or units were). Only a
-        // complete, synced installation writes the record.
-        let replaced = committed && agent_matched && privd_matched;
-        if !replaced && (agent_matched || privd_matched) {
-            // An interrupted lifecycle already modified this host. Re-running
-            // the destructive backup step would snapshot the mixed state as
-            // the previous release, and guessing success would certify it;
-            // the rollback snapshot from the original attempt is preserved,
-            // so refuse durably and leave recovery to the operator.
-            return refuse(
-                operation_dir,
-                intent,
-                UpgradeStoreError::Unsafe(
-                    "installation was interrupted before its commit record; the rollback snapshot is preserved",
-                ),
-            );
-        }
-        write_atomic(
-            &operation_dir.join("state"),
-            format!("{}\n", OperationState::Running.as_str()).as_bytes(),
-            TempOwner::Run,
-        )?;
-        let outcome = if replaced {
-            // Crash window: the replacement finished but the service restart
-            // or result persistence did not. Never re-run the destructive
-            // backup step over the matched snapshot of the previous release.
-            if self.is_real_host()
-                && let Err(failure) = restart_services()
-            {
-                return refuse(
-                    operation_dir,
-                    intent,
-                    UpgradeStoreError::Lifecycle(format!("service restart failed: {failure}")),
-                );
-            }
-            finish(operation_dir, intent, "verified package already installed")
+        let manager = if self.root.join("var/lib/dpkg/status").is_file() {
+            NativePackage::Deb
         } else {
-            if let Err(failure) = self.run_lifecycle(&package_root) {
-                return refuse(operation_dir, intent, UpgradeStoreError::Lifecycle(failure));
-            }
-            let installed_agent = sha256_if_present(&self.installed_binary("ocservia-agent"))?;
-            let installed_privd = sha256_if_present(&self.installed_binary("ocservia-privd"))?;
-            if installed_agent != Some(expected_agent) || installed_privd != Some(expected_privd) {
-                return refuse(
-                    operation_dir,
-                    intent,
-                    UpgradeStoreError::Lifecycle(
-                        "lifecycle completed without installing the authorized binaries".to_owned(),
-                    ),
-                );
-            }
-            if !matches!(
-                read_installation_commit(&self.installation_commit())?,
-                Some(record) if record == hex::encode(digest)
-            ) {
-                return refuse(
-                    operation_dir,
-                    intent,
-                    UpgradeStoreError::Lifecycle(
-                        "lifecycle completed without recording the installation commit".to_owned(),
-                    ),
-                );
-            }
-            finish(
-                operation_dir,
-                intent,
-                "verified package lifecycle completed",
-            )
+            NativePackage::Rpm
         };
-        self.cleanup_staging(&package_root);
-        outcome
+        let spool = self.spool_dir();
+        ensure_operations_root(&spool)?;
+        let previous_file = operation_dir.join("previous-version");
+        let previous_version = if previous_file.try_exists()? {
+            fs::read_to_string(&previous_file)?
+        } else {
+            let version = self.installed_version(manager)?;
+            write_atomic(&previous_file, version.as_bytes(), TempOwner::Run)?;
+            version
+        };
+        if !ocservia_contracts::agent_upgrade::valid_target_version(&previous_version) {
+            return Err(UpgradeStoreError::Unsafe("invalid cached package version"));
+        }
+        let previous = spool.join(manager.filename(&previous_version, &intent.architecture));
+        validate_spool_file(&previous)?;
+        let rollback_file = operation_dir.join("rollback-reason");
+        let failure = if rollback_file.try_exists()? {
+            fs::read_to_string(rollback_file)?
+        } else {
+            let target = self.authorized_package(manager, intent)?;
+            write_atomic(&operation_dir.join("state"), b"running\n", TempOwner::Run)?;
+            // Native package replacement is replayable. Preserve the original baseline
+            // even if dpkg or RPM was interrupted halfway through the transaction.
+            match self.install_and_probe(manager, &target, &intent.target_version) {
+                Ok(()) => {
+                    return Ok((
+                        OperationState::Succeeded,
+                        "native package installed and services active".into(),
+                    ));
+                }
+                Err(error) => {
+                    let detail = bounded_detail(&error.to_string());
+                    write_atomic(&rollback_file, detail.as_bytes(), TempOwner::Run)?;
+                    detail
+                }
+            }
+        };
+        self.install_and_probe(manager, &previous, &previous_version)
+            .map_err(|error| {
+                UpgradeStoreError::Lifecycle(format!(
+                    "rollback failed: {error}; upgrade failure: {failure}"
+                ))
+            })?;
+        Ok((OperationState::RolledBack, failure))
     }
 
-    fn run_lifecycle(&self, package_root: &Path) -> Result<(), String> {
-        let script = package_root.join("scripts/upgrade-agent.sh");
-        validate_regular_executable(&script).map_err(|failure| failure.to_string())?;
-        let mut command = Command::new(&script);
-        if self.is_real_host() {
-            command.env_remove("DESTDIR");
-        } else {
-            command.env("DESTDIR", &self.root);
-        }
-        let output = command_output(&mut command).map_err(|failure| failure.to_string())?;
-        if output.status.success() {
-            return Ok(());
-        }
-        Err(format!(
-            "upgrade-agent.sh exited with {}: {}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "a signal".to_owned(), |code| code.to_string()),
-            bounded_detail(&String::from_utf8_lossy(&output.stderr),)
-        ))
-    }
-
-    fn verify_package(
+    fn authorized_package(
         &self,
-        archive: &Path,
-        expected_digest: &[u8; 32],
+        manager: NativePackage,
+        intent: &UpgradeIntent,
     ) -> Result<PathBuf, UpgradeStoreError> {
-        let verifier = self.verifier();
-        validate_regular_executable(&verifier)?;
-        let staging_root = self.root.join("var/lib/ocservia-upgrade/package-staging");
-        let mut command = Command::new(&verifier);
-        command.arg(archive).arg(hex::encode(expected_digest));
-        if self.is_real_host() {
-            command.env_remove("DESTDIR");
+        let name = manager.filename(&intent.target_version, &intent.architecture);
+        let target = self.spool_dir().join(&name);
+        if target.try_exists()? {
+            verify_digest(&target, intent)?;
         } else {
-            command.env("DESTDIR", &self.root);
+            let url = format!(
+                "https://github.com/GentleKingson/ocservia/releases/download/v{}/{}",
+                intent.target_version, name
+            );
+            let temporary = self
+                .spool_dir()
+                .join(format!(".download-{}", intent.operation_id));
+            let download = (|| {
+                checked(
+                    Command::new(self.root.join("usr/bin/curl"))
+                        .args([
+                            "--fail",
+                            "--silent",
+                            "--show-error",
+                            "--location",
+                            "--proto",
+                            "=https",
+                            "--proto-redir",
+                            "=https",
+                            "--max-time",
+                            "600",
+                            "--max-filesize",
+                            &MAX_SPOOL_PACKAGE_BYTES.to_string(),
+                            "--output",
+                        ])
+                        .arg(&temporary)
+                        .arg(url),
+                )?;
+                verify_digest(&temporary, intent)?;
+                File::open(&temporary)?.sync_all()?;
+                fs::rename(&temporary, &target)?;
+                sync_directory(&self.spool_dir())
+            })();
+            if download.is_err() && temporary.try_exists()? {
+                fs::remove_file(temporary)?;
+            }
+            download?;
         }
-        let output = command_output(&mut command).map_err(UpgradeStoreError::Io)?;
-        if !output.status.success() {
-            return Err(UpgradeStoreError::Package(
-                "verified package staging refused the spool inputs".to_owned(),
-            ));
-        }
-        let printed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let package_root = PathBuf::from(printed);
-        let relative = package_root.strip_prefix(&staging_root).map_err(|_| {
-            UpgradeStoreError::Package("verifier output escapes trusted staging".to_owned())
-        })?;
-        if relative.components().count() != 3
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(UpgradeStoreError::Package(
-                "verifier output is not a verified package root".to_owned(),
-            ));
-        }
-        validate_directory_strict(&package_root)?;
-        Ok(package_root)
+        Ok(target)
     }
 
-    /// Best-effort removal of the verifier's scratch staging directory once
-    /// the operation reached a terminal outcome; evidence is persisted first.
-    fn cleanup_staging(&self, package_root: &Path) {
-        let Some(staging) = package_root.parent().and_then(Path::parent) else {
-            return;
+    fn installed_version(&self, manager: NativePackage) -> Result<String, UpgradeStoreError> {
+        let record = match manager {
+            NativePackage::Deb => {
+                checked(Command::new(self.root.join("usr/bin/dpkg-query")).args([
+                    "-W",
+                    "-f=${Status} ${Version}",
+                    "ocservia-agent",
+                ]))?
+            }
+            NativePackage::Rpm => checked(Command::new(self.root.join("usr/bin/rpm")).args([
+                "-q",
+                "--qf",
+                "%{VERSION}-%{RELEASE}",
+                "ocservia-agent",
+            ]))?,
         };
-        let staging_root = self.root.join("var/lib/ocservia-upgrade/package-staging");
-        if staging.parent() == Some(staging_root.as_path())
-            && let Err(error) = fs::remove_dir_all(staging)
-        {
-            tracing::warn!(error = %error, staging = %staging.display(), "verified staging cleanup failed");
+        let version = match manager {
+            NativePackage::Deb => record.strip_prefix("install ok installed "),
+            NativePackage::Rpm => Some(record.as_str()),
+        }
+        .and_then(|s| s.strip_suffix("-1"))
+        .map(|s| s.replace("~rc.", "-rc."));
+        version
+            .filter(|s| ocservia_contracts::agent_upgrade::valid_target_version(s))
+            .ok_or_else(|| {
+                UpgradeStoreError::Package(
+                    "installed Agent does not have a supported native package version".into(),
+                )
+            })
+    }
+
+    fn install_and_probe(
+        &self,
+        manager: NativePackage,
+        package: &Path,
+        version: &str,
+    ) -> Result<(), UpgradeStoreError> {
+        match manager {
+            NativePackage::Deb => checked(
+                Command::new(self.root.join("usr/bin/dpkg"))
+                    .arg("-i")
+                    .arg(package),
+            )?,
+            NativePackage::Rpm => checked(
+                Command::new(self.root.join("usr/bin/rpm"))
+                    .args(["-U", "--oldpackage", "--replacepkgs"])
+                    .arg(package),
+            )?,
+        };
+        if self.installed_version(manager)? != version {
+            return Err(UpgradeStoreError::Lifecycle(
+                "installed native package version mismatches intent".into(),
+            ));
+        }
+        let systemctl = self.root.join("usr/bin/systemctl");
+        let units = ["ocservia-privd.service", "ocservia-agent.service"];
+        checked(Command::new(&systemctl).arg("restart").args(units))?;
+        // Give both daemons time to run their startup probes. Query individually:
+        // systemctl is-active with multiple arguments succeeds if *any* is active.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        for unit in units {
+            checked(Command::new(&systemctl).args(["is-active", "--quiet", unit]))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativePackage {
+    Deb,
+    Rpm,
+}
+
+impl NativePackage {
+    fn filename(self, version: &str, arch: &str) -> String {
+        match self {
+            Self::Deb => format!("ocservia-agent_{version}-1_{arch}.deb"),
+            Self::Rpm => {
+                let rpm_arch = if arch == "amd64" { "x86_64" } else { "aarch64" };
+                format!("ocservia-agent-{version}-1.{rpm_arch}.rpm")
+            }
         }
     }
 }
 
-fn command_output(command: &mut std::process::Command) -> io::Result<std::process::Output> {
-    // Another test thread can briefly hold a freshly written helper script's
-    // writable fd across fork() until execve(), causing ETXTBSY.
-    for attempt in 0..20 {
-        match command.output() {
-            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && attempt < 19 => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            result => return result,
-        }
+fn verify_digest(path: &Path, intent: &UpgradeIntent) -> Result<(), UpgradeStoreError> {
+    validate_spool_file(path)?;
+    if sha256_file(path)? != intent.package_sha256 {
+        return Err(UpgradeStoreError::Package(
+            "native package digest mismatches authorized intent".into(),
+        ));
     }
-    unreachable!("loop returns on final attempt")
+    Ok(())
+}
+
+fn checked(command: &mut Command) -> Result<String, UpgradeStoreError> {
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(UpgradeStoreError::Lifecycle(format!(
+            "{} exited with {}: {}",
+            command.get_program().to_string_lossy(),
+            output.status,
+            bounded_detail(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned())
 }
 
 fn write_terminal(
@@ -941,15 +926,6 @@ fn write_terminal(
         TempOwner::Run,
     )?;
     Ok(())
-}
-
-fn finish(
-    operation_dir: &Path,
-    intent: &UpgradeIntent,
-    detail: &str,
-) -> Result<OperationState, UpgradeStoreError> {
-    write_terminal(operation_dir, intent, OperationState::Succeeded, detail)?;
-    Ok(OperationState::Succeeded)
 }
 
 /// Persists the durable failure evidence first, then surfaces the same
@@ -1015,22 +991,6 @@ impl UpgradeLock {
         rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| UpgradeStoreError::ActiveConflict)?;
         Ok(Self { _file: file })
-    }
-}
-
-fn restart_services() -> Result<(), String> {
-    let status = Command::new("/usr/bin/systemctl")
-        .args([
-            "try-restart",
-            "ocservia-privd.service",
-            "ocservia-agent.service",
-        ])
-        .status()
-        .map_err(|failure| failure.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("systemctl try-restart failed".to_owned())
     }
 }
 
@@ -1168,55 +1128,6 @@ fn validate_record_file(path: &Path) -> Result<(), UpgradeStoreError> {
     Ok(())
 }
 
-fn validate_regular_executable(path: &Path) -> Result<(), UpgradeStoreError> {
-    let metadata = fs::symlink_metadata(path).map_err(UpgradeStoreError::Io)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != trusted_euid()
-        || metadata.nlink() != 1
-        || metadata.permissions().mode() & 0o111 == 0
-        || metadata.permissions().mode() & 0o022 != 0
-    {
-        return Err(UpgradeStoreError::Package(
-            "trusted package executable has unsafe metadata".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-/// Reads the installer's durable commit record. `Ok(None)` means no record
-/// exists (a pre-upgrade host or a fresh operation); a present but
-/// non-regular, symlinked, oversized, or malformed record is unsafe and
-/// fails closed instead of being ignored, because convergence decisions
-/// hinge on it.
-fn read_installation_commit(path: &Path) -> Result<Option<String>, UpgradeStoreError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(UpgradeStoreError::Io(error)),
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 96 {
-        return Err(UpgradeStoreError::Unsafe(
-            "installation commit record is not a bounded regular file",
-        ));
-    }
-    let record = fs::read_to_string(path).map_err(UpgradeStoreError::Io)?;
-    let digest = record
-        .strip_prefix("archive_sha256=")
-        .and_then(|digest| digest.strip_suffix('\n'))
-        .unwrap_or_default();
-    if digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(UpgradeStoreError::Unsafe(
-            "installation commit record is malformed",
-        ));
-    }
-    Ok(Some(digest.to_owned()))
-}
-
 fn validate_spool_file(path: &Path) -> Result<(), UpgradeStoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
@@ -1237,44 +1148,6 @@ fn validate_spool_file(path: &Path) -> Result<(), UpgradeStoreError> {
     {
         return Err(UpgradeStoreError::Package(
             "trusted package spool input has unsafe metadata".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_verified_marker(
-    package_root: &Path,
-    archive_digest: &[u8; 32],
-) -> Result<(), UpgradeStoreError> {
-    let marker = package_root.join(".ocservia-package-verified");
-    let metadata = fs::symlink_metadata(&marker)
-        .map_err(|_| UpgradeStoreError::Package("verified package marker is missing".to_owned()))?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != trusted_euid()
-        || metadata.nlink() != 1
-        || metadata.permissions().mode() & 0o777 != 0o600
-    {
-        return Err(UpgradeStoreError::Package(
-            "verified package marker has unsafe metadata".to_owned(),
-        ));
-    }
-    let marker = fs::read_to_string(&marker).map_err(UpgradeStoreError::Io)?;
-    let lines: Vec<&str> = marker.trim_end_matches('\n').split('\n').collect();
-    if lines.len() != 3
-        || lines[0] != "version=1"
-        || lines[1] != format!("archive_sha256={}", hex::encode(archive_digest))
-        || lines[2]
-            != format!(
-                "package={}",
-                package_root
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default()
-            )
-    {
-        return Err(UpgradeStoreError::Package(
-            "verified package marker does not bind the authorized archive".to_owned(),
         ));
     }
     Ok(())
@@ -1444,17 +1317,6 @@ fn sha256_file(path: &Path) -> Result<[u8; 32], UpgradeStoreError> {
     Ok(hasher.finalize().into())
 }
 
-fn sha256_if_present(path: &Path) -> Result<Option<[u8; 32]>, UpgradeStoreError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            Ok(Some(sha256_file(path)?))
-        }
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(UpgradeStoreError::Io(error)),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
@@ -1532,88 +1394,6 @@ mod tests {
             .expect("tmp");
         f.write_all(bytes).expect("w");
         f.sync_all().expect("sync");
-    }
-
-    struct FakePackage {
-        root: TempRoot,
-        archive_digest: [u8; 32],
-        lifecycle_runs: PathBuf,
-    }
-    impl FakePackage {
-        fn new(tag: &str, version: &str) -> Self {
-            let root = TempRoot::new(tag);
-            let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("arch");
-            let spool = root.path().join("var/lib/ocservia-upgrade/package-spool");
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&spool)
-                .expect("spool");
-            let bytes = format!("fake-agent-package-{tag}").into_bytes();
-            let archive_digest: [u8; 32] = Sha256::digest(&bytes).into();
-            let archive = spool.join(format!("ocservia-agent-{version}-linux-{arch}.tar.gz"));
-            fs::write(&archive, &bytes).expect("archive");
-            fs::set_permissions(&archive, fs::Permissions::from_mode(0o644)).expect("644");
-
-            let verifier = root
-                .path()
-                .join("usr/libexec/ocservia/ocservia-agent-verify");
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o755)
-                .create(verifier.parent().unwrap())
-                .expect("libexec");
-            let lifecycle_runs = root.path().join("lifecycle-runs");
-            let src = "#!/bin/sh\nset -e\n[ \"$#\" -eq 2 ]\ndigest=\"$2\"\n[ \"$(sha256sum \"$1\" | cut -d' ' -f1)\" = \"${digest}\" ]\n\
-stage=\"${DESTDIR}/var/lib/ocservia-upgrade/package-staging/pkg.1\"\npkg=\"${stage}/extracted/ocservia-agent-@VERSION@\"\n\
-mkdir -p \"${pkg}/rust/target/release\" \"${pkg}/scripts\"\n\
-printf 'new-agent-@TAG@\\n' > \"${pkg}/rust/target/release/ocservia-agent\"\n\
-printf 'new-privd-@TAG@\\n' > \"${pkg}/rust/target/release/ocservia-privd\"\n\
-{\n  printf '#!/bin/sh\\nset -e\\n'\n  printf 'here=$(dirname \"$0\")\\n'\n\
-  printf 'cp \"${here}/../rust/target/release/ocservia-agent\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-agent\"\\n'\n\
-  printf 'cp \"${here}/../rust/target/release/ocservia-privd\" \"${DESTDIR}/usr/libexec/ocservia/ocservia-privd\"\\n'\n\
-  printf 'echo \"archive_sha256=%s\" > \"${DESTDIR}/var/lib/ocservia-upgrade/installed-commit\"\\n' \"${digest}\"\n\
-  printf 'printf x >> \"@LOG@\"\\n'\n} > \"${pkg}/scripts/upgrade-agent.sh\"\n\
-chmod 0755 \"${pkg}/rust/target/release/ocservia-agent\" \"${pkg}/rust/target/release/ocservia-privd\" \"${pkg}/scripts/upgrade-agent.sh\"\n\
-printf 'version=1\\narchive_sha256=%s\\npackage=ocservia-agent-@VERSION@\\n' \"${digest}\" > \"${pkg}/.ocservia-package-verified\"\n\
-chmod 0600 \"${pkg}/.ocservia-package-verified\"\nchmod 0700 \"${pkg}\"\necho \"${pkg}\"\n"
-                .replace("@TAG@", tag)
-                .replace("@VERSION@", version)
-                .replace("@LOG@", &lifecycle_runs.display().to_string());
-            fs::write(&verifier, src).expect("verifier");
-            fs::write(&lifecycle_runs, b"").expect("log");
-            fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755)).expect("755");
-            Self {
-                root,
-                archive_digest,
-                lifecycle_runs,
-            }
-        }
-        fn seed_bins(&self, tag: &str, agent: bool, privd: bool) {
-            if agent {
-                fs::write(
-                    self.root.path().join("usr/libexec/ocservia/ocservia-agent"),
-                    format!("new-agent-{tag}\n"),
-                )
-                .expect("a");
-            }
-            if privd {
-                fs::write(
-                    self.root.path().join("usr/libexec/ocservia/ocservia-privd"),
-                    format!("new-privd-{tag}\n"),
-                )
-                .expect("p");
-            }
-        }
-        fn seed_commit(&self, hex_sha: &str) {
-            fs::write(
-                self.root
-                    .path()
-                    .join("var/lib/ocservia-upgrade/installed-commit"),
-                format!("archive_sha256={hex_sha}\n"),
-            )
-            .expect("c");
-        }
     }
 
     #[test]
@@ -1902,7 +1682,7 @@ chmod 0600 \"${pkg}/.ocservia-package-verified\"\nchmod 0700 \"${pkg}\"\necho \"
         plant_tmp(&sched_tmp, b"accepted\n");
         assert!(matches!(
             root.runner().run(&f_intent.operation_id.to_string()),
-            Err(UpgradeStoreError::Package(_))
+            Err(UpgradeStoreError::Io(_))
         ));
         assert!(!stale.exists() && sched_tmp.exists());
         assert_eq!(load_state(&op_dir).expect("st"), OperationState::Failed);
@@ -1914,169 +1694,78 @@ chmod 0600 \"${pkg}/.ocservia-package-verified\"\nchmod 0700 \"${pkg}\"\necho \"
     }
 
     #[test]
-    fn runner_lifecycle_commit_record_and_rejection_matrix() {
-        // Happy path + replay after result loss converges without re-running lifecycle.
-        let pkg = FakePackage::new("lifecycle", "1.2.3");
-        let intent = new_intent(pkg.archive_digest);
-        pkg.root
-            .scheduler()
-            .schedule_and_trigger(&intent)
-            .expect("s");
-        assert_eq!(
-            pkg.root
-                .runner()
-                .run(&intent.operation_id.to_string())
-                .expect("ok"),
-            OperationState::Succeeded
-        );
-        assert_eq!(
-            fs::read(pkg.root.path().join("usr/libexec/ocservia/ocservia-agent")).expect("a"),
-            b"new-agent-lifecycle\n"
-        );
-        assert_eq!(fs::read_to_string(&pkg.lifecycle_runs).expect("log"), "x");
-        pkg.root
-            .force_state(&intent.operation_id, OperationState::Running);
-        assert_eq!(
-            pkg.root
-                .runner()
-                .run(&intent.operation_id.to_string())
-                .expect("conv"),
-            OperationState::Succeeded
-        );
-        assert_eq!(fs::read_to_string(&pkg.lifecycle_runs).expect("log"), "x");
-
-        // Removing the commit record forces replay to fail closed.
-        fs::remove_file(
-            pkg.root
-                .path()
-                .join("var/lib/ocservia-upgrade/installed-commit"),
-        )
-        .expect("rm");
-        pkg.root
-            .force_state(&intent.operation_id, OperationState::Running);
-        assert!(matches!(
-            pkg.root.runner().run(&intent.operation_id.to_string()),
-            Err(UpgradeStoreError::Unsafe(_))
-        ));
-        assert_eq!(
-            load_state(&pkg.root.ops().join(intent.operation_id.to_string())).expect("st"),
-            OperationState::Failed
-        );
-
-        // Interrupted installs (both bins / agent-only / foreign commit) fail closed before lifecycle runs.
-        for (tag, agent, privd, foreign_commit) in [
-            ("crash-both", true, true, false),
-            ("crash-agent", true, false, false),
-            ("foreign-rec", true, true, true),
+    fn native_install_replays_preserve_rollback_package_and_probe_each_service() {
+        let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("architecture");
+        let root = TempRoot::new("native");
+        let runner = root.runner();
+        let spool = runner.spool_dir();
+        ensure_operations_root(&spool).expect("cache");
+        let status = root.path().join("var/lib/dpkg/status");
+        fs::create_dir_all(status.parent().unwrap()).expect("dpkg db");
+        fs::write(&status, b"1.0.0").expect("installed");
+        let bin = root.path().join("usr/bin");
+        fs::create_dir_all(&bin).expect("bin");
+        for (name, commands) in [
+            (
+                "dpkg-query",
+                "printf 'install ok installed %s-1' \"$(cat \"$status\")\"",
+            ),
+            ("dpkg", "test \"$1\" = -i && cat \"$2\" > \"$status\""),
+            (
+                "systemctl",
+                "test \"$1\" != is-active || test \"$3\" != ocservia-agent.service || test ! -f \"$status.fail\" || test \"$(cat \"$status\")\" = 1.0.0",
+            ),
         ] {
-            let p = FakePackage::new(tag, "1.2.3");
-            p.seed_bins(tag, agent, privd);
-            if foreign_commit {
-                let mut d = p.archive_digest;
-                d[0] ^= 0xff;
-                p.seed_commit(&hex::encode(d));
-            }
-            let it = new_intent(p.archive_digest);
-            p.root.scheduler().schedule_and_trigger(&it).expect("s");
-            assert!(
-                matches!(
-                    p.root.runner().run(&it.operation_id.to_string()),
-                    Err(UpgradeStoreError::Unsafe(_))
+            let path = bin.join(name);
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nset -eu\nstatus='{}'\n{commands}\n",
+                    status.display()
                 ),
-                "{tag}"
-            );
-            let op_dir = p.root.ops().join(it.operation_id.to_string());
-            assert_eq!(load_state(&op_dir).expect("st"), OperationState::Failed);
-            let res = fs::read_to_string(op_dir.join("result")).expect("res");
-            assert!(
-                res.contains("state=failed")
-                    && res.contains("interrupted before its commit record")
-            );
-            assert_eq!(fs::read_to_string(&p.lifecycle_runs).expect("log"), "");
+            )
+            .expect("test tool");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
         }
-
-        // Matching commit record converges without re-running lifecycle.
-        let conv = FakePackage::new("commit-conv", "1.2.3");
-        conv.seed_bins("commit-conv", true, true);
-        conv.seed_commit(&hex::encode(conv.archive_digest));
-        let cit = new_intent(conv.archive_digest);
-        conv.root.scheduler().schedule_and_trigger(&cit).expect("s");
+        let old = spool.join(NativePackage::Deb.filename("1.0.0", arch));
+        let target = spool.join(NativePackage::Deb.filename("1.2.3", arch));
+        fs::write(&old, b"1.0.0").unwrap();
+        fs::write(&target, b"1.2.3").unwrap();
+        let intent = new_intent(sha256_file(&target).expect("authorized digest"));
+        root.scheduler()
+            .schedule_and_trigger(&intent)
+            .expect("schedule");
+        let operation = intent.operation_id.to_string();
         assert_eq!(
-            conv.root
-                .runner()
-                .run(&cit.operation_id.to_string())
-                .expect("ok"),
+            runner.run(&operation).expect("upgrade"),
             OperationState::Succeeded
         );
-        assert_eq!(fs::read_to_string(&conv.lifecycle_runs).expect("log"), "");
-        assert!(
-            fs::read_to_string(
-                conv.root
-                    .ops()
-                    .join(cit.operation_id.to_string())
-                    .join("result")
-            )
-            .expect("r")
-            .contains("verified package already installed")
+        assert_eq!(fs::read_to_string(&status).unwrap(), "1.2.3");
+        root.force_state(&intent.operation_id, OperationState::Running);
+        fs::write(status.with_extension("fail"), b"").expect("fail target health");
+        assert_eq!(
+            runner.run(&operation).expect("rollback"),
+            OperationState::RolledBack
+        );
+        assert_eq!(fs::read_to_string(&status).unwrap(), "1.0.0");
+        assert_eq!(
+            runner.run(&operation).expect("terminal replay"),
+            OperationState::RolledBack
         );
 
-        // Spool digest mismatch & foreign arch fail closed with Package error.
-        let dp = FakePackage::new("digest", "1.2.3");
-        let mut wrong = dp.archive_digest;
-        wrong[0] ^= 0xff;
-        let dit = new_intent(wrong);
-        dp.root.scheduler().schedule_and_trigger(&dit).expect("s");
+        let unauthorized = new_intent([0; 32]);
+        root.scheduler()
+            .schedule_and_trigger(&unauthorized)
+            .expect("schedule");
         assert!(matches!(
-            dp.root.runner().run(&dit.operation_id.to_string()),
+            runner.run(&unauthorized.operation_id.to_string()),
             Err(UpgradeStoreError::Package(_))
         ));
-        assert_eq!(fs::read_to_string(&dp.lifecycle_runs).expect("log"), "");
-
-        let fp = FakePackage::new("arch", "1.2.3");
-        let foreign = if ocservia_contracts::agent_upgrade::runtime_architecture() == Some("amd64")
-        {
-            "arm64"
-        } else {
-            "amd64"
-        };
-        let fit = new_intent_ver("1.2.3", fp.archive_digest, foreign);
-        fp.root.scheduler().schedule_and_trigger(&fit).expect("s");
-        assert!(matches!(
-            fp.root.runner().run(&fit.operation_id.to_string()),
-            Err(UpgradeStoreError::Package(_))
-        ));
-
-        // Explicit target versions (downgrade, same, upgrade) apply without semver gating.
-        for target in [
-            "0.0.0",
-            ocservia_contracts::agent_upgrade::release_version(),
-            "999.0.0",
-        ] {
-            let p = FakePackage::new("explicit", target);
-            let it = new_intent_ver(
-                target,
-                p.archive_digest,
-                ocservia_contracts::agent_upgrade::runtime_architecture().expect("arch"),
-            );
-            p.root.scheduler().schedule_and_trigger(&it).expect("s");
-            assert_eq!(
-                p.root
-                    .runner()
-                    .run(&it.operation_id.to_string())
-                    .expect("apply"),
-                OperationState::Succeeded
-            );
-            let runs = fs::read_to_string(&p.lifecycle_runs).expect("runs");
-            assert_ne!(runs, "");
-            assert_eq!(
-                p.root
-                    .runner()
-                    .run(&it.operation_id.to_string())
-                    .expect("retry"),
-                OperationState::Succeeded
-            );
-            assert_eq!(fs::read_to_string(&p.lifecycle_runs).expect("runs"), runs);
-        }
+        assert_eq!(fs::read_to_string(&status).unwrap(), "1.0.0");
+        assert_eq!(
+            NativePackage::Rpm.filename("2.0.0-rc.1", "arm64"),
+            "ocservia-agent-2.0.0-rc.1-1.aarch64.rpm"
+        );
     }
 
     #[test]

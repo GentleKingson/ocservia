@@ -71,7 +71,7 @@ if grep -Eq '^[[:space:]]*ConditionPathExists[[:space:]]*=.*\/var\/lib\/ocservia
   exit 1
 fi
 grep -Fxq 'ProtectSystem=strict' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
-grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 if grep -q '^\[Install\]' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"; then
   echo "the durable upgrade runner must stay an on-demand unit without an [Install] section" >&2
   exit 1

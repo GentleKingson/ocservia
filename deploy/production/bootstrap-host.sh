@@ -188,28 +188,20 @@ detect_conflicts() {
   fi
 }
 
-# Base packages. rename.ul (atomic file publication in quick-materials.sh) is in
-# util-linux, except on Ubuntu 26.04 where it moved to util-linux-extra.
-base_packages() {
-  base_package_list=(jq util-linux curl openssl ca-certificates)
-  [[ "${OS_ID} ${OS_VERSION_ID}" != "ubuntu 26.04" ]] || base_package_list+=(util-linux-extra)
-}
+BASE_PACKAGES=(jq util-linux curl openssl ca-certificates python3)
 
 install_missing_base_tools() {
-  local package missing=() base_package_list
-  base_packages
-  for package in "${base_package_list[@]}"; do
+  local package missing=()
+  for package in "${BASE_PACKAGES[@]}"; do
     package_installed "${package}" || missing+=("${package}")
   done
   if ((${#missing[@]} == 0)); then
-    echo "base tools present: jq, flock and rename.ul (util-linux), curl, openssl, ca-certificates"
+    echo "base tools present: jq, flock (util-linux), curl, openssl, ca-certificates, python3"
   else
     echo "installing missing base tools: ${missing[*]}"
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
   fi
-  command -v rename.ul >/dev/null 2>&1 ||
-    fail "rename.ul is unavailable after installing the base tools; install the package that provides it (util-linux, or util-linux-extra on Ubuntu 26.04)"
 }
 
 setup_docker_apt_repository() {
@@ -298,20 +290,15 @@ verify_launcher_docker_access() {
 }
 
 check_base_tools() {
-  local package any_missing=false base_package_list
-  base_packages
-  for package in "${base_package_list[@]}"; do
+  local package any_missing=false
+  for package in "${BASE_PACKAGES[@]}"; do
     if ! package_installed "${package}"; then
       record_failure "required package '${package}' is not installed; run 'bootstrap-host.sh install' to install missing host prerequisites"
       any_missing=true
     fi
   done
-  if ! command -v rename.ul >/dev/null 2>&1; then
-    record_failure "rename.ul is not available; install the package that provides it (util-linux, or util-linux-extra on Ubuntu 26.04)"
-    any_missing=true
-  fi
   if [[ "${any_missing}" == false ]]; then
-    echo "base tools present: jq, flock and rename.ul (util-linux), curl, openssl, ca-certificates"
+    echo "base tools present: jq, flock (util-linux), curl, openssl, ca-certificates, python3"
   fi
 }
 

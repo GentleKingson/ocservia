@@ -1,0 +1,8 @@
+d /etc/ocservia-agent 0750 root ocserv-agent -
+d /var/lib/ocservia-agent 0700 ocserv-agent ocserv-agent -
+d /var/lib/ocservia-agent/identity 0700 ocserv-agent ocserv-agent -
+d /var/lib/ocservia-privd 0700 root ocserv-agent -
+d /var/lib/ocservia-upgrade 0700 root root -
+d /var/lib/ocservia-vpn-audit 0700 ocserv-agent ocserv-agent -
+C /etc/ocservia-agent/agent.env 0640 root ocserv-agent - /usr/share/ocservia-agent/agent.env.example
+C /etc/ocservia-agent/relays.env 0640 root ocserv-agent - /usr/share/ocservia-agent/relays.env.example

@@ -18,7 +18,7 @@ export SOURCE_COMMIT CONTROLLER_ARCH
 [[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" ]]
 [[ ! -e /etc/ocservia && ! -e /var/lib/ocservia-controller && ! -e /root/ocservia-initial-credentials ]]
-# As in quick-install.sh: the lifecycle belongs to root; SUDO_UID keeps git's
+# As in install.sh --quick: the lifecycle belongs to root; SUDO_UID keeps git's
 # trust in the runner-owned checkout.
 unset SUDO_USER
 umask 077
@@ -104,7 +104,7 @@ update-ca-certificates >/dev/null
 stage=first_install
 passphrase="${work}/root-ca-passphrase" export_dir="${work}/root-ca-export"
 openssl rand -hex 24 >"${passphrase}"
-quick=("${ROOT}/deploy/production/quick-install.sh" --controller-domain "${controller}" --relay-domain "${relay}"
+quick=("${ROOT}/deploy/production/install.sh" --quick --controller-domain "${controller}" --relay-domain "${relay}"
   --acme-email quick-acceptance@ocservia.test --root-ca-passphrase-file "${passphrase}"
   --root-ca-export-dir "${export_dir}" --release-file "${manifest}")
 OCSERV_ACME_DIRECTORY_URL="https://${gateway}:14000/dir" OCSERV_ACME_CA_FILE="${pebble_dir}/ca.pem" \
@@ -175,11 +175,16 @@ published="$(docker ps --filter label=com.docker.compose.project=ocservia-produc
 pass "only 443/tcp and 7842/udp are published"
 
 stage=rerun
-materials() { find /etc/ocservia "${CREDENTIALS_DIR}" -type f ! -name complete -print0 | sort -z | xargs -0 sha256sum; }
-before="$(materials)"
+cp -a -- /etc/ocservia "${work}/config.before"
+cp -a -- "${CREDENTIALS_DIR}" "${work}/credentials.before"
+check_materials() {
+  diff -qr -- "${work}/config.before" /etc/ocservia
+  diff -qr --exclude=complete -- "${work}/credentials.before" "${CREDENTIALS_DIR}"
+}
 "${quick[@]}" >"${work}/run-rerun.log" 2>&1
 grep -qF "initial Local administrator already exists" "${work}/run-rerun.log"
-[[ "$(materials)" == "${before}" && "$(served)" == "${certificates}" ]]
+check_materials
+[[ "$(served)" == "${certificates}" ]]
 accounts
 pass "a rerun keeps material and certificates"
 
@@ -189,7 +194,7 @@ stage=bootstrap_resume
 rm -- "${CREDENTIALS_DIR}/complete"
 "${quick[@]}" >"${work}/run-resume.log" 2>&1
 grep -qF "Local authentication was already initialized by an earlier run" "${work}/run-resume.log"
-[[ "$(materials)" == "${before}" ]]
+check_materials
 accounts
 pass "a rerun resumes an unrecorded Local bootstrap"
 
@@ -207,7 +212,8 @@ lifecycle() {
   ) >"${work}/run-lifecycle.log" 2>&1
   curl -fsS --cacert "${work}/acme-root.pem" "https://${controller}/api/v1/version" |
     jq -e --arg commit "${SOURCE_COMMIT}" --arg version "${VERSION}" '.commit == $commit and .version == $version' >/dev/null
-  [[ "$(materials)" == "${before}" && "$(served)" == "${certificates}" ]]
+  check_materials
+  [[ "$(served)" == "${certificates}" ]]
   accounts
 }
 lifecycle upgrade --release-file "${upgrade_manifest}"

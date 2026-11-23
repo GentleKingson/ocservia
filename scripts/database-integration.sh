@@ -13,7 +13,7 @@ case "${scope}" in
 esac
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands go jq setsid python3 curl sha256sum
+require_test_commands go jq setsid python3 curl
 require_test_docker
 require_go_race
 bash "${ROOT}/scripts/database-artifact-policy.sh" postgres

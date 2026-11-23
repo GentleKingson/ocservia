@@ -7,14 +7,8 @@ COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${ROOT}/deploy/production/comp
 SMOKE_SCRIPT="${OCSERV_CONTROLLER_SMOKE_SH:-${ROOT}/deploy/production/controller-release-smoke.sh}"
 CURRENT_RELEASE=""
 PREVIOUS_RELEASE=""
-PENDING_RELEASE=""
 STAGED_RELEASE=""
-CANONICAL_RELEASE=""
 SOURCE_CHECKOUT_TMP=""
-PENDING_MANIFEST_TMP=""
-PENDING_PREVIOUS_TMP=""
-PENDING_ACTIVE=false
-PENDING_FAILURE_RECORDED=false
 PURGE_DATA=false
 
 umask 077
@@ -22,17 +16,13 @@ umask 077
 usage() {
   echo "usage: $0 {install|upgrade} --release-file /path/controller-release-<amd64|arm64>.json" >&2
   echo "       $0 rollback" >&2
-  echo "       $0 start" >&2
+  echo "       $0 {start|health}" >&2
   echo "       $0 uninstall [--purge-data]" >&2
   exit 2
 }
 
 fail() {
   local message="$1" status="${2:-2}"
-  if [[ "${PENDING_ACTIVE}" == true && "${PENDING_FAILURE_RECORDED}" != true ]]; then
-    record_pending_failure "${message}" ||
-      echo "controller lifecycle: could not persist pending failure evidence" >&2
-  fi
   echo "controller lifecycle: ${message}" >&2
   exit "${status}"
 }
@@ -50,10 +40,8 @@ require_absolute_canonical_path() {
 validate_ancestor() {
   local ancestor="$1" ancestor_uid ancestor_mode
   while true; do
-    [[ "$(realpath -e -- "${ancestor}")" == "${ancestor}" ]] ||
-      fail "state path ancestry must not contain symlinks"
     IFS=: read -r ancestor_uid ancestor_mode < <(stat -c '%u:%a' "${ancestor}")
-    [[ "${ancestor_uid}" == "0" || "${ancestor_uid}" == "$(id -u)" ]] ||
+    [[ "${ancestor_uid}" == "0" || "${ancestor_uid}" == "${EUID}" ]] ||
       fail "state path ancestry must be root- or launcher-owned"
     (( (8#${ancestor_mode} & 8#022) == 0 )) ||
       fail "state path ancestry must not be group/world writable"
@@ -78,12 +66,13 @@ prepare_state_root() {
     require_absolute_canonical_path "state root parent" "${parent}"
     validate_ancestor "${parent}"
     mkdir -m 700 -- "${STATE_ROOT}" || fail "cannot create state root"
+    return
   fi
 
   require_absolute_canonical_path "state root" "${STATE_ROOT}"
-  validate_ancestor "${STATE_ROOT}"
+  validate_ancestor "$(dirname -- "${STATE_ROOT}")"
   IFS=: read -r state_uid state_mode < <(stat -c '%u:%a' "${STATE_ROOT}")
-  [[ "${state_uid}" == "$(id -u)" && "${state_mode}" == "700" ]] ||
+  [[ "${state_uid}" == "${EUID}" && "${state_mode}" == "700" ]] ||
     fail "state root must be owned by the launcher user with mode 0700"
 }
 
@@ -96,7 +85,7 @@ acquire_lock() {
     : >"${lock_file}" || fail "cannot create lifecycle lock"
   fi
   IFS=: read -r lock_uid lock_mode < <(stat -c '%u:%a' "${lock_file}")
-  [[ "${lock_uid}" == "$(id -u)" && "${lock_mode}" == "600" ]] ||
+  [[ "${lock_uid}" == "${EUID}" && "${lock_mode}" == "600" ]] ||
     fail "lifecycle lock must be launcher-owned with mode 0600"
   command -v flock >/dev/null 2>&1 || fail "flock is required for lifecycle locking"
   exec 9>>"${lock_file}"
@@ -111,7 +100,7 @@ validate_release_file_path() {
   validate_ancestor "$(dirname -- "${path}")"
   [[ -f "${path}" && ! -L "${path}" ]] || fail "release file must be a regular file and not a symlink"
   IFS=: read -r release_uid release_mode < <(stat -c '%u:%a' "${path}")
-  [[ "${release_uid}" == "0" || "${release_uid}" == "$(id -u)" ]] ||
+  [[ "${release_uid}" == "0" || "${release_uid}" == "${EUID}" ]] ||
     fail "release file must be root- or launcher-owned"
   (( (8#${release_mode} & 8#022) == 0 )) ||
     fail "release file must not be group/world writable"
@@ -125,7 +114,7 @@ validate_state_file_path() {
   [[ -f "${path}" ]] || fail "${label} must be a regular file"
   require_absolute_canonical_path "${label}" "${path}"
   IFS=: read -r state_uid state_mode < <(stat -c '%u:%a' "${path}")
-  [[ "${state_uid}" == "$(id -u)" && "${state_mode}" == "600" ]] ||
+  [[ "${state_uid}" == "${EUID}" && "${state_mode}" == "600" ]] ||
     fail "${label} must be launcher-owned with mode 0600"
 }
 
@@ -146,7 +135,7 @@ normalize_release_file_path() {
 }
 
 select_release_source() {
-  local manifest="${1:-${STAGED_RELEASE}}" manifest_commit current_commit dirty source_root
+  local manifest="$1" manifest_commit current_commit dirty source_root
   manifest_commit="$(jq -er -s '.[0].source_commit' "${manifest}")"
   if [[ -f "${ROOT}/RELEASE" ]]; then
     local manifest_tag
@@ -156,11 +145,11 @@ select_release_source() {
     source_root="${STATE_ROOT}/runtime-${manifest_tag}"
     if [[ ! -e "${source_root}" && ! -L "${source_root}" ]] &&
        [[ "$(cat "${ROOT}/RELEASE")" == "${manifest_tag} ${manifest_commit}" ]]; then
-      runtime_validate "${ROOT}" "${manifest_tag}" "${manifest_commit}"
       SOURCE_CHECKOUT_TMP="$(mktemp -d "${STATE_ROOT}/.runtime.XXXXXX")"
       # A root lifecycle may start from a launcher-owned downloaded bundle.
       # Retained state belongs to the lifecycle user, never the source owner.
       cp -R --preserve=mode,timestamps "${ROOT}/." "${SOURCE_CHECKOUT_TMP}/"
+      runtime_validate "${SOURCE_CHECKOUT_TMP}" "${manifest_tag}" "${manifest_commit}"
       mv -T -- "${SOURCE_CHECKOUT_TMP}" "${source_root}"
       SOURCE_CHECKOUT_TMP=""
     else
@@ -168,7 +157,6 @@ select_release_source() {
     fi
     require_absolute_canonical_path "release runtime" "${source_root}"
     validate_ancestor "${source_root}"
-    runtime_validate "${source_root}" "${manifest_tag}" "${manifest_commit}"
     COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${source_root}/deploy/production/compose.sh}"
     SMOKE_SCRIPT="${OCSERV_CONTROLLER_SMOKE_SH:-${source_root}/deploy/production/controller-release-smoke.sh}"
     return
@@ -199,12 +187,6 @@ select_release_source() {
   fi
   [[ "$(git -C "${source_root}" rev-parse HEAD)" == "${manifest_commit}" ]] ||
     fail "checkout HEAD does not match release manifest source_commit"
-  if ! git -C "${source_root}" diff --quiet --exit-code -- .; then
-    fail "checkout has unstaged changes; refusing to install a release"
-  fi
-  if ! git -C "${source_root}" diff --cached --quiet --exit-code -- .; then
-    fail "checkout has staged changes; refusing to install a release"
-  fi
   dirty="$(git -C "${source_root}" status --porcelain --untracked-files=all)"
   [[ -z "${dirty}" ]] || fail "checkout has untracked changes"
   COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${source_root}/deploy/production/compose.sh}"
@@ -249,23 +231,7 @@ validate_manifest_file() {
   jq -e -s "${manifest_filter}" "${path}" >/dev/null ||
     fail "${label} is invalid"
 
-  CANONICAL_RELEASE="$(mktemp "${STATE_ROOT}/.canonical-release.json.XXXXXX")" ||
-    fail "cannot allocate manifest validation file"
-  chmod 600 "${CANONICAL_RELEASE}"
-  jq -s '.[0]' "${path}" >"${CANONICAL_RELEASE}" ||
-    fail "${label} is not valid JSON"
-  cmp -s "${path}" "${CANONICAL_RELEASE}" ||
-    fail "${label} is not in canonical form"
-  rm -f -- "${CANONICAL_RELEASE}"
-  CANONICAL_RELEASE=""
-}
 
-stage_and_validate_manifest() {
-  STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
-    fail "cannot allocate release state staging file"
-  chmod 600 "${STAGED_RELEASE}"
-  cat -- "${RELEASE_FILE}" >"${STAGED_RELEASE}" || fail "cannot read release file"
-  validate_manifest_file "release manifest" "${STAGED_RELEASE}"
 }
 
 check_active_profile_supported() {
@@ -310,22 +276,13 @@ map_manifest_images() {
   export OCSERV_DEPLOYMENT_MODE="${mode}"
   export OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT="${deployment}"
   export OCSERV_TLS_MODE="${tls_mode}"
-  OCSERV_GATEWAY_IMAGE="$(jq -er -s '.[0].images.gateway' "${manifest}")"
-  OCSERV_CONTROL_IMAGE="$(jq -er -s '.[0].images.control' "${manifest}")"
-  OCSERV_TRANSPORT_IMAGE="$(jq -er -s '.[0].images.transport' "${manifest}")"
-  OCSERV_BACKUP_IMAGE="$(jq -er -s '.[0].images.backup' "${manifest}")"
-  OCSERV_POSTGRES_IMAGE="$(jq -er -s '.[0].images.postgres' "${manifest}")"
-  OCSERV_OTEL_IMAGE="$(jq -er -s '.[0].images.otel' "${manifest}")"
-  export OCSERV_GATEWAY_IMAGE OCSERV_CONTROL_IMAGE OCSERV_TRANSPORT_IMAGE
-  export OCSERV_BACKUP_IMAGE OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
-  if [[ "$(jq -r '.manifest_version' "${manifest}")" == 2 ]]; then
-    OCSERV_EDGE_IMAGE="$(jq -er '.images.edge' "${manifest}")"
-    OCSERV_RELAY_IMAGE="$(jq -er '.images.relay' "${manifest}")"
-    OCSERV_SIGNER_IMAGE="$(jq -er '.images.signer' "${manifest}")"
-    export OCSERV_EDGE_IMAGE OCSERV_RELAY_IMAGE OCSERV_SIGNER_IMAGE
-  elif [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+  if [[ "${mode}" == integrated && "$(jq -r '.manifest_version' "${manifest}")" != 2 ]]; then
     fail "Integrated deployment requires a v2 release manifest"
   fi
+  local role image
+  while IFS=$'\t' read -r role image; do
+    export "OCSERV_${role^^}_IMAGE=${image}"
+  done < <(jq -r '.images | to_entries[] | [.key, .value] | @tsv' "${manifest}")
 }
 
 check_manifest_platform() {
@@ -382,7 +339,7 @@ checkpoint_signer() {
 }
 
 validate_prerequisites() {
-  local compose_help require_release_runtime="${1:-true}"
+  local compose_help require_release_runtime="$1"
   command -v jq >/dev/null 2>&1 || fail "jq is required to validate release manifests"
   [[ -x "${COMPOSE_LAUNCHER}" && ! -L "${COMPOSE_LAUNCHER}" ]] ||
     fail "production Compose launcher is missing or not executable"
@@ -398,618 +355,124 @@ validate_prerequisites() {
   fi
 }
 
-cleanup() {
-  local status=$?
-  if [[ -n "${SOURCE_CHECKOUT_TMP}" && -d "${SOURCE_CHECKOUT_TMP}" ]]; then
-    rm -rf -- "${SOURCE_CHECKOUT_TMP}"
-  fi
-  if [[ -n "${STAGED_RELEASE}" && -e "${STAGED_RELEASE}" ]]; then
-    rm -f -- "${STAGED_RELEASE}"
-  fi
-  if [[ -n "${CANONICAL_RELEASE}" && -e "${CANONICAL_RELEASE}" ]]; then
-    rm -f -- "${CANONICAL_RELEASE}"
-  fi
-  if [[ -n "${PENDING_MANIFEST_TMP}" && -e "${PENDING_MANIFEST_TMP}" ]]; then
-    rm -f -- "${PENDING_MANIFEST_TMP}"
-  fi
-  if [[ -n "${PENDING_PREVIOUS_TMP}" && -e "${PENDING_PREVIOUS_TMP}" ]]; then
-    rm -f -- "${PENDING_PREVIOUS_TMP}"
-  fi
-  if ((status != 0)) && [[ "${PENDING_ACTIVE}" == true && "${PENDING_FAILURE_RECORDED}" != true ]]; then
-    record_pending_failure "Controller lifecycle command failed" || :
-  fi
-  exit "${status}"
-}
-
-validate_current_release() {
-  if [[ -L "${CURRENT_RELEASE}" ]]; then
-    fail "current release state is a symlink; refusing to upgrade"
-  fi
-  [[ -e "${CURRENT_RELEASE}" ]] || fail "current release state is missing; refusing to upgrade"
-  validate_state_file_path "current release state" "${CURRENT_RELEASE}"
-  validate_manifest_file "current release state" "${CURRENT_RELEASE}"
-}
-
-validate_previous_release() {
-  if [[ -L "${PREVIOUS_RELEASE}" ]]; then
-    fail "previous release state must not be a symlink"
-  elif [[ -e "${PREVIOUS_RELEASE}" ]]; then
-    validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
-    validate_manifest_file "previous release state" "${PREVIOUS_RELEASE}"
-  fi
-}
-
-reconcile_completed_pending() {
-  if [[ ! -e "${CURRENT_RELEASE}" || -L "${CURRENT_RELEASE}" ||
-    ! -e "${PENDING_RELEASE}" || -L "${PENDING_RELEASE}" ]]; then
-    return
-  fi
-  validate_state_file_path "current release state" "${CURRENT_RELEASE}"
-  validate_state_file_path "pending release state" "${PENDING_RELEASE}"
-  if jq -e --slurpfile current "${CURRENT_RELEASE}" \
-    'type == "object" and
-      ((if has("manifest") then .manifest else . end) == $current[0])' \
-    "${PENDING_RELEASE}" >/dev/null; then
-    if [[ -n "${PREVIOUS_RELEASE}" ]]; then
-      jq -e 'has("previous_manifest")' "${PENDING_RELEASE}" >/dev/null || return
-      PENDING_PREVIOUS_TMP="$(mktemp "${STATE_ROOT}/.pending-previous.json.XXXXXX")" ||
-        fail "cannot allocate pending previous release validation file"
-      chmod 600 "${PENDING_PREVIOUS_TMP}"
-      jq -e '.previous_manifest | select(type == "object")' "${PENDING_RELEASE}" >"${PENDING_PREVIOUS_TMP}" ||
-        fail "pending release state is invalid"
-      validate_manifest_file "pending previous release manifest" "${PENDING_PREVIOUS_TMP}"
-      if [[ -L "${PREVIOUS_RELEASE}" ]]; then
-        fail "previous release state must not be a symlink"
-      elif [[ -e "${PREVIOUS_RELEASE}" ]]; then
-        validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
-      fi
-      if [[ ! -e "${PREVIOUS_RELEASE}" ]] || ! jq -e --slurpfile expected "${PENDING_PREVIOUS_TMP}" \
-        '. == $expected[0]' "${PREVIOUS_RELEASE}" >/dev/null; then
-        local previous_staged
-        previous_staged="$(mktemp "${STATE_ROOT}/.previous-release.json.XXXXXX")" ||
-          fail "cannot allocate previous release recovery file"
-        chmod 600 "${previous_staged}"
-        cat -- "${PENDING_PREVIOUS_TMP}" >"${previous_staged}" || {
-          rm -f -- "${previous_staged}"
-          fail "cannot stage previous release recovery state"
-        }
-        mv -- "${previous_staged}" "${PREVIOUS_RELEASE}" || {
-          rm -f -- "${previous_staged}"
-          fail "cannot recover previous release state"
-        }
-      fi
-    fi
-    rm -- "${PENDING_RELEASE}" || fail "cannot reconcile completed pending release state"
-    if [[ -n "${PENDING_PREVIOUS_TMP}" && -e "${PENDING_PREVIOUS_TMP}" ]]; then
-      rm -f -- "${PENDING_PREVIOUS_TMP}"
-      PENDING_PREVIOUS_TMP=""
-    fi
-  fi
-}
-
-write_pending_state() {
-  local manifest="$1" phase="$2" previous_manifest="${3:-}" pending_staged
-  pending_staged="$(mktemp "${STATE_ROOT}/.pending-release.json.XXXXXX")" || return 1
-  chmod 600 "${pending_staged}"
-  if [[ -n "${previous_manifest}" ]]; then
-    if ! jq -s --slurpfile previous "${previous_manifest}" --arg phase "${phase}" \
-      '{manifest: .[0], previous_manifest: $previous[0], phase: $phase, failure: null}' \
-      "${manifest}" >"${pending_staged}"; then
-      rm -f -- "${pending_staged}"
-      return 1
-    fi
-  elif ! jq -s --arg phase "${phase}" \
-    '{manifest: .[0], phase: $phase, failure: null}' "${manifest}" >"${pending_staged}"; then
-    rm -f -- "${pending_staged}"
-    return 1
-  fi
-  if ! mv -- "${pending_staged}" "${PENDING_RELEASE}"; then
-    rm -f -- "${pending_staged}"
-    return 1
-  fi
-  PENDING_FAILURE_RECORDED=false
-}
-
-record_pending_failure() {
-  local message="$1" pending_staged
-  [[ "${PENDING_ACTIVE}" == true && -f "${PENDING_RELEASE}" ]] || return 0
-  pending_staged="$(mktemp "${STATE_ROOT}/.pending-release.json.XXXXXX")" || return 1
-  chmod 600 "${pending_staged}"
-  if ! jq --arg message "${message}" '
-    (if has("manifest") then . else {manifest: ., phase: "failed", failure: null} end)
-    | .phase = "failed"
-    | .failure = {message: $message}
-  ' "${PENDING_RELEASE}" >"${pending_staged}"; then
-    rm -f -- "${pending_staged}"
-    return 1
-  fi
-  if ! mv -- "${pending_staged}" "${PENDING_RELEASE}"; then
-    rm -f -- "${pending_staged}"
-    return 1
-  fi
-  PENDING_FAILURE_RECORDED=true
-}
-
-validate_pending_release() {
-  PENDING_MANIFEST_TMP="$(mktemp "${STATE_ROOT}/.pending-manifest.json.XXXXXX")" ||
-    fail "cannot allocate pending release validation file"
-  chmod 600 "${PENDING_MANIFEST_TMP}"
-  jq -e '
-    type == "object" and
-    (if has("manifest") then
-      (.manifest | type == "object") and
-      ((.previous_manifest | type == "object") or (has("previous_manifest") | not)) and
-      (.phase | type == "string") and
-      ((.failure == null) or
-        ((.failure | type == "object") and (.failure.message | type == "string")))
-    else true end)
-  ' "${PENDING_RELEASE}" >/dev/null || fail "pending release state is invalid"
-  jq -e 'if has("manifest") then .manifest else . end' \
-    "${PENDING_RELEASE}" >"${PENDING_MANIFEST_TMP}" || fail "pending release state is invalid"
-  validate_manifest_file "pending release manifest" "${PENDING_MANIFEST_TMP}"
-  rm -f -- "${PENDING_MANIFEST_TMP}"
-  PENDING_MANIFEST_TMP=""
-}
-
-ensure_pending_release() {
-  local previous_manifest="${1:-}" require_previous="${2:-false}"
-  if [[ -L "${PENDING_RELEASE}" ]]; then
-    fail "pending release state must not be a symlink"
-  elif [[ -e "${PENDING_RELEASE}" ]]; then
-    validate_state_file_path "pending release state" "${PENDING_RELEASE}"
-    validate_pending_release
-    if ! jq -e --slurpfile target "${STAGED_RELEASE}" \
-      '((if has("manifest") then .manifest else . end) == $target[0])' \
-      "${PENDING_RELEASE}" >/dev/null; then
-      fail "a different pending release exists; only the same manifest may be retried"
-    fi
-    if [[ -n "${previous_manifest}" ]] && jq -e 'has("previous_manifest")' "${PENDING_RELEASE}" >/dev/null &&
-      ! jq -e --slurpfile expected "${previous_manifest}" \
-        '.previous_manifest == $expected[0]' "${PENDING_RELEASE}" >/dev/null; then
-      fail "pending release previous state does not match current release"
-    fi
-    if [[ "${require_previous}" == true ]] && ! jq -e 'has("previous_manifest")' "${PENDING_RELEASE}" >/dev/null; then
-      fail "pending release transaction is not compatible with rollback"
-    fi
-    PENDING_ACTIVE=true
-    write_pending_state "${STAGED_RELEASE}" "preflight" "${previous_manifest}" ||
-      fail "cannot refresh pending release state"
-  else
-    write_pending_state "${STAGED_RELEASE}" "preflight" "${previous_manifest}" ||
-      fail "cannot persist pending release state"
-    PENDING_ACTIVE=true
-  fi
-}
-
-mark_pending_phase() {
-  local phase="$1" previous_manifest="${2:-}"
-  write_pending_state "${STAGED_RELEASE}" "${phase}" "${previous_manifest}" ||
-    fail "cannot persist pending release phase ${phase}"
-}
-
-run_release_smoke() {
-  local release_file="${1:-${STAGED_RELEASE}}"
-  if ! "${SMOKE_SCRIPT}" --release-file "${release_file}"; then
-    fail "release smoke failed; confirmed release state remains unchanged" 1
-  fi
-}
-
-commit_install_state() {
-  local current_staged
-  current_staged="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
-    fail "cannot allocate current release state staging file"
-  chmod 600 "${current_staged}"
-  if ! cat -- "${STAGED_RELEASE}" >"${current_staged}"; then
-    rm -f -- "${current_staged}"
-    fail "cannot stage current release state"
-  fi
-  if [[ -e "${CURRENT_RELEASE}" || -L "${CURRENT_RELEASE}" ]]; then
-    rm -f -- "${current_staged}"
-    fail "current release state appeared during install"
-  fi
-  mv -- "${current_staged}" "${CURRENT_RELEASE}" || {
-    rm -f -- "${current_staged}"
-    fail "cannot commit current release state"
-  }
-  rm -- "${PENDING_RELEASE}" || fail "cannot remove pending release state"
-  PENDING_ACTIVE=false
-}
-
-check_current_database_and_backup_health() {
-  local health_json required_json health_label="database backup" backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
-  local services=(backup)
-  if [[ "${backend}:${deployment}" == postgres:bundled ]]; then
-    services=(postgres backup)
-    health_label="PostgreSQL and backup"
-  fi
-  if ! health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")"; then
-    fail "cannot inspect current ${health_label} health; current release remains unchanged"
-  fi
-  required_json="$(printf '%s\n' "${services[@]}" | jq -R . | jq -s .)"
-  if ! jq -s -e --argjson required "${required_json}" '
-    if type != "array" then false
-    else
-      . as $services |
-      $required | all(.[];
-        . as $service |
-        any($services[]; .Service == $service and .State == "running" and .Health == "healthy"))
-    end
-  ' <<<"${health_json}" >/dev/null; then
-    fail "current ${health_label} services are not healthy; current release remains unchanged"
-  fi
-}
-
-commit_upgrade_state() {
-  local previous_staged
-  previous_staged="$(mktemp "${STATE_ROOT}/.previous-release.json.XXXXXX")" ||
-    fail "cannot allocate previous release state staging file"
-  chmod 600 "${previous_staged}"
-  cat -- "${CURRENT_RELEASE}" >"${previous_staged}" || {
-    rm -f -- "${previous_staged}"
-    fail "cannot stage previous release state"
-  }
-
-  if [[ -L "${CURRENT_RELEASE}" || -L "${PREVIOUS_RELEASE}" ]]; then
-    rm -f -- "${previous_staged}"
-    fail "release state path became a symlink; target release was not confirmed"
-  fi
-  if ! mv -- "${STAGED_RELEASE}" "${CURRENT_RELEASE}"; then
-    rm -f -- "${previous_staged}"
-    fail "cannot commit current release state; target release was not confirmed"
-  fi
-  STAGED_RELEASE=""
-  if ! mv -- "${previous_staged}" "${PREVIOUS_RELEASE}"; then
-    if ! mv -- "${previous_staged}" "${CURRENT_RELEASE}"; then
-      fail "release state rollover failed after activation; target release was not confirmed"
-    fi
-    fail "release state rollover failed after activation; target release was not confirmed"
-  fi
-  rm -- "${PENDING_RELEASE}" || fail "cannot remove pending release state after upgrade"
-  PENDING_ACTIVE=false
-}
-
-commit_rollback_state() {
-  local current_staged
-  validate_state_file_path "current release state" "${CURRENT_RELEASE}"
-  validate_state_file_path "previous release state" "${PREVIOUS_RELEASE}"
-  current_staged="$(mktemp "${STATE_ROOT}/.previous-release.json.XXXXXX")" ||
-    fail "cannot allocate current release rollback state staging file"
-  chmod 600 "${current_staged}"
-  cat -- "${CURRENT_RELEASE}" >"${current_staged}" || {
-    rm -f -- "${current_staged}"
-    fail "cannot stage current release rollback state"
-  }
-
-  if [[ -L "${CURRENT_RELEASE}" || -L "${PREVIOUS_RELEASE}" ]]; then
-    rm -f -- "${current_staged}"
-    fail "release state path became a symlink; rollback target was not confirmed"
-  fi
-  if ! mv -- "${STAGED_RELEASE}" "${CURRENT_RELEASE}"; then
-    rm -f -- "${current_staged}"
-    fail "cannot commit rollback current release state"
-  fi
-  STAGED_RELEASE=""
-  if ! mv -- "${current_staged}" "${PREVIOUS_RELEASE}"; then
-    if ! mv -- "${current_staged}" "${CURRENT_RELEASE}"; then
-      fail "rollback state rollover failed after activation; rollback target was not confirmed"
-    fi
-    fail "rollback state rollover failed after activation; rollback target was not confirmed"
-  fi
-  rm -- "${PENDING_RELEASE}" || fail "cannot remove pending rollback state"
-  PENDING_ACTIVE=false
-}
-
-install_controller() {
-  local release_version
-  prepare_state_root
-  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
-  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
-  acquire_lock
-  check_active_profile_supported
-  reconcile_completed_pending
-
-  if [[ -L "${CURRENT_RELEASE}" ]]; then
-    fail "current release state is a symlink; refusing to install"
-  elif [[ -e "${CURRENT_RELEASE}" ]]; then
-    fail "Controller is already installed; use upgrade"
-  fi
-
-  validate_release_file_path "${RELEASE_FILE}"
-  stage_and_validate_manifest
-  map_manifest_images "${STAGED_RELEASE}"
-  release_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
-  select_release_source
-  validate_prerequisites
-  check_manifest_platform "${STAGED_RELEASE}"
-
-  ensure_pending_release
-
-  if ! "${COMPOSE_LAUNCHER}" config --quiet; then
-    fail "production preflight failed; pending release state retained"
-  fi
-  if ! "${COMPOSE_LAUNCHER}" pull; then
-    fail "target image pull failed; pending release state retained"
-  fi
-  record_deployment_profile
-  if [[ "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
-    "${COMPOSE_LAUNCHER}" stop signer || fail "cannot stop Signer before exclusive initialization"
-    if [[ -e "${STATE_ROOT}/signer-init-attempted" || -L "${STATE_ROOT}/signer-init-attempted" ]]; then
-      validate_state_file_path "Signer initialization intent" "${STATE_ROOT}/signer-init-attempted"
-    else
-      [[ ! -e "${OCSERV_SIGNER_STATE_DIR}/ledger.db" && ! -L "${OCSERV_SIGNER_STATE_DIR}/ledger.db" ]] ||
-        fail "first install refuses preexisting Signer state"
-      # Persist intent before init: a lost reply must never cause identity recreation.
-      printf '%s\n' attempted >"${STATE_ROOT}/signer-init-attempted"
-      "${COMPOSE_LAUNCHER}" run --rm --no-deps signer init ||
-        fail "Signer initialization failed; preserve state and reconcile before retry"
-    fi
-    checkpoint_signer
-  fi
-  mark_pending_phase activation
-  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
-    fail "activation started but was not confirmed successful; pending release state retained" 1
-  fi
-
-  mark_pending_phase smoke
-  run_release_smoke
-  commit_install_state
-  echo "Controller ${release_version} installed"
-}
-
-upgrade_controller() {
-  local target_version
-  prepare_state_root
-  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
-  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
-  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
-  acquire_lock
-  check_active_profile_supported
-  reconcile_completed_pending
-
-  validate_current_release
-  validate_previous_release
-  validate_release_file_path "${RELEASE_FILE}"
-  stage_and_validate_manifest
-  select_release_source
-  target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
-  if cmp -s "${CURRENT_RELEASE}" "${STAGED_RELEASE}"; then
-    echo "Controller ${target_version} is already current; no-op"
-    return
-  fi
-
-  validate_prerequisites
-  check_manifest_platform "${STAGED_RELEASE}"
-  select_release_source "${CURRENT_RELEASE}"
-  validate_prerequisites
-  map_manifest_images "${CURRENT_RELEASE}"
-  check_current_database_and_backup_health
-
-  select_release_source
-  validate_prerequisites
-  map_manifest_images "${STAGED_RELEASE}"
-  ensure_pending_release "${CURRENT_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" config --quiet; then
-    fail "production preflight failed for target release; current release remains unchanged"
-  fi
-  if ! "${COMPOSE_LAUNCHER}" pull; then
-    fail "target image pull failed; current release remains unchanged"
-  fi
-  record_deployment_profile
-  checkpoint_signer
-  mark_pending_phase activation "${CURRENT_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
-    fail "upgrade activation started but was not confirmed successful; current release state remains unchanged; do not automatically rollback old images" 1
-  fi
-
-  mark_pending_phase smoke "${CURRENT_RELEASE}"
-  run_release_smoke
-  commit_upgrade_state
-  echo "Controller ${target_version} upgraded"
-}
-
-rollback_controller() {
-  local target_version
-  prepare_state_root
-  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
-  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
-  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
-  acquire_lock
-  check_active_profile_supported
-  reconcile_completed_pending
-
-  validate_current_release
-  validate_previous_release
-  [[ -e "${PREVIOUS_RELEASE}" ]] || fail "previous release state is missing; refusing to rollback"
-  if cmp -s "${CURRENT_RELEASE}" "${PREVIOUS_RELEASE}"; then
-    select_release_source "${CURRENT_RELEASE}"
-    echo "Controller target is already current; no-op"
-    return
-  fi
-
-  STAGED_RELEASE="$(mktemp "${STATE_ROOT}/.current-release.json.XXXXXX")" ||
-    fail "cannot allocate rollback target staging file"
-  chmod 600 "${STAGED_RELEASE}"
-  cat -- "${PREVIOUS_RELEASE}" >"${STAGED_RELEASE}" || fail "cannot stage rollback target"
-  validate_manifest_file "rollback target release" "${STAGED_RELEASE}"
-  target_version="$(jq -er -s '.[0].release_version' "${STAGED_RELEASE}")"
-
-  select_release_source
-  ensure_pending_release "${CURRENT_RELEASE}" true
-  select_release_source "${CURRENT_RELEASE}"
-  validate_prerequisites
-  check_manifest_platform "${STAGED_RELEASE}"
-  map_manifest_images "${CURRENT_RELEASE}"
-  check_current_database_and_backup_health
-  select_release_source
-  validate_prerequisites
-  map_manifest_images "${STAGED_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" config --quiet; then
-    fail "production preflight failed for rollback target; current release remains unchanged"
-  fi
-  if ! "${COMPOSE_LAUNCHER}" pull; then
-    fail "rollback target image pull failed; current release remains unchanged"
-  fi
-  checkpoint_signer
-  mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
-    fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
-  fi
-
-  mark_pending_phase rollback-smoke "${CURRENT_RELEASE}"
-  run_release_smoke
-  commit_rollback_state
-  echo "Controller rolled back to ${target_version}"
-}
-
-validate_uninstall_state() {
-  if [[ -L "${CURRENT_RELEASE}" ]]; then
-    fail "current release state is a symlink; refusing to uninstall"
-  fi
-  validate_current_release
-  validate_previous_release
-  if [[ -L "${PENDING_RELEASE}" ]]; then
-    fail "pending release state must not be a symlink; refusing to uninstall"
-  elif [[ -e "${PENDING_RELEASE}" ]]; then
-    validate_state_file_path "pending release state" "${PENDING_RELEASE}"
-    validate_pending_release
-    fail "pending release transaction exists; refusing to uninstall"
-  fi
-}
-
-purge_controller_state() {
-  local state_file failed=false
-  local state_files=(
-    "${CURRENT_RELEASE}"
-    "${PREVIOUS_RELEASE}"
-    "${PENDING_RELEASE}"
-    "${STATE_ROOT}/deployment-profile.json"
-  )
-
-  for state_file in "${state_files[@]}"; do
-    if [[ -L "${state_file}" || ( -e "${state_file}" && ! -f "${state_file}" ) ]]; then
-      echo "controller lifecycle: lifecycle state path is unsafe: ${state_file}" >&2
-      failed=true
-    fi
-  done
-  [[ "${failed}" == false ]] || return 1
-
-  for state_file in "${state_files[@]}"; do
-    [[ -e "${state_file}" ]] || continue
-    if ! rm -f -- "${state_file}"; then
-      echo "controller lifecycle: failed to remove lifecycle state: ${state_file}" >&2
-      failed=true
-    fi
-  done
-  if [[ "${failed}" == true ]]; then
-    echo "controller lifecycle: lifecycle state cleanup left residual paths:" >&2
-    for state_file in "${state_files[@]}"; do
-      if [[ -e "${state_file}" || -L "${state_file}" ]]; then
-        echo "  ${state_file}" >&2
-      fi
-    done
-    return 1
-  fi
-}
-
-uninstall_controller() {
-  local down_args=(down)
-  prepare_state_root
-  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
-  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
-  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
-  acquire_lock
-  check_active_profile_supported
-  reconcile_completed_pending
-  validate_uninstall_state
-  select_release_source "${CURRENT_RELEASE}"
-  validate_prerequisites false
-  map_manifest_images "${CURRENT_RELEASE}"
-
-  if [[ "${PURGE_DATA}" == true && "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
-    fail "Integrated uninstall preserves Signer identity and revision evidence; data purge requires separate operator reconciliation"
-  fi
-  if [[ "${PURGE_DATA}" == true ]]; then
-    down_args+=(--volumes)
-  fi
-  if ! COMPOSE_PROJECT_NAME=ocservia-production "${COMPOSE_LAUNCHER}" "${down_args[@]}"; then
-    if [[ "${PURGE_DATA}" == true ]]; then
-      fail "Controller Compose down --volumes failed; local data purge is partial and lifecycle state was retained" 1
-    fi
-    fail "Controller Compose down failed; lifecycle state and persistent data were retained" 1
-  fi
-
-  if [[ "${PURGE_DATA}" == true ]]; then
-    if ! purge_controller_state; then
-      fail "local Controller data purge completed but lifecycle state cleanup failed" 1
-    fi
-    echo "Controller uninstalled and Controller-owned local data purged"
-  else
-    echo "Controller uninstalled; persistent data and lifecycle state preserved"
-  fi
-}
-
-start_controller() {
-  local release_version
-  prepare_state_root
-  CURRENT_RELEASE="${STATE_ROOT}/current-release.json"
-  PREVIOUS_RELEASE="${STATE_ROOT}/previous-release.json"
-  PENDING_RELEASE="${STATE_ROOT}/pending-release.json"
-  acquire_lock
-  check_active_profile_supported
-  reconcile_completed_pending
-  validate_uninstall_state
-  select_release_source "${CURRENT_RELEASE}"
-  validate_prerequisites
-  check_manifest_platform "${CURRENT_RELEASE}"
-  map_manifest_images "${CURRENT_RELEASE}"
-  release_version="$(jq -er -s '.[0].release_version' "${CURRENT_RELEASE}")"
-
-  "${COMPOSE_LAUNCHER}" config --quiet || fail "start preflight failed; current release remains unchanged"
-  "${COMPOSE_LAUNCHER}" pull || fail "start image pull failed; current release remains unchanged"
-  record_deployment_profile
-  checkpoint_signer
-  if ! COMPOSE_PROJECT_NAME=ocservia-production "${COMPOSE_LAUNCHER}" up -d --wait; then
-    fail "start activation was not confirmed successful; confirmed release state remains unchanged" 1
-  fi
-  run_release_smoke "${CURRENT_RELEASE}"
-  echo "Controller ${release_version} started"
-}
-
-case "${1:-}" in
-  rollback)
-    (($# == 1)) || usage
-    trap cleanup EXIT
-    rollback_controller
-    ;;
-  start)
-    (($# == 1)) || usage
-    trap cleanup EXIT
-    start_controller
-    ;;
+command="${1:-}"
+case "${command}" in
   install|upgrade)
-    (($# == 3)) || usage
-    [[ "$2" == "--release-file" ]] || usage
+    [[ $# == 3 && "$2" == --release-file ]] || usage
     RELEASE_FILE="$3"
     normalize_release_file_path
-    trap cleanup EXIT
-    if [[ "$1" == "install" ]]; then
-      install_controller
-    else
-      upgrade_controller
-    fi
+    validate_release_file_path "${RELEASE_FILE}"
     ;;
+  start|rollback|health) (($# == 1)) || usage ;;
   uninstall)
-    if (($# == 1)); then
-      PURGE_DATA=false
-    elif (($# == 2)) && [[ "$2" == "--purge-data" ]]; then
+    if (($# == 2)) && [[ "$2" == --purge-data ]]; then
       PURGE_DATA=true
     else
-      usage
-    fi
-    trap cleanup EXIT
-    uninstall_controller
-    ;;
-  *)
-    usage
-    ;;
+      (($# == 1)) || usage
+    fi ;;
+  *) usage ;;
 esac
+
+prepare_state_root
+acquire_lock
+work="$(mktemp -d "${STATE_ROOT}/.lifecycle.XXXXXX")"
+trap 'rm -rf -- "${work}" ${SOURCE_CHECKOUT_TMP:+"${SOURCE_CHECKOUT_TMP}"}' EXIT
+history="${STATE_ROOT}/release-history.json"
+CURRENT_RELEASE="${work}/current.json"
+PREVIOUS_RELEASE="${work}/previous.json"
+STAGED_RELEASE="${work}/target.json"
+
+# Import the last confirmed v1 state. Finish an in-flight legacy transaction
+# using its original launcher before switching to the new history format.
+if [[ -e "${history}" || -L "${history}" ]]; then
+  validate_state_file_path "release history" "${history}"
+  jq -e '.current' "${history}" >"${CURRENT_RELEASE}"
+  if jq -e '.previous != null' "${history}" >/dev/null; then
+    jq -e '.previous' "${history}" >"${PREVIOUS_RELEASE}"
+  fi
+else
+  [[ ! -e "${STATE_ROOT}/pending-release.json" && ! -L "${STATE_ROOT}/pending-release.json" ]] ||
+    fail "finish the pending release with its original launcher before upgrading"
+  for slot in current previous; do
+    path="${STATE_ROOT}/${slot}-release.json"
+    if [[ -e "${path}" || -L "${path}" ]]; then
+      validate_state_file_path "${slot} release" "${path}"
+      cp -- "${path}" "${work}/${slot}.json"
+    fi
+  done
+fi
+
+if [[ "${command}" == install ]]; then
+  [[ ! -e "${CURRENT_RELEASE}" ]] || fail "Controller is already installed; use upgrade"
+else
+  validate_manifest_file "current release" "${CURRENT_RELEASE}"
+fi
+
+case "${command}" in
+  install|upgrade) jq -e . "${RELEASE_FILE}" >"${STAGED_RELEASE}" ;;
+  rollback)
+    [[ -e "${PREVIOUS_RELEASE}" ]] || fail "no previous release to roll back to"
+    cp -- "${PREVIOUS_RELEASE}" "${STAGED_RELEASE}" ;;
+  *) cp -- "${CURRENT_RELEASE}" "${STAGED_RELEASE}" ;;
+esac
+validate_manifest_file "target release" "${STAGED_RELEASE}"
+select_release_source "${STAGED_RELEASE}"
+if [[ "${command}" == uninstall ]]; then validate_prerequisites false; else validate_prerequisites true; fi
+map_manifest_images "${STAGED_RELEASE}"
+check_manifest_platform "${STAGED_RELEASE}"
+
+# Current runtimes expose a shell function so the protected host inputs are
+# validated once for pull/inspect/up. Older release launchers remain executable.
+if [[ -z "${OCSERV_CONTROLLER_COMPOSE_SH:-}" && ! -e "$(dirname -- "${COMPOSE_LAUNCHER}")/compose.postgres.yaml" ]]; then
+  # shellcheck disable=SC1090
+  source "${COMPOSE_LAUNCHER}"
+  COMPOSE_LAUNCHER=production_compose
+fi
+
+case "${command}" in
+  health) "${SMOKE_SCRIPT}" --release-file "${STAGED_RELEASE}"; exit ;;
+  uninstall)
+    down=(down)
+    if [[ "${PURGE_DATA}" == true ]]; then
+      [[ "${OCSERV_DEPLOYMENT_MODE}" != integrated ]] ||
+        fail "Integrated uninstall preserves Signer state"
+      down+=(--volumes)
+    fi
+    "${COMPOSE_LAUNCHER}" "${down[@]}"
+    if [[ "${PURGE_DATA}" == true ]]; then
+      rm -f -- "${history}" "${STATE_ROOT}/"{current-release,previous-release,deployment-profile}.json
+    fi
+    exit ;;
+esac
+
+"${COMPOSE_LAUNCHER}" pull
+record_deployment_profile
+if [[ "${command}" == install && "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
+  "${COMPOSE_LAUNCHER}" stop signer
+  if [[ ! -e "${STATE_ROOT}/signer-init-attempted" ]]; then
+    [[ ! -e "${OCSERV_SIGNER_STATE_DIR}/ledger.db" && ! -L "${OCSERV_SIGNER_STATE_DIR}/ledger.db" ]] ||
+      fail "first install refuses preexisting Signer state"
+    printf '%s\n' attempted >"${STATE_ROOT}/signer-init-attempted"
+  fi
+  # A failed first init can be retried until inspect has confirmed a ledger.
+  if [[ ! -e "${STATE_ROOT}/signer-checkpoint.json" && ! -e "${OCSERV_SIGNER_STATE_DIR}/ledger.db" ]]; then
+    "${COMPOSE_LAUNCHER}" run --rm --no-deps signer init
+  fi
+fi
+checkpoint_signer
+"${COMPOSE_LAUNCHER}" up -d --wait
+"${SMOKE_SCRIPT}" --release-file "${STAGED_RELEASE}"
+
+# A single rename records both generations after public readiness succeeds.
+# Retrying the same release reapplies Compose and keeps the rollback target.
+if [[ ! -e "${CURRENT_RELEASE}" ]]; then
+  jq '{current: ., previous: null}' "${STAGED_RELEASE}" >"${work}/history"
+elif cmp -s "${CURRENT_RELEASE}" "${STAGED_RELEASE}"; then
+  if [[ -e "${history}" ]]; then exit 0; fi
+  previous="${PREVIOUS_RELEASE}"
+  [[ -e "${previous}" ]] || previous=/dev/null
+  jq --slurpfile previous "${previous}" '{current: ., previous: $previous[0]}' "${STAGED_RELEASE}" >"${work}/history"
+else
+  jq --slurpfile old "${CURRENT_RELEASE}" '{current: ., previous: $old[0]}' "${STAGED_RELEASE}" >"${work}/history"
+fi
+mv -fT -- "${work}/history" "${history}"

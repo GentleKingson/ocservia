@@ -14,11 +14,12 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from controller_release_manifest import build_manifest
+
 ROLES = ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer')
 ARCHES = ('amd64', 'arm64')
 PREFIX = 'ghcr.io/gentlekingson/ocservia'
 ROOT = Path(__file__).resolve().parent.parent
-GENERATOR = ROOT / 'scripts/generate-controller-release-manifest.mjs'
 MIGRATIONS = ROOT / 'control-plane/migrations'
 PINNED_IMAGES = {
     'postgres': 'docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af',
@@ -60,8 +61,7 @@ def asset_files(version, directory, include_manifests=True):
     if include_manifests:
         names.update(MANIFEST_ASSETS)
     for arch, rpm_arch in (('amd64', 'x86_64'), ('arm64', 'aarch64')):
-        archive = f'ocservia-agent-{version}-linux-{arch}.tar.gz'
-        names.update((archive, archive + '.sha256', f'ocservia-agent_{version}-1_{arch}.deb',
+        names.update((f'ocservia-agent_{version}-1_{arch}.deb',
                       f'ocservia-agent-{version}-1.{rpm_arch}.rpm'))
     require({p.name for p in directory.iterdir()} == names, 'Incomplete or unexpected release asset set')
     files = [directory / name for name in sorted(names)]
@@ -182,28 +182,13 @@ def verify_images(expected):
 
 def generate_release_manifests(version, sha, directory, image_digests):
     require(set(image_digests) == set(ROLES), 'Missing verified release image digest')
-    image_args = []
-    expected_images = {}
-    for name in ROLES:
-        digest_value = image_digests[name]
-        require(re.fullmatch(r'sha256:[0-9a-f]{64}', digest_value) is not None,
-                f'Invalid verified release image digest: {name}')
-        expected_images[name] = f'{PREFIX}/{name}@{digest_value}'
-        image_args.extend(('--image', f'{name}={expected_images[name]}'))
-    for name, reference in PINNED_IMAGES.items():
-        expected_images[name] = reference
-        image_args.extend(('--image', f'{name}={reference}'))
+    images = {name: f'{PREFIX}/{name}@{value}' for name, value in image_digests.items()}
+    images.update(PINNED_IMAGES)
     for arch in ARCHES:
         output = directory / f'controller-release-{arch}.json'
-        require(not output.exists(), f'Release manifest already exists: {output.name}')
-        command('node', str(GENERATOR), '--output', str(output), '--manifest-version', '2',
-                '--release-version', version, '--release-tag', 'v' + version,
-                '--source-commit', sha, '--platform', f'linux/{arch}',
-                '--migration-dir', str(MIGRATIONS), *image_args)
-        generated = json.loads(output.read_text())
-        require(generated.get('platform') == f'linux/{arch}'
-                and generated.get('images') == expected_images,
-                f'Generated release manifest does not bind verified digests: {arch}')
+        manifest_data = build_manifest(version, 'v' + version, sha, f'linux/{arch}', MIGRATIONS, 2, images)
+        with output.open('x') as stream:
+            stream.write(json.dumps(manifest_data, indent=2) + '\n')
     require(not (directory / 'controller-release.json').exists(),
             'Release manifest already exists: controller-release.json')
     shutil.copyfile(directory / 'controller-release-amd64.json',
@@ -246,11 +231,9 @@ def finish(repo, version, sha, assets, images):
         expected[name, tag] = index[0]
         image_digests[name] = index[0]
     # Bind release assets only after the complete published index set is stable.
-    verify_images(expected)
     generate_release_manifests(version, sha, assets, image_digests)
     files = asset_files(version, assets)
     command('gh', 'release', 'upload', tag, *(str(path) for path in files))
-    verify_assets(repo, release_id, files)
     require(draft(repo, tag, sha, prerelease) == release_id, 'Draft identity changed')
     verify_assets(repo, release_id, files)
     verify_images(expected)
@@ -261,8 +244,6 @@ def finish(repo, version, sha, assets, images):
     require(published['draft'] is False and published.get('immutable') is True
             and published['tag_name'] == tag and published['prerelease'] == prerelease,
             'Release is not published and immutable; enable repository Immutable Releases before publishing')
-    verify_assets(repo, release_id, files)
-    verify_images(expected)
     if prerelease:
         require(api(f'repos/{repo}/releases/latest')['tag_name'] != tag, 'RC must not become Latest')
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:

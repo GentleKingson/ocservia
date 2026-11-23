@@ -61,7 +61,6 @@ export default defineConfig(
     // The root script invocation uses --config web/eslint.config.ts from the
     // repository root, so these patterns are relative to that working directory.
     files: [
-      "scripts/generate-controller-release-manifest.mjs",
       "scripts/redact-release-upgrade-log.mjs",
       "scripts/release-business-browser.mjs",
       "scripts/test-release-upgrade.mjs",

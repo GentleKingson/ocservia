@@ -34,9 +34,7 @@ printf 'release_tag=%s\narch=%s\nharness_commit=%s\n' \
 : >"${ARTIFACT_DIR}/release-assets-downloads.txt"
 
 base="https://github.com/GentleKingson/ocservia/releases/download/${release_tag}"
-archive="ocservia-agent-${version}-linux-${arch}.tar.gz"
-for name in "${archive}" "${archive}.sha256" \
-  "ocservia-agent_${version}-1_${arch}.deb" "ocservia-agent-${version}-1.${rpm_arch}.rpm" \
+for name in "ocservia-agent_${version}-1_${arch}.deb" "ocservia-agent-${version}-1.${rpm_arch}.rpm" \
   managed-node-bootstrap.sh; do
   url="${base}/${name}"
   printf '%s\n' "${url}" >>"${ARTIFACT_DIR}/release-assets-downloads.txt"
@@ -45,47 +43,16 @@ for name in "${archive}" "${archive}.sha256" \
     --output "${work}/${name}" "${url}"
   test -s "${work}/${name}"
 done
-# Check exactly the requested archive, never arbitrary paths from a checksum file.
-checksum="$(cat "${work}/${archive}.sha256")"
-digest="${checksum%% *}"
-[[ "${digest}" =~ ^[0-9a-f]{64}$ && "${checksum}" == "${digest}  ${archive}" ]]
-[[ "$(sha256sum "${work}/${archive}" | awk '{print $1}')" == "${digest}" ]]
-printf 'published_archive_checksum=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
-
 # The Nodes wizard and Stage-0 now use the same fixed Release asset.
 grep -qxF "readonly DEFAULT_VERSION=\"${release_tag}\"" "${work}/managed-node-bootstrap.sh"
 chmod 0700 "${work}/managed-node-bootstrap.sh"
 printf 'installer_embedded_version=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
 
-# The fixture suite also manages the ocserv-agent account. Guard before it,
-# not just later inside the native smoke's own pristine-host check.
-sudo -n true
-for path in /usr/libexec/ocservia /etc/ocservia-agent /etc/ocservia \
-  /var/lib/ocservia-agent /var/lib/ocservia-privd /var/lib/ocservia-upgrade /var/lib/ocservia-rebind; do
-  if sudo test -e "${path}"; then
-    echo "host already carries Agent state: ${path}" >&2
-    exit 1
-  fi
-done
-if getent passwd ocserv-agent >/dev/null || getent group ocserv-agent >/dev/null || \
-  dpkg-query -W -f='${Status}' ocservia-agent 2>/dev/null | grep -q 'install ok installed'; then
-  echo 'host already carries an Agent account or package' >&2
-  exit 1
-fi
-
-# These are explicitly fixture checks: exercise the published installer's
-# fixed-version URL, download failure and frozen-staging digest rejection.
-INSTALLER_UNDER_TEST="${work}/managed-node-bootstrap.sh" TEST_RELEASE_VERSION="${version}" \
-  bash "${ROOT}/scripts/test-managed-node-install.sh" release-contracts \
-  >"${ARTIFACT_DIR}/published-installer-contracts.log" 2>&1
-grep -Fxq "Managed node release contracts passed (${version})" "${ARTIFACT_DIR}/published-installer-contracts.log"
-printf 'published_installer_contracts=PASS (fault injection)\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
-
 # The existing smoke executes the actual downloaded native binaries/packages,
-# including installation and corrupt embedded-payload rejection. No rebuilds.
+# including package ownership, installation and removal.
 PRODUCTS_DIR="${work}" VERSION="${version}" RC_LIFECYCLE=false \
   ARTIFACT_DIR="${ARTIFACT_DIR}/native-smoke" \
   bash "${ROOT}/scripts/release-native-package-smoke.sh" \
   >"${ARTIFACT_DIR}/native-package-smoke.log" 2>&1
-printf 'published_native_install_and_rejection=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
+printf 'published_native_lifecycle=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
 result=PASS

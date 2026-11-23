@@ -10,6 +10,8 @@ A supported production deployment consists of one Controller instance, a relatio
 
 Control and data planes remain separate at runtime. Client VPN sessions terminate on the ocserv nodes, and tunnel payloads never pass through the Controller, transportd, or the Relay. If the control plane goes offline, administrative writes, validation, and new command dispatch stop. Established client VPN tunnels stay up unless the local node crashes or an invalid ocserv reload disrupts the daemon. Production deployments require pre-provisioned cryptographic keys, working DNS and TLS, PostgreSQL 18, and the Signer service.
 
+The v2.0.0 Controller holds a PostgreSQL session advisory lock for single-instance scheduling. The schema owner applies numbered Goose migrations. The runtime role checks the applied version on startup. Command authorization and enrollment use versioned, domain-separated transcripts with matching deterministic CBOR encoders in Go and Rust. Connection ownership still binds a command to its authenticated node session.
+
 ## High-level view
 
 ```mermaid
@@ -129,7 +131,7 @@ Before tuning concurrency settings or splitting services, measure queue depth, m
 ## Safety model
 
 - Production deployments pin immutable release tags or container image digests.
-- Managed-node packages are verified against an expected SHA-256 digest (supplied by the operator or a signed Controller upgrade command) before installation; a plain checksum guards against file corruption and does not grant execution authority.
+- The native DEB or RPM owns the node binaries, hooks and units. First-install verification accepts an operator-supplied digest. Controller-driven upgrades require the signed command’s digest and use a cached native package for recovery.
 - Private keys, TLS certificates, relay access tokens, and database or admin credentials are provisioned out of band in protected host directories.
 - One authenticated workspace Admin can authorize management writes. Transaction-time identity, session and resource checks remain enforced, along with exact operation intent, revisions, idempotency and signed root receipts ([authorization boundary](reference/stable-contracts.md#single-admin-authorization-boundary)).
 - Audit events commit in the same database transaction as the state changes they record.

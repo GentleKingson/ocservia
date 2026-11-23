@@ -729,16 +729,13 @@ passwordless sudo so the run exercises controlled privilege elevation alongside
 the root paths:
 
 ```sh
-bash scripts/test-managed-node-install.sh
+python3 scripts/test-node-bootstrap.py
 bash scripts/test-controller-install.sh
 bash scripts/test-controller-bootstrap.sh
 bash scripts/test-controller-host-bootstrap.sh
 docker run --rm --network none -v "$PWD:/source:ro" \
   python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
   python3 /source/scripts/test-relay-launchers.py
-docker run --rm --network none -v "$PWD:/source:ro" \
-  python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
-  bash /source/scripts/test-agent-upgrade-retry.sh
 ```
 
 The node installer has one token pipeline for the hidden prompt, protected
@@ -806,8 +803,7 @@ key returns the existing operation and command without another reload.
 
 ### Package lifecycle and cleanup
 
-For current DEB and RPM packages, run `agent-package-smoke.sh` and
-`release-native-package-smoke.sh` inside disposable systemd and packaging
+For current DEB and RPM packages, run `scripts/release-native-package-smoke.sh` inside disposable systemd and packaging
 containers (see
 [Release candidates and package validation](#release-candidates-and-package-validation)).
 When a native test container starts sibling Docker containers through the host

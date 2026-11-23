@@ -17,6 +17,7 @@ import urllib.error
 from release_business_runtime import ROOT, api, client, environment, record, run, sql, wait_for
 
 COMPOSE = str(ROOT / 'deploy/production/compose.sh')
+OCSERV_FILES = ('/etc/ocserv/ocserv.conf', '/etc/ocserv/ocpasswd')
 
 
 def _signer_state():
@@ -389,9 +390,13 @@ def ready():
         return False
 
 
-def identity_digest():
-    return run('sudo', 'sha256sum', '/var/lib/ocservia-agent/identity/endpoint.key',
-               '/var/lib/ocservia-agent/identity/controller.endpoint')
+def check_unchanged(*paths):
+    for path in map(Path, paths):
+        run('sudo', 'cmp', '-s', environment().work / 'unchanged' / path.name, path)
+
+
+def check_enrolled_identity():
+    check_unchanged('/var/lib/ocservia-agent/identity/endpoint.key', '/var/lib/ocservia-agent/identity/controller.endpoint')
 
 
 def completed(operation):
@@ -427,7 +432,6 @@ def single_relay_argv():
 
 
 def agent_stack_recovery():
-    identity = identity_digest()
     before = owner()
     # One systemd transaction orders privd before its Requires= dependent Agent.
     run('sudo', 'systemctl', 'restart', 'ocservia-privd', 'ocservia-agent')
@@ -435,7 +439,7 @@ def agent_stack_recovery():
         wait_for(service + ' active', lambda: run(
             'systemctl', 'show', service, '-p', 'ActiveState', '--value').strip() == 'active')
     wait_for('fresh Agent stack session', lambda: fresh_owner(before))
-    assert identity_digest() == identity
+    check_enrolled_identity()
     record('resilience_agent')
 
 
@@ -453,8 +457,8 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     prefix = 'nodes/' + node
     before = owner()
-    identity = identity_digest()
     pids = native_service_pids()
+    run('sudo', 'cp', '--', *OCSERV_FILES, environment().work / 'unchanged')
     effects = node_side_effects()
     relay = os.environ['OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER']
     body = {'reason': 'Relay outage offline queue recovery', 'ttl_seconds': 300}
@@ -479,9 +483,10 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
         assert api('operations/' + operation['id'])['state'] == 'queued'
         assert sql(f"SELECT count(*) FROM outbox_events WHERE command_id='{command}' AND published_at IS NULL;") == '1'
         assert sql(f"SELECT count(*) FROM command_attempts WHERE command_id='{command}' AND state='sent';") == '0'
+        check_unchanged(*OCSERV_FILES)
         assert node_side_effects() == effects
         assert ping(), 'existing VPN session dropped during Relay outage'
-        assert identity_digest() == identity
+        check_enrolled_identity()
         assert native_service_pids() == pids
     finally:
         run('docker', 'start', relay)
@@ -501,11 +506,12 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
     # count can shrink while the exact command row is verified by cross_check.
     assert after_effects['journal'] == effects['journal'] + 1
     assert after_effects['reloads'] == effects['reloads'] + 1
-    assert after_effects['files'] == effects['files']
+    check_unchanged(*OCSERV_FILES)
     replay = api(prefix + '/service:reload', body, headers=headers, status=202)
     assert replay['id'] == settled['id'] and replay['command_id'] == command
+    check_unchanged(*OCSERV_FILES)
     assert node_side_effects() == after_effects
-    assert identity_digest() == identity
+    check_enrolled_identity()
     assert native_service_pids() == pids
     wait_for('VPN after Relay recovery', ping, 40)
     record('resilience_relay',
@@ -583,7 +589,6 @@ def node_side_effects():
         'privd': int(run('sudo', 'sqlite3', '-readonly', '/var/lib/ocservia-privd/desired-effects.sqlite3',
                          'SELECT count(*) FROM authorized_effects;').strip()),
         'reloads': run('sudo', 'journalctl', '--no-pager', '-u', 'ocserv', '-o', 'cat').count('Reloaded ocserv.service'),
-        'files': run('sudo', 'sha256sum', '/etc/ocserv/ocserv.conf', '/etc/ocserv/ocpasswd').strip(),
     }
 
 
@@ -594,6 +599,7 @@ def revocation():
     wait_for('online before revocation', lambda: api(prefix)['connection_state'] == 'online')
     before = owner()
     agent_pid = run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip()
+    run('sudo', 'cp', '--', *OCSERV_FILES, environment().work / 'unchanged')
     effects = node_side_effects()
     path, body = prefix + '/revocation', {'reason': 'Business test: terminal node revocation'}
     api(path, body, role='anonymous', status=401)
@@ -631,6 +637,7 @@ def revocation():
                  headers={'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"'}, status=404)
     assert denied['type'] == 'https://ocservia.dev/problems/not-found'
     assert sql(f"SELECT count(*) FROM operations WHERE workspace_id='{environment().workspace}' AND idempotency_key='{key}';") == '0'
+    check_unchanged(*OCSERV_FILES)
     assert node_side_effects() == effects
     record('revoked_node_old_authority_without_privd_effect', side_effects=effects)
 
@@ -670,6 +677,7 @@ PHASES = {
     'transport_ready': transport_ready,
     'bootstrap_token': bootstrap_token,
     'bootstrap_verify': bootstrap_verify,
+    'check_enrolled_identity': check_enrolled_identity,
     'config_prepare': config_prepare,
     'browser_prepare': browser_prepare,
     'browser_verify': browser_verify,

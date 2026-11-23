@@ -12,8 +12,7 @@ Type=exec
 User=root
 Group=root
 ExecStart=/usr/libexec/ocservia/ocservia-upgrader --operation %i
-# A crashed runner converges on restart: committed state plus installed
-# binaries skip the destructive lifecycle instead of repeating it.
+# Resume the recorded transaction with its original cached rollback version.
 Restart=on-failure
 RestartSec=10s
 NoNewPrivileges=yes
@@ -26,8 +25,7 @@ ProtectHostname=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
-IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictSUIDSGID=yes
@@ -35,8 +33,9 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 # The durable runner is the one fixed component allowed to replace Agent and
 # privd binaries, units, and upgrade state on this node.
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID
-ReadWritePaths=-/etc/ocservia -/etc/ocservia-agent /usr /run -/var/lib/ocservia-agent -/var/lib/ocservia-privd /var/lib/ocservia-upgrade
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SYS_CHROOT
+# Native package transactions update system accounts, package databases and units.
+ReadWritePaths=/etc /usr /run /var/lib /var/log
 UMask=0077
 TasksMax=64
 LimitNOFILE=256

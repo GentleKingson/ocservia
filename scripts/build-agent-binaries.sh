@@ -12,15 +12,15 @@ case "${PACKAGE_ARCH}:$(docker info --format '{{.Architecture}}')" in
   amd64:x86_64|amd64:amd64|arm64:aarch64|arm64:arm64) ;;
   *) echo 'Docker daemon must match the native Agent build architecture' >&2; exit 2 ;;
 esac
-builder_hash="$(sha256sum "${ROOT}/rust/agent-build.Dockerfile" | cut -c1-16)"
-builder="ocservia-agent-build:${PACKAGE_ARCH}-${builder_hash}"
+builder="ocservia-agent-build:${PACKAGE_ARCH}"
 docker build --platform "linux/${PACKAGE_ARCH}" --tag "${builder}" - <"${ROOT}/rust/agent-build.Dockerfile"
+builder_id="$(docker image inspect --format '{{.Id}}' "${builder}")"
 [[ "$(docker image inspect --format '{{.Architecture}}' "${builder}")" == "${PACKAGE_ARCH}" ]]
 docker run --rm --platform "linux/${PACKAGE_ARCH}" \
   --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges \
   --volume "${ROOT}:${ROOT}" --workdir "${ROOT}" \
   --env VERSION --env PACKAGE_ARCH --env "ELF_MACHINE=${machine}" \
-  --env "BUILD_CACHE_KEY=${PACKAGE_ARCH}-${builder_hash}" \
+  --env "BUILD_CACHE_KEY=${PACKAGE_ARCH}-${builder_id#sha256:}" \
   --env TAR_OPTIONS=--no-same-owner \
   --env CARGO_INCREMENTAL=0 --env "HOME=${ROOT}/.cache/agent-build-home" \
   "${builder}" bash -euo pipefail -c '
