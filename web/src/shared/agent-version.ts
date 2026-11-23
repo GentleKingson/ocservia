@@ -1,4 +1,4 @@
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 
 export function agentVersionLabel(node: NodeObservedState): string {
   if (!node.agentVersion) return "versionNotObserved";

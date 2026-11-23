@@ -194,7 +194,7 @@ In development, `npm run dev` proxies `/api` to `VITE_API_TARGET` and adds `VITE
 
 API ownership:
 
-- Handwritten modules under `web/src/api` wrap the generated `@ocservia/api-client` package and stay free of UI state. They never instantiate authentication stores, choose a Workspace, navigate, or classify terminal operation states.
+- Handwritten modules under `web/src/api` use `openapi-fetch` with the generated OpenAPI types and stay free of UI state. They never instantiate authentication stores, choose a Workspace, navigate, or classify terminal operation states.
 - `api/transport.ts` owns the authenticated fetch wrapper, the `/api/v1` base URL, same-origin credentials, the development bearer header, and idempotency key generation. On a 401 it notifies the session coordinator in `shared/session.ts` and returns the original response without retrying.
 - `api/workspace.ts` is the only source of the active and authorized Workspace list and the Workspace generation counter. Async callers fence their responses against both the Workspace ID and the generation. `api/platform.ts` provides an authentication probe that never changes Workspace state.
 - Domain API modules translate parameters, Workspace scope, cursors, idempotency rules and response decoding for their endpoints. `api/events.ts` decodes audit verification evidence on both HTTP 200 and 409; `api/agents.ts` decodes rollout exclusions and preserves unfamiliar stored JSON before generated conversion. Components import the owning module directly, with no barrel file. The client never retries mutations automatically.

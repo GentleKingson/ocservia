@@ -1,4 +1,5 @@
-import { ResponseError, type UserPolicy } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { UserPolicy } from "@/api/models";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/api/users", () => ({
@@ -68,7 +69,7 @@ describe("user policy feature", () => {
       "ticket",
     );
     expect(request.quotaBytes).toBe(2_684_354_560);
-    expect(request.expiresAt?.toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(request.expiresAt).toBe("2026-09-01T00:00:00Z");
     expect(request.expectedVersion).toBe(3);
   });
 
@@ -122,8 +123,8 @@ describe("user policy feature", () => {
       expect(expiryInputType(form.expiresAtUtcInput)).toBe("text");
       expect(() => formToRequest(form, "ticket")).toThrow("whole seconds");
       form.expiresAtUtcInput = "2026-12-31T23:59:59";
-      expect(formToRequest(form, "ticket").expiresAt?.toISOString()).toBe(
-        "2026-12-31T23:59:59.000Z",
+      expect(formToRequest(form, "ticket").expiresAt).toBe(
+        "2026-12-31T23:59:59Z",
       );
       form.expiresAtUtcInput = "";
       expect(formToRequest(form, "ticket").expiresAt).toBeUndefined();

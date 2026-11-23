@@ -1,18 +1,9 @@
-import type {
-  Operation,
-  OperationSummary,
-  PlatformEvent,
-} from "@ocservia/api-client";
+import type { Operation, OperationSummary, PlatformEvent } from "@/api/models";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { createReadRequest } from "./read-request";
 import { createForegroundRefresh } from "./foreground-refresh";
 
-import {
-  getWorkspace,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/workspace";
 import { listEvents, platformEventsEvent } from "../api/events";
 import { listOperations, operationSummary } from "../api/operations";
 import { useFleetStore } from "./fleet";
@@ -38,25 +29,9 @@ export const useOverviewStore = defineStore("overview", () => {
   const eventsReads = createReadRequest();
   let started = false;
 
-  async function currentContext(): Promise<WorkspaceContext> {
-    // Development authentication can run without a persisted workspace.
-    // Keep the generation at its current value so workspace-bound requests
-    // still fail closed while the console remains available.
-    try {
-      await getWorkspace();
-    } catch {
-      // Workspace-bound listing fails below and surfaces as unavailable.
-    }
-    return workspaceContext();
-  }
-
   async function loadOperations(): Promise<void> {
     const request = operationsReads.begin();
-    let context: WorkspaceContext | undefined;
     try {
-      context = await currentContext();
-      const isLatest = () => request.current(context);
-      if (!isLatest()) return;
       // Operations are listed newest-first, so a single page bounds every
       // refresh to one request. The page feeds the recent list only; the
       // active/unknown totals come from the workspace summary, which stays
@@ -65,14 +40,14 @@ export const useOverviewStore = defineStore("overview", () => {
         listOperations(undefined, request.signal, recentOperationWindow),
         operationSummary(request.signal),
       ]);
-      if (!isLatest()) return;
+      if (!request.current()) return;
       operations.value = page.items;
       summary.value = counts;
       operationsLoaded.value = true;
       operationsAt.value = new Date();
       operationsUnavailable.value = false;
     } catch {
-      if (request.current(context)) operationsUnavailable.value = true;
+      if (request.current()) operationsUnavailable.value = true;
     } finally {
       request.finish();
     }
@@ -85,11 +60,7 @@ export const useOverviewStore = defineStore("overview", () => {
     // no matter how much durable history the workspace has. Incremental
     // refreshes resume ascending after the newest retained event.
     const since = incremental ? events.value.at(-1)?.id : undefined;
-    let context: WorkspaceContext | undefined;
     try {
-      context = await currentContext();
-      const isLatest = () => request.current(context);
-      if (!isLatest()) return;
       const collected: PlatformEvent[] = [];
       if (!incremental) {
         const page = await listEvents(
@@ -98,18 +69,18 @@ export const useOverviewStore = defineStore("overview", () => {
           "desc",
           retainedEventLimit,
         );
-        if (!isLatest()) return;
+        if (!request.current()) return;
         collected.push(...[...page.items].reverse());
       } else {
         let cursor = since;
         do {
           const page = await listEvents(cursor, request.signal);
-          if (!isLatest()) return;
+          if (!request.current()) return;
           collected.push(...page.items);
           cursor = page.page.hasMore ? page.page.nextCursor : undefined;
         } while (cursor);
       }
-      if (!isLatest()) return;
+      if (!request.current()) return;
       events.value = incremental
         ? [...events.value, ...collected].slice(-retainedEventLimit)
         : collected.slice(-retainedEventLimit);
@@ -117,7 +88,7 @@ export const useOverviewStore = defineStore("overview", () => {
       eventsAt.value = new Date();
       eventsUnavailable.value = false;
     } catch {
-      if (request.current(context)) eventsUnavailable.value = true;
+      if (request.current()) eventsUnavailable.value = true;
     } finally {
       request.finish();
     }

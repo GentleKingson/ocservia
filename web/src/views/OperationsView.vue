@@ -1,15 +1,10 @@
 <script setup lang="ts">
 import { RefreshCw } from "@lucide/vue";
-import type { AgentRollout, Operation } from "@ocservia/api-client";
+import type { AgentRollout, Operation } from "@/api/models";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { getOperation, listOperations } from "../api/operations";
-import {
-  getWorkspace,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/workspace";
 import { listAgentRollouts } from "../api/agents";
 import { operationStatusKey } from "../shared/operation-status";
 import { operationTone, rolloutTone } from "../features/operations/state-tone";
@@ -48,7 +43,6 @@ const rolloutReads = createReadRequest();
 
 async function loadOperations(reset = true): Promise<void> {
   const request = operationReads.begin();
-  let context: WorkspaceContext | undefined;
   if (reset) {
     operations.value = [];
     nextCursor.value = undefined;
@@ -57,14 +51,11 @@ async function loadOperations(reset = true): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    await getWorkspace();
-    if (!request.current()) return;
-    context = workspaceContext();
     const page = await listOperations(
       reset ? undefined : nextCursor.value,
       request.signal,
     );
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     operations.value = reset
       ? page.items
       : [...operations.value, ...page.items];
@@ -72,7 +63,7 @@ async function loadOperations(reset = true): Promise<void> {
     nextCursor.value = page.page.nextCursor;
     unavailable.value = false;
   } catch (cause) {
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     unavailable.value = true;
     error.value =
       cause instanceof Error ? cause.message : t("operationsUnavailable");
@@ -85,18 +76,14 @@ async function loadOperations(reset = true): Promise<void> {
 
 async function inspectOperation(operationId: string): Promise<void> {
   const request = detailReads.begin();
-  let context: WorkspaceContext | undefined;
   detailLoading.value = true;
   detailState.value = { error: "" };
   try {
-    await getWorkspace();
-    if (!request.current()) return;
-    context = workspaceContext();
     const operation = await getOperation(operationId, request.signal);
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     detailState.value = { selected: operation, error: "" };
   } catch {
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     detailState.value = { error: t("operationDetailsUnavailable") };
   } finally {
     if (request.finish()) {
@@ -107,17 +94,13 @@ async function inspectOperation(operationId: string): Promise<void> {
 
 async function loadRollouts(): Promise<void> {
   const request = rolloutReads.begin();
-  let context: WorkspaceContext | undefined;
   try {
-    await getWorkspace();
-    if (!request.current()) return;
-    context = workspaceContext();
     const page = await listAgentRollouts(10, request.signal);
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     rollouts.value = page.rollouts;
     rolloutsUnavailable.value = false;
   } catch {
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     rollouts.value = [];
     rolloutsUnavailable.value = true;
   } finally {

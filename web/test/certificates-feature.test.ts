@@ -1,9 +1,5 @@
 import { effectScope, ref, type EffectScope } from "vue";
-import type {
-  Certificate,
-  NodeObservedState,
-  Operation,
-} from "@ocservia/api-client";
+import type { Certificate, NodeObservedState, Operation } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperation } from "../src/api/operations";
 import { useNodeCertificates } from "../src/features/certificates/useNodeCertificates";
@@ -45,7 +41,6 @@ function setup() {
     version: 31,
   } as NodeObservedState);
   const readReady = ref(true);
-  const workspace = ref({ id: "workspace-a", generation: 1 });
   const trackOperation = vi.fn().mockResolvedValue(undefined);
   const scope = effectScope();
   scopes.push(scope);
@@ -53,13 +48,13 @@ function setup() {
     useNodeCertificates({
       currentNode,
       readReady,
-      workspaceContext: () => workspace.value,
+      workspaceId: () => "workspace-a",
       trackOperation,
       t: (key) => key,
     }),
   );
   if (!feature) throw new Error("Certificate scope did not start");
-  return { feature, currentNode, readReady, workspace, trackOperation, scope };
+  return { feature, currentNode, readReady, trackOperation, scope };
 }
 
 beforeEach(() => {
@@ -119,7 +114,7 @@ describe("certificate feature without a page or store", () => {
     expect(api.createCertificate).toHaveBeenCalledExactlyOnceWith("node-a", {
       expectedVersion: 31,
       commonName: "Node A",
-      dnsNames: new Set(["node.example", "alternate.example"]),
+      dnsNames: ["node.example", "alternate.example"],
       keyBits: 3072,
       reason: "certificate",
     });
@@ -224,15 +219,15 @@ describe("certificate feature without a page or store", () => {
     },
   );
 
-  it.each(["node", "workspace"])(
+  it.each(["node", "close"])(
     "fences mutations with the supplied %s context",
     async (kind) => {
-      const { feature, currentNode, workspace } = setup();
+      const { feature, currentNode } = setup();
       await feature.openCertificate();
       feature.certificateReason.value = "certificate";
       if (kind === "node")
         currentNode.value = { ...currentNode.value, id: "node-b" };
-      else workspace.value = { id: "workspace-a", generation: 3 };
+      else feature.certificateDialog.value = false;
       await feature.submitCertificateRequest();
       expect(api.createCertificate).not.toHaveBeenCalled();
     },

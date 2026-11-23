@@ -1,4 +1,4 @@
-import type { UserPasswordSealingKey } from "@ocservia/api-client";
+import type { UserPasswordSealingKey } from "@/api/models";
 
 // Takes ownership of the UTF-8 buffer; clear it on every outcome. The caller
 // clears the password input before awaiting network or cryptographic work.

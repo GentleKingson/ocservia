@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
+import { loginLocal } from "../api/platform";
 import { retryAfterSeconds } from "../shared/login";
 
 const { t } = useI18n();
@@ -20,17 +21,7 @@ async function signInLocal(): Promise<void> {
   pending.value = true;
   error.value = "";
   try {
-    // Do not use authenticatedFetch: rejected credentials belong to this form.
-    const request = fetch("/api/v1/auth/login", {
-      method: "POST",
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: username.value,
-        password: password.value,
-      }),
-    });
+    const request = loginLocal(username.value, password.value);
     password.value = "";
     const response = await request;
     if (response.ok) {

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, type Ref } from "vue";
 import { Download, KeyRound } from "@lucide/vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { useI18n } from "vue-i18n";
 import { formatTimestamp } from "@/shared/timestamp";
-import { workspaceContext } from "@/api/workspace";
+import { cachedWorkspaceId } from "@/api/workspace";
 import { useNodeCertificates } from "@/features/certificates/useNodeCertificates";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,7 +48,7 @@ const {
 } = useNodeCertificates({
   currentNode,
   readReady: props.context.readReady,
-  workspaceContext,
+  workspaceId: cachedWorkspaceId,
   trackOperation: (id) => fleet.trackOperation(id),
   t,
 });

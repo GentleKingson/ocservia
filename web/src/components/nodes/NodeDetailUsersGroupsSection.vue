@@ -7,7 +7,7 @@ import {
   UserPlus,
   UserX,
 } from "@lucide/vue";
-import type { UserGroupResourceState } from "@ocservia/api-client";
+import type { UserGroupResourceState } from "@/api/models";
 import { ref } from "vue";
 
 import SectionCard from "@/components/common/SectionCard.vue";

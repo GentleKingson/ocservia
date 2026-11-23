@@ -1,4 +1,4 @@
-import type { Operation } from "@ocservia/api-client";
+import type { Operation } from "@/api/models";
 import { describe, expect, it } from "vitest";
 
 import {

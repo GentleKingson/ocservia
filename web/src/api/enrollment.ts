@@ -1,31 +1,24 @@
-import { EnrollmentApi } from "@ocservia/api-client";
-import { configuration } from "./transport";
+import { client, read } from "./transport";
 
-const enrollment = new EnrollmentApi(configuration);
-
-// Capture the workspace at the UI boundary; never resolve a different selection
-// while this non-idempotent request is in flight. No retries on unknown outcomes.
 export function createNodeBootstrapToken(
   workspaceId: string,
   environment: string,
   expectedNodeName: string,
   signal: AbortSignal,
 ) {
-  return enrollment.createNodeBootstrapToken(
-    {
-      nodeBootstrapTokenRequest: {
-        workspaceId,
+  return read(
+    client.POST("/node-bootstrap-tokens", {
+      params: { header: { "X-Workspace-ID": workspaceId } },
+      body: {
+        workspace_id: workspaceId,
         installation: true,
         environment,
-        expectedNodeName,
-        ttlSeconds: 900,
+        expected_node_name: expectedNodeName,
+        ttl_seconds: 900,
         reason: "Bootstrap managed node",
       },
-    },
-    ({ init }) => {
-      const headers = new Headers(init.headers);
-      headers.set("X-Workspace-ID", workspaceId);
-      return Promise.resolve({ ...init, headers, signal, cache: "no-store" });
-    },
+      signal,
+      cache: "no-store",
+    }),
   );
 }

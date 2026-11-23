@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
-import { ResponseError } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
 import { useIntervalFn, useNow } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
 import { createAgentRollout } from "../api/agents";
-import { workspaceContext } from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
 import FormField from "../components/common/FormField.vue";
 import OperationDialog from "../components/common/OperationDialog.vue";
@@ -148,7 +147,7 @@ const rolloutBatchSize = ref(5);
 const rolloutReason = ref("");
 const rolloutStarting = ref(false);
 const rolloutError = ref("");
-// Bumped when the page or workspace changes; an accepted create keeps running
+// Bumped when the page is left; an accepted create keeps running
 // server-side, but its late response no longer owns this page.
 let rolloutSubmission = 0;
 // Bumped on every open; closing the dialog gives up the automatic navigation.
@@ -227,15 +226,7 @@ async function submitRollout(): Promise<void> {
   if (rolloutStarting.value || !rolloutTarget.value) return;
   const ticket = ++rolloutSubmission;
   const opening = rolloutOpening;
-  const context = workspaceContext();
-  const owned = () => {
-    const workspace = workspaceContext();
-    return (
-      ticket === rolloutSubmission &&
-      workspace.id === context.id &&
-      workspace.generation === context.generation
-    );
-  };
+  const owned = () => ticket === rolloutSubmission;
   rolloutStarting.value = true;
   if (!rolloutUnconfirmed) rolloutError.value = "";
   let createdId: string | undefined;
@@ -268,7 +259,7 @@ async function submitRollout(): Promise<void> {
   }
   if (rejected) {
     const key = rolloutRejections.get(await problemType(rejected));
-    // The body is read after the request settled; a newer submit, Workspace
+    // The body is read after the request settled; a newer submit
     // or dialog owns the message by then.
     if (owned() && opening === rolloutOpening)
       rolloutError.value = t(key ?? "rolloutStartRejected");

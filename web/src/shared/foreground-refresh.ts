@@ -1,8 +1,7 @@
-// One timer per owner, suspended while the page is hidden or unfocused.
+// One timer per owner, suspended while the page is hidden.
 export function isPageActive(): boolean {
   return (
-    typeof document === "undefined" ||
-    (document.visibilityState !== "hidden" && document.hasFocus())
+    typeof document === "undefined" || document.visibilityState === "visible"
   );
 }
 
@@ -81,10 +80,8 @@ export function createForegroundRefresh(
 
   function listen(remove: boolean): void {
     if (typeof window === "undefined") return;
-    for (const event of ["focus", "blur", "pageshow"]) {
-      if (remove) window.removeEventListener(event, update);
-      else window.addEventListener(event, update);
-    }
+    if (remove) window.removeEventListener("pageshow", update);
+    else window.addEventListener("pageshow", update);
     if (typeof document !== "undefined") {
       if (remove) document.removeEventListener("visibilitychange", update);
       else document.addEventListener("visibilitychange", update);

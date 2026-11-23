@@ -948,7 +948,7 @@ Run verification checks inside an authorized, isolated environment with all depe
 
 | Change | Relevant evidence |
 | --- | --- |
-| API adapters, session or Workspace | `test/api-client.test.ts`, generated-auth serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
+| API adapters, session or Workspace | `test/api-client.test.ts`, request serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
 | Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-workflows.test.ts`; browser spec `e2e/node-forms.spec.ts` on desktop/mobile |
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser spec `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [manual integration](#business-validation) |
 | Audit, overview | Corresponding view/unit tests (`test/audit-view.test.ts`, `test/overview.test.ts`) and browser spec `e2e/apple-layout.spec.ts`; verify authorization, stale/empty states and Workspace switching |

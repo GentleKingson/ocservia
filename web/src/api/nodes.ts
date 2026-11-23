@@ -1,57 +1,57 @@
-import {
-  NodesApi,
-  type NodeObservedState,
-  type NodePage,
-  type NodeSessionPage,
-  type NodeIpBanPage,
-  type UserGroupStatePage,
-} from "@ocservia/api-client";
-import { configuration, requestInit } from "./transport";
+import { client, read } from "./transport";
 import { getWorkspaceId } from "./workspace";
 
-const nodes = new NodesApi(configuration);
-
-export async function listNodes(
-  cursor?: string,
-  signal?: AbortSignal,
-): Promise<NodePage> {
-  const xWorkspaceID = await getWorkspaceId();
-  return nodes.listNodes(
-    cursor
-      ? { xWorkspaceID, cursor, pageSize: 200 }
-      : { xWorkspaceID, pageSize: 200 },
-    requestInit(signal),
+export async function listNodes(cursor?: string, signal?: AbortSignal) {
+  return read(
+    client.GET("/nodes", {
+      params: {
+        header: { "X-Workspace-ID": await getWorkspaceId() },
+        query: { page_size: 200, ...(cursor ? { cursor } : {}) },
+      },
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function getNode(
-  nodeId: string,
-  signal?: AbortSignal,
-): Promise<NodeObservedState> {
-  return nodes.getNode({ nodeId }, requestInit(signal));
-}
-
-export async function listNodeSessions(
-  nodeId: string,
-  cursor?: string,
-  signal?: AbortSignal,
-): Promise<NodeSessionPage> {
-  return nodes.listNodeSessions(
-    cursor ? { nodeId, cursor, pageSize: 200 } : { nodeId, pageSize: 200 },
-    requestInit(signal),
+export function getNode(nodeId: string, signal?: AbortSignal) {
+  return read(
+    client.GET("/nodes/{node_id}", {
+      params: { path: { node_id: nodeId } },
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function listNodeIpBans(
+export function listNodeSessions(
   nodeId: string,
+  cursor?: string,
   signal?: AbortSignal,
-): Promise<NodeIpBanPage> {
-  return nodes.listNodeIpBans({ nodeId }, requestInit(signal));
+) {
+  return read(
+    client.GET("/nodes/{node_id}/sessions", {
+      params: {
+        path: { node_id: nodeId },
+        query: { page_size: 200, ...(cursor ? { cursor } : {}) },
+      },
+      signal: signal ?? null,
+    }),
+  );
 }
 
-export async function listNodeUserGroupState(
-  nodeId: string,
-  signal?: AbortSignal,
-): Promise<UserGroupStatePage> {
-  return nodes.listNodeUserGroupState({ nodeId }, requestInit(signal));
+export function listNodeIpBans(nodeId: string, signal?: AbortSignal) {
+  return read(
+    client.GET("/nodes/{node_id}/ip-bans", {
+      params: { path: { node_id: nodeId } },
+      signal: signal ?? null,
+    }),
+  );
+}
+
+export function listNodeUserGroupState(nodeId: string, signal?: AbortSignal) {
+  return read(
+    client.GET("/nodes/{node_id}/user-group-state", {
+      params: { path: { node_id: nodeId } },
+      signal: signal ?? null,
+    }),
+  );
 }

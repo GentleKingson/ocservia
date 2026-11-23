@@ -1,5 +1,5 @@
 import { h, ssrContextKey, type Ref, type Component } from "vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { renderer } from "./renderer";
 import NodeDetailView from "../src/views/NodeDetailView.vue";
 import NodeConfigurationDialog from "../src/features/configuration/NodeConfigurationDialog.vue";

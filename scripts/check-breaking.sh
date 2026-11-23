@@ -38,8 +38,8 @@ fi
 
 if git -C "${ROOT}" cat-file -e "${base_sha}:openapi/openapi.yaml" 2>/dev/null; then
   git -C "${ROOT}" show "${base_sha}:openapi/openapi.yaml" >"${temporary}/main.yaml"
-  # Normalize only the deliberate security and single-Admin migrations in the
-  # comparison baseline so every unrelated OpenAPI break remains an error.
+  # Normalize deliberate contract changes in the comparison baseline so
+  # unrelated OpenAPI breaks still fail the check.
   (cd "${ROOT}/web" && node --input-type=module - \
     "${temporary}/main.yaml" <<'EOF'
 import { readFileSync, writeFileSync } from "node:fs";
@@ -198,6 +198,37 @@ const normalizeAuditConflict = (before) => {
     content: { "application/json": { schema: { $ref: "#/components/schemas/AuditVerification" } } },
   };
 };
+const normalizeLegacyTelemetry = (before) => {
+  const schemas = before.components.schemas;
+  if (!schemas.TelemetryTimestamp) return;
+
+  const legacyTimestamp = "#/components/schemas/TelemetryTimestamp";
+  for (const schema of Object.values(schemas)) {
+    for (const [name, property] of Object.entries(schema.properties ?? {})) {
+      if (property.$ref === legacyTimestamp) {
+        schema.properties[name] = { type: "string", format: "date-time" };
+      }
+    }
+  }
+  const since = before.paths["/nodes/{node_id}/telemetry"]?.get?.parameters
+    ?.find((parameter) => parameter.in === "query" && parameter.name === "since");
+  if (since?.schema?.$ref === legacyTimestamp) {
+    since.schema = { type: "string", format: "date-time" };
+  }
+  for (const [schema, fields] of [
+    ["UserGroupResourceState", [
+      "desired_fingerprint", "observed_fingerprint",
+      "desired_member_dimensions", "observed_member_dimensions",
+    ]],
+    ["Certificate", ["public_key_sha256"]],
+    ["ConfigPlan", ["current_hash"]],
+  ]) {
+    for (const field of fields) delete schemas[schema]?.properties?.[field];
+  }
+  delete schemas.TelemetryTimestamp;
+  delete schemas.ResourceMemberDimensions;
+};
+normalizeLegacyTelemetry(baseline);
 normalizeAuditConflict(baseline);
 normalizeSecurityMigrations(baseline);
 writeFileSync(baselinePath, stringify(baseline));

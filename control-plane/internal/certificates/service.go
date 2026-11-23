@@ -76,22 +76,21 @@ type CreateRequest struct {
 }
 
 type Certificate struct {
-	ID              uuid.UUID       `json:"id"`
-	WorkspaceID     uuid.UUID       `json:"workspace_id"`
-	NodeID          uuid.UUID       `json:"node_id"`
-	OperationID     uuid.UUID       `json:"operation_id"`
-	CommonName      string          `json:"common_name"`
-	DNSNames        json.RawMessage `json:"dns_names"`
-	KeyBits         uint32          `json:"key_bits"`
-	State           string          `json:"state"`
-	Version         int64           `json:"version"`
-	PublicKeySHA256 []byte          `json:"public_key_sha256,omitempty"`
-	SerialNumber    string          `json:"serial_number,omitempty"`
-	NotBefore       *time.Time      `json:"not_before,omitempty"`
-	NotAfter        *time.Time      `json:"not_after,omitempty"`
-	RevokedAt       *time.Time      `json:"revoked_at,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	ID           uuid.UUID       `json:"id"`
+	WorkspaceID  uuid.UUID       `json:"workspace_id"`
+	NodeID       uuid.UUID       `json:"node_id"`
+	OperationID  uuid.UUID       `json:"operation_id"`
+	CommonName   string          `json:"common_name"`
+	DNSNames     json.RawMessage `json:"dns_names"`
+	KeyBits      uint32          `json:"key_bits"`
+	State        string          `json:"state"`
+	Version      int64           `json:"version"`
+	SerialNumber string          `json:"serial_number,omitempty"`
+	NotBefore    *time.Time      `json:"not_before,omitempty"`
+	NotAfter     *time.Time      `json:"not_after,omitempty"`
+	RevokedAt    *time.Time      `json:"revoked_at,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 type IssueRequest struct {
@@ -270,5 +269,5 @@ func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, node
 }
 
 func readCertificate(v certificatestore.Certificate) Certificate {
-	return Certificate{ID: v.ID, WorkspaceID: v.WorkspaceID, NodeID: v.NodeID, OperationID: v.OperationID, CommonName: v.CommonName, DNSNames: v.DNSNames, KeyBits: v.KeyBits, State: v.State, Version: v.Version, PublicKeySHA256: v.PublicKeySHA256, SerialNumber: v.SerialNumber, NotBefore: v.NotBefore, NotAfter: v.NotAfter, RevokedAt: v.RevokedAt, CreatedAt: v.CreatedAt.UTC(), UpdatedAt: v.UpdatedAt.UTC()}
+	return Certificate{ID: v.ID, WorkspaceID: v.WorkspaceID, NodeID: v.NodeID, OperationID: v.OperationID, CommonName: v.CommonName, DNSNames: v.DNSNames, KeyBits: v.KeyBits, State: v.State, Version: v.Version, SerialNumber: v.SerialNumber, NotBefore: v.NotBefore, NotAfter: v.NotAfter, RevokedAt: v.RevokedAt, CreatedAt: v.CreatedAt.UTC(), UpdatedAt: v.UpdatedAt.UTC()}
 }

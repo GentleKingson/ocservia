@@ -1,24 +1,15 @@
-import {
-  EventsApi,
-  ResponseError,
-  AuditVerificationFromJSON,
-  type AuditVerification,
-  type AuditEventPage,
-  type ListVpnAuditRecordsRequest,
-  type PlatformEventPage,
-} from "@ocservia/api-client";
-import { configuration, devAuthToken, requestInit } from "./transport";
-import { getWorkspace, getWorkspaceId } from "./workspace";
+import type { operations } from "./generated/schema";
+import { fromWire, type AuditVerification, type Schemas } from "./models";
+import { client, devAuthToken, read } from "./transport";
+import { getWorkspaceId } from "./workspace";
 
-const events = new EventsApi(configuration);
 export const platformEventsEvent = "ocservia:platform-events";
 
 export async function eventStreamPath(after?: string): Promise<string> {
   const query = new URLSearchParams();
   if (after) query.set("after", after);
   try {
-    const workspace = await getWorkspace();
-    query.set("workspace_id", workspace.id);
+    query.set("workspace_id", await getWorkspaceId());
   } catch (error) {
     if (!devAuthToken) throw error;
   }
@@ -31,72 +22,70 @@ export async function listEvents(
   signal?: AbortSignal,
   order?: "asc" | "desc",
   pageSize = 200,
-): Promise<PlatformEventPage> {
-  const xWorkspaceID = await getWorkspaceId();
-  return events.listEvents(
-    {
-      xWorkspaceID,
-      pageSize,
-      ...(after ? { after } : {}),
-      ...(order ? { order } : {}),
-    },
-    requestInit(signal),
+) {
+  return read(
+    client.GET("/events", {
+      params: {
+        header: { "X-Workspace-ID": await getWorkspaceId() },
+        query: {
+          page_size: pageSize,
+          ...(after ? { after } : {}),
+          ...(order ? { order } : {}),
+        },
+      },
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function listAuditEvents(
-  signal?: AbortSignal,
-): Promise<AuditEventPage> {
-  const xWorkspaceID = await getWorkspaceId();
-  return events.listAuditEvents(
-    { xWorkspaceID, pageSize: 50 },
-    requestInit(signal),
+export async function listAuditEvents(signal?: AbortSignal) {
+  return read(
+    client.GET("/audit/events", {
+      params: {
+        header: { "X-Workspace-ID": await getWorkspaceId() },
+        query: { page_size: 50 },
+      },
+      signal: signal ?? null,
+    }),
   );
 }
 
-// 409 is a completed verification with negative evidence, not a Problem.
-// Other failures remain errors, and this POST is never automatically retried.
 export async function verifyAuditChain(
   signal?: AbortSignal,
 ): Promise<AuditVerification> {
-  const xWorkspaceID = await getWorkspaceId();
-  let value: unknown;
-  try {
-    value = await events.verifyAuditChain(
-      { xWorkspaceID },
-      requestInit(signal),
-    );
-  } catch (cause) {
-    if (!(cause instanceof ResponseError) || cause.response.status !== 409)
-      throw cause;
-    const wire: unknown = await cause.response.json();
-    if (!wire || typeof wire !== "object") throw cause;
-    value = AuditVerificationFromJSON(wire);
-  }
+  const workspaceId = await getWorkspaceId();
+  const result = await client.POST("/audit:verify", {
+    params: { header: { "X-Workspace-ID": workspaceId } },
+    signal: signal ?? null,
+  });
+  const verification = (result.data ?? result.error) as Partial<
+    Schemas["AuditVerification"]
+  > | null;
   if (
-    !value ||
-    typeof value !== "object" ||
-    !("workspaceId" in value) ||
-    value.workspaceId !== xWorkspaceID ||
-    !("events" in value) ||
-    !Number.isSafeInteger(value.events) ||
-    Number(value.events) < 0 ||
-    !("valid" in value) ||
-    typeof value.valid !== "boolean" ||
-    !("checkpointValid" in value) ||
-    typeof value.checkpointValid !== "boolean" ||
-    !("compactedEvents" in value) ||
-    !Number.isSafeInteger(value.compactedEvents) ||
-    Number(value.compactedEvents) < 0
-  ) {
+    !verification ||
+    verification.workspace_id !== workspaceId ||
+    typeof verification.valid !== "boolean" ||
+    typeof verification.checkpoint_valid !== "boolean" ||
+    ![verification.events, verification.compacted_events].every(
+      (count) => Number.isSafeInteger(count) && Number(count) >= 0,
+    )
+  )
     throw new Error("Invalid audit verification response");
-  }
-  return value as AuditVerification;
+  return fromWire(verification as Schemas["AuditVerification"]);
 }
 
-export function listVpnAuditRecords(
+export type ListVpnAuditRecordsRequest = NonNullable<
+  operations["listVpnAuditRecords"]["parameters"]["query"]
+>;
+
+export async function listVpnAuditRecords(
   query: ListVpnAuditRecordsRequest,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ) {
-  return events.listVpnAuditRecords(query, requestInit(signal));
+  return read(
+    client.GET("/audit/vpn", {
+      params: { header: { "X-Workspace-ID": await getWorkspaceId() }, query },
+      signal: signal ?? null,
+    }),
+  );
 }

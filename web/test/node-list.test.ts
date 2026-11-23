@@ -1,4 +1,4 @@
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -118,23 +118,23 @@ describe("sortNodes", () => {
       node("c", "old", { lastHeartbeatAt: "2026-01-01T00:00:00Z" }),
       node("b", "new", { lastHeartbeatAt: "2026-02-01T00:00:00.123456Z" }),
       node("a", "same", { lastHeartbeatAt: "2026-02-01T00:00:00.123456Z" }),
-      node("f", "infinite", { lastHeartbeatAt: "infinity" }),
+      node("f", "unknown"),
     ];
     expect(sortNodes(nodes, "heartbeat").map((item) => item.id)).toEqual([
-      "f",
       "a",
       "b",
       "c",
       "d",
       "e",
+      "f",
     ]);
   });
 
-  it("orders special timestamps without Date coercion", () => {
-    expect(heartbeatOrder("infinity")).toBe(Number.POSITIVE_INFINITY);
-    expect(heartbeatOrder("-infinity")).toBe(Number.NEGATIVE_INFINITY);
-    expect(heartbeatOrder("+275760-09-13T00:00:00Z")).toBe(Number.MAX_VALUE);
-    expect(heartbeatOrder("")).toBeUndefined();
+  it("orders RFC 3339 offsets by instant", () => {
+    expect(heartbeatOrder("2026-09-10T12:34:56+08:00")).toBe(
+      heartbeatOrder("2026-09-10T04:34:56Z"),
+    );
+    expect(heartbeatOrder(undefined)).toBeUndefined();
   });
 });
 
@@ -187,11 +187,9 @@ describe("relativeTimestamp", () => {
     );
   });
 
-  it("leaves extended and infinite values to the absolute format", () => {
-    expect(relativeTimestamp("infinity", now, "en")).toBeUndefined();
-    expect(
-      relativeTimestamp("+275760-09-13T00:00:00Z", now, "en"),
-    ).toBeUndefined();
+  it("leaves unknown timestamps to the absolute format", () => {
+    expect(relativeTimestamp(undefined, now, "en")).toBeUndefined();
+    expect(relativeTimestamp("invalid", now, "en")).toBeUndefined();
   });
 
   it("formats consistently across repeated calls and locale cache eviction", () => {

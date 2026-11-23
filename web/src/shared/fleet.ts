@@ -1,11 +1,11 @@
-import {
-  ResponseError,
-  type NodeIpBan,
-  type NodeObservedState,
-  type NodeSession,
-  type Operation,
-  type UserGroupResourceState,
-} from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type {
+  NodeIpBan,
+  NodeObservedState,
+  NodeSession,
+  Operation,
+  UserGroupResourceState,
+} from "@/api/models";
 import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref, shallowRef } from "vue";
 
@@ -16,12 +16,6 @@ import {
   removeIpBan,
   terminateSession,
 } from "../api/operations";
-import {
-  getWorkspace,
-  sameWorkspaceContext,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/workspace";
 import {
   getNode,
   listNodeIpBans,
@@ -97,29 +91,6 @@ export const useFleetStore = defineStore("fleet", () => {
   const rebuildReads = createReadRequest();
   const selectReads = createReadRequest();
   let operationController: AbortController | undefined;
-  let operationSequence = 0;
-
-  function isCurrent(
-    context: WorkspaceContext,
-    controller?: AbortController,
-  ): boolean {
-    return (
-      !controller?.signal.aborted &&
-      sameWorkspaceContext(workspaceContext(), context)
-    );
-  }
-
-  async function currentContext(): Promise<WorkspaceContext> {
-    // Development authentication can run without a persisted workspace.
-    // Keep the generation at its current value so workspace-bound requests
-    // still fail closed while the console remains available.
-    try {
-      await getWorkspace();
-    } catch {
-      // eventStreamPath preserves the development-token fallback below.
-    }
-    return workspaceContext();
-  }
 
   // Single-pass fleet rollup; agentVersionState is optional on the wire, so
   // anything missing or not yet classified (unknown, unsupported) rolls up as
@@ -185,12 +156,8 @@ export const useFleetStore = defineStore("fleet", () => {
     if (!isPageActive()) return;
     const request = rebuildReads.begin();
     const selectSequenceAtStart = selectReads.revision;
-    let context: WorkspaceContext | undefined;
     loading.value = true;
     try {
-      context = await currentContext();
-      const isLatestRebuild = () => request.current(context);
-      if (!isLatestRebuild()) return;
       // Read the cursor before the nodes so events racing the snapshot are
       // still delivered. An open stream keeps the cursor current itself.
       // A failed lookup falls back to a full replay rather than failing.
@@ -200,26 +167,26 @@ export const useFleetStore = defineStore("fleet", () => {
             (page) => page.items[0]?.id,
             () => undefined,
           );
-      if (!isLatestRebuild()) return;
+      if (!request.current()) return;
       const rebuilt: NodeObservedState[] = [];
       let cursor: string | undefined;
       do {
         const page = await listNodes(cursor, request.signal);
-        if (!isLatestRebuild()) return;
+        if (!request.current()) return;
         rebuilt.push(...page.items);
         cursor = page.page.hasMore ? page.page.nextCursor : undefined;
       } while (cursor);
-      if (!isLatestRebuild()) return;
+      if (!request.current()) return;
       nodes.value = rebuilt;
       if (!source) eventCursor = snapshotCursor;
       snapshotAt.value = new Date();
       initialized.value = true;
       if (selectionTarget && selectReads.revision === selectSequenceAtStart)
         await select(selectionTarget);
-      if (!isLatestRebuild()) return;
+      if (!request.current()) return;
       unavailable.value = false;
     } catch {
-      if (!request.current(context)) return;
+      if (!request.current()) return;
       unavailable.value = true;
     } finally {
       if (request.finish()) {
@@ -238,21 +205,17 @@ export const useFleetStore = defineStore("fleet", () => {
       userGroupState.value = [];
     }
     const request = selectReads.begin();
-    let context: WorkspaceContext | undefined;
     selecting.value = true;
     selectionError.value = "";
     try {
-      context = await currentContext();
-      const isLatestSelect = () => request.current(context);
-      if (!isLatestSelect()) return;
       const node = await getNode(nodeId, request.signal);
-      if (!isLatestSelect()) return;
+      if (!request.current()) return;
       const loadNodeSessions = async (): Promise<NodeSession[]> => {
         const rebuiltSessions: NodeSession[] = [];
         let cursor: string | undefined;
         do {
           const page = await listNodeSessions(nodeId, cursor, request.signal);
-          if (!isLatestSelect()) return rebuiltSessions;
+          if (!request.current()) return rebuiltSessions;
           rebuiltSessions.push(...page.items);
           cursor = page.page.hasMore ? page.page.nextCursor : undefined;
         } while (cursor);
@@ -264,7 +227,7 @@ export const useFleetStore = defineStore("fleet", () => {
           listNodeIpBans(nodeId, request.signal),
           listNodeUserGroupState(nodeId, request.signal),
         ]);
-      if (!isLatestSelect()) return;
+      if (!request.current()) return;
       selected.value = node;
       sessions.value = rebuiltSessions;
       ipBans.value = ipBansPage.items;
@@ -272,7 +235,7 @@ export const useFleetStore = defineStore("fleet", () => {
       selectionError.value = "";
       unavailable.value = false;
     } catch (error) {
-      if (!request.current(context)) return;
+      if (!request.current()) return;
       if (error instanceof ResponseError && error.response.status === 404) {
         selectionError.value = "notFound";
       } else {
@@ -295,17 +258,11 @@ export const useFleetStore = defineStore("fleet", () => {
     terminal: Set<string> = terminalStates,
   ): Promise<void> {
     if (!selected.value || operationTracking.value) return;
-    operationController?.abort();
-    const context = workspaceContext();
     const controller = new AbortController();
     operationController = controller;
     operationTracking.value = true;
-    const sequence = ++operationSequence;
     const selectSequenceAtStart = selectReads.revision;
-    const isLatestOperation = () =>
-      operationController === controller &&
-      sequence === operationSequence &&
-      isCurrent(context, controller);
+    const isLatestOperation = () => operationController === controller;
     const node = selected.value;
     operationError.value = "";
     try {
@@ -353,7 +310,6 @@ export const useFleetStore = defineStore("fleet", () => {
     operationController?.abort();
     operationController = undefined;
     operationTracking.value = false;
-    operationSequence += 1;
   }
 
   function pauseRefresh(): void {
@@ -405,39 +361,19 @@ export const useFleetStore = defineStore("fleet", () => {
     source?.close();
     source = undefined;
     streamConnected.value = false;
-    let context: WorkspaceContext;
     try {
-      context = await currentContext();
       const path = await eventStreamPath(eventCursor);
-      if (
-        sequence !== connectSequence ||
-        !isCurrent(context) ||
-        !isPageActive()
-      )
-        return;
+      if (sequence !== connectSequence || !isPageActive()) return;
       const stream = new EventSource(path);
-      if (sequence !== connectSequence || !isCurrent(context)) {
-        stream.close();
-        return;
-      }
       source = stream;
       stream.onopen = () => {
-        if (
-          sequence !== connectSequence ||
-          !isCurrent(context) ||
-          source !== stream
-        )
-          return;
+        if (sequence !== connectSequence || source !== stream) return;
         streamConnected.value = true;
         if (unavailable.value) foregroundRefresh.request();
         else foregroundRefresh.reschedule();
       };
       stream.addEventListener("platform", (message) => {
-        if (
-          sequence !== connectSequence ||
-          !isCurrent(context) ||
-          source !== stream
-        ) {
+        if (sequence !== connectSequence || source !== stream) {
           stream.close();
           return;
         }
@@ -448,11 +384,7 @@ export const useFleetStore = defineStore("fleet", () => {
           window.dispatchEvent(new Event(platformEventsEvent));
       });
       stream.onerror = () => {
-        if (
-          sequence !== connectSequence ||
-          !isCurrent(context) ||
-          source !== stream
-        ) {
+        if (sequence !== connectSequence || source !== stream) {
           stream.close();
           return;
         }

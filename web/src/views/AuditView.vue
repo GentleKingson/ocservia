@@ -1,19 +1,11 @@
 <script setup lang="ts">
 import { ChevronRight, RefreshCw } from "@lucide/vue";
-import {
-  ResponseError,
-  type AuditEventPage,
-  type AuditVerification,
-} from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { AuditEventPage, AuditVerification } from "@/api/models";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { listAuditEvents, verifyAuditChain } from "../api/events";
 import VpnAuditHistory from "@/features/audit/VpnAuditHistory.vue";
-import {
-  getWorkspace,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/workspace";
 import { createReadRequest } from "../shared/read-request";
 import { formatTimestamp } from "../shared/timestamp";
 import DataState from "@/components/common/DataState.vue";
@@ -47,19 +39,15 @@ const verificationReads = createReadRequest();
 
 async function refresh(): Promise<void> {
   const request = reads.begin();
-  let context: WorkspaceContext | undefined;
   loading.value = true;
   error.value = "";
   try {
-    await getWorkspace();
-    if (!request.current()) return;
-    context = workspaceContext();
     const page = await listAuditEvents(request.signal);
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     items.value = page.items;
     initialized.value = true;
   } catch (cause) {
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     error.value = t(
       cause instanceof ResponseError && cause.response.status === 403
         ? "auditForbidden"
@@ -73,19 +61,15 @@ async function refresh(): Promise<void> {
 async function verifyChain(): Promise<void> {
   // Verification is a read expressed as POST. Cancellation never retries it.
   const request = verificationReads.begin();
-  let context: WorkspaceContext | undefined;
   verifying.value = true;
   verifyError.value = "";
   verification.value = undefined;
   try {
-    await getWorkspace();
-    if (!request.current()) return;
-    context = workspaceContext();
     const result = await verifyAuditChain(request.signal);
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     verification.value = result;
   } catch (cause) {
-    if (!request.current(context)) return;
+    if (!request.current()) return;
     verifyError.value = t(
       cause instanceof ResponseError && cause.response.status === 403
         ? "auditForbidden"

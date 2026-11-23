@@ -1,5 +1,7 @@
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { requestOrigin, stubRequestOrigin } from "./request-origin";
 
 const alpha = { id: "workspace-a", name: "Alpha", slug: "alpha", version: 1 };
 const beta = { id: "workspace-b", name: "Beta", slug: "beta", version: 2 };
@@ -89,7 +91,16 @@ beforeEach(() => {
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
   });
-  vi.stubGlobal("fetch", fetchMock);
+  stubRequestOrigin();
+  vi.stubGlobal("fetch", async (input: Request) =>
+    fetchMock(input.url.slice(requestOrigin.length), {
+      method: input.method,
+      credentials: input.credentials,
+      headers: input.headers,
+      signal: input.signal,
+      body: input.body ? await input.text() : null,
+    }),
+  );
   fetchMock.mockImplementation((input) =>
     Promise.resolve(
       json(
@@ -152,6 +163,22 @@ describe("API transport and session contracts", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("returns a login rejection to the form without using development credentials", async () => {
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
+    const api = await loadApi();
+    fetchMock.mockResolvedValueOnce(json({}, 401));
+    expect((await api.loginLocal("alice", "test-password")).status).toBe(401);
+    expect(request().path).toBe("/api/v1/auth/login");
+    expect(request().method).toBe("POST");
+    expect(request().credentials).toBe("same-origin");
+    expect(request().headers.has("Authorization")).toBe(false);
+    expect(request().body).toEqual({
+      username: "alice",
+      password: "test-password",
+    });
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it("keeps artifact grant authorization separate from Workspace headers", async () => {
     vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
     const api = await loadApi();
@@ -189,63 +216,32 @@ describe("Workspace authority and events", () => {
     await expect(api.getWorkspace()).rejects.toThrow(
       "No authorized workspace is available",
     );
-    expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
+    expect(api.cachedWorkspaceId()).toBeUndefined();
   });
 
-  it("compares Workspace contexts symmetrically without triggering requests", async () => {
-    const api = await loadApi();
-    for (const [aId, aGeneration, bId, bGeneration, matches] of [
-      [undefined, 0, undefined, 0, true],
-      ["", 0, "", 0, true],
-      [undefined, 0, "workspace-a", 0, false],
-      ["workspace-a", 1, "workspace-b", 1, false],
-      ["workspace-a", 1, "workspace-a", 1, true],
-      ["workspace-a", 1, "workspace-a", 3, false],
-      [undefined, 0, undefined, 2, false],
-    ] as const) {
-      const a = { id: aId, generation: aGeneration };
-      const b = { id: bId, generation: bGeneration };
-      expect(api.sameWorkspaceContext(a, b)).toBe(matches);
-      expect(api.sameWorkspaceContext(b, a)).toBe(matches);
-    }
-    expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("advances generation when a refreshed workspace changes identity", async () => {
+  it("updates the cached workspace after explicit discovery", async () => {
     const api = await loadApi();
     await api.getWorkspace();
-    const firstA = api.workspaceContext();
-    expect(firstA).toEqual({ id: alpha.id, generation: 1 });
+    expect(api.cachedWorkspaceId()).toBe(alpha.id);
     fetchMock.mockResolvedValueOnce(json({ items: [beta] }));
-    await api.getWorkspace(true);
-    expect(api.sameWorkspaceContext(firstA, api.workspaceContext())).toBe(
-      false,
-    );
-    fetchMock.mockResolvedValueOnce(json({ items: [alpha] }));
-    await api.getWorkspace(true);
-    const returnedA = api.workspaceContext();
-    expect(returnedA.id).toBe(firstA.id);
-    expect(returnedA.generation).toBeGreaterThan(firstA.generation);
-    expect(api.sameWorkspaceContext(firstA, returnedA)).toBe(false);
-    expect(api.sameWorkspaceContext(returnedA, api.workspaceContext())).toBe(
-      true,
-    );
+    await expect(api.getWorkspace(true)).resolves.toEqual(beta);
+    expect(api.cachedWorkspaceId()).toBe(beta.id);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("coalesces bootstrap discovery and stabilizes generation when unchanged", async () => {
+  it("coalesces bootstrap discovery and retains the selected workspace", async () => {
     const api = await loadApi();
-    expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
+    expect(api.cachedWorkspaceId()).toBeUndefined();
     await Promise.all([
       api.getWorkspace(),
       api.getWorkspace(),
       api.getWorkspaceId(),
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+    expect(api.cachedWorkspaceId()).toBe(alpha.id);
     await api.getWorkspace(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+    expect(api.cachedWorkspaceId()).toBe(alpha.id);
   });
 
   it("keeps session probes independent of cached Workspace authority and coalesces only in flight", async () => {
@@ -253,14 +249,14 @@ describe("Workspace authority and events", () => {
     await api.getWorkspace();
     await Promise.all([api.probeAuthentication(), api.probeAuthentication()]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+    expect(api.cachedWorkspaceId()).toBe(alpha.id);
     await api.probeAuthentication();
     expect(fetchMock).toHaveBeenCalledTimes(3);
     fetchMock.mockResolvedValueOnce(json({}, 503));
     await expect(api.getWorkspace(true)).rejects.toMatchObject({
       response: { status: 503 },
     });
-    expect(api.workspaceContext()).toEqual({ id: alpha.id, generation: 1 });
+    expect(api.cachedWorkspaceId()).toBe(alpha.id);
     await api.getWorkspace(true);
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
@@ -268,28 +264,31 @@ describe("Workspace authority and events", () => {
   it("scopes list requests and stream URLs without placing credentials in the URL", async () => {
     vi.stubEnv("VITE_DEV_AUTH_TOKEN", "fictional-dev-token");
     const api = await loadApi();
-    const signal = new AbortController().signal;
+    const controller = new AbortController();
+    const { signal } = controller;
     await api.listNodes("cursor/a", signal);
     expect(request().path).toBe(
-      "/api/v1/nodes?cursor=cursor%2Fa&page_size=200",
+      "/api/v1/nodes?page_size=200&cursor=cursor%2Fa",
     );
     expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
     expect(request().headers.get("Authorization")).toBe(
       "Bearer fictional-dev-token",
     );
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     await api.listOperations(undefined, signal);
     expect(request().path).toBe("/api/v1/operations?page_size=200");
     expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
     await api.listEvents("event/a", signal, "desc");
     expect(request().headers.get("X-Workspace-ID")).toBe(alpha.id);
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     const eventUrl = new URL(request().path, "https://console.invalid");
     expect(Object.fromEntries(eventUrl.searchParams)).toEqual({
       page_size: "200",
       after: "event/a",
       order: "desc",
     });
+    controller.abort();
+    expect(request().signal?.aborted).toBe(true);
     expect(await api.eventStreamPath("event/a")).toBe(
       "/api/v1/events/stream?after=event%2Fa&workspace_id=workspace-a",
     );
@@ -313,7 +312,7 @@ describe("Workspace authority and events", () => {
         await expect(api.eventStreamPath()).rejects.toMatchObject({
           response: { status: 503 },
         });
-      expect(api.workspaceContext()).toEqual({ id: undefined, generation: 0 });
+      expect(api.cachedWorkspaceId()).toBeUndefined();
     },
   );
 });
@@ -378,7 +377,7 @@ describe("domain request contracts", () => {
     expect(request().path).toBe("/api/v1/nodes/node%2Fa/users");
     expect(request().method).toBe("POST");
     expect(request().headers.get("If-Match")).toBe('"revision-7"');
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     expect(request().body).toEqual({
       name: "alice",
       sealed_password: {
@@ -426,7 +425,7 @@ describe("domain request contracts", () => {
       ttl_seconds: 60,
       boot_id: "boot-a",
     });
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     await api.reloadService(node, "requested", signal);
     expect(request().headers.get("X-Approval-ID")).toBeNull();
     expect(request().body).toEqual({
@@ -456,7 +455,7 @@ describe("domain request contracts", () => {
       ttl_seconds: 300,
       reason: "requested",
     });
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     await api.issueCertificate(
       "certificate-a",
       { reason: "requested" },
@@ -466,13 +465,13 @@ describe("domain request contracts", () => {
     expect(request().body).toEqual({
       reason: "requested",
     });
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     fetchMock.mockResolvedValueOnce(json({}, 409));
     await expect(
       api.applyConfigPlan("plan-a", { reason: "requested" }, signal),
     ).rejects.toMatchObject({ response: { status: 409 } });
     expect(request().headers.get("Idempotency-Key")).toBeTruthy();
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -493,7 +492,7 @@ describe("domain request contracts", () => {
       batch_size: 1,
       reason: "requested",
     });
-    expect(request().signal).toBe(signal);
+    expect(request().signal).toBeInstanceOf(AbortSignal);
     expect(request().headers.get("Idempotency-Key")).toBeTruthy();
   });
 });
@@ -507,7 +506,7 @@ describe("audit and rollout wire decoding", () => {
         items: [
           {
             id: "audit-a",
-            occurred_at: "-infinity",
+            occurred_at: "2026-09-10T04:31:00Z",
             actor_type: "user",
             actor_id: "admin",
             action: "node.approve",
@@ -535,7 +534,7 @@ describe("audit and rollout wire decoding", () => {
       previousEventHash: "",
       eventHash: "abc",
       result: "historical-result",
-      occurredAt: "-infinity",
+      occurredAt: "2026-09-10T04:31:00Z",
     });
   });
 
@@ -612,8 +611,8 @@ describe("audit and rollout wire decoding", () => {
     const wire = {
       id: "rollout-a",
       workspace_id: alpha.id,
-      created_at: "-infinity",
-      updated_at: "infinity",
+      created_at: "2026-09-10T04:34:00Z",
+      updated_at: "2026-09-10T04:34:56.123456Z",
       excluded: [
         { node_id: "node-a", reason: "future_reason" },
         null,
@@ -636,8 +635,8 @@ describe("audit and rollout wire decoding", () => {
         { nodeId: "", reason: "", raw: '["legacy"]' },
         { nodeId: "", reason: "", raw: '{"extra":true}' },
       ]);
-      expect(value.createdAt).toBe("-infinity");
-      expect(value.updatedAt).toBe("infinity");
+      expect(value.createdAt).toBe("2026-09-10T04:34:00Z");
+      expect(value.updatedAt).toBe("2026-09-10T04:34:56.123456Z");
     }
   });
 });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { useIntervalFn, useNow } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 

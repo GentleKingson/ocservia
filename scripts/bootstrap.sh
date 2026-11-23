@@ -260,16 +260,6 @@ install_protoc() {
   [[ "$(protoc --version)" == "libprotoc $(version protobuf)" ]]
 }
 
-install_openapi_generator() {
-  local artifact jar
-  artifact="openapi-generator-cli-$(version openapi_generator).jar"
-  if [[ ! -f "${TOOLS}/${artifact}" ]]; then
-    jar="$(download "https://github.com/OpenAPITools/openapi-generator/releases/download/v$(version openapi_generator)/${artifact}" "${artifact}")"
-    install -m 0644 "${jar}" "${TOOLS}/${artifact}"
-  fi
-  verify_sha256 "${TOOLS}/${artifact}" "$(checksum "${artifact}")"
-}
-
 install_gitleaks() {
   local artifact archive
   artifact="gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz"
@@ -367,7 +357,6 @@ install_nfpm() {
 
 install_contract_tools() {
   install_buf
-  install_openapi_generator
   install_oasdiff
 }
 
@@ -392,14 +381,6 @@ verify_host_command() {
   }
 }
 
-verify_java() {
-  verify_host_command java
-  java -version >/dev/null 2>&1 || {
-    echo "Java 17 or newer is required to run OpenAPI Generator" >&2
-    exit 1
-  }
-}
-
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "${ROOT}/scripts/env.sh"
@@ -417,7 +398,6 @@ case "${PROFILE}" in
     install_gitleaks
     install_go_quality_tools
     install_rust_quality_tools
-    verify_java
     verify_host_command jq
     verify_host_command shellcheck
     install_ruff
@@ -432,7 +412,6 @@ case "${PROFILE}" in
     install_node
     install_npm
     install_contract_tools
-    verify_java
     install_web_dependencies
     ;;
   secret-scan)

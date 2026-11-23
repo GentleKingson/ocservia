@@ -1,45 +1,38 @@
-import type { ArtifactGrant } from "@ocservia/api-client";
+import type { ArtifactGrant } from "@/api/models";
 import { shallowReactive } from "vue";
-import type { WorkspaceContext } from "../api/workspace";
 import { abortableDelay } from "../shared/abortable-delay";
 
 export interface NodeWorkflowContext {
   nodeId: string;
-  workspace: WorkspaceContext;
+  workspaceId: string | undefined;
   signal: AbortSignal;
 }
 
 export function createNodeWorkflow(
   nodeId: () => string | undefined,
   isOpen: () => boolean,
-  workspaceContext: () => WorkspaceContext,
+  workspaceId: () => string | undefined,
 ) {
-  let current: NodeWorkflowContext | undefined;
-  let controller: AbortController | undefined;
+  let current:
+    { context: NodeWorkflowContext; controller: AbortController } | undefined;
   function cancel(): void {
-    controller?.abort();
-    controller = undefined;
+    current?.controller.abort();
     current = undefined;
   }
   function begin(id: string): NodeWorkflowContext {
     cancel();
-    controller = new AbortController();
-    current = {
+    const controller = new AbortController();
+    const context = {
       nodeId: id,
-      workspace: workspaceContext(),
+      workspaceId: workspaceId(),
       signal: controller.signal,
     };
-    return current;
+    current = { context, controller };
+    return context;
   }
   function isCurrent(context: NodeWorkflowContext): boolean {
-    const workspace = workspaceContext();
     return (
-      current === context &&
-      !context.signal.aborted &&
-      isOpen() &&
-      nodeId() === context.nodeId &&
-      workspace.id === context.workspace.id &&
-      workspace.generation === context.workspace.generation
+      current?.context === context && isOpen() && nodeId() === context.nodeId
     );
   }
   return { begin, cancel, isCurrent };
@@ -58,7 +51,7 @@ function workflowReferenceKey(
   context: NodeWorkflowContext,
   kind: "config" | "certificate",
 ): string {
-  return `ocservia.node-workflow.${JSON.stringify([context.workspace.id, context.nodeId, kind])}`;
+  return `ocservia.node-workflow.${JSON.stringify([context.workspaceId, context.nodeId, kind])}`;
 }
 
 // Persistent references contain only identifiers. Reopening must read the server;
@@ -157,7 +150,7 @@ interface CachedGrant {
 const certificateGrants = new Map<string, CachedGrant>();
 
 function grantKey(context: NodeWorkflowContext, certificateId: string): string {
-  return JSON.stringify([context.workspace.id, context.nodeId, certificateId]);
+  return JSON.stringify([context.workspaceId, context.nodeId, certificateId]);
 }
 
 function expireGrant(key: string): void {

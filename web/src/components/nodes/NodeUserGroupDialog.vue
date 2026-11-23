@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import type { Ref } from "vue";
-import { ResponseError, type NodeObservedState } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { NodeObservedState } from "@/api/models";
 import type { DesiredDialogKind } from "@/shared/desired-recovery";
 import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { getUserPasswordSealingKey } from "@/api/users";
 import { sealUserPassword } from "@/features/user-password";
-import { workspaceContext } from "@/api/workspace";
+import { cachedWorkspaceId } from "@/api/workspace";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -53,7 +54,7 @@ function openDesired(kind: DesiredDialogKind, name = "", version = 0): void {
 const desiredWorkflow = createNodeWorkflow(
   () => currentNode.value?.id,
   () => Boolean(desiredDialog.value),
-  workspaceContext,
+  cachedWorkspaceId,
 );
 watch(
   desiredDialog,
@@ -86,7 +87,7 @@ async function submitDesired(): Promise<void> {
       const sealed = await sealUserPassword(
         plaintext,
         key,
-        context.workspace.id,
+        context.workspaceId,
         nodeId,
       );
       if (!desiredWorkflow.isCurrent(context)) return;

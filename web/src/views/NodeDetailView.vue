@@ -9,7 +9,7 @@ import {
   Server,
   ShieldOff,
 } from "@lucide/vue";
-import { type NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import {
   computed,
   onBeforeUnmount,

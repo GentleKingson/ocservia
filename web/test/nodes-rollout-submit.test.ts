@@ -1,13 +1,13 @@
 import { mountSetup } from "./renderer";
 import { nextTick } from "vue";
-import { ResponseError } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   vi.stubGlobal("window", new EventTarget());
   return {
     createAgentRollout: vi.fn(),
-    workspaceContext: vi.fn(),
+
     push: vi.fn(),
     replace: vi.fn(),
   };
@@ -18,9 +18,6 @@ vi.mock("@vueuse/core", async (original) => ({
   defaultWindow: globalThis.window,
 }));
 vi.mock("../src/api/agents", () => mocks);
-vi.mock("../src/api/workspace", () => ({
-  workspaceContext: mocks.workspaceContext,
-}));
 vi.mock("../src/shared/fleet", () => ({
   useFleetStore: () => ({
     start: () => {},
@@ -53,7 +50,6 @@ interface View {
   submitRollout(): Promise<void>;
 }
 
-let workspace = { id: "workspace-a", generation: 1 };
 let unmount: (() => void) | undefined;
 async function flush() {
   for (let i = 0; i < 8; i++) await nextTick();
@@ -82,8 +78,6 @@ function created() {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  workspace = { id: "workspace-a", generation: 1 };
-  mocks.workspaceContext.mockImplementation(() => ({ ...workspace }));
 });
 afterEach(() => unmount?.());
 afterAll(() => vi.unstubAllGlobals());
@@ -190,7 +184,7 @@ it("never shows server text for an unknown or unreadable Problem", async () => {
   }
 });
 
-it("drops a rejection whose Problem arrives after the workspace changes", async () => {
+it("drops a rejection whose Problem arrives after the view unmounts", async () => {
   let body!: (value: unknown) => void;
   const response = {
     status: 409,
@@ -207,8 +201,7 @@ it("drops a rejection whose Problem arrives after the workspace changes", async 
   await vi.waitFor(() => {
     expect(body).toBeDefined();
   });
-  workspace = { id: "workspace-b", generation: 2 };
-  window.dispatchEvent(new Event("workspace"));
+  unmount?.();
   body({ type: "https://ocservia.dev/problems/forbidden" });
   await submit;
   expect(view.rolloutError).toBe("");
