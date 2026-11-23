@@ -96,7 +96,7 @@ upgraded. The semantic hash formats are frozen in
 
 Whenever a database commit acknowledgement is uncertain, the service performs a
 bounded readback of the original immutable intent, the specific attempt lease
-or completed attempt, or the exact owner term and deadline, failing closed if
+or completed attempt, or the active connection ID and epoch, failing closed if
 the expected record is missing, expired, or superseded. Services never allocate
 a replacement intent or call `transportd` to mask a database error, and
 repeating bookkeeping for an already committed transition is idempotent even
@@ -879,8 +879,7 @@ and the Controller identity key (see
 
 The Controller scheduler compacts aged terminal command payloads, retired-node
 snapshots, and aged audit/security detail in periodic background passes that
-process bounded, indexed batches inside short transactions while checking the
-scheduler leadership fence. Existing telemetry retention keeps its established
+process bounded, indexed batches inside short transactions in the single active Controller. Existing telemetry retention keeps its established
 14-day raw, 90-day five-minute, and 13-calendar-month hourly windows.
 
 Compaction replaces eligible non-`config_plan` terminal command payloads with an
@@ -963,7 +962,7 @@ authorized scope.
 
 ### VPN audit history
 
-VPN lifecycle and optional conntrack audit records use a separate Agent-initiated bidirectional Iroh stream after the fenced handshake. A frame contains a four-byte big-endian size and one `VpnAuditBatch` with up to 32 events. Transportd binds the batch to its authenticated peer, node, connection ID and owner epoch. The Controller locks the active endpoint binding and checks the current unexpired owner term inside the PostgreSQL transaction. The reply contains the ordered event IDs from the committed batch. A missing or mismatched reply leaves the local SQLite records available for retry. A node and event ID uniquely identify a stored record within its audit category.
+VPN lifecycle and optional conntrack audit records use a separate Agent-initiated bidirectional Iroh stream after the fenced handshake. A frame contains a four-byte big-endian size and one `VpnAuditBatch` with up to 32 events. Transportd binds the batch to its authenticated peer, node, connection ID and owner epoch. The Controller locks the active endpoint binding and checks the current active connection and epoch inside the PostgreSQL transaction. The reply contains the ordered event IDs from the committed batch. A missing or mismatched reply leaves the local SQLite records available for retry. A node and event ID uniquely identify a stored record within its audit category.
 
 A workspace Admin can query `GET /api/v1/audit/vpn`. Use `X-Workspace-ID` when the principal has access to multiple workspaces. All three sources accept an exact `username`, a `node_id` UUID and an RFC 3339 time range with inclusive `since` and exclusive `until`.
 
@@ -1035,7 +1034,7 @@ Traffic quotas are expressed in integer bytes up to JavaScript's maximum safe in
 
 As session telemetry arrives, the Controller converts monotonic per-session byte counters into durable monthly and lifetime usage totals. Duplicate or replayed telemetry batches add zero bytes, and observations older than the stored session cursor are dropped. When a newer observation reports a lower byte count than the cursor (for example after a session or counter reset), the ingestion path starts a new counter epoch and adds the new reading directly instead of guessing what happened in the gap.
 
-Policy enforcement runs in the scheduler under a database-backed leadership lease and a reentrant scan loop, so restarting the scheduler resumes the scan with deterministic idempotency keys. When an account crosses its quota or expiration timestamp, the scheduler enqueues a standard typed `user_disable` desired-state operation and leaves node command serialization to the worker. Uncertain command outcomes follow the normal Unknown reconciliation path.
+Policy enforcement runs in the scheduler in a reentrant scan loop, so restarting the scheduler resumes the scan with deterministic idempotency keys. When an account crosses its quota or expiration timestamp, the scheduler enqueues a standard typed `user_disable` desired-state operation and leaves node command serialization to the worker. Uncertain command outcomes follow the normal Unknown reconciliation path.
 
 At the start of a new UTC calendar month, the scheduler re-enables a user through a deterministic enable operation only if all of the following hold:
 
@@ -1270,7 +1269,7 @@ Business stores coordinate transaction ownership, atomic audit and domain writes
 
 Within a single business operation, bind every participating domain Store to the same `database.Tx` inside `database.Within`. Never construct a store from the connection pool inside that callback or split a logical transaction across multiple callbacks. `database.Within` does not retry. For database-only claim, completion, reaping, and lease work, use the opt-in `database.WithinRetry` helper, which makes at most three attempts and retries only when the transaction was a deadlock victim or hit a serialization failure with an acknowledged rollback. Connection loss, lock timeouts, ordinary constraint errors, and unknown commit outcomes return immediately without retry, and callbacks passed to `database.WithinRetry` must never perform transport calls or other external mutations. Store methods translate driver errors into backend-neutral categories such as `database.ErrDeadlock` and `database.ErrSerialization`, keeping driver types and SQLSTATE codes out of business packages.
 
-Lease and fence checks read a fresh database wall-clock timestamp after acquiring their locks so time spent waiting on a lock cannot revive an expired term; transaction-stable timestamps remain available for logical ordering. Authority takeovers increment the retained epoch in place instead of deleting and recreating records, so stale holders continue to fail their exact owner, incarnation, connection, and epoch predicates.
+Node connection ownership is scoped to the node ID, connection ID and monotonic epoch. Replacing a connection advances the epoch, and releasing it marks that exact binding inactive. Outbox and job claim leases retain their own independent deadlines.
 
 UUIDs and logical timestamps cross the store boundary as typed Go values and are stored in native PostgreSQL `uuid` and `timestamptz` columns. Always check the owning store and appended migration instead of guessing a column's representation from its name. For a concrete workspace preparation example, see [database preparation](../operations/authentication.md#database-preparation).
 
