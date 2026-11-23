@@ -97,7 +97,9 @@ expected_migration_version() {
   (
     cd "${ROOT}/control-plane/migrations/sql"
     for file in [0-9]*_*.sql; do
-      [[ -f "${file}" ]] && printf '%s\n' "${file}"
+      if [[ -f "${file}" && ! -L "${file}" ]]; then
+        printf '%s\n' "${file}"
+      fi
     done
   ) \
     | sed -n 's/^\([0-9][0-9]*\)_.*/\1/p' \
