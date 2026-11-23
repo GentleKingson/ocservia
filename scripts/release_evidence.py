@@ -46,24 +46,28 @@ def list_items(repo, path, key, **params):
     return [json.loads(line) for line in data.splitlines()]
 
 
+def benchmark_branch():
+    return os.environ.get('CONTROLLER_BENCH_REF', 'main')
+
+
 def matches(run, repo, sha, events, title=None):
     head_repository = run['head_repository']
-    return (run['event'] in events and run['head_sha'] == sha and run['head_branch'] == 'main'
+    return (run['event'] in events and run['head_sha'] == sha and run['head_branch'] == benchmark_branch()
             and head_repository is not None and head_repository['full_name'].lower() == repo.lower()
             and (title is None or run['display_title'] == title))
 
 
 def latest(repo, workflow, sha, predicate):
     runs = list_items(repo, f'actions/workflows/{workflow}/runs', 'workflow_runs',
-                      branch='main', head_sha=sha)
+                      branch=benchmark_branch(), head_sha=sha)
     return max((run for run in runs if predicate(run)),
                key=lambda run: run['run_number'], default=None)
 
 
 def dispatch(repo, workflow, sha, inputs):
-    require(api(repo, 'git/ref/heads/main')['object']['sha'] == sha,
+    require(api(repo, f'git/ref/heads/{benchmark_branch()}')['object']['sha'] == sha,
             f'main moved before {workflow} could be dispatched for {sha}')
-    data = json.dumps({'ref': 'main', 'inputs': {'expected_sha': sha, **inputs}}).encode()
+    data = json.dumps({'ref': benchmark_branch(), 'inputs': {'expected_sha': sha, **inputs}}).encode()
     run = api(repo, f'actions/workflows/{workflow}/dispatches', '--method', 'POST',
               '-H', 'X-GitHub-Api-Version: 2026-03-10', '--input', '-', data=data)
     run_id = run['workflow_run_id']
@@ -200,7 +204,13 @@ def build_record(repo, run, version):
 
 
 def build_matches(run, repo, sha, version):
-    return matches(run, repo, sha, ('workflow_dispatch',), f'Release build v{version}')
+    title = f'Release build v{version}'
+    if 'CONTROLLER_BENCH_REF' in os.environ:
+        mode = os.environ['CONTROLLER_BENCH_VARIANT']
+        cache = os.environ['CONTROLLER_BENCH_CACHE']
+        trial = os.environ['CONTROLLER_BENCH_TRIAL']
+        title += f' ({mode}:{cache}:{trial})'
+    return matches(run, repo, sha, ('workflow_dispatch',), title)
 
 
 def qualify(repo, sha, version):
@@ -274,7 +284,11 @@ def main():
         def candidate_build(run):
             return build_matches(run, repo, sha, version)
 
-        run = find_or_dispatch(repo, 'release.yml', sha, candidate_build, {'version': version}, deadline)
+        inputs = {'version': version}
+        if 'CONTROLLER_BENCH_REF' in os.environ:
+            inputs.update(variant=os.environ['CONTROLLER_BENCH_VARIANT'], cache_state=os.environ['CONTROLLER_BENCH_CACHE'],
+                          trial=os.environ['CONTROLLER_BENCH_TRIAL'])
+        run = find_or_dispatch(repo, 'release.yml', sha, candidate_build, inputs, deadline)
         write_outputs(build_record(repo, run, version))
     else:
         raise RuntimeError(f'Unknown evidence phase: {phase}')

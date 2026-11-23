@@ -13,6 +13,12 @@ on:
         description: Also exercise synthetic RC -> RC -> final package lifecycle
         type: boolean
         default: false
+      bench_variant:
+        type: string
+        default: baseline
+      bench_cache:
+        type: string
+        default: cold
     outputs:
       agent_packages_artifact_id:
         value: ${{ jobs.build-agent-packages.outputs.artifact_id }}
@@ -178,6 +184,8 @@ jobs:
     permissions:
       contents: read
     env:
+      BENCH_VARIANT: ${{ inputs.bench_variant }}
+      BENCH_CACHE: ${{ inputs.bench_cache }}
       BUILDX_BUILDER: controller-release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
     steps:
       - name: Checkout release source
@@ -203,7 +211,17 @@ jobs:
       # archive per image. Nothing is written to GHCR here: the legs hold
       # only source read, and every production registry write happens inside
       # the single reviewer-gated publish job.
+      - name: Prime isolated benchmark cache
+        if: inputs.bench_cache == 'warm'
+        env:
+          CACHE_ROOT: ${{ runner.temp }}/controller-bench-cache
+        run: |
+          VERSION="${version}" SOURCE_COMMIT="${source_commit}" CONTROLLER_ARCH="${{ inputs.arch }}" \
+            CONTROLLER_CACHE_IMAGES='transport relay' bash scripts/build-release-controller.sh --cache-only
+          docker buildx rm "${BUILDX_BUILDER}"
       - name: Build Controller images
+        env:
+          CACHE_ROOT: ${{ runner.temp }}/controller-bench-cache
         id: build-images
         run: |
           VERSION="${version}" SOURCE_COMMIT="${source_commit}" \

@@ -1,8 +1,6 @@
 name: Release
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release build v{0}', inputs.version) || format('Publish {0}', github.ref_name) }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release build v{0}{1}', inputs.version, format(' ({0}:{1}:{2})', inputs.variant, inputs.cache_state, inputs.trial)) || format('Publish {0}', github.ref_name) }}
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       version:
@@ -10,6 +8,20 @@ on:
         type: string
         required: true
         default: '0.0.0'
+      variant:
+        description: Benchmark build variant
+        type: choice
+        options: [baseline, compiler, recipe, parallel, combined]
+        default: baseline
+      cache_state:
+        description: Benchmarked cache state
+        type: choice
+        options: [cold, warm]
+        default: cold
+      trial:
+        description: Paired trial number
+        type: string
+        default: '1'
       expected_sha:
         description: Expected main commit when dispatched by Release Check
         type: string
@@ -17,7 +29,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && format('build-{0}-{1}', github.sha, inputs.version) || github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && format('build-{0}-{1}', github.sha, format('{0}-{1}-{2}-{3}', inputs.version, inputs.variant, inputs.cache_state, inputs.trial)) || github.ref }}
   cancel-in-progress: false
 jobs:
   prepare:
@@ -50,7 +62,7 @@ jobs:
           else
             version="$TEST_VERSION"
             if [[ -n "$EXPECTED_SHA" ]]; then
-              test "$GITHUB_REF" = refs/heads/main
+              [[ "$GITHUB_REF" == refs/heads/codex/controller-perf-* ]]
               test "$GITHUB_SHA" = "$EXPECTED_SHA"
             fi
           fi
@@ -80,6 +92,8 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       arch: amd64
       run_rc_lifecycle: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+      bench_variant: ${{ inputs.variant }}
+      bench_cache: ${{ inputs.cache_state }}
   build-arm64:
     if: github.event_name == 'workflow_dispatch'
     needs: prepare
@@ -88,6 +102,8 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       arch: arm64
       run_rc_lifecycle: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+      bench_variant: ${{ inputs.variant }}
+      bench_cache: ${{ inputs.cache_state }}
   assets:
     needs: [prepare, build-amd64, build-arm64]
     runs-on: ubuntu-24.04

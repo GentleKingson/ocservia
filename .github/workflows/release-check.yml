@@ -1,5 +1,5 @@
 name: Release Check
-run-name: Release Check v${{ inputs.version }}
+run-name: Release Check v${{ inputs.version }}${{ format(' ({0}:{1}:{2})', inputs.variant, inputs.cache_state, inputs.trial) }}
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +7,20 @@ on:
         description: Intended release version without v (X.Y.Z or X.Y.Z-rc.N)
         type: string
         required: true
+      variant:
+        description: Benchmark build variant
+        type: choice
+        options: [baseline, compiler, recipe, parallel, combined]
+        default: baseline
+      cache_state:
+        description: Benchmarked cache state
+        type: choice
+        options: [cold, warm]
+        default: cold
+      trial:
+        description: Paired trial number
+        type: string
+        default: '1'
       contract_base_ref:
         description: Optional prior commit or tag; defaults to the latest release tag before HEAD (or HEAD~1)
         type: string
@@ -15,7 +29,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-check-${{ github.sha }}
+  group: controller-bench-${{ github.sha }}-${{ inputs.variant }}-${{ inputs.cache_state }}-${{ inputs.trial }}
   cancel-in-progress: false
 env:
   VERSION: ${{ inputs.version }}
@@ -29,7 +43,7 @@ jobs:
     steps:
       - name: Require main branch and a release version
         run: |
-          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_REF" == refs/heads/codex/controller-perf-* ]]
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "$VERSION" != 0.0.0 ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -77,6 +91,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          CONTROLLER_BENCH_REF: ${{ github.ref_name }}
+          CONTROLLER_BENCH_VARIANT: ${{ inputs.variant }}
+          CONTROLLER_BENCH_CACHE: ${{ inputs.cache_state }}
+          CONTROLLER_BENCH_TRIAL: ${{ inputs.trial }}
           CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
         run: python3 scripts/release_evidence.py ci
 
@@ -98,6 +116,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          CONTROLLER_BENCH_REF: ${{ github.ref_name }}
+          CONTROLLER_BENCH_VARIANT: ${{ inputs.variant }}
+          CONTROLLER_BENCH_CACHE: ${{ inputs.cache_state }}
+          CONTROLLER_BENCH_TRIAL: ${{ inputs.trial }}
         run: python3 scripts/release_evidence.py security
 
   products:
@@ -125,6 +147,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          CONTROLLER_BENCH_REF: ${{ github.ref_name }}
+          CONTROLLER_BENCH_VARIANT: ${{ inputs.variant }}
+          CONTROLLER_BENCH_CACHE: ${{ inputs.cache_state }}
+          CONTROLLER_BENCH_TRIAL: ${{ inputs.trial }}
         run: python3 scripts/release_evidence.py products
 
   contracts:

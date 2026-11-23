@@ -64,7 +64,8 @@ jobs:
         if: inputs.expected_sha != ''
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: test "$GITHUB_REF" = refs/heads/main && test "$GITHUB_SHA" = "$EXPECTED_SHA"
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/codex/controller-perf-* ]] && test "$GITHUB_SHA" = "$EXPECTED_SHA"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: ${{ (github.event_name == 'workflow_dispatch' || inputs.profile == 'full') && 1 || 0 }}

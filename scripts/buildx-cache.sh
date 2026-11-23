@@ -24,6 +24,18 @@ shift 3
 [[ "${log_name}" =~ ^[A-Za-z0-9._-]+$ ]] || usage
 [[ "${export_cache}" == true || "${export_cache}" == false ]] || usage
 
+# Benchmark cache stays on this hosted runner and cannot evict shared caches.
+if [[ "${GITHUB_REF:-}" == refs/heads/codex/controller-perf-* ]]; then
+  if [[ "${BENCH_CACHE}" == warm && "$log_name" =~ ^controller-(transport|relay)- ]]; then
+    cache_dir="$CACHE_ROOT/$scope"
+    if [[ "$export_cache" == true ]]; then
+      exec docker buildx build --cache-to "type=local,dest=$cache_dir,mode=max" "$@"
+    fi
+    exec docker buildx build --cache-from "type=local,src=$cache_dir" "$@"
+  fi
+  exec docker buildx build "$@"
+fi
+
 strict_export="${BUILD_CACHE_STRICT_EXPORT:-false}"
 [[ "${strict_export}" == true || "${strict_export}" == false ]] || usage
 cache_mode="${BUILD_CACHE_MODE:-max}"
