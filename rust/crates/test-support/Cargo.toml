@@ -11,6 +11,7 @@ ed25519-dalek.workspace = true
 ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization", default-features = false }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 prost-types.workspace = true
+rustix.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [lints]

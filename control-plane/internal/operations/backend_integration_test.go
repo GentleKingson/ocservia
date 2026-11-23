@@ -535,7 +535,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 		t.Fatal("did not exercise one real deadlock rollback", attempts.Load())
 	}
 	for _, node := range nodes {
-		if got := f.count(t, `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1`, node[:]); got != 3 {
+		if got := f.count(t, `SELECT session_epoch FROM connection_owner_fencing WHERE node_id=$1`, node[:]); got != 3 {
 			t.Fatal("partial transaction leaked", got)
 		}
 	}

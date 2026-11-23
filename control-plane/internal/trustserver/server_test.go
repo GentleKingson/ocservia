@@ -30,11 +30,7 @@ func TestListenRejectsWritableParentDirectory(t *testing.T) {
 }
 
 func TestListenAcceptsPrivateOwnedParentDirectory(t *testing.T) {
-	workingDirectory, err := os.Getwd()
-	testutil.NoError(t, err)
-	parent, err := os.MkdirTemp(workingDirectory, ".trust-test-")
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	parent := testutil.PrivateTempDir(t)
 	listener, identity, err := listen(filepath.Join(parent, "trust.sock"))
 	testutil.NoError(t, err)
 	testutil.NoError(t, listener.Close())

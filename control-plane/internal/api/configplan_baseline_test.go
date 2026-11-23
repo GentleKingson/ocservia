@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
@@ -42,9 +45,29 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	if _, err := testfixture.InstallKey(ctx, pool, node); err != nil {
 		t.Fatal(err)
 	}
+	backend := postgres.WrapPool(pool)
 	ops := apiOperationService(pool)
-	certs := certificates.NewBackend(postgres.WrapPool(pool), ops, nil, nil, nil, commandauth.NewSignerFromSeed([32]byte{4}))
-	s := newTestServer(t, testHTTPConfig(true), postgres.WrapPool(pool), Modules{Operations: ops, ConfigPlans: configplan.NewBackend(postgres.WrapPool(pool), ops), Certificates: certs}, Authorization{})
+	certs := certificates.NewBackend(backend, ops, nil, nil, nil, commandauth.NewSignerFromSeed([32]byte{4}))
+	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: bytes.Repeat([]byte{7}, 32), SessionTTL: time.Hour})
+	testutil.NoError(t, err)
+	s := newTestServer(t, testHTTPConfig(false), backend, Modules{Operations: ops, ConfigPlans: configplan.NewBackend(backend, ops), Certificates: certs}, Authorization{Authentication: authn})
+	adminName, adminPass := "baseline-"+uuid.NewString(), "a unique long baseline fixture password"
+	adminID, err := authn.CreateLocalCredential(ctx, adminName, adminPass)
+	testutil.NoError(t, err)
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now())`, ws, adminID)
+	loginResp := authHTTPRequest(s, "POST", "login", fmt.Sprintf(`{"username":%q,"password":%q}`, adminName, adminPass), authTestOrigin)
+	if loginResp.Code != http.StatusNoContent || len(loginResp.Result().Cookies()) != 1 {
+		t.Fatalf("local login: %d %s", loginResp.Code, loginResp.Body)
+	}
+	cookie := loginResp.Result().Cookies()[0]
+	authedRequest := func(method, reqPath string, reqBody io.Reader) *http.Request {
+		r := baselineRequest(method, reqPath, reqBody)
+		r.Header.Del("Authorization")
+		r.Header.Set("Origin", authTestOrigin)
+		r.Header.Set("X-Workspace-ID", ws.String())
+		r.AddCookie(cookie)
+		return r
+	}
 	path := "/api/v1/nodes/" + node.String() + "/config-plans"
 	body := fmt.Sprintf(`{"expected_revision":0,"template":{"name":"baseline","directives":[`+
 		`{"name":"auth","value":"plain[passwd=/etc/ocserv/ocpasswd]"},`+
@@ -61,7 +84,7 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 		`{"name":"udp-port","value":"0"}`+
 		`]},"ttl_seconds":900,"reason":"HTTP baseline"}`, secretRef.String(), secretRef.String())
 	post := func(key string) *httptest.ResponseRecorder {
-		r := baselineRequest("POST", path, strings.NewReader(body))
+		r := authedRequest("POST", path, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("Idempotency-Key", key)
 		w := httptest.NewRecorder()
@@ -125,10 +148,10 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 		t.Fatalf("replay: %d %v %s", replay.Code, replay.Header(), replay.Body)
 	}
 	read := httptest.NewRecorder()
-	s.http.Handler.ServeHTTP(read, baselineRequest("GET", location, nil))
+	s.http.Handler.ServeHTTP(read, authedRequest("GET", location, nil))
 	assertBaselineJSON(t, read, w.Body.String())
 	operation := httptest.NewRecorder()
-	s.http.Handler.ServeHTTP(operation, baselineRequest("GET", "/api/v1/operations/"+plan.ID.String(), nil))
+	s.http.Handler.ServeHTTP(operation, authedRequest("GET", "/api/v1/operations/"+plan.ID.String(), nil))
 	if operation.Code != 200 || operation.Header().Get("ETag") != `"revision-1"` || operation.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("operation: %d %v %s", operation.Code, operation.Header(), operation.Body)
 	}

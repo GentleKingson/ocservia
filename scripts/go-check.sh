@@ -29,10 +29,10 @@ fi
 
 GO_MODULES=(control-plane signer)
 
-# The signer store refuses state under a group/world-writable ancestor such as
-# the default /tmp, so Go tests get a private temporary directory in the checkout.
-mkdir -p "${ROOT}/.cache"
-GO_TEST_TMPDIR="$(mktemp -d "${ROOT}/.cache/go-test-tmp.XXXXXX")"
+# The signer store and UDS tests refuse state under a group/world-writable
+# ancestor such as /tmp or a 0775 checkout, so Go tests use a private temporary
+# directory outside the repository tree.
+GO_TEST_TMPDIR="$(private_go_tmpdir go-test-tmp)"
 trap 'rm -rf -- "${GO_TEST_TMPDIR}"' EXIT
 export TMPDIR="${GO_TEST_TMPDIR}"
 

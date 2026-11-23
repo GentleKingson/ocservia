@@ -291,18 +291,25 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-migrate-repeat.log" 2>&1
     assert_local_bootstrap_schema "${container}" ocservia
+    # Verify schema-version drift rejection on a clean clone before business
+    # fixtures insert test-keyed audit rows into the shared database.
+    clone_database "${container}" ocservia ocservia_version_drift
+    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia_version_drift -c \
+      "INSERT INTO goose_db_version(version_id,is_applied) VALUES(9000001,true)" >/dev/null
+    if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
+      OCSERV_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_version_drift?sslmode=disable" \
+      "${BIN}" >"${TMP_ROOT}/pg${major}-version-rejected.log" 2>&1; then
+      echo 'controller accepted a schema version mismatch' >&2; exit 1
+    fi
+    if ! grep -Fq 'PostgreSQL schema version mismatch' "${TMP_ROOT}/pg${major}-version-rejected.log"; then
+      cat "${TMP_ROOT}/pg${major}-version-rejected.log" >&2
+      exit 1
+    fi
+    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'DROP DATABASE ocservia_version_drift' >/dev/null
     for group in regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-telemetry backend-policy-config backend-policy-certificates backend-policy-userstate backend-policy-useroperations; do
       OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
         checked_go_tests "${group}" --select -race -p 1 -parallel 1
     done
-    # Deliberate schema-version drift is last, after all current-schema business checks.
-    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "INSERT INTO goose_db_version(version_id,is_applied) VALUES(9000001,true)" >/dev/null
-    if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
-      OCSERV_DATABASE_URL="${runtime_url}" "${BIN}" >"${TMP_ROOT}/pg${major}-version-rejected.log" 2>&1; then
-      echo 'controller accepted a schema version mismatch' >&2; exit 1
-    fi
-    grep -Fq 'PostgreSQL schema version mismatch' "${TMP_ROOT}/pg${major}-version-rejected.log"
     required_cases="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
     echo "PostgreSQL ${major} regression: current migration, repeat migration, permissions and version guards passed"
     echo "Database acceptance required cases: backend=postgres${major} shard=regression passed=${required_cases} skipped=0"

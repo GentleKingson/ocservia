@@ -12,6 +12,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -44,15 +45,7 @@ func (s *blockingFetchServer) FetchArtifact(ctx context.Context, request *transp
 
 func startFetchServer(t *testing.T, server transportv1.TransportServiceServer) string {
 	t.Helper()
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory, err := os.MkdirTemp(filepath.Join(workingDirectory, "..", ".."), ".tc-fetch-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	directory := testutil.PrivateTempDir(t)
 	path := filepath.Join(directory, "transport.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {

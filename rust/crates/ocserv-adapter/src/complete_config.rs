@@ -563,11 +563,12 @@ mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         CompleteConfigDirective, NodeLocalTlsReference,
     };
+    use ocservia_test_support::PrivateTempDir;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
 
     struct Fixture {
-        directory: PathBuf,
+        directory: PrivateTempDir,
         bundle: PathBuf,
         adapter: Adapter,
         plan: CompleteConfigPlan,
@@ -605,15 +606,12 @@ mod tests {
         #[allow(clippy::too_many_lines)]
         fn new() -> Self {
             // /tmp is deliberately not trusted by the production ancestry checks.
-            let directory = std::env::current_dir()
-                .expect("cwd")
-                .join(format!(".complete-config-{}", Uuid::now_v7()));
-            std::fs::create_dir(&directory).expect("fixture directory");
-            let tls = directory.join("tls");
+            let directory = PrivateTempDir::new("cc");
+            let tls = directory.create_subdir_all("tls");
             let node = Uuid::now_v7();
             let reference = Uuid::now_v7();
-            let bundle = tls.join(reference.to_string()).join("v1");
-            std::fs::create_dir_all(&bundle).expect("TLS bundle");
+            let bundle = directory
+                .create_subdir_all(PathBuf::from("tls").join(reference.to_string()).join("v1"));
             write(&tls.join(".lock"), [], 0o600);
             let cert = bundle.join("server-cert.pem");
             let key = bundle.join("server-key.pem");
@@ -753,7 +751,7 @@ mod tests {
             assert!(
                 !result
                     .diff_redacted
-                    .contains(self.directory.to_str().expect("directory"))
+                    .contains(self.directory.path().to_str().expect("directory"))
             );
             assert!(!result.diff_redacted.contains("PRIVATE KEY"));
             let mut request = CompleteConfigApply {
@@ -767,12 +765,6 @@ mod tests {
             };
             request.plan_expires_at.get_or_insert_default().seconds = i64::MAX;
             request
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.directory).expect("remove owned fixture");
         }
     }
 

@@ -186,12 +186,7 @@ func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 }
 
 func TestLoadSignerRejectsUnsafeKeyPaths(t *testing.T) {
-	directory, err := os.MkdirTemp(".", ".command-key-test-")
-	testutil.NoError(t, err)
-	directory, err = filepath.Abs(directory)
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	testutil.NoError(t, os.Chmod(directory, 0o700))
+	directory := testutil.PrivateTempDir(t)
 	var seed [32]byte
 	seed[0] = 7
 	privateKey := ed25519.NewKeyFromSeed(seed[:])

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
 type termAwareGapHandler struct {
@@ -56,15 +57,7 @@ func TestNewRejectsTCPAndUnboundedConfiguration(t *testing.T) {
 }
 
 func TestClientRejectsForeignOwnedUnixServer(t *testing.T) {
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory, err := os.MkdirTemp(filepath.Join(workingDirectory, "..", ".."), ".tc-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	directory := testutil.PrivateTempDir(t)
 	path := filepath.Join(directory, "transport.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {

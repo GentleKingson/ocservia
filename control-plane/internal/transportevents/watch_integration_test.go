@@ -66,11 +66,7 @@ func (s *retainedEventServer) WatchEvents(request *transportv1.WatchEventsReques
 
 func newRetainedEventClient(t *testing.T, serverImpl *retainedEventServer) *transportclient.Client {
 	t.Helper()
-	socketRoot, err := os.MkdirTemp(filepath.Join("..", "..", ".."), ".watch-")
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
-	socketRoot, err = filepath.Abs(socketRoot)
-	testutil.NoError(t, err)
+	socketRoot := testutil.PrivateTempDir(t)
 	socketPath := filepath.Join(socketRoot, "transportd.sock")
 	listener, err := net.Listen("unix", socketPath)
 	testutil.NoError(t, err)

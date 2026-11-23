@@ -14,6 +14,7 @@ import (
 	"time"
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -148,15 +149,7 @@ func (h *bufferedGapHandler) captured() [][]byte {
 
 func newGapWatchClient(t *testing.T, server transportv1.TransportServiceServer, queueCapacity int) *Client {
 	t.Helper()
-	directory, err := os.MkdirTemp(filepath.Join("..", ".."), ".gap-watch-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory, err = filepath.Abs(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	directory := testutil.PrivateTempDir(t)
 	socketPath := filepath.Join(directory, "transportd.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {

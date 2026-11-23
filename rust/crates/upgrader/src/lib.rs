@@ -1825,6 +1825,8 @@ mod tests {
         let target = spool.join(NativePackage::Deb.filename("1.2.3", arch));
         fs::write(&old, b"1.0.0").unwrap();
         fs::write(&target, b"1.2.3").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
         let intent = new_intent(
             sha256_reader(&mut open_spool_file(&target).expect("target"))
                 .expect("authorized digest"),

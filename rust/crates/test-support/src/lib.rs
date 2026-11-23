@@ -6,8 +6,10 @@
 )]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -174,4 +176,219 @@ pub fn sign_command_envelope_v2(key: &SigningKey, command: &mut CommandEnvelope)
         .as_mut()
         .expect("authorization")
         .signature = signature.to_bytes().to_vec();
+}
+
+const MAX_UNIX_SOCKET_DIR_BYTES: usize = 80;
+
+/// RAII private `0700` temporary directory outside the repository checkout
+/// whose entire ancestor chain up to `/` is real, root-or-self owned, and
+/// neither group- nor world-writable (`mode & 0o022 == 0`).
+pub struct PrivateTempDir(PathBuf);
+
+impl PrivateTempDir {
+    pub fn new(prefix: &str) -> Self {
+        let base = resolve_private_temp_base(prefix);
+        let dir = create_unique_private_dir(&base, prefix);
+        Self(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.0.join(path)
+    }
+
+    /// Create every relative component under this directory with mode `0700`
+    /// so host `umask` never produces group-writable ancestors.
+    pub fn create_subdir_all(&self, relative: impl AsRef<Path>) -> PathBuf {
+        let mut current = self.0.clone();
+        for component in relative.as_ref().components() {
+            match component {
+                Component::Normal(part) => {
+                    current.push(part);
+                    match fs::DirBuilder::new().mode(0o700).create(&current) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(err) => {
+                            panic!("create private subdir {}: {err}", current.display());
+                        }
+                    }
+                    fs::set_permissions(&current, fs::Permissions::from_mode(0o700))
+                        .expect("chmod private subdir");
+                }
+                Component::CurDir => {}
+                other => panic!("create_subdir_all requires relative path, got {other:?}"),
+            }
+        }
+        current
+    }
+}
+
+impl AsRef<Path> for PrivateTempDir {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn repo_root() -> Option<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .parent()?
+        .canonicalize()
+        .ok()
+}
+
+fn candidate_bases() -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(dir) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dir));
+    }
+    // Intentionally use $HOME/.cache rather than $XDG_CACHE_HOME because
+    // scripts/env.sh sets XDG_CACHE_HOME inside the repository checkout.
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        let home_path = PathBuf::from(home);
+        let cache = home_path.join(".cache");
+        if home_path.is_dir() && !cache.exists() {
+            let _ = fs::DirBuilder::new().mode(0o700).create(&cache);
+            let _ = fs::set_permissions(&cache, fs::Permissions::from_mode(0o700));
+        }
+        candidates.push(cache);
+    }
+    candidates
+}
+
+fn select_private_base(
+    candidates: &[PathBuf],
+    repo: Option<&Path>,
+    prefix: &str,
+    uid: u32,
+) -> Option<PathBuf> {
+    for candidate in candidates {
+        let Ok(resolved) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if let Some(root) = repo
+            && resolved.starts_with(root)
+        {
+            continue;
+        }
+        if !has_safe_ancestry(&resolved, uid) {
+            continue;
+        }
+        if resolved.as_os_str().len() + prefix.len() + 20 > MAX_UNIX_SOCKET_DIR_BYTES {
+            continue;
+        }
+        return Some(resolved);
+    }
+    None
+}
+
+fn resolve_private_temp_base(prefix: &str) -> PathBuf {
+    let uid = rustix::process::geteuid().as_raw();
+    let repo = repo_root();
+    let candidates = candidate_bases();
+    select_private_base(&candidates, repo.as_deref(), prefix, uid).unwrap_or_else(|| {
+        panic!(
+            "no private temporary directory with non-group/world-writable ancestry outside the repository; set TMPDIR to a private 0700 directory"
+        )
+    })
+}
+
+fn has_safe_ancestry(path: &Path, uid: u32) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        let Ok(meta) = fs::symlink_metadata(dir) else {
+            return false;
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return false;
+        }
+        let owner = meta.uid();
+        if owner != 0 && owner != uid {
+            return false;
+        }
+        if meta.permissions().mode() & 0o022 != 0 {
+            return false;
+        }
+        current = dir.parent();
+    }
+    true
+}
+
+fn create_unique_private_dir(base: &Path, prefix: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    for _ in 0..1024 {
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("{prefix}-{pid}-{seq}"));
+        match fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+                    .expect("chmod private temp dir");
+                return dir;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => panic!("create private temp dir {}: {err}", dir.display()),
+        }
+    }
+    panic!("exhausted private temp dir names under {}", base.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_temp_dir_has_safe_ancestry_outside_repo_and_cleans_up() {
+        let uid = rustix::process::geteuid().as_raw();
+        let repo = repo_root().expect("repo root");
+        let created_path = {
+            let dir = PrivateTempDir::new("ts");
+            let path = dir.path().to_path_buf();
+            assert!(!path.starts_with(&repo), "must be outside repo checkout");
+            assert!(has_safe_ancestry(&path, uid), "must have safe ancestry");
+            assert_eq!(
+                fs::symlink_metadata(&path)
+                    .expect("dir meta")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            let nested = dir.create_subdir_all("a/b/c");
+            assert!(has_safe_ancestry(&nested, uid));
+            path
+        };
+        assert!(!created_path.exists(), "Drop must remove temp dir");
+    }
+
+    #[test]
+    fn selector_skips_world_writable_and_in_repo_candidates() {
+        let uid = rustix::process::geteuid().as_raw();
+        let repo = repo_root().expect("repo root");
+        let safe = PrivateTempDir::new("sel");
+        let candidates = vec![
+            PathBuf::from("/tmp"),
+            repo.clone(),
+            safe.path().to_path_buf(),
+        ];
+        let picked = select_private_base(&candidates, Some(&repo), "s", uid)
+            .expect("falls back to safe candidate");
+        assert_eq!(picked, fs::canonicalize(safe.path()).expect("canonical"));
+    }
 }

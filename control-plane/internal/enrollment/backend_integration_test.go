@@ -236,8 +236,9 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("prebound token consumed by another endpoint", err)
 	}
 	bootstrapRequest := enrollmentRequest(bootstrap.Value, bootstrapEndpoint)
-	past, future := time.Now().UTC().Add(-time.Hour), time.Now().UTC().Add(time.Hour)
-	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, past, future, bootstrap.ID)
+	now := time.Now().UTC()
+	created, past, future := now.Add(-2*time.Hour), now.Add(-time.Hour), now.Add(time.Hour)
+	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, created, future, bootstrap.ID)
 	if err := s.ValidateEnrollment(ctx, bootstrapRequest); err != nil {
 		t.Fatal("bootstrap expiry", err)
 	}
