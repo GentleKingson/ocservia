@@ -4,7 +4,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GENERATOR="${ROOT}/deploy/lib/quick-materials.sh"
+if [[ "${1:-}" == --generate ]]; then
+  shift
+  # shellcheck source=deploy/lib/quick-materials.sh
+  source "${ROOT}/deploy/lib/quick-materials.sh"
+  generate_materials "$@"
+  exit
+fi
 
 if ((EUID == 0)); then
   as_root() { "$@"; }
@@ -33,12 +39,8 @@ new_case() {
 
 generate() {
   as_root env OCSERV_SECRET_DIR="${case_dir}/secrets" OCSERV_SIGNER_SECRET_DIR="${case_dir}/signer" \
-    OCSERV_SIGNER_STATE_DIR="${case_dir}/signer-state" bash -s -- "${GENERATOR}" \
-    --root-ca-export-dir "${case_dir}/export" "$@" <<'RUN'
-source "$1"
-shift
-generate_materials "$@"
-RUN
+    OCSERV_SIGNER_STATE_DIR="${case_dir}/signer-state" bash "${BASH_SOURCE[0]}" --generate \
+    --root-ca-export-dir "${case_dir}/export" "$@"
 }
 
 expect_stat() {
