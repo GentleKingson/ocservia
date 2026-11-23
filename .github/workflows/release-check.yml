@@ -1,199 +1,56 @@
-name: Release Check
-run-name: Release Check v${{ inputs.version }}
+name: Hosted benchmark diagnostics
+run-name: Hosted benchmark diagnostics
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: Intended release version without v (X.Y.Z or X.Y.Z-rc.N)
-        type: string
-        required: true
-      contract_base_ref:
-        description: Optional prior commit or tag; defaults to the latest release tag before HEAD (or HEAD~1)
-        type: string
-        required: false
-        default: ''
 permissions:
   contents: read
-concurrency:
-  group: release-check-${{ github.sha }}
-  cancel-in-progress: false
+  actions: read
 env:
-  VERSION: ${{ inputs.version }}
+  BUILD_RUN_ID: '45213282067'
+  BUILD_SHA: 'faea568f93b19fbd7a40b950da142841ee59259b'
+  VERSION: '2.0.0-rc.1'
 jobs:
   prepare:
-    name: Prepare Release Check
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      contract_base_sha: ${{ steps.resolve.outputs.contract_base_sha }}
+      agent_id: ${{ steps.record.outputs.agent_id }}
+      agent_digest: ${{ steps.record.outputs.agent_digest }}
+      controller_id: ${{ steps.record.outputs.controller_id }}
+      controller_digest: ${{ steps.record.outputs.controller_digest }}
     steps:
-      - name: Require main branch and a release version
-        run: |
-          test "$GITHUB_REF" = refs/heads/main
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "$VERSION" != 0.0.0 ]]
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Resolve contract baseline
-        id: resolve
-        env:
-          INPUT_BASE: ${{ inputs.contract_base_ref }}
-        run: |
-          if [[ -n "$INPUT_BASE" ]]; then
-            base="$INPUT_BASE"
-          else
-            base="$(git describe --tags --abbrev=0 --match 'v*.*.*' 'HEAD~1' 2>/dev/null || git rev-parse 'HEAD~1')"
-          fi
-          base_sha="$(git rev-parse --verify --end-of-options "${base}^{commit}")"
-          head_sha="$(git rev-parse HEAD)"
-          if [[ "$base_sha" == "$head_sha" ]]; then
-            echo "contract_base_ref (${base}) must differ from HEAD (${head_sha})" >&2
-            exit 1
-          fi
-          echo "contract_base_sha=${base_sha}" >>"$GITHUB_OUTPUT"
-          printf 'Contract baseline: %s (%s)\n' "$base" "$base_sha" >>"$GITHUB_STEP_SUMMARY"
-
-  ci:
-    name: Resolve Basic CI evidence
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    permissions:
-      contents: read
-      actions: write
-    outputs:
-      quick_url: ${{ steps.evidence.outputs.quick_url }}
-      full_url: ${{ steps.evidence.outputs.full_url }}
-      contract_done: ${{ steps.evidence.outputs.contract_done }}
-      database_done: ${{ steps.evidence.outputs.database_done }}
-      database_smoke_done: ${{ steps.evidence.outputs.database_smoke_done }}
-      recovery_done: ${{ steps.evidence.outputs.recovery_done }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - id: evidence
+      - name: Find build receipt from benchmark run
+        id: find
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
-        run: python3 scripts/release_evidence.py ci
-
-  security:
-    name: Resolve security evidence
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    permissions:
-      contents: read
-      actions: write
-    outputs:
-      security_url: ${{ steps.evidence.outputs.security_url }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - id: evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: python3 scripts/release_evidence.py security
-
-  products:
-    name: Resolve dual-architecture release build
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    permissions:
-      contents: read
-      actions: write
-    outputs:
-      build_run_id: ${{ steps.evidence.outputs.build_run_id }}
-      build_attempt: ${{ steps.evidence.outputs.build_attempt }}
-      build_receipt_id: ${{ steps.evidence.outputs.build_receipt_id }}
-      build_url: ${{ steps.evidence.outputs.build_url }}
-      agent_amd64_id: ${{ steps.evidence.outputs.agent_amd64_id }}
-      agent_amd64_sha256: ${{ steps.evidence.outputs.agent_amd64_sha256 }}
-      controller_amd64_id: ${{ steps.evidence.outputs.controller_amd64_id }}
-      controller_amd64_sha256: ${{ steps.evidence.outputs.controller_amd64_sha256 }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - id: evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: python3 scripts/release_evidence.py products
-
-  contracts:
-    name: Release contract compatibility
-    needs: [prepare, ci]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.ci.outputs.contract_done != 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        if: needs.ci.outputs.contract_done != 'true'
-        with:
-          profiles: contracts
-          cache-npm: 'true'
-      - if: needs.ci.outputs.contract_done != 'true'
-        env:
-          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
-        run: bash scripts/check-breaking.sh "$CONTRACT_BASE_SHA"
-      - if: needs.ci.outputs.contract_done == 'true'
-        run: echo 'Reused the successful comparison against the release baseline.'
-
-  database:
-    name: Release database acceptance
-    needs: ci
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
-        with:
-          profiles: go-test
-      - if: needs.ci.outputs.database_done != 'true'
-        env:
-          PG_MAJOR: '18'
-          DATABASE_TEST_SCOPE: full
-        run: scripts/database-integration.sh
-      - if: needs.ci.outputs.database_done != 'true' && needs.ci.outputs.database_smoke_done != 'true'
         run: |
-          bash scripts/database-postgres-snapshot.sh check
-          bash scripts/test-postgres-volume-layout.sh
-      - if: needs.ci.outputs.recovery_done != 'true'
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/database-recovery-postgres
-        run: |
-          RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres-bundled" \
-            ARTIFACT_DIR="$ARTIFACT_DIR/bundled" bash scripts/postgres-backup-restore-smoke.sh
-          RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres" \
-            bash scripts/external-postgres-backup-restore-smoke.sh
-      - if: always() && needs.ci.outputs.recovery_done != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")
+          attempt=$(jq -er --arg sha "$BUILD_SHA" 'select(.head_sha == $sha and .status == "completed") | .run_attempt' <<<"$run")
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100" |
+            jq -e 'any(.jobs[]; .name == "assets" and .conclusion == "success")'
+          name="release-build-$BUILD_RUN_ID-$attempt"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100" |
+            jq -er --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | select(length == 1) | .[0].id')
+          printf 'receipt_id=%s\n' "$id" >>"$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
-          name: database-recovery-postgres-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/database-recovery-postgres
-          retention-days: 7
-      - if: needs.ci.outputs.database_done == 'true' && needs.ci.outputs.recovery_done == 'true'
-        run: echo 'Reused successful Full CI database acceptance and recovery.'
-
+          artifact-ids: ${{ steps.find.outputs.receipt_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BUILD_RUN_ID }}
+          path: ${{ runner.temp }}/receipt
+          merge-multiple: true
+      - name: Extract exact artifact coordinates
+        id: record
+        run: |
+          file="$RUNNER_TEMP/receipt/release-build.json"
+          jq -e --arg sha "$BUILD_SHA" --arg version "$VERSION" --argjson id "$BUILD_RUN_ID"             '.schema == 1 and .candidate.sha == $sha and .candidate.version == $version and .candidate.run_id == $id' "$file"
+          for kind in agent controller; do
+            id=$(jq -er --arg key "${kind}_amd64" '.products[$key].id | select(type == "number" and . > 0)' "$file")
+            digest=$(jq -er --arg key "${kind}_amd64" '.products[$key].manifest_sha256 | select(test("^[0-9a-f]{64}$"))' "$file")
+            printf '%s_id=%s\n%s_digest=%s\n' "$kind" "$id" "$kind" "$digest" >>"$GITHUB_OUTPUT"
   business:
     name: Business Smoke (amd64)
-    needs: [products, security]
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -204,25 +61,36 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ env.BUILD_SHA }}
           persist-credentials: false
-      - uses: ./.github/actions/download-release-product
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
-          run-id: ${{ needs.products.outputs.build_run_id }}
-          artifact-id: ${{ needs.products.outputs.agent_amd64_id }}
-          manifest-sha256: ${{ needs.products.outputs.agent_amd64_sha256 }}
-          kind: agent
-          version: ${{ inputs.version }}
-          arch: amd64
+          artifact-ids: ${{ needs.prepare.outputs.agent_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BUILD_RUN_ID }}
           path: ${{ runner.temp }}/business-packages
-      - uses: ./.github/actions/download-release-product
+          merge-multiple: true
+      - name: Verify exact agent artifact
+        env:
+          PRODUCT_PATH: ${{ runner.temp }}/business-packages
+          DIGEST: ${{ needs.prepare.outputs.agent_digest }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          python3 scripts/release-product-identity.py verify --kind agent --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
-          run-id: ${{ needs.products.outputs.build_run_id }}
-          artifact-id: ${{ needs.products.outputs.controller_amd64_id }}
-          manifest-sha256: ${{ needs.products.outputs.controller_amd64_sha256 }}
-          kind: controller
-          version: ${{ inputs.version }}
-          arch: amd64
+          artifact-ids: ${{ needs.prepare.outputs.controller_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BUILD_RUN_ID }}
           path: ${{ runner.temp }}/business-controller-images
+          merge-multiple: true
+      - name: Verify exact controller artifact
+        env:
+          PRODUCT_PATH: ${{ runner.temp }}/business-controller-images
+          DIGEST: ${{ needs.prepare.outputs.controller_digest }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          python3 scripts/release-product-identity.py verify --kind controller --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
       - uses: ./.github/actions/setup-tools
         with:
           profiles: npm-security
@@ -303,7 +171,7 @@ jobs:
 
   quick:
     name: Quick Install (Pebble ACME, amd64)
-    needs: [products, security]
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -312,16 +180,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ env.BUILD_SHA }}
           persist-credentials: false
-      - uses: ./.github/actions/download-release-product
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
         with:
-          run-id: ${{ needs.products.outputs.build_run_id }}
-          artifact-id: ${{ needs.products.outputs.controller_amd64_id }}
-          manifest-sha256: ${{ needs.products.outputs.controller_amd64_sha256 }}
-          kind: controller
-          version: ${{ inputs.version }}
-          arch: amd64
+          artifact-ids: ${{ needs.prepare.outputs.controller_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ env.BUILD_RUN_ID }}
           path: ${{ runner.temp }}/quick-controller-images
+          merge-multiple: true
+      - name: Verify exact controller artifact
+        env:
+          PRODUCT_PATH: ${{ runner.temp }}/quick-controller-images
+          DIGEST: ${{ needs.prepare.outputs.controller_digest }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          python3 scripts/release-product-identity.py verify --kind controller --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
       - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
           IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
@@ -329,45 +203,3 @@ jobs:
         run: |
           sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR \
             bash scripts/release-quick-acceptance.sh
-
-  result:
-    name: Release Check Result
-    needs: [prepare, ci, contracts, database, security, products, business, quick]
-    if: always()
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          if ! jq -e 'keys == ["business","ci","contracts","database","prepare","products","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
-            echo FAIL >>"$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Record the accepted build and checks
-        env:
-          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
-          QUICK_URL: ${{ needs.ci.outputs.quick_url }}
-          FULL_URL: ${{ needs.ci.outputs.full_url }}
-          SECURITY_URL: ${{ needs.security.outputs.security_url }}
-          BUILD_RUN_ID: ${{ needs.products.outputs.build_run_id }}
-          BUILD_ATTEMPT: ${{ needs.products.outputs.build_attempt }}
-          BUILD_RECEIPT_ID: ${{ needs.products.outputs.build_receipt_id }}
-        run: python3 scripts/release_evidence.py record-check
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: release-check-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/release-check.json
-          if-no-files-found: error
-          retention-days: 7
-      - env:
-          QUICK_URL: ${{ needs.ci.outputs.quick_url }}
-          FULL_URL: ${{ needs.ci.outputs.full_url }}
-          SECURITY_URL: ${{ needs.security.outputs.security_url }}
-          BUILD_URL: ${{ needs.products.outputs.build_url }}
-        run: |
-          printf 'PASS\n\n- Quick CI: %s\n- Security: %s\n- Build: %s\n' "$QUICK_URL" "$SECURITY_URL" "$BUILD_URL" >>"$GITHUB_STEP_SUMMARY"
-          if [[ -n "$FULL_URL" ]]; then printf -- '- Full CI: %s\n' "$FULL_URL" >>"$GITHUB_STEP_SUMMARY"; fi
