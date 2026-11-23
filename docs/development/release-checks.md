@@ -81,9 +81,8 @@ For a new workspace, run the supported bootstrap profile that matches your
 target check and host platform; tool versions come from
 [`toolchains.lock`](../../toolchains.lock) and downloads are verified against
 [`scripts/checksums.txt`](../../scripts/checksums.txt). `make bootstrap`
-installs the `all` profile, which most single-module edits do not need and
-which Linux ARM64 does not support (see
-[Linux ARM64 Go validation](#linux-arm64-go-validation)). Reuse a prepared
+installs the `all` profile, which most single-module edits do not need (see
+[Linux ARM64 Go validation](#linux-arm64-go-validation) for platform details). Reuse a prepared
 environment across changes. Direct `go`, `cargo` or `npm` runs need
 `source scripts/env.sh` first; the system versions are not the locked toolchain.
 The local development stack is started as described in the
@@ -110,7 +109,7 @@ baseline, not for small single-module edits. `make verify` (`scripts/verify.sh`)
 runs `scripts/lint.sh common` (ShellCheck, Ruff, Buf, OpenAPI lint,
 `check-public-repository.sh`, `docs-check.sh`), the Buf breaking-change check,
 `go-check.sh` in full mode, `rust-check.sh`, the transport and Agent boundary
-checks, `web-check.sh` in full mode, the policy and toolchain self-tests,
+checks, `web-check.sh` in full mode, the toolchain consistency self-test,
 `security-check.sh` (Gitleaks), `license-check.sh`, and the generated-code checks.
 It does not start database containers or
 run `make integration`, `make e2e`, the CI router/selector/bootstrap self-tests,
@@ -120,8 +119,9 @@ Pick the entry point that matches the behavior under test:
 
 - Quick database feedback:
   `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh`.
-  PostgreSQL smoke runs `TestDatabaseCoreSmoke`,
-  `TestDatabaseInitializationSmoke` and the enrollment restart check.
+  PostgreSQL smoke runs `TestControllerLockSessionLoss`,
+  `TestDatabaseCoreSmoke`, `TestDatabaseInitializationSmoke`, and the enrollment
+  restart check.
 - Full database migrations and failure scenarios: `make database-integration`
   (PostgreSQL, where `PG_MAJOR=all` and `18` both target PostgreSQL 18).
 - Local Go and transport integration: `make integration` runs
@@ -182,7 +182,7 @@ privd receipts have their own golden suites.
 Run the focused contract suites in an authorized, isolated checkout:
 
 ```bash
-(cd control-plane && go test -race -count=1 -skip Integration ./internal/commandauth ./internal/contractpolicy ./internal/privdattestation)
+(cd control-plane && go test -race -count=1 -skip Integration ./internal/commandauth ./internal/semanticpayload ./internal/privdattestation)
 (cd rust && cargo test --locked -p ocservia-contracts -p ocservia-command-authorization -p ocservia-privd-attestation)
 ```
 
@@ -234,9 +234,8 @@ The Rust interop test exercises the privd adapter and OpenSSL decryption, P12
 bundle creation, wrong-purpose rejection and idempotent replay against
 ciphertext produced by the Go HTTP handler from node-script key exports. It
 covers adapter interoperability only; full privd RPC and Controller end-to-end
-flows, registry image checks and live ocserv CRL enforcement belong to the
-extended Business integration profile (see
-[Business validation](#business-validation)). Unit and subprocess
+flows, registry image checks and live ocserv CRL enforcement belong to
+Business Smoke (see [Business validation](#business-validation)). Unit and subprocess
 fault-injection tests cover crash boundaries during preparation, signing,
 pre-commit and post-commit lost replies, concurrent duplicates, ledger
 corruption, recovery floors, TLS trust and SAN isolation, authentication,
@@ -410,8 +409,8 @@ The workflow file defines the matrices. The jobs and what they own:
 | `installers` | Installer (including host bootstrap) and Relay-launcher contract self-tests |
 | `web` | `web-check.sh basic`; no browser installation |
 | `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs` inside the version-matched Playwright container image (`PLAYWRIGHT_WORKERS=4`); Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
-| `database-smoke` | PostgreSQL 18.x; Quick runs smoke, Full runs full database acceptance; both enforce the SQL artifact window and snapshot equivalence (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
-| `database-recovery-full` | Bundled and external PostgreSQL physical backup/restore with snapshot provenance, Full only |
+| `database-smoke` | PostgreSQL 18.x; Quick runs smoke, Full runs full database acceptance; both enforce Goose migration artifact policy via `scripts/database-artifact-policy.sh` (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
+| `database-recovery-full` | Bundled and external PostgreSQL physical backup/restore with Goose version-history verification, Full only |
 | `Basic CI Result` | Always checks routing and the selected job results |
 
 Database service images stay pinned to exact patches and digests.
@@ -523,7 +522,7 @@ production secrets: full-history `scripts/security-check.sh` (including its
 Gitleaks rule regression check); `govulncheck ./...` in both Go modules;
 `cargo audit` against `rust/Cargo.lock` and `deploy/production/relay.Cargo.lock`
 with `cargo deny --locked check advisories bans licenses sources` across the
-Rust workspace; `npm audit --package-lock-only` against `web/package-lock.json`,
+Rust workspace; `npm audit --package-lock-only --ignore-scripts` against `web/package-lock.json`,
 including development dependencies; and `scripts/license-check.sh --skip-rust`
 for Go (`control-plane` and `signer`) and Web dependency licenses. Any scan
 failure fails the workflow and blocks Release Check when called from it.
@@ -590,9 +589,9 @@ because they need dedicated resources or systemd/privd/PKI fixtures:
 
 To reproduce the Go unit checks, Quick database smoke and the Full-only
 PostgreSQL backup/restore smoke scripts, run these against the candidate commit
-in an authorized, isolated environment. They omit docs, Rust, Web, the SQL
-artifact-window and snapshot steps, the PostgreSQL volume-layout check and the
-full database suite:
+in an authorized, isolated environment. They omit docs, Rust, Web, the
+PostgreSQL volume-layout check and the full database suite (Quick smoke still
+runs `database-artifact-policy.sh`):
 
 ```bash
 scripts/bootstrap.sh go-test
@@ -684,17 +683,15 @@ Inside an isolated environment with the repository's Rust toolchain, run:
 ```sh
 cd rust
 cargo test --locked -p ocservia-agent -p ocservia-transportd relay -- --nocapture
-cargo test --locked -p ocservia-agent fenced_agent_supervisor_redials_over_hot_standby_and_advances_epoch -- --nocapture
 cargo fmt --all -- --check
 ```
 
 The Relay test filter exercises URL parsing, normalized duplicate detection,
-forbidden URL rejection, token-file loading, and the default and disabled
-behavior of the transport library. The transport crate keeps generic
-multi-member and fenced-supervisor tests, but production installers and launch
-entry points admit only one Relay, so these tests certify neither multi-Relay
-deployments nor failover, and they do not validate an authenticated dedicated
-Relay deployment.
+forbidden URL rejection, token-file loading, and the default, disabled, and
+single-relay recovery behavior of the transport and agent crates. Production
+installers and launch entry points admit only one Relay, so these unit tests
+certify neither multi-Relay deployments nor failover, and they do not validate
+an authenticated dedicated Relay deployment.
 
 To check the installer contracts, use a disposable Linux container with Bash,
 Node, sudo, jq and Python, and run the scripts as an unprivileged user with
@@ -720,8 +717,7 @@ in the Agent CLI procedures; none of these checks resets identities or keys.
 
 `test-relay-launchers.py` swaps the fixed binary paths for argv recorders. Never run it on an installed host. In Basic CI, the installer and launcher self-tests run only when [path routing](#path-routing) sets the installer flag.
 
-To validate the Compose configuration and authentication/database contracts, export a unique `RUN_ID`, `ARTIFACT_DIR`
-and a private, owner-controlled `RUNNER_TEMP`, then run:
+To validate the Compose configuration and authentication/database contracts, run:
 
 ```sh
 bash scripts/test-production-auth-config.sh
@@ -731,12 +727,14 @@ bash scripts/docs-check.sh
 ### Network probe
 
 After building the current transportd runtime image (with its Relay launcher) and
-the authenticated iroh-relay image from `deploy/production/relay.Dockerfile`, run
+the authenticated iroh-relay image from `deploy/production/relay.Dockerfile`,
+render the Standalone production Compose JSON with
+`deploy/production/compose.sh config --format json > "$COMPOSE_JSON"` and run
 the probe on the disposable test host:
 
 ```sh
 python3 scripts/single-relay-network-smoke.py \
-  --compose-json "$ARTIFACT_DIR/platform-compose-single-empty.json" \
+  --compose-json "$COMPOSE_JSON" \
   --transport-image "$TRANSPORT_IMAGE" --relay-image "$RELAY_IMAGE" \
   --artifacts "$NETWORK_EVIDENCE" --cold-start
 ```
@@ -810,32 +808,28 @@ Recovery procedures and boundaries are in
 ### Recovery coverage and ownership
 
 Single-instance recovery checks run under the Business and database owners.
-Manual Release Check invokes Integrated Business Smoke with `run-resilience=true`.
+Manual Release Check invokes Integrated Business Smoke, which always runs all
+four resilience scenarios (`R1`–`R4`).
 
 | Check | Owner and entrypoint | Required observation |
 | --- | --- | --- |
-| R1 Controller stack | Business Smoke with `run-resilience` | Restart Controller and transport together; both ready, fresh Agent session and new authorized business succeeds. |
+| R1 Controller stack | Integrated Business Smoke | Restart Controller and transport together; both ready, fresh Agent session and new authorized business succeeds. |
 | R2 Agent stack | Same smoke environment | One systemd restart transaction for privd and its dependent Agent; both active, fresh session and unchanged identity. |
 | R3 Database interruption | Same smoke environment | Stop the bundled PostgreSQL container, require database-unavailable readiness, start it, recover readiness and Agent connectivity, then complete normal business. No outage mutation. External PostgreSQL databases have no Business-level recovery check. |
 | R4 Sole Relay interruption | Same smoke environment | Stop the only Relay, observe Agent offline with direct UDP blocked, restart Relay, acquire a fresh session and recover authorized business and VPN traffic. |
 
-The extended manual integration profile replaces R1 through R4 with deeper
-variants: separate Controller and transport restarts, mutations submitted during
-the outage, unsent offline queueing, idempotent replay, exact native reload
-counts, and cross-checks across the API, database, Agent journal and root
-receipts. Release Smoke does not require them. Full CI separately runs the full
-database suite and the bundled and external PostgreSQL backup/restore smoke
-scripts, which validate database-level recovery but not Controller, Agent or
-Relay restarts.
+Full CI separately runs the full database suite and the bundled and external
+PostgreSQL backup/restore smoke scripts, which validate database-level recovery
+but not Controller, Agent or Relay restarts.
 
 Acceptance relies on the Business job status and the scenario checkpoints in
 `result.json`; sanitized failure diagnostics are kept as seven-day Actions
 artifacts. Only `controller`, `agent`, `database` and `relay` are required
 checkpoints, with no synthetic overall checkpoint or standalone transport
-scenario, and each must finish and pass. Runs without resilience record
-`SKIPPED`. During Business runs the harness builds the Relay image from the
-candidate tree; the standalone [network probe](#network-probe) verifies transport
-reachability in isolation and does not exercise the business recovery chain. In
+scenario, and each must finish and pass. During Business runs the harness loads
+the prebuilt candidate Controller images (including `relay`) from `IMAGES_DIR`;
+the standalone [network probe](#network-probe) verifies transport reachability
+in isolation and does not exercise the business recovery chain. In
 every scenario the command pipeline still enforces owner/epoch/fence/lease
 validation, the transactional outbox, session and workspace-admin authorization, signatures, idempotent command IDs, the Agent SQLite journal and privd
 receipts. A queued offline command proven never sent must never be treated as
@@ -919,12 +913,12 @@ Run verification checks inside an authorized, isolated environment with all depe
 | --- | --- |
 | API adapters, session or Workspace | `test/api-client.test.ts`, request serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
 | Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-workflows.test.ts`; browser spec `e2e/node-forms.spec.ts` on desktop/mobile |
-| Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser spec `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [manual integration](#business-validation) |
+| Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser spec `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [Business validation](#business-validation) |
 | Audit, overview | Corresponding view/unit tests (`test/audit-view.test.ts`, `test/overview.test.ts`) and browser spec `e2e/apple-layout.spec.ts`; verify authorization, stale/empty states and Workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
-| ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts`; lint's prelint builds the generated client |
+| ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts` |
 
-`scripts/web-check.sh basic` builds the generated OpenAPI client and runs formatting checks, ESLint, typecheck, Vitest unit tests, the production Vite build, and generated-auth verification. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. Specs that exercise the development simulator (`development-simulation` and the first two `overview` tests) require a running backend stack; if the backend is not running, report those specs as not run. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
+`scripts/web-check.sh basic` runs formatting checks, ESLint (over `web/` and the root JS scripts), `vue-tsc --noEmit`, Vitest unit tests, and the production Vite build. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
 
 Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (and therefore does not provide Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/Workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and audit. `npm run test:e2e` executes all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; always report any project whose browser engine is not installed as not run.
 
@@ -1254,8 +1248,8 @@ docker run --rm --network "$RELAY_EGRESS_NETWORK" \
 ```
 
 This diagnostic is not single-node recovery acceptance and does not establish a
-real Agent command result; that chain belongs to the Business Smoke and
-extended harness (see [Resilience and capacity](#resilience-and-capacity)).
+real Agent command result; that chain belongs to Integrated Business Smoke
+(see [Resilience and capacity](#resilience-and-capacity)).
 
 ### Build rehearsal
 
