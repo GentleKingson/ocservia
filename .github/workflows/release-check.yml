@@ -1,245 +1,51 @@
-name: Hosted benchmark diagnostics
-run-name: Hosted benchmark diagnostics
+name: Hosted release gate verification
+run-name: Hosted release gate verification
 on:
   workflow_dispatch:
 permissions:
-  contents: read
   actions: read
-env:
-  BUILD_RUN_ID: '45213282067'
-  BUILD_SHA: 'faea568f93b19fbd7a40b950da142841ee59259b'
-  VERSION: '2.0.0-rc.1'
+  contents: read
 jobs:
-  prepare:
+  products:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    outputs:
-      agent_id: ${{ steps.find.outputs.agent_amd64 }}
-      controller_id: ${{ steps.find.outputs.controller_amd64 }}
-      agent_arm_id: ${{ steps.find.outputs.agent_arm64 }}
     steps:
-      - name: Find exact admitted artifacts from the benchmark jobs
-        id: find
-        env:
+      - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")
-          attempt=$(jq -er --arg sha "$BUILD_SHA" 'select(.head_sha == $sha and .status == "completed") | .run_attempt' <<<"$run")
-          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100")
-          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts?per_page=100")
-          for arch in amd64 arm64; do
-            for job in "Build Agent Packages" "Smoke Agent Packages" "Smoke Synthetic RC Lifecycle" "Build Controller Images"; do
-              name="build-$arch / $job ($arch)"
-              jq -e --arg name "$name" 'any(.jobs[]; .name == $name and .conclusion == "success")' <<<"$jobs"
-            done
-            for kind in agent controller; do
-              if [[ "$kind" == agent ]]; then prefix=agent-packages; else prefix=controller-images; fi
-              name="$prefix-$arch-$BUILD_RUN_ID-$attempt"
-              id=$(jq -er --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false and (.digest | test("^sha256:[0-9a-f]{64}$")))] | select(length == 1) | .[0].id' <<<"$artifacts")
-              printf '%s_%s=%s\n' "$kind" "$arch" "$id" >>"$GITHUB_OUTPUT"
-            done
-          done
-  assets:
-    name: Verify fixed asset assembly
-    needs: prepare
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45215897281/jobs?per_page=100" |
+            jq -e 'any(.jobs[]; .name == "Verify fixed asset assembly" and .conclusion == "success")'
+  security:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.BUILD_SHA }}
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.agent_id }}
-          github-token: ${{ github.token }}
-          run-id: ${{ env.BUILD_RUN_ID }}
-          path: ${{ runner.temp }}/agent-amd64
-          merge-multiple: true
-      - name: Verify exact Agent artifact (amd64)
+      - env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          path="$RUNNER_TEMP/agent-amd64"
-          digest="$(sha256sum "$path/product-identity.json" | cut -d' ' -f1)"
-          python3 scripts/release-product-identity.py verify --kind agent --directory "$path" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$digest"
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.agent_arm_id }}
-          github-token: ${{ github.token }}
-          run-id: ${{ env.BUILD_RUN_ID }}
-          path: ${{ runner.temp }}/agent-arm64
-          merge-multiple: true
-      - name: Verify exact Agent artifact (arm64)
-        run: |
-          path="$RUNNER_TEMP/agent-arm64"
-          digest="$(sha256sum "$path/product-identity.json" | cut -d' ' -f1)"
-          python3 scripts/release-product-identity.py verify --kind agent --directory "$path" --source "$BUILD_SHA" --version "$VERSION" --arch arm64 --manifest-sha256 "$digest"
-      - name: Prepare bootstrap and package assets
-        env:
-          ASSET_DIR: ${{ runner.temp }}/assets
-        run: |
-          mkdir -p "$ASSET_DIR"
-          for arch in amd64 arm64; do
-            find "$RUNNER_TEMP/agent-$arch" -maxdepth 1 -type f ! -name 'product-identity.json' -exec mv -t "$ASSET_DIR" -- {} +
-          done
-          scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends rpm cpio
-          scripts/validate-release-packages.sh
-      - name: Check pre-publication asset inventory
-        id: check-assets
-        run: python3 scripts/publish-release.py check-assets
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/45213282067/jobs?per_page=100" |
+            jq -e 'any(.jobs[]; .name == "security / Rust advisories" and .conclusion == "success")'
   business:
-    name: Business Smoke (amd64)
-    needs: prepare
+    name: Business Smoke job dependency
+    needs: [products, security]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      actions: read
-    env:
-      CONTROLLER_ARCH: amd64
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.BUILD_SHA }}
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.agent_id }}
-          github-token: ${{ github.token }}
-          run-id: ${{ env.BUILD_RUN_ID }}
-          path: ${{ runner.temp }}/business-packages
-          merge-multiple: true
-      - name: Verify exact agent artifact
-        env:
-          PRODUCT_PATH: ${{ runner.temp }}/business-packages
-        run: |
-          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
-          DIGEST="$(sha256sum "$PRODUCT_PATH/product-identity.json" | cut -d' ' -f1)"
-          python3 scripts/release-product-identity.py verify --kind agent --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.controller_id }}
-          github-token: ${{ github.token }}
-          run-id: ${{ env.BUILD_RUN_ID }}
-          path: ${{ runner.temp }}/business-controller-images
-          merge-multiple: true
-      - name: Verify exact controller artifact
-        env:
-          PRODUCT_PATH: ${{ runner.temp }}/business-controller-images
-        run: |
-          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
-          DIGEST="$(sha256sum "$PRODUCT_PATH/product-identity.json" | cut -d' ' -f1)"
-          python3 scripts/release-product-identity.py verify --kind controller --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: npm-security
-          cache-npm: 'true'
-      - name: Exercise Integrated Business Smoke with candidate products
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
-          PRODUCTS_DIR: ${{ runner.temp }}/business-packages
-          IMAGES_DIR: ${{ runner.temp }}/business-controller-images
-        run: |
-          sudo --preserve-env=ARTIFACT_DIR,VERSION,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,PRODUCTS_DIR,IMAGES_DIR \
-            bash scripts/release-business-probe.sh
-      - name: Return task-owned diagnostics and caches to the runner
-        if: always()
-        run: |
-          for path in "$RUNNER_TEMP/business-diagnostics" .cache .tools web/node_modules; do
-            if [[ -d "$path" && ! -L "$path" ]]; then
-              sudo chown -R -- "$(id -u):$(id -g)" "$path"
-            fi
-          done
-      - name: Summarize business timings and sanitized failures
-        if: always()
-        env:
-          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
-        run: |
-          if [[ -f "$DIAGNOSTICS/result.json" ]]; then
-            jq '{probe_status,last_stage,exit_code,timings,scenario_timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
-          fi
-          if [[ -f "$DIAGNOSTICS/api-checkpoints.jsonl" ]]; then
-            jq -c 'select(.name == "real_vpn_relay_recovery" or .name == "resilience_relay") | {name,time,status}' "$DIAGNOSTICS/api-checkpoints.jsonl"
-          fi
-          if [[ -f "$DIAGNOSTICS/probe.log" ]]; then
-            grep -E '^(RuntimeError:|AssertionError|probe failed at line)' "$DIAGNOSTICS/probe.log" || true
-          fi
-      - name: Require completed business and recovery scenarios
-        env:
-          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
-        run: |
-          test -s "$DIAGNOSTICS/probe.log"
-          if grep -rIEq '(obt2_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43})' "$DIAGNOSTICS"; then
-            echo 'diagnostics contain a node bootstrap token' >&2
-            exit 1
-          fi
-          jq -e '
-            . as $result |
-            .profile == "smoke" and .terminal == "revocation" and
-            .probe_status == "PASS" and .exit_code == 0 and
-            (.timings | type == "array" and length > 0) and
-            ([
-              "integrated_entry_and_internal_tls",
-              "production_signer_active_binding",
-              "bootstrap_token_enrollment_and_rerun_identity",
-              "real_browser_subset",
-              "config_apply_and_vpn_user",
-              "real_vpn_after_config_apply",
-              "real_node_revocation_and_disconnect"
-            ] - .passed_checkpoints | length) == 0 and
-            .resilience_requested == true and
-            .resilience_result == "PASS" and
-            .planned_topology.native_systemd_node == true and
-            (.resilience_scenarios | type == "array") and
-            all(["controller", "agent", "database", "relay"][];
-              . as $name |
-              ([$result.resilience_scenarios[] | select(.name == "resilience_" + $name)] | length == 1 and .[0].status == "PASS"))
-          ' "$DIAGNOSTICS/result.json" >/dev/null
-          jq -se 'any(.[]; .name == "production_signer_password_sealed" and .status == "PASS")' \
-            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
-          jq -se 'any(.[]; .name == "resilience_relay" and .status == "PASS" and .offline_queued_zero_side_effects == true and .idempotent_replay == true)' \
-            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
-      - name: Preserve business timings and sanitized diagnostics
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: business-smoke-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/business-diagnostics
-          if-no-files-found: warn
-          retention-days: 7
-
+      - run: exit 1
   quick:
-    name: Quick Install (Pebble ACME, amd64)
-    needs: prepare
+    name: Quick Install job dependency
+    needs: [products, security]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      actions: read
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.BUILD_SHA }}
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v7
-        with:
-          artifact-ids: ${{ needs.prepare.outputs.controller_id }}
-          github-token: ${{ github.token }}
-          run-id: ${{ env.BUILD_RUN_ID }}
-          path: ${{ runner.temp }}/quick-controller-images
-          merge-multiple: true
-      - name: Verify exact controller artifact
-        env:
-          PRODUCT_PATH: ${{ runner.temp }}/quick-controller-images
+      - run: exit 1
+  result:
+    name: Assert verified products and failed Security skip acceptance
+    needs: [products, security, business, quick]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
-          DIGEST="$(sha256sum "$PRODUCT_PATH/product-identity.json" | cut -d' ' -f1)"
-          python3 scripts/release-product-identity.py verify --kind controller --directory "$PRODUCT_PATH" --source "$BUILD_SHA" --version "$VERSION" --arch amd64 --manifest-sha256 "$DIGEST"
-      - name: Quick install, rerun, upgrade and rollback against Pebble
-        env:
-          IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
-          CONTROLLER_ARCH: amd64
-        run: |
-          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR \
-            bash scripts/release-quick-acceptance.sh
+          jq -e '.products.result == "success" and .security.result == "failure" and .business.result == "skipped" and .quick.result == "skipped"' <<<"$RESULTS"
