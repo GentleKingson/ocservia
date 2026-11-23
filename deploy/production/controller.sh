@@ -477,7 +477,7 @@ checkpoint_signer
 # Retrying the same release reapplies Compose and keeps the rollback target.
 if [[ ! -e "${CURRENT_RELEASE}" ]]; then
   jq '{current: ., previous: null}' "${STAGED_RELEASE}" >"${work}/history"
-elif cmp -s "${CURRENT_RELEASE}" "${STAGED_RELEASE}"; then
+elif jq -e --slurpfile current "${CURRENT_RELEASE}" '. == $current[0]' "${STAGED_RELEASE}" >/dev/null; then
   if [[ -e "${history}" ]]; then exit 0; fi
   previous="${PREVIOUS_RELEASE}"
   [[ -e "${previous}" ]] || previous=/dev/null

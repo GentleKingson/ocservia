@@ -1032,18 +1032,13 @@ Security or Business acceptance. Only the tag-triggered `publish` job receives
 environment, which is an approval and protection boundary without GitHub
 Deployment records.
 
-Published release artifacts are Agent archives, plain archive checksums, DEB and
-RPM packages, Controller container images, minimal Controller runtime bundles
+Published release artifacts are native Agent DEB and RPM packages, Controller container images, minimal Controller runtime bundles
 with published checksums, and the version-stamped bootstrap files consumed by
 the installers. Plain checksums guard against download corruption; they are not
 cryptographic signatures or a trust root. `controller-release.json` is the
 standard deployment configuration for Integrated lifecycle consumers.
 
-During SQL artifact builds, the tooling reads the current `schema.sql` headers to
-record PostgreSQL `database_migration` as `{"epoch": N, "revision": R}`, and the
-source commit binds the matching schema and upgrade files. Existing launchers
-also accept the positive integer format of earlier manifests, so generating a new
-manifest does not need historical migration files.
+The manifest generator records the highest numbered Goose migration in `control-plane/migrations/sql` as the revision in `database_migration`, with epoch 1. The source commit binds the embedded SQL.
 
 AgentUpgrade keeps the Controller-authorized `target_version`, `package_sha256`
 and `architecture` fields. Before protected staging, architecture verification,
@@ -1070,8 +1065,8 @@ RPM. Package validation has three separate scopes:
 
 1. Same-source relabeled native package lifecycle: without `PRODUCTS_DIR`,
    [`scripts/release-native-package-smoke.sh`](../../scripts/release-native-package-smoke.sh)
-   rebuilds the current checkout under synthetic version labels (`1.0.0 -> 1.0.1`
-   by default, or `1.2.0-rc.1 -> 1.2.0-rc.2 -> 1.2.0` with `RC_LIFECYCLE=true`)
+   rebuilds the current checkout under synthetic version labels (`2.0.0 -> 2.0.1`
+   by default, or `2.0.0-rc.1 -> 2.0.0-rc.2 -> 2.0.0` with `RC_LIFECYCLE=true`)
    on a disposable native systemd runner:
 
    ```bash
@@ -1079,17 +1074,13 @@ RPM. Package validation has three separate scopes:
      scripts/release-native-package-smoke.sh
    ```
 
-   It always builds and exercises real compiled binaries. The fixed `1.2.0`
-   sequence verifies DEB and RPM `~rc.N` version sorting, upgrade and rollback
-   state snapshots, and package scriptlet transitions. Relabeling one source
+   It always builds and exercises real compiled binaries. The multi-version sequence exercises installation, upgrade, downgrade, file ownership and package scriptlets. Relabeling one source
    tree does not prove cross-release binary upgrade compatibility.
 2. Current candidate product build and install smoke: in
    [`release-products.yml`](../../.github/workflows/release-products.yml),
    `PRODUCTS_DIR` and `VERSION` feed the candidate packages built for `VERSION`
    into `scripts/release-native-package-smoke.sh` on native `amd64` and `arm64`
-   runners, checking ELF architecture identity, fresh installation, same-version
-   reinstall and upgrade, rollback, package removal, state preservation and
-   rejection of corrupted archives. The build job uploads the package
+   runners, checking package ownership, binary versions, removal and state preservation. The build job uploads the package
    artifact before a separate smoke job downloads that exact immutable artifact
    ID. Release consumers wait for the smoke job but download the original
    artifact, so the privileged RPM systemd helper can affect only its disposable
@@ -1243,17 +1234,7 @@ the exact commit for every RC and final tag.
 After an RC's Release workflow has uploaded its assets, run
 [`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) against the
 published tag (`VERSION=<X.Y.Z-rc.N>`) on a disposable native runner to download the
-exact Release's Agent archive, SHA-256 sidecar, DEB, RPM and managed-node
-bootstrap over HTTPS, verify the archive checksum, and check the bootstrap's
-embedded Release version (`RELEASE_ASSET_DOWNLOAD=PASS`). It checks the
-downloaded script against release download/checksum contracts and feeds the
-downloaded packages to native installation Smoke, keeping the requested tag,
-architecture, exact URLs, downloaded hashes and logs without building or
-publishing assets (`latest`, branch names and `0.0.0` are rejected).
-
-This verifies published downloads and native package installation. Installer
-fault injection uses mocked host commands and is labeled separately; it does not
-repeat browser enrollment, automatic Controller activation or live Relay connectivity.
+exact release’s DEB, RPM and managed-node bootstrap over HTTPS. The smoke check validates the embedded release tag and installs the downloaded native packages. The summary records the requested version, architecture and asset URLs.
 
 ### Existing checks
 
@@ -1263,7 +1244,7 @@ repeat browser enrollment, automatic Controller activation or live Relay connect
 | Controller/transport, Agent/privd, bundled PostgreSQL and UDP-isolated sole-Relay offline-queue/exactly-once/idempotent-replay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Pebble ACME Quick Install, credential and root-CA custody, idempotent rerun, bootstrap resume, and `controller.sh` upgrade/rollback/upgrade | Quick Install (`release-check.yml`, `amd64`) |
-| DEB/RPM install, retry/removal, state preservation and unsafe-package rejection on `amd64`/`arm64` | Native package build/install smoke (Release Check and Release) |
+| DEB/RPM file ownership, install/removal and state preservation on `amd64`/`arm64` | Native package build/install smoke (Release Check and Release) |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Release Controller products (Release Check and Release) |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](#security-checks) | Security |
 | Fail-fast qualification, tagged-source build and GitHub/GHCR publication | Release |

@@ -123,7 +123,7 @@ services:
       OCSERV_RELAY_ROUTE_PREFIX: ${OCSERV_RELAY_ROUTE_PREFIX:-disabled}
       OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:-}
       OCSERV_ACME_DIRECTORY_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
-      SSL_CERT_FILE:
+      SSL_CERT_FILE: ${OCSERV_ACME_CA_FILE:+/run/secrets/acme_ca}
     secrets: [acme_ca]
     tmpfs:
       - /config:size=1m,mode=0700,uid=65532,gid=65532

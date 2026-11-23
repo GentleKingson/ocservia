@@ -7,7 +7,8 @@ work="$(mktemp -d "${HOME}/.ocservia-lifecycle.XXXXXX")"
 export OCSERV_CONTROLLER_STATE_ROOT="${work}/state"
 export OCSERV_CONTROLLER_COMPOSE_SH="${work}/compose.sh"
 export OCSERV_CONTROLLER_SMOKE_SH="${work}/health.sh"
-export COMPOSE_PROJECT_NAME="ocservia-history-$$" COMPOSE_FILE="${work}/compose.yaml"
+project="${work##*.}"
+export COMPOSE_PROJECT_NAME="ocservia-history-${project,,}" COMPOSE_FILE="${work}/compose.yaml"
 trap 'docker compose down --remove-orphans; rm -rf -- "${work}"' EXIT
 # Each release has the same immutable test image. The release label identifies
 # the container actually replaced by Compose during activation and rollback.
@@ -16,6 +17,7 @@ cat >"${COMPOSE_FILE}" <<'YAML'
 x-service: &service
     image: ${OCSERV_TEST_IMAGE}
     command: [sleep, infinity]
+    init: true
     healthcheck:
       test: [CMD, python, -V]
       interval: 1s
@@ -64,6 +66,8 @@ cmp "${history}" "${work}/confirmed"
 rm "${OCSERV_CONTROLLER_STATE_ROOT}/fail-smoke"
 "${ctl}" upgrade --release-file "${work}/2.0.1.json"
 jq -e '.current.release_version == "2.0.1" and .previous.release_version == "2.0.0"' "${history}" >/dev/null
+jq -S . "${work}/2.0.1.json" >"${work}/reordered.json"
+"${ctl}" upgrade --release-file "${work}/reordered.json"
 "${ctl}" rollback
 jq -e '.current.release_version == "2.0.0" and .previous.release_version == "2.0.1"' "${history}" >/dev/null
 "${ctl}" health
