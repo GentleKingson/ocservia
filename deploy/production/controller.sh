@@ -445,6 +445,16 @@ case "${command}" in
     exit ;;
 esac
 
+if [[ "${command}" == upgrade || "${command}" == rollback ]]; then
+  database_services=(backup)
+  [[ "${OCSERV_DATABASE_DEPLOYMENT}" != bundled ]] || database_services+=(postgres)
+  healthy="$("${COMPOSE_LAUNCHER}" ps --format json "${database_services[@]}" |
+    jq -rs '.[] | select(.State == "running" and .Health == "healthy") | .Service')"
+  for service in "${database_services[@]}"; do
+    grep -Fxq -- "${service}" <<<"${healthy}" || fail "${service} must be healthy before ${command}"
+  done
+fi
+
 "${COMPOSE_LAUNCHER}" pull
 record_deployment_profile
 if [[ "${command}" == install && "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then

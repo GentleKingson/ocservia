@@ -13,17 +13,21 @@ trap 'docker compose down --remove-orphans; rm -rf -- "${work}"' EXIT
 # the container actually replaced by Compose during activation and rollback.
 export OCSERV_TEST_IMAGE="python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df"
 cat >"${COMPOSE_FILE}" <<'YAML'
-services:
-  controller:
+x-service: &service
     image: ${OCSERV_TEST_IMAGE}
     command: [sleep, infinity]
-    labels:
-      release: ${OCSERV_CONTROL_IMAGE:-}
     healthcheck:
       test: [CMD, python, -V]
       interval: 1s
       timeout: 1s
       retries: 5
+services:
+  backup: *service
+  postgres: *service
+  controller:
+    <<: *service
+    labels:
+      release: ${OCSERV_CONTROL_IMAGE:-}
 YAML
 cat >"${OCSERV_CONTROLLER_COMPOSE_SH}" <<'SH'
 #!/usr/bin/env bash
