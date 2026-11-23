@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
@@ -83,6 +84,39 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	}
 	if manager.OwnsTerm(nodeID, next.ConnectionID, next.SessionEpoch) {
 		t.Fatal("closed session still reported owned")
+	}
+
+	// Simulate a Controller restart where transportd keeps an existing session
+	// open across the restart boundary and later delivers its Disconnected event
+	// to a fresh Manager with an empty in-memory session map.
+	restarted, err := manager.OpenSession(context.Background(), nodeID, endpointID)
+	if err != nil {
+		t.Fatalf("open session before restart: %v", err)
+	}
+	backend := postgres.WrapPool(pool)
+	successor, err := NewManagerBackend(backend, testLogger())
+	if err != nil {
+		t.Fatalf("new successor manager: %v", err)
+	}
+	if err := successor.CloseSession(context.Background(), nodeID, next.ConnectionID, next.SessionEpoch); err != nil {
+		t.Fatalf("close stale pre-restart session: %v", err)
+	}
+	state, err := connectionowner.ReadStateBackend(context.Background(), backend, nodeID)
+	if err != nil {
+		t.Fatalf("read state after stale close: %v", err)
+	}
+	if !state.Active || state.ConnectionID != restarted.ConnectionID || uint64(state.Epoch) != restarted.SessionEpoch {
+		t.Fatalf("stale close altered active owner state: %+v", state)
+	}
+	if err := successor.CloseSession(context.Background(), nodeID, restarted.ConnectionID, restarted.SessionEpoch); err != nil {
+		t.Fatalf("close active pre-restart session: %v", err)
+	}
+	state, err = connectionowner.ReadStateBackend(context.Background(), backend, nodeID)
+	if err != nil {
+		t.Fatalf("read state after restart close: %v", err)
+	}
+	if state.Active {
+		t.Fatalf("pre-restart session remained active after CloseSession: %+v", state)
 	}
 }
 

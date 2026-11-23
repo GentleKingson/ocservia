@@ -56,6 +56,7 @@ test.beforeEach(async ({ page }) => {
   await installConsoleMocks(page, {
     workspace: { id: workspaceId, name: "Rollout", slug: "rollout" },
     recommendedAgentVersion: recommended,
+    default404: true,
     nodes: [
       nodeRow(canaryNodeId, "node-a"),
       nodeRow(batchNodeId, "node-b"),

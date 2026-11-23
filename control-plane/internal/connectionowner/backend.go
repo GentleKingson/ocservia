@@ -28,21 +28,25 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID, conne
 	return &Term{nodeID: nodeID, connectionID: connectionID, epoch: epoch}, nil
 }
 
-func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) error {
+func ReleaseTermBackend(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte, epoch int64) error {
 	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := StoreFromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		return store.Release(ctx, t.nodeID, t.connectionID, t.epoch)
+		return store.Release(ctx, nodeID, connectionID, epoch)
 	})
-	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, t.nodeID, t.connectionID, t.epoch, false) == nil {
+	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, nodeID, connectionID, epoch, false) == nil {
 		err = nil
 	}
 	if errors.Is(err, database.ErrNotFound) {
 		return ErrNotOwner
 	}
 	return err
+}
+
+func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) error {
+	return ReleaseTermBackend(ctx, backend, t.nodeID, t.connectionID, t.epoch)
 }
 
 func confirmTerm(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte, epoch int64, active bool) error {
