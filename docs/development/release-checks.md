@@ -46,7 +46,7 @@ Validation converges onto four explicit tiers:
 | Tier | Purpose | Primary entrypoints |
 | --- | --- | --- |
 | Unit | Fast in-memory domain, protocol, UI, and CI-guard contract checks | `scripts/go-check.sh standard`, `make rust-check`, `scripts/web-check.sh basic`, `scripts/ci-tools-check.sh` |
-| Key Integration | Live PostgreSQL 18 schema/snapshot/API checks, native ocserv adapter integration, and Controller/Agent lifecycle suites | `scripts/database-postgres-snapshot.sh check`, `scripts/database-postgres-smoke.sh`, `DATABASE_TEST_SCOPE=full PG_MAJOR=18 scripts/database-integration.sh`, `scripts/native-ocserv-integration.sh` |
+| Key Integration | Live PostgreSQL 18 schema and API checks, native ocserv adapter integration, and Controller/Agent lifecycle suites | `scripts/database-postgres-smoke.sh`, `DATABASE_TEST_SCOPE=full PG_MAJOR=18 scripts/database-integration.sh`, `scripts/native-ocserv-integration.sh` |
 | Security Regressions | Single-admin workspace boundary, authentication/session, fencing/outbox regressions, secret scanning, and dependency/image vulnerability gates | `regression-*` groups in `scripts/required-go-tests.txt`, `scripts/security-check.sh`, `security.yml`, `release-products.yml` |
 | Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance & sole-Relay offline-queue recovery, and Pebble ACME Quick Install | `scripts/web-check.sh full` / `make e2e`, `release-check.yml` |
 
@@ -121,10 +121,7 @@ Pick the entry point that matches the behavior under test:
 - Quick database feedback:
   `DATABASE_TEST_SCOPE=smoke PG_MAJOR=18 scripts/database-integration.sh`.
   PostgreSQL smoke runs `TestDatabaseCoreSmoke`,
-  `TestDatabaseInitializationSmoke`, the enrollment restart check, and the
-  `postgres-snapshot` inventory. The local smoke command does not run the
-  v1.2.0 checkpoint comparison that CI adds (see
-  [SQL artifact acceptance](#sql-artifact-acceptance)).
+  `TestDatabaseInitializationSmoke` and the enrollment restart check.
 - Full database migrations and failure scenarios: `make database-integration`
   (PostgreSQL, where `PG_MAJOR=all` and `18` both target PostgreSQL 18).
 - Local Go and transport integration: `make integration` runs
@@ -202,36 +199,12 @@ are still caught.
 
 ### SQL artifact acceptance
 
-`scripts/database-artifact-policy.sh all` verifies that `control-plane/migrations`
-contains only `schema.sql` and `upgrade.sql`, that no legacy migration manifests
-remain, and that the shared marker parser and PostgreSQL 18 metadata checks
-pass. The prior release checkpoint stays pinned to v1.2.0 regardless of newer
-commits on main.
-
-In `scripts/required-go-tests.txt`, the `postgres-snapshot` inventory requires
-live PostgreSQL 18 execution where every listed test runs and passes with zero
-skips across both PostgreSQL smoke and Full CI. The snapshot suite verifies
-schema, ACL and seed equivalence between a fresh install and an upgrade from
-the v1.2.0 checkpoint, forward-only upgrades, zero-mutation rejection of unknown
-or tampered databases, raw checksum tampering detection, and PostgreSQL
-transactional rollback and locking. Never substitute a database-free run for it.
-
-Every database CI job fetches the v1.2.0 release history and runs
-`database-postgres-snapshot.sh check`. Full Basic CI also runs the physical
-PostgreSQL (external topology) backup/restore smoke script
-(`external-postgres-backup-restore-smoke.sh`), confirming that migration
-receipts survive backup, restore and repeated migration, and that restored
-PostgreSQL enforces runtime read access and owner-only DDL. Audit log
-authenticity, checkpointed-tail transitions and compaction remain required
-business checks.
-
-Before cutting over a major database change, qualify the exact candidate commit
-through Full Basic CI, Security, Business integration (with the production Signer
-and resilience enabled), and a build-only Release rehearsal, recording workflow
-URLs and commit SHAs. Branch diagnostic runs do not replace the main-branch
-Release Check, and publishing still requires explicit operator confirmation.
-Checkpoint and receipt identities are defined in the
-[upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
+`scripts/database-artifact-policy.sh postgres` checks the embedded PostgreSQL 18
+migration artifacts. Run `PG_MAJOR=18 scripts/database-integration.sh` against
+live PostgreSQL for schema initialization, runtime permissions, transaction
+checks and migration replay. The external PostgreSQL backup and restore smoke
+check verifies that the Goose version history survives a restore and that the
+restored runtime role can read but cannot perform owner-only DDL.
 
 ### Bundled PostgreSQL initialization
 
@@ -449,7 +422,7 @@ runtime DDL denial check so the Controller cannot pass with owner credentials.
 Smoke runs use `-count=1`, and explicit inventories fail if a required case is
 skipped (`required-go-tests.sh --smoke <package> <test>` checks only that the
 named top-level test ran and passed). Pull requests that touch PostgreSQL
-`schema.sql`, `upgrade.sql` or the migration runner should also run a candidate
+migration SQL or the migration runner should also run a candidate
 Full workflow before merging so `database-recovery-full` and full database
 acceptance execute.
 
@@ -571,7 +544,7 @@ optional `Cargo.lock` suffix and base toolchain fallback when `.tools/cargo`
 caches crates). Web CI, `contracts` checks and the license scan cache
 `.cache/npm` instead of `node_modules`, and Web jobs still run `npm ci`; the
 lockfile-only `npm audit` job skips `.cache/npm`. Rust jobs restore
-`rust/target/debug` and `rust/vendor/iroh/target/debug` with
+`rust/target/debug` with
 `CARGO_INCREMENTAL=0` and save them only on passing pushes to main, falling
 back to the matching Rust toolchain prefix when manifests or lockfiles change.
 Native Agent release builds save their isolated Rocky compilation cache only on
@@ -1161,20 +1134,10 @@ archive checksums keep their role.
 
 ## Database checkpoint release boundary
 
-Stable v1.2.0 is the single prior database checkpoint; its fixed source commit,
-epoch and revision numbers and schema receipts are specified in the
-[upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
-Databases on older releases must upgrade to v1.2.0 before moving to epoch 2, and
-commits landing on main do not shift that checkpoint.
-
-Any major database change must pass the
-[SQL artifact acceptance checks](#sql-artifact-acceptance), including
-fresh-install versus checkpoint-upgrade equivalence and both bundled and
-external PostgreSQL backup/restore smoke paths. A build-only Release run can
-validate package construction ahead of time,
-but a major release still needs a passing Release Check on the exact merged main
-commit before the operator tags it. Branch diagnostic runs and earlier release
-results do not satisfy that gate.
+The v2.0.0 baseline initializes fresh PostgreSQL 18 databases with Goose.
+Schema changes must pass the [SQL artifact acceptance checks](#sql-artifact-acceptance)
+and the bundled and external PostgreSQL backup and restore checks. The exact main
+commit must pass Release Check before tagging.
 
 ## Release notes and changelog
 

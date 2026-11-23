@@ -30,7 +30,10 @@ import {
 } from "../features/operations/state-tone";
 
 import { createReadRequest } from "../shared/read-request";
-import { createForegroundRefresh } from "../shared/foreground-refresh";
+import {
+  createForegroundRefresh,
+  isPageActive,
+} from "../shared/foreground-refresh";
 
 const route = useRoute();
 const { t } = useI18n();
@@ -47,11 +50,17 @@ const reads = createReadRequest();
 let sequence = 0;
 
 const activeStates = new Set(["queued", "running", "paused"]);
-const foregroundRefresh = createForegroundRefresh(async () => {
-  if (rollout.value === undefined || activeStates.has(rollout.value.state)) {
-    await refresh();
-  }
-}, 2000);
+const foregroundRefresh = createForegroundRefresh(
+  async () => {
+    if (rollout.value === undefined || activeStates.has(rollout.value.state)) {
+      await refresh();
+    }
+  },
+  2000,
+  () => {
+    reads.cancel();
+  },
+);
 
 const exclusions = computed(() => rollout.value?.excluded ?? []);
 
@@ -124,7 +133,7 @@ function reload(): void {
 
 async function refresh(): Promise<void> {
   // A read started before the resume response could restore the old state.
-  if (resuming.value) return;
+  if (resuming.value || !isPageActive()) return;
   const rolloutId = String(route.params.rolloutId ?? "");
   if (!rolloutId) return;
   const request = reads.begin();
@@ -139,7 +148,6 @@ async function refresh(): Promise<void> {
     unavailable.value = false;
     notFound.value = false;
     resumeBlocked.value = false;
-    if (!activeStates.has(value.state)) foregroundRefresh.stop();
   } catch (cause) {
     if (!request.current()) return;
     const status = cause instanceof ResponseError ? cause.response.status : 0;
@@ -150,6 +158,8 @@ async function refresh(): Promise<void> {
   } finally {
     if (request.finish()) {
       loading.value = false;
+      if (rollout.value && !activeStates.has(rollout.value.state))
+        foregroundRefresh.stop();
     }
   }
 }
@@ -176,9 +186,8 @@ async function resume(): Promise<void> {
     // a fresh read of the server state re-enables the action.
     resumeBlocked.value = true;
     resumeError.value =
-      cause instanceof ResponseError
-        ? cause.message
-        : t("rolloutResumeUnconfirmed");
+      (cause instanceof ResponseError && cause.message) ||
+      t("rolloutResumeUnconfirmed");
     resuming.value = false;
     foregroundRefresh.request();
   } finally {

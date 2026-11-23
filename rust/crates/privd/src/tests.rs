@@ -86,7 +86,7 @@ struct PrivdFixture {
 
 impl PrivdFixture {
     fn new() -> Self {
-        let dir = PathBuf::from("/tmp").join(format!("ocp-{}", Uuid::now_v7().simple()));
+        let dir = std::env::temp_dir().join(format!("ocp-{}", Uuid::now_v7().simple()));
         fs::create_dir(&dir).expect("create test dir");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod dir");
         let counter = dir.join("reload-count");

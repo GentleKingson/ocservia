@@ -171,31 +171,55 @@ func (c *Connection) ValidateRuntime(ctx context.Context) error {
 
 const controllerLockID int64 = 764057383691829797
 
-// AcquireControllerLock holds a PostgreSQL session advisory lock for the
-// lifetime of the Controller process so a second Controller cannot start
-// against the same database.
-func (c *Connection) AcquireControllerLock(ctx context.Context) (func(), error) {
-	conn, err := c.pg.Acquire(ctx)
+// AcquireControllerLock reserves a dedicated PostgreSQL session for this Controller.
+func (c *Connection) AcquireControllerLock(ctx context.Context) (monitor func(context.Context) error, release func(), err error) {
+	pooled, err := c.pg.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("acquire controller lock connection: %w", err)
+		return nil, nil, fmt.Errorf("acquire controller lock connection: %w", err)
+	}
+	conn := pooled.Hijack()
+	release = func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
 	}
 	var locked bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", controllerLockID).Scan(&locked); err != nil {
-		conn.Release()
-		return nil, fmt.Errorf("acquire controller advisory lock: %w", err)
+	if err = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", controllerLockID).Scan(&locked); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("acquire controller advisory lock: %w", err)
 	}
 	if !locked {
-		conn.Release()
-		return nil, errors.New("another Controller instance already holds the database advisory lock")
+		release()
+		return nil, nil, errors.New("another Controller instance already holds the database advisory lock")
 	}
-	return func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var unlocked bool
-		if err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", controllerLockID).Scan(&unlocked); err != nil || !unlocked {
-			_ = conn.Hijack().Close(unlockCtx)
-			return
+	return func(ctx context.Context) error {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+				var held bool
+				err := conn.QueryRow(probe, `SELECT EXISTS (
+					SELECT 1 FROM pg_locks WHERE locktype='advisory'
+					AND pid=pg_backend_pid() AND granted AND mode='ExclusiveLock'
+					AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+					AND classid=($1::bigint >> 32)::oid
+					AND objid=($1::bigint & 4294967295)::oid AND objsubid=1
+				)`, controllerLockID).Scan(&held)
+				cancel()
+				if ctx.Err() != nil {
+					return nil
+				}
+				if err != nil {
+					return fmt.Errorf("check controller advisory lock: %w", err)
+				}
+				if !held {
+					return errors.New("controller advisory lock ownership was lost")
+				}
+			}
 		}
-		conn.Release()
-	}, nil
+	}, release, nil
 }

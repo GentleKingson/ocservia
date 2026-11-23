@@ -120,10 +120,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		fault.armed.Store(true)
 		d := claimOutbox(t, service)
 		fault.armed.Store(true)
-		if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
+		if err := service.MarkSent(ctx, d); err != nil {
 			t.Fatal("bookkeeping readback", err)
 		}
-		if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
+		if err := service.MarkSent(ctx, d); err != nil {
 			t.Fatal("bookkeeping replay", err)
 		}
 		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='dispatched'`) != 1 {
@@ -220,7 +220,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				if err != nil || op.State != "unknown" {
 					t.Fatal(op, err)
 				}
-				if err := service.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope); err == nil {
+				if err := service.MarkSent(ctx, dispatch); err == nil {
 					t.Fatal("expired claim accepted")
 				}
 				if attempt == 3 {
@@ -266,7 +266,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			testutil.NoError(t, ingress.Ingest(ctx, event))
 		}
 		for range 2 {
-			if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
+			if err := service.MarkSent(ctx, d); err != nil {
 				t.Fatal("late bookkeeping", err)
 			}
 		}
@@ -360,7 +360,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Fatal("recovery retries were not claimed", jobs, err)
 			}
 			for _, job := range jobs {
-				testutil.NoError(t, service.MarkSentWithEnvelope(context.Background(), job, job.Envelope))
+				testutil.NoError(t, service.MarkSent(context.Background(), job))
 			}
 			// The retries are sent with no result yet: their leases are gone
 			// and their operations are still Unknown, but they are executing.
@@ -448,7 +448,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			if d.OperationID != id {
 				t.Fatal("released wrong operation", d)
 			}
-			testutil.NoError(t, service.MarkSentWithEnvelope(ctx, d, d.Envelope))
+			testutil.NoError(t, service.MarkSent(ctx, d))
 			// Repeated release/activation must not revive a published command.
 			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, change))
 			assertUnclaimed()

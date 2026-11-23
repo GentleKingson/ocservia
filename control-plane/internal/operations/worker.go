@@ -163,7 +163,7 @@ func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
 			return &sentDispatchError{err: err}
 		}
 	}
-	if err := w.service.MarkSentWithEnvelope(ctx, job, job.Envelope); err != nil {
+	if err := w.service.MarkSent(ctx, job); err != nil {
 		return &sentDispatchError{err: err}
 	}
 	return nil

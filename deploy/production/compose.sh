@@ -257,7 +257,7 @@ production_compose() {
       build|--build) echo "production lifecycle only consumes prebuilt images" >&2; return 2 ;;
     esac
   done
-  case "$1" in
+  case "${1:-}" in
     run|create|up)
       if [[ "${backup_checked}" == false ]]; then
         protected_directory "${OCSERV_BACKUP_DIR:-}" 999:999:700 '%u:%g:%a' || return
@@ -267,7 +267,7 @@ production_compose() {
       "${compose[@]}" --profile observability "$@"
       return ;;
   esac
-  if [[ "$1" == up ]]; then
+  if [[ "${1:-}" == up ]]; then
     if [[ "${otel_enabled}" == false ]]; then
       "${compose[@]}" --profile observability rm --stop --force otel-collector
     fi

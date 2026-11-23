@@ -156,14 +156,8 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if certificateVersion != request.CertificateVersion && !existingRequest {
 		return operations.Operation{}, false, ErrNotReady
 	}
-	if state == "revoked" {
-		exists, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
-		if err != nil {
-			return operations.Operation{}, false, err
-		}
-		if !exists {
-			return operations.Operation{}, false, ErrNotReady
-		}
+	if state == "revoked" && !existingRequest {
+		return operations.Operation{}, false, ErrNotReady
 	}
 	if state != "issued" && state != "expiring" && state != "expired" && state != "revoking" && state != "revocation_unknown" && state != "revoked" || serialNumber == "" {
 		return operations.Operation{}, false, ErrNotReady

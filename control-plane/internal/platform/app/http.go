@@ -36,7 +36,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 		}
 	}
 	server, err := api.NewServer(api.HTTPConfig{
-		Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
+		Context: life.ctx, Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
 		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
 		LocalSimulator: cfg.LocalSimulator, BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
 	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, modules,

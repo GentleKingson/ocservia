@@ -31,9 +31,8 @@ func newProvider(pool *pgxpool.Pool) (*goose.Provider, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("load embedded migrations: %w", err)
 	}
-	var cleanup func()
-	var db = stdlib.OpenDBFromPool(pool)
-	cleanup = func() { _ = db.Close() }
+	db := stdlib.OpenDBFromPool(pool)
+	cleanup := func() { _ = db.Close() }
 	provider, err := goose.NewProvider(
 		goose.DialectPostgres,
 		db,
@@ -95,7 +94,7 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 // Migrate applies all embedded goose migrations sequentially under an exclusive
 // PostgreSQL session advisory lock. Must be executed by the schema owner role.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	return withMigrationConnection(ctx, pool, func(conn *pgxpool.Conn) error {
+	return withMigrationConnection(ctx, pool, func(conn *pgx.Conn) error {
 		provider, cleanup, err := newProvider(pool)
 		if err != nil {
 			return err
@@ -143,18 +142,23 @@ func ValidateSchemaVersion(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*pgxpool.Conn) error) (result error) {
-	conn, err := pool.Acquire(ctx)
+func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*pgx.Conn) error) (result error) {
+	pooled, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
 	}
+	// Reserve the lock session outside the pool so Goose can borrow even
+	// when the caller configures pool_max_conns=1.
+	conn := pooled.Hijack()
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
 	lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	_, err = conn.Exec(lockCtx, "SELECT pg_advisory_lock($1)", migrationLockID)
 	cancel()
 	if err != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer closeCancel()
-		_ = conn.Hijack().Close(closeCtx)
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	defer func() {
@@ -163,9 +167,6 @@ func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*
 		var unlocked bool
 		err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockID).Scan(&unlocked)
 		if err != nil || !unlocked {
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer closeCancel()
-			_ = conn.Hijack().Close(closeCtx)
 			if result == nil {
 				if err != nil {
 					result = fmt.Errorf("unlock migrations: %w", err)
@@ -175,7 +176,6 @@ func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*
 			}
 			return
 		}
-		conn.Release()
 	}()
 	return run(conn)
 }

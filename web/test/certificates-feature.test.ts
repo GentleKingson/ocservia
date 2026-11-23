@@ -2,6 +2,7 @@ import { effectScope, ref, type EffectScope } from "vue";
 import type { Certificate, NodeObservedState, Operation } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperation } from "../src/api/operations";
+import { ResponseError } from "../src/api/transport";
 import { useNodeCertificates } from "../src/features/certificates/useNodeCertificates";
 
 const api = vi.hoisted(() => ({
@@ -100,6 +101,29 @@ describe("certificate feature without a page or store", () => {
     expect(feature.certificateGrant.value?.downloadToken).toBeUndefined();
     expect(trackOperation).toHaveBeenCalledExactlyOnceWith("export-operation");
   });
+
+  it.each([400, 409])(
+    "starts a new export after HTTP %s rejects the old intent",
+    async (status) => {
+      const { feature } = setup();
+      await feature.openCertificate();
+      feature.certificateReason.value = "original reason";
+      await feature.submitCertificateRequest();
+      api.createCertificateP12.mockRejectedValueOnce(
+        new ResponseError(new Response(null, { status })),
+      );
+      await feature.createP12();
+      const original: unknown = api.createCertificateP12.mock.calls[0]?.[1];
+      feature.certificateReason.value = "corrected reason";
+      api.createCertificateP12.mockRejectedValueOnce(new TypeError("network"));
+      await feature.createP12();
+      const revised: unknown = api.createCertificateP12.mock.calls[1]?.[1];
+      expect(revised).toMatchObject({ reason: "corrected reason" });
+      expect(
+        (revised as { artifactRequestId: string }).artifactRequestId,
+      ).not.toBe((original as { artifactRequestId: string }).artifactRequestId);
+    },
+  );
 
   it("keeps local forms and preserves CSR, issue and P12 inputs and tracking", async () => {
     const { feature, trackOperation } = setup();

@@ -109,6 +109,7 @@ type Store interface {
 	RolloutNodes(context.Context, uuid.UUID) ([]RolloutNode, error)
 	RolloutWorkspace(context.Context, uuid.UUID) (uuid.UUID, error)
 	FindRollout(context.Context, uuid.UUID, string) (uuid.UUID, []byte, error)
+	LockRolloutIntent(context.Context, uuid.UUID, string) error
 	InsertRollout(context.Context, PendingRollout) error
 	InsertRolloutNode(context.Context, uuid.UUID, RolloutNode, time.Time) error
 	ResumeRollout(context.Context, uuid.UUID, int, time.Time) (int64, error)

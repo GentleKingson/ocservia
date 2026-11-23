@@ -66,20 +66,21 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 	}
 }
 
-func TestValidateSentEnvelopeRequiresExactClaimedBytes(t *testing.T) {
+func TestDecodeClaimedEnvelopeRequiresMatchingIdentity(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	dispatch, sent := recoveryTestDispatch(t, now, 10*time.Minute)
-	if _, err := validateAndDecodeSentEnvelope(dispatch, sent); err != nil {
+	if _, err := decodeClaimedEnvelope(dispatch); err != nil {
 		t.Fatalf("valid send rejected: %v", err)
 	}
 
 	var changed agentv1.CommandEnvelope
 	testutil.NoError(t, proto.Unmarshal(sent, &changed))
-	changed.GetSyntheticEcho().Message = "changed"
+	changed.NodeId = nil
 	changedBytes, err := proto.Marshal(&changed)
 	testutil.NoError(t, err)
-	if _, err := validateAndDecodeSentEnvelope(dispatch, changedBytes); err == nil {
-		t.Fatal("sent envelope changed the semantic payload")
+	dispatch.Envelope = changedBytes
+	if _, err := decodeClaimedEnvelope(dispatch); err == nil {
+		t.Fatal("sent envelope changed the node identity")
 	}
 }
 

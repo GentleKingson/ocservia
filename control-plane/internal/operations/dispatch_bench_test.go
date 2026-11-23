@@ -43,7 +43,7 @@ func BenchmarkValidateSentEnvelope(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(sent)))
 			for b.Loop() {
-				if _, err := validateAndDecodeSentEnvelope(dispatch, sent); err != nil {
+				if _, err := decodeClaimedEnvelope(dispatch); err != nil {
 					b.Fatal(err)
 				}
 			}

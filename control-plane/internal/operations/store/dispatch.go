@@ -34,9 +34,8 @@ type DispatchStore interface {
 	LockDispatchOutbox(context.Context, Dispatch) error
 	DispatchStatus(context.Context, Dispatch) (DispatchStatus, error)
 	CompletedDispatch(context.Context, Dispatch) (DispatchStatus, error)
-	SaveTerminalEnvelope(context.Context, uuid.UUID, []byte) error
 	PublishDispatch(context.Context, Dispatch, time.Time) error
-	RecordDispatched(context.Context, Dispatch, []byte, bool, time.Time) error
+	RecordDispatched(context.Context, Dispatch, bool, time.Time) error
 	CloseDispatch(context.Context, Dispatch, time.Time) error
 	FailDispatch(context.Context, Dispatch, string, time.Time) error
 	QueueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (QueueMetrics, error)

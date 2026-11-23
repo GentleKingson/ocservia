@@ -179,7 +179,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	download, err := s.certificates.OpenArtifact(r.Context(), id, token, actor.IdentityID)
+	download, err := s.certificates.OpenArtifact(r.Context(), id, token, actor.IdentityID, actor.SessionID)
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return

@@ -69,17 +69,19 @@ generate_materials() (
   staging="${secret_dir}/.quick-ca"
   legacy_staging="${signer_dir}/.quick-ca"
 
-  # Publish a finished file with its final owner and mode by a pure rename. A
-  # failure (including a cross-device target) keeps the prepared material.
-  place() {
+  # Stage under root-owned work by default. Offline CA exports can be on a
+  # separate filesystem, so use the protected export directory for those.
+  place() (
     local source="$1" target="$2" owner="$3" mode="$4" temporary
-    temporary="$(mktemp "${stage}/place.XXXXXX")"
+    temporary="$(mktemp "${5:-${work}}/.place.XXXXXX")"
+    trap 'rm -f -- "${temporary}"' EXIT
+    trap 'exit 1' HUP INT TERM
     cat -- "${source}" >"${temporary}"
     chown "${owner}" -- "${temporary}"
     chmod "${mode}" -- "${temporary}"
     python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "${temporary}" "${target}" ||
       fail "atomic publication failed; keep prepared materials"
-  }
+  )
 
   # Write stdin to a missing target; existing targets are reused.
   put() {
@@ -254,10 +256,10 @@ generate_materials() (
     fingerprint="$(openssl x509 -in "${staging}/root-ca.crt" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' |
       tr 'A-F' 'a-f')"
     private_dir "${export_dir}" 0:0
-    place "${staging}/root-ca.crt" "${export_dir}/root-ca.crt" 0:0 0444
-    place "${staging}/root-ca.key.enc" "${export_dir}/root-ca.key.enc" 0:0 0400
+    place "${staging}/root-ca.crt" "${export_dir}/root-ca.crt" 0:0 0444 "${export_dir}"
+    place "${staging}/root-ca.key.enc" "${export_dir}/root-ca.key.enc" 0:0 0400 "${export_dir}"
     printf '%s  root-ca.crt\n' "${fingerprint}" >"${work}/fingerprint"
-    place "${work}/fingerprint" "${export_dir}/root-ca.sha256" 0:0 0444
+    place "${work}/fingerprint" "${export_dir}/root-ca.sha256" 0:0 0444 "${export_dir}"
     if [[ "${interactive}" == true ]]; then
       cat >&2 <<EOF
 The offline root CA was written to ${export_dir}:

@@ -97,11 +97,6 @@ func (s operationStore) CompletedDispatch(ctx context.Context, d operationstore.
 	return
 }
 
-func (s operationStore) SaveTerminalEnvelope(ctx context.Context, id uuid.UUID, envelope []byte) error {
-	_, err := s.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE id=$1 AND details_compacted_at IS NULL`, id, envelope)
-	return err
-}
-
 func (s operationStore) PublishDispatch(ctx context.Context, d operationstore.Dispatch, at time.Time) error {
 	n, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=$3,locked_by=NULL,locked_until=NULL,last_error=NULL
 		WHERE id=$1 AND locked_by=(SELECT worker_id FROM node_command_leases WHERE lease_token=$2)`, d.OutboxID, d.LeaseToken, at)
@@ -111,12 +106,12 @@ func (s operationStore) PublishDispatch(ctx context.Context, d operationstore.Di
 	return err
 }
 
-func (s operationStore) RecordDispatched(ctx context.Context, d operationstore.Dispatch, envelope []byte, unknown bool, at time.Time) error {
+func (s operationStore) RecordDispatched(ctx context.Context, d operationstore.Dispatch, unknown bool, at time.Time) error {
 	if unknown {
-		_, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,updated_at=$3 WHERE id=$1 AND state='unknown'`, d.CommandID, envelope, at)
+		_, err := s.Exec(ctx, `UPDATE commands SET updated_at=$2 WHERE id=$1 AND state='unknown'`, d.CommandID, at)
 		return err
 	}
-	if _, err := s.Exec(ctx, `UPDATE commands SET state='dispatched',envelope=$2,updated_at=$3 WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID, envelope, at); err != nil {
+	if _, err := s.Exec(ctx, `UPDATE commands SET state='dispatched',updated_at=$2 WHERE id=$1 AND state IN ('queued','unknown')`, d.CommandID, at); err != nil {
 		return err
 	}
 	if _, err := s.Exec(ctx, `UPDATE operations SET state='dispatched',version=version+1,updated_at=$2 WHERE id=$1 AND state='queued'`, d.OperationID, at); err != nil {

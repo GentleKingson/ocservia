@@ -283,6 +283,7 @@ export const i18n = createI18n({
       reloadOcserv: "Reload Ocserv",
       latestOperation: "Latest operation",
       stopTrackingOperation: "Stop tracking this operation",
+      operationTrackingFailed: "Could not update the operation status.",
       operationId: "Operation ID",
       state: "State",
       operationNode: "Node",

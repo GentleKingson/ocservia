@@ -277,11 +277,11 @@ function openPolicy(username: string): void {
             </Button>
           </div>
           <p
-            v-if="fleet.operationError"
+            v-if="fleet.operationError !== undefined"
             class="text-destructive m-0 text-sm break-words"
             role="alert"
           >
-            {{ fleet.operationError }}
+            {{ fleet.operationError || $t("operationTrackingFailed") }}
           </p>
         </div>
       </NodeObservedDetails>

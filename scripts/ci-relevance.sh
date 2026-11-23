@@ -139,7 +139,7 @@ classify_path() {
     .github/workflows/release*.yml)
       tools_suite guards; tools_suite release; run_installers=true ;;
     install.env.example|\
-    scripts/*release*|scripts/*controller*|scripts/*agent-upgrade*|\
+    scripts/*release*|scripts/*controller*|\
     scripts/build-agent-binaries.sh|\
     scripts/package-native-agent.sh|scripts/verify-bootstrap-endpoint.sh|\
     deploy/package/*|deploy/systemd/*|deploy/bootstrap/*|deploy/managed-node/*|\

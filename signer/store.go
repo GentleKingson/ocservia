@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -166,34 +165,6 @@ func (s *service) check() error {
 		if string(m.Get([]byte("version"))) != "1" || string(m.Get([]byte("issuer"))) != s.ca.id || string(m.Get([]byte("policy"))) != policy {
 			return invalidState
 		}
-		for _, name := range buckets[1:] {
-			if err := tx.Bucket([]byte(name)).ForEach(func(k, v []byte) error {
-				if v == nil || string(m.Get([]byte("sha256:"+name+":"+string(k)))) != digest(v) {
-					return invalidState
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		// Loop above verified every record in buckets[1:] matches its meta sha256 entry;
-		// verify no orphaned or non-data sha256 entries exist in meta without re-hashing.
-		if err := m.ForEach(func(k, v []byte) error {
-			if !strings.HasPrefix(string(k), "sha256:") {
-				return nil
-			}
-			parts := strings.SplitN(string(k), ":", 3)
-			if len(parts) != 3 || parts[1] == "meta" {
-				return invalidState
-			}
-			b := tx.Bucket([]byte(parts[1]))
-			if b == nil || b.Get([]byte(parts[2])) == nil {
-				return invalidState
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
 		if err := tx.Bucket([]byte("issued")).ForEach(func(k, v []byte) error {
 			var r issuance
 			id, err := uuid.Parse(string(k))
@@ -242,14 +213,7 @@ func audit(tx *bolt.Tx, action, id string) error {
 	if err != nil {
 		return err
 	}
-	return putRecord(tx, "audit", []byte(fmt.Sprintf("%020d", n)), data)
-}
-
-func putRecord(tx *bolt.Tx, bucket string, key, data []byte) error {
-	if err := tx.Bucket([]byte(bucket)).Put(key, data); err != nil {
-		return err
-	}
-	return tx.Bucket([]byte("meta")).Put([]byte("sha256:"+bucket+":"+string(key)), []byte(digest(data)))
+	return tx.Bucket([]byte("audit")).Put([]byte(fmt.Sprintf("%020d", n)), data)
 }
 
 func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
@@ -301,7 +265,7 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 			return err
 		}
 		result = candidate
-		if err := putRecord(tx, "issued", key, data); err != nil {
+		if err := tx.Bucket([]byte("issued")).Put(key, data); err != nil {
 			return err
 		}
 		if err := audit(tx, "issue", idStr); err != nil {
@@ -341,7 +305,7 @@ func (s *service) revoke(id, serial, reason string) error {
 		if err != nil {
 			return err
 		}
-		if err := putRecord(tx, "issued", []byte(id), data); err != nil {
+		if err := tx.Bucket([]byte("issued")).Put([]byte(id), data); err != nil {
 			return err
 		}
 		if err := audit(tx, "revoke", id); err != nil {

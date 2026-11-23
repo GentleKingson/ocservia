@@ -105,7 +105,7 @@ func (s *service) importBinding(approved, exported binding) error {
 		if err != nil {
 			return err
 		}
-		if err := putRecord(tx, "bindings", key, data); err != nil {
+		if err := tx.Bucket([]byte("bindings")).Put(key, data); err != nil {
 			return err
 		}
 		return audit(tx, "import", approved.NodeID)
@@ -127,7 +127,7 @@ func (s *service) disable(node string) error {
 		if err != nil {
 			return err
 		}
-		if err := putRecord(tx, "bindings", []byte(node), data); err != nil {
+		if err := tx.Bucket([]byte("bindings")).Put([]byte(node), data); err != nil {
 			return err
 		}
 		return audit(tx, "disable", node)

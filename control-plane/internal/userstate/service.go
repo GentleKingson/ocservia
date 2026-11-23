@@ -428,7 +428,7 @@ func requestDigest(request MutationRequest) idempotency.Digest {
 	return idempotency.New("desired-state", struct {
 		Intent                      any
 		ActorIdentity, ActorSession uuid.UUID
-	}{value, request.ActorIdentityID, request.ActorSessionID}, func() [32]byte { return idempotency.LegacyJSON("", value) })
+	}{value, request.ActorIdentityID, request.ActorSessionID})
 }
 
 func normalizeMembers(members []string) []string {

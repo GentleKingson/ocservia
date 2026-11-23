@@ -172,10 +172,8 @@ a Quick host, because Quick reruns accept an already-initialized database.
    [supported database deployment](production-deployment.md#database-support).
    Stop any incompatible older Controllers, then run the installed release's
    one-shot owner migration (`--migrate-only`). That command initializes an
-   empty database from `schema.sql` or applies bounded forward upgrades from
-   `upgrade.sql` against `schema_revisions` (accepting only current-epoch
-   receipts or the fixed `v1.2.0` checkpoint at epoch 1 / revision 0; older
-   databases must upgrade to `v1.2.0` first). Confirm that the migration
+   empty PostgreSQL 18 database and applies the embedded Goose SQL migrations.
+   Confirm that the migration
    process logged `database migrations complete` and exited cleanly, and that
    the Controller is ready. Run the remaining commands from the retained
    release runtime with the same effective exported production settings and
@@ -249,19 +247,15 @@ database UUID function that produces another UUID version).
 
 #### PostgreSQL
 
-Inspect the verified schema journal:
+Inspect the Goose migration history.
 
 ```sql
-SELECT epoch, revision, encode(checksum, 'hex') AS checksum, state, step
-FROM schema_revisions ORDER BY epoch, revision;
+SELECT version_id, is_applied, tstamp
+FROM goose_db_version ORDER BY id;
 ```
 
-Before applying forward SQL, owner initialization validates the supported epoch
-and revision, exact artifact receipts, and live schema structure, refusing
-unknown or modified history (never edit the journal manually). The
-previous-checkpoint window is pinned to `v1.2.0` at epoch 1 / revision 0, and
-Controller readiness checks live read queries and permissions directly without
-consulting legacy migration filename counters.
+The schema owner applies the embedded migrations. Controller startup requires
+the applied Goose version to match the version embedded in its binary.
 
 PostgreSQL stores workspace IDs as `uuid` and timestamps as `timestamptz`. On
 an empty database, create the management workspace:

@@ -20,7 +20,7 @@ export function newIdempotencyKey(): string {
 export class ResponseError extends Error {
   constructor(
     readonly response: Response,
-    message = "Response returned an error code",
+    message = "",
   ) {
     super(message);
   }
@@ -38,15 +38,36 @@ client.use({
       request.headers.set("Authorization", `Bearer ${devAuthToken}`);
     return request;
   },
-  onResponse({ response, schemaPath }) {
+  async onResponse({ response, schemaPath }) {
     if (schemaPath === "/auth/login") return;
     if (response.status === 401) redirectToLogin();
     // A failed audit verification is a structured result.
     if (
       !response.ok &&
       !(schemaPath === "/audit:verify" && response.status === 409)
-    )
-      throw new ResponseError(response);
+    ) {
+      let detail = "";
+      if (
+        response.headers
+          .get("content-type")
+          ?.includes("application/problem+json")
+      ) {
+        try {
+          const problem: unknown = await response.clone().json();
+          if (
+            problem &&
+            typeof problem === "object" &&
+            "detail" in problem &&
+            typeof problem.detail === "string"
+          ) {
+            detail = problem.detail;
+          }
+        } catch {
+          // Keep the HTTP status available for caller-specific handling.
+        }
+      }
+      throw new ResponseError(response, detail);
+    }
   },
 });
 

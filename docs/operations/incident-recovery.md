@@ -324,15 +324,15 @@ administration workflows. Editing `postgres-app-password`,
 `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` on disk
 does not update the password verifier stored inside PostgreSQL. Against
 `deploy/production/compose.yaml` (or the file named by
-`OCSERV_ROTATION_COMPOSE_FILE`), the script invokes `docker compose` directly
-instead of calling `compose.sh`, and requires that file to define the `postgres`
-and backup services. Test the procedure on a non-production copy first. If the
+`OCSERV_ROTATION_COMPOSE_FILE`), the script uses the `ocservia-production` Compose project and the
+`bundled-postgres` profile, which supplies the `postgres` and `backup` services. Test the procedure on a non-production copy first. If the
 script reports a missing or unknown service, or fails its initial credential
 check, stop immediately and preserve its output without retrying blindly.
 
 To rotate both runtime roles, create two single-link, launcher-owned password
 files (mode `0400` or `0600`) inside a launcher-owned mode-`0700` directory
-outside `OCSERV_SECRET_DIR`, and run:
+outside `OCSERV_SECRET_DIR`. In the retained runtime, load the same deployment
+settings and image digests used to start the Controller, then run:
 
 ```bash
 export OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE=/protected/new-app-password
@@ -440,7 +440,7 @@ automatic recovery of every Unknown mutation is promised.
 
 ## Database backup and restore
 
-Every backup must preserve the full `schema_revisions` table (see
+Every backup must preserve the full `goose_db_version` table (see
 [Schema provenance after restore](#schema-provenance-after-restore)) and the
 Local bootstrap marker table. A completed backup job alone is never recovery
 proof without a verified restore. The checks that must pass before cutover are
@@ -520,38 +520,21 @@ Neither substitutes for testing an actual production archive.
   PostgreSQL contract. It runs a TLS server outside the Controller network,
   verifies routing and hostname rejection, applies migrations prior to backup,
   confirms that `pg_verifybackup` catches corruption, restores into an isolated
-  server, compares the `schema_revisions` journal across a repeat owner
+  server, compares the `goose_db_version` journal across a repeat owner
   migration, and tests the restored runtime account's read and privilege
   boundaries.
 
 ### Schema provenance after restore
 
-Every backup must preserve the full `schema_revisions` table, including
-checksums, state, step progress, and timestamps. The runtime Controller and
-`/readyz` do not re-evaluate migration receipts, so a restored database is
-admitted only when the matching build's owner migration run (`--migrate-only`)
-validates it and confirms there are no unknown epochs, revisions, checksums, or
-schema drift. On a restored database, owner migration runs only supported
-forward SQL without replaying `schema.sql`. The receipt histories of fresh and
-checkpoint-upgraded databases, and where to read the current schema revision,
-are in [Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint)
-and [Database](../reference/stable-contracts.md#database).
+Every backup must preserve the full `goose_db_version` table. Verify the
+restore on isolated PostgreSQL 18 with the matching Controller build. Run
+`--migrate-only` using the schema owner, then confirm runtime startup validates
+the applied Goose version and opens under the restricted role.
 
-The only supported prior upgrade checkpoint is defined in
-[Upgrade checkpoint](../reference/stable-contracts.md#upgrade-checkpoint).
-Restoring a pre-checkpoint backup does not allow adopting or force-cleaning the
-schema. Likewise, any PostgreSQL instance that already contains user tables or
-data without a trusted receipt is rejected outright instead of being initialized
-in place. Rolling back across a schema change requires restoring a compatible
-backup paired with the matching binary, because reverse SQL migrations are never
-run against an upgraded database.
-
-This guide defines no in-place production schema repair. At runtime, the
-application database account can read receipts but lacks permission to modify the
-journal or run arbitrary DDL. Never manually update `schema_revisions` to mark
-in-flight work as verified. Legacy manifest or snapshot repair modes and their
-journals no longer exist and cannot replace the current artifact checksum
-verification.
+The [database contract](../reference/stable-contracts.md#database) describes the
+fresh v2.0.0 baseline. Rolling back across a schema change requires a compatible
+backup paired with the matching binary. The runtime role has read-only access to
+the migration history. Never edit `goose_db_version` to bypass verification.
 
 ## Database recovery
 

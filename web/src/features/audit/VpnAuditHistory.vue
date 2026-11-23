@@ -9,6 +9,15 @@ import { createReadRequest } from "@/shared/read-request";
 import SectionCard from "@/components/common/SectionCard.vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 const { t } = useI18n();
 const kind = ref<"sessions" | "network" | "observations">("sessions");
@@ -25,6 +34,11 @@ let submitted: ListVpnAuditRecordsRequest = {};
 const error = ref("");
 const reads = createReadRequest();
 onBeforeUnmount(reads.cancel);
+
+function setKind(value: unknown) {
+  if (value === "sessions" || value === "network" || value === "observations")
+    kind.value = value;
+}
 
 async function search(more = false) {
   const read = reads.begin();
@@ -68,12 +82,9 @@ async function search(more = false) {
 
 function duration(row: VpnAuditRecord) {
   const start = row.flowStartedAt ?? row.connectedAt;
-  return start
-    ? Math.max(
-        0,
-        Math.floor((Date.parse(row.lastSeenAt) - Date.parse(start)) / 1000),
-      )
-    : "—";
+  if (!start) return "—";
+  const seconds = (Date.parse(row.lastSeenAt) - Date.parse(start)) / 1000;
+  return Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : "—";
 }
 
 function download() {
@@ -100,11 +111,11 @@ function download() {
     >
       <label
         >{{ t("vpnAuditSource")
-        }}<select v-model="kind" class="block rounded-md border p-2">
+        }}<NativeSelect :model-value="kind" @update:model-value="setKind">
           <option value="sessions">{{ t("vpnAuditSessions") }}</option>
           <option value="observations">{{ t("vpnAuditSnapshots") }}</option>
           <option value="network">{{ t("vpnAuditNetwork") }}</option>
-        </select></label
+        </NativeSelect></label
       >
       <label v-if="kind === 'network'"
         >{{ t("vpnAuditDestinationIp") }}<Input v-model="destination"
@@ -132,66 +143,66 @@ function download() {
     </form>
     <p v-if="error" role="alert">{{ error }}</p>
     <p v-if="items && !items.length">{{ t("vpnAuditEmpty") }}</p>
-    <div v-if="items?.length" class="overflow-x-auto">
-      <table class="w-full text-left text-sm">
-        <caption class="text-left">
-          {{
-            t("vpnAuditCount", { count: items.length })
-          }}
-        </caption>
-        <thead>
-          <tr>
-            <th>{{ t("vpnAuditEvent") }}</th>
-            <th>{{ t("vpnAuditUser") }}</th>
-            <th>{{ t("vpnAuditNodeSession") }}</th>
-            <th>{{ t("vpnAuditSourceIp") }}</th>
-            <th>{{ t("vpnAuditVpnIp") }}</th>
-            <th>{{ t("vpnAuditConnected") }}</th>
-            <th>{{ t("vpnAuditObserved") }}</th>
-            <th v-if="displayed === 'observations'">
-              {{ t("vpnAuditAbsent") }}
-            </th>
-            <th v-if="displayed === 'network'">
-              {{ t("vpnAuditDestination") }}
-            </th>
-            <th v-if="displayed === 'network'">{{ t("vpnAuditFlowStart") }}</th>
-            <th>{{ t("vpnAuditDuration") }}</th>
-            <th>{{ t("vpnAuditRx") }}</th>
-            <th>{{ t("vpnAuditTx") }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="row in items"
-            :key="
-              row.eventId ??
-              [row.nodeId, row.sessionId, row.connectedAt].join('/')
-            "
-          >
-            <td>{{ row.eventType }}</td>
-            <td>{{ row.username }}</td>
-            <td>{{ row.nodeId }} / {{ row.sessionId }}</td>
-            <td>{{ row.clientIp }}</td>
-            <td>{{ row.vpnIp || "—" }}</td>
-            <td>{{ formatTimestamp(row.connectedAt) }}</td>
-            <td>{{ formatTimestamp(row.lastSeenAt) }}</td>
-            <td v-if="displayed === 'observations'">
-              {{ formatTimestamp(row.absentAt) }}
-            </td>
-            <td v-if="displayed === 'network'">
-              {{ row.destinationIp }} {{ row.destinationPort ?? "" }} /
-              {{ row.protocol }}
-            </td>
-            <td v-if="displayed === 'network'">
-              {{ formatTimestamp(row.flowStartedAt) }}
-            </td>
-            <td>{{ duration(row) }}</td>
-            <td>{{ row.bytesIn ?? "—" }}</td>
-            <td>{{ row.bytesOut ?? "—" }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <Table v-if="items?.length">
+      <caption class="text-left">
+        {{
+          t("vpnAuditCount", { count: items.length })
+        }}
+      </caption>
+      <TableHeader>
+        <TableRow>
+          <TableHead>{{ t("vpnAuditEvent") }}</TableHead>
+          <TableHead>{{ t("vpnAuditUser") }}</TableHead>
+          <TableHead>{{ t("vpnAuditNodeSession") }}</TableHead>
+          <TableHead>{{ t("vpnAuditSourceIp") }}</TableHead>
+          <TableHead>{{ t("vpnAuditVpnIp") }}</TableHead>
+          <TableHead>{{ t("vpnAuditConnected") }}</TableHead>
+          <TableHead>{{ t("vpnAuditObserved") }}</TableHead>
+          <TableHead v-if="displayed === 'observations'">
+            {{ t("vpnAuditAbsent") }}
+          </TableHead>
+          <TableHead v-if="displayed === 'network'">
+            {{ t("vpnAuditDestination") }}
+          </TableHead>
+          <TableHead v-if="displayed === 'network'">{{
+            t("vpnAuditFlowStart")
+          }}</TableHead>
+          <TableHead>{{ t("vpnAuditDuration") }}</TableHead>
+          <TableHead>{{ t("vpnAuditRx") }}</TableHead>
+          <TableHead>{{ t("vpnAuditTx") }}</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <TableRow
+          v-for="row in items"
+          :key="
+            row.eventId ??
+            [row.nodeId, row.sessionId, row.connectedAt].join('/')
+          "
+        >
+          <TableCell>{{ row.eventType }}</TableCell>
+          <TableCell>{{ row.username }}</TableCell>
+          <TableCell>{{ row.nodeId }} / {{ row.sessionId }}</TableCell>
+          <TableCell>{{ row.clientIp }}</TableCell>
+          <TableCell>{{ row.vpnIp || "—" }}</TableCell>
+          <TableCell>{{ formatTimestamp(row.connectedAt) }}</TableCell>
+          <TableCell>{{ formatTimestamp(row.lastSeenAt) }}</TableCell>
+          <TableCell v-if="displayed === 'observations'">
+            {{ formatTimestamp(row.absentAt) }}
+          </TableCell>
+          <TableCell v-if="displayed === 'network'">
+            {{ row.destinationIp }} {{ row.destinationPort ?? "" }} /
+            {{ row.protocol }}
+          </TableCell>
+          <TableCell v-if="displayed === 'network'">
+            {{ formatTimestamp(row.flowStartedAt) }}
+          </TableCell>
+          <TableCell>{{ duration(row) }}</TableCell>
+          <TableCell>{{ row.bytesIn ?? "—" }}</TableCell>
+          <TableCell>{{ row.bytesOut ?? "—" }}</TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
     <Button
       v-if="nextCursor"
       variant="outline"

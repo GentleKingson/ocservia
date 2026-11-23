@@ -213,11 +213,11 @@ def integrated_entry():
 
 def wait_for_relay_outage(node):
     # Stopping Relay does not immediately invalidate a buffered QUIC session.
-    wait_for('single Relay owner lease invalidation', lambda: sql(
+    wait_for('single Relay ownership invalidation', lambda: sql(
         "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
         f"WHERE node_id=decode('{node.replace('-', '')}','hex') "
-        "AND lease_until>clock_timestamp());") == 't')
-    record('single_relay_owner_lease_invalidated')
+        "AND active);") == 't')
+    record('single_relay_ownership_invalidated')
 
 
 def local():
@@ -372,13 +372,13 @@ def smoke_user():
 def owner():
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'].replace('-', '')
     return json.loads(sql("SELECT row_to_json(s) FROM (SELECT encode(connection_id,'hex') connection_id,"
-                          "owner_epoch FROM connection_owner_fencing "
-                          f"WHERE node_id=decode('{node}','hex')) s;"))
+                          "session_epoch FROM connection_owner_fencing "
+                          f"WHERE node_id=decode('{node}','hex') AND active) s;") or "null")
 
 
 def fresh_owner(before):
     current = owner()
-    return current if (current and current['owner_epoch'] > before['owner_epoch'] and
+    return current if (current and current['session_epoch'] > before['session_epoch'] and
                        current['connection_id'] != before['connection_id'] and
                        api('nodes/' + os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID'])['connection_state'] == 'online') else None
 
@@ -517,8 +517,8 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
     record('resilience_relay',
            operation_id=settled['id'],
            command_id=command,
-           before_epoch=before['owner_epoch'],
-           after_epoch=after['owner_epoch'],
+           before_epoch=before['session_epoch'],
+           after_epoch=after['session_epoch'],
            offline_queued_zero_side_effects=True,
            idempotent_replay=True)
 
@@ -618,15 +618,15 @@ def revocation():
     # The request settled exactly this revoked intent with its fenced update and close.
     assert sql("SELECT desired_state='revoked' AND update_applied AND close_required AND close_applied FROM node_trust_convergence "
                f"WHERE node_id='{node}' AND revision={int(revision)};") == 't'
-    wait_for('revoked owner lease invalidation', lambda: sql(
+    wait_for('revoked ownership invalidation', lambda: sql(
         "SELECT NOT EXISTS (SELECT 1 FROM connection_owner_fencing "
-        f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND lease_until>clock_timestamp());") == 't')
+        f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND active);") == 't')
     wait_for('revoked node offline', lambda: api(prefix)['connection_state'] == 'offline', seconds=180)
     # The same Agent process keeps redialing, and no new session is admitted.
     assert run('systemctl', 'show', 'ocservia-agent', '-p', 'MainPID', '--value').strip() == agent_pid
     assert run('systemctl', 'show', 'ocservia-agent', '-p', 'ActiveState', '--value').strip() == 'active'
     assert sql("SELECT count(*) FROM connection_owner_fencing "
-               f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND owner_epoch>{int(before['owner_epoch'])};") == '0'
+               f"WHERE node_id=decode('{node.replace('-', '')}','hex') AND session_epoch>{int(before['session_epoch'])};") == '0'
     ended = run('sudo', 'journalctl', '--no-pager', '-u', 'ocservia-agent', '--since', f'@{started}', '-o', 'cat').count(
         'controller connection ended')
     assert ended >= 1

@@ -160,15 +160,12 @@ func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.Com
 	return payload, expiresAt, nil
 }
 
-func validateAndDecodeSentEnvelope(dispatch Dispatch, encoded []byte) (*agentv1.CommandEnvelope, error) {
-	if len(encoded) == 0 || len(encoded) > 1<<20 {
+func decodeClaimedEnvelope(dispatch Dispatch) (*agentv1.CommandEnvelope, error) {
+	if len(dispatch.Envelope) == 0 || len(dispatch.Envelope) > 1<<20 {
 		return nil, errors.New("operations: sent command envelope size is invalid")
 	}
-	if !bytes.Equal(encoded, dispatch.Envelope) {
-		return nil, errors.New("operations: sent command envelope does not match claimed envelope")
-	}
 	var sent agentv1.CommandEnvelope
-	if err := proto.Unmarshal(encoded, &sent); err != nil {
+	if err := proto.Unmarshal(dispatch.Envelope, &sent); err != nil {
 		return nil, fmt.Errorf("decode sent command envelope: %w", err)
 	}
 	if !bytes.Equal(sent.GetCommandId(), dispatch.CommandID[:]) || !bytes.Equal(sent.GetOperationId(), dispatch.OperationID[:]) || !bytes.Equal(sent.GetNodeId(), dispatch.NodeID[:]) {
