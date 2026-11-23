@@ -12,10 +12,12 @@ case "${mode}" in
 esac
 
 if [[ "${mode}" == all || "${mode}" == --go-only ]]; then
-  if (cd "${ROOT}/control-plane" && go list -deps ./...) | grep -Eiq '(^|/)iroh($|/)'; then
-    echo "Go dependency graph must not contain Iroh" >&2
-    exit 1
-  fi
+  for module in control-plane signer; do
+    if (cd "${ROOT}/${module}" && go list -deps ./...) | grep -Eiq '(^|/)iroh($|/)'; then
+      echo "Go dependency graph (${module}) must not contain Iroh" >&2
+      exit 1
+    fi
+  done
 fi
 
 if [[ "${mode}" == all || "${mode}" == --rust-only ]]; then
