@@ -11,7 +11,7 @@ default = ["transport"]
 transport = ["dep:tonic", "dep:tonic-prost"]
 
 [dependencies]
-ocservia-canonical-cbor = { path = "../canonical-cbor" }
+ocservia-canonical-cbor = { version = "=0.1.0", path = "../canonical-cbor" }
 prost.workspace = true
 prost-types.workspace = true
 serde.workspace = true

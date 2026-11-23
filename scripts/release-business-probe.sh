@@ -84,6 +84,11 @@ cleanup() {
   if [[ -f "${work}/private.log" ]]; then
     {
       compose logs --no-color
+      if [[ -n "$(compose ps -q postgres 2>/dev/null)" ]]; then
+        echo '=== transport_event_quarantine ==='
+        compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c \
+          "SELECT observed_at, event_id, node_id, event_type, reason_code, reason_detail FROM transport_event_quarantine ORDER BY observed_at DESC LIMIT 50"
+      fi
       for service in control-plane transportd; do
         container="$(compose ps -a -q "${service}")"
         if [[ -n "${container}" ]]; then
@@ -153,8 +158,8 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay \
 record products_ready
 
 next_stage dependency_install
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
+sudo apt-get -o Acquire::Retries=3 update -qq
+sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
 
@@ -363,12 +368,41 @@ record native_node_services
 
 next_stage browser
 npm --prefix "${ROOT}/web" ci --ignore-scripts
-(cd "${ROOT}/web" && npx playwright install --with-deps chromium)
 mkdir -p "${HOME}/.pki/nssdb"
 if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
 certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
+pw_version="$(jq -r '.devDependencies["@playwright/test"]' "${ROOT}/web/package.json")"
+pw_version="${pw_version#^}"
+[[ "${pw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+pw_image="mcr.microsoft.com/playwright:v${pw_version}-noble"
+pw_pulled=false
+for attempt in 1 2 3; do
+  if docker pull -q "${pw_image}"; then
+    pw_pulled=true
+    break
+  fi
+  if ((attempt < 3)); then sleep $((attempt * 2)); fi
+done
+[[ "${pw_pulled}" == true ]]
 scenario browser_prepare
-NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
+docker run --rm --init --ipc=host --network=host \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  -v "${ROOT}:${ROOT}:ro" \
+  -v "${work}:${work}" \
+  -v "${ARTIFACT_DIR}:${ARTIFACT_DIR}" \
+  -v "${HOME}/.pki/nssdb:${HOME}/.pki/nssdb" \
+  -w "${ROOT}" \
+  -e "PATH=${ROOT}/.tools/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  -e "HOME=${HOME}" \
+  -e "NODE_EXTRA_CA_CERTS=${work}/ca.crt" \
+  -e "OCSERVIA_BUSINESS_TEST_WORK_DIR=${work}" \
+  -e "OCSERVIA_BUSINESS_TEST_NODE_ID=${OCSERVIA_BUSINESS_TEST_NODE_ID}" \
+  -e "OCSERVIA_BUSINESS_TEST_WORKSPACE_ID=${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" \
+  -e "OCSERV_CONTROLLER_PUBLIC_URL=${OCSERV_CONTROLLER_PUBLIC_URL}" \
+  -e "ARTIFACT_DIR=${ARTIFACT_DIR}" \
+  "${pw_image}" \
+  node "${ROOT}/scripts/release-business-browser.mjs"
 scenario browser_verify
 record real_browser_subset
 

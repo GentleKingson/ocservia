@@ -136,6 +136,7 @@ impl EffectStore {
         store.ensure_authorized_schema()?;
         store.ensure_artifact_schema()?;
         store.ensure_owner_fence_schema()?;
+        store.ensure_receipt_sequence_schema()?;
         store.validate_identity()?;
         Ok(store)
     }
@@ -247,6 +248,19 @@ impl EffectStore {
                    record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
                    updated_at INTEGER NOT NULL,
                    PRIMARY KEY(node_id, endpoint_id)
+                 ) STRICT;",
+            )
+            .map_err(sqlite_io)
+    }
+
+    fn ensure_receipt_sequence_schema(&self) -> Result<(), AdapterError> {
+        self.connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS receipt_sequence (
+                   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                   last_sequence INTEGER NOT NULL CHECK(last_sequence > 0),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL
                  ) STRICT;",
             )
             .map_err(sqlite_io)

@@ -2497,3 +2497,29 @@ fn effect_store_concurrent_writers_zero_busy() {
     assert_eq!(after.state, "available");
     assert_eq!(after.record_hmac, before.record_hmac);
 }
+
+#[test]
+fn receipt_sequence_is_monotonic_durable_and_tamper_checked() {
+    let dir = TempDir::new("receipt-seq");
+    let resources = dir.effect_resources();
+    let adapter = Adapter::new(resources.clone(), Limits::default());
+    assert_eq!(adapter.next_receipt_sequence().expect("seq 1"), 1);
+    assert_eq!(adapter.next_receipt_sequence().expect("seq 2"), 2);
+
+    // Survives adapter reopen with the same effect store.
+    let reopened = Adapter::new(resources.clone(), Limits::default());
+    assert_eq!(reopened.next_receipt_sequence().expect("seq 3"), 3);
+
+    // Tampering with the persisted counter fails closed.
+    let conn = rusqlite::Connection::open(dir.join("effects.sqlite3")).expect("open sqlite");
+    conn.execute(
+        "UPDATE receipt_sequence SET last_sequence = 1 WHERE singleton = 1",
+        [],
+    )
+    .expect("tamper counter");
+    drop(conn);
+    assert!(matches!(
+        reopened.next_receipt_sequence(),
+        Err(AdapterError::InvalidResource)
+    ));
+}

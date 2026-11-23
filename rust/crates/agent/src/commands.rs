@@ -221,10 +221,13 @@ async fn execute_external_command(
         CommandDeliveryMode::ReconcileOnly => {
             let response = session.privd.call_reconcile(envelope).await;
             if response.as_ref().ok().and_then(response_proof).is_some() {
-                let command = session
+                match session
                     .command_executor
-                    .begin_attested_recovery(envelope, context)?;
-                (command, Some(response))
+                    .begin_attested_recovery(envelope, context)?
+                {
+                    ExternalPreparation::Execute(command) => (command, Some(response)),
+                    ExternalPreparation::Replay(outcome) => return Ok(outcome),
+                }
             } else {
                 let observed =
                     observe_external_effect_with_reconcile(session.privd, envelope, Some(response))
