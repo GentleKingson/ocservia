@@ -12,6 +12,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
@@ -30,8 +31,8 @@ func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspace
 	return
 }
 
-func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, subject uuid.UUID) (ArtifactDownload, error) {
-	if id == uuid.Nil || subject == uuid.Nil || len(token) != 43 || s.artifacts == nil || s.grantSigner == nil {
+func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, subject, sessionID uuid.UUID) (ArtifactDownload, error) {
+	if id == uuid.Nil || subject == uuid.Nil || sessionID == uuid.Nil || len(token) != 43 || s.artifacts == nil || s.grantSigner == nil {
 		return ArtifactDownload{}, ErrArtifactDenied
 	}
 	tokenHash := sha256.Sum256([]byte(token))
@@ -41,6 +42,16 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
+			return err
+		}
+		workspaceID, _, err := store.Resource(ctx, id)
+		if errors.Is(err, database.ErrNotFound) {
+			return ErrArtifactDenied
+		}
+		if err != nil {
+			return err
+		}
+		if err := auth.AuthorizeMutationTx(ctx, tx, subject, sessionID, workspaceID); err != nil {
 			return err
 		}
 		if err = store.LockCapacity(ctx); err != nil {
@@ -88,7 +99,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 }
 
 func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, grant *agentv1.ArtifactGrantV1, digest []byte, size int64, actorID, sessionID uuid.UUID, requestID string) error {
-	if grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != 1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
+	if s.artifacts == nil || grant == nil || actorID == uuid.Nil || sessionID == uuid.Nil || requestID == "" || len(requestID) > 128 || grant.GetVersion() != 1 || grant.GetPurpose() != "certificate_p12" || grant.GetCertificateVersion() == 0 || grant.GetAuthorizedSubject() != actorID.String() || !bytes.Equal(grant.GetArtifactId(), id[:]) || !bytes.Equal(grant.GetGrantId(), grantID[:]) || len(digest) != sha256.Size || size < 1 || uint64(size) != grant.GetMaxBytes() {
 		return ErrArtifactDenied
 	}
 	nodeID, nodeErr := uuid.FromBytes(grant.GetNodeId())
@@ -106,6 +117,16 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.ArtifactFromTransaction(tx)
 		if err != nil {
+			return err
+		}
+		workspaceID, _, err := store.Resource(ctx, id)
+		if errors.Is(err, database.ErrNotFound) {
+			return ErrArtifactDenied
+		}
+		if err != nil {
+			return err
+		}
+		if err := auth.AuthorizeMutationTx(ctx, tx, actorID, sessionID, workspaceID); err != nil {
 			return err
 		}
 		changed, err := store.StartConsumption(ctx, consumption)

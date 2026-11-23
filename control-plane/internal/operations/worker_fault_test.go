@@ -134,7 +134,7 @@ func (s *faultOperationStore) PublishDispatch(context.Context, Dispatch, time.Ti
 	return nil
 }
 
-func (s *faultOperationStore) RecordDispatched(_ context.Context, d Dispatch, _ []byte, _ bool, _ time.Time) error {
+func (s *faultOperationStore) RecordDispatched(_ context.Context, d Dispatch, _ bool, _ time.Time) error {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	s.backend.records[d.CommandID].sent = true

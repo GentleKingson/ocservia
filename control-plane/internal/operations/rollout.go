@@ -202,9 +202,7 @@ func agentRolloutRequestDigest(target string, sorted []uuid.UUID, request Create
 		Intent                      any
 		ActorIdentity, ActorSession uuid.UUID
 		Reason                      string
-	}{intent, request.ActorIdentityID, request.ActorSessionID, strings.TrimSpace(request.Reason)}, func() [32]byte {
-		return idempotency.LegacyJSON("ocservia/agent-rollout/v1\x00", intent)
-	})
+	}{intent, request.ActorIdentityID, request.ActorSessionID, strings.TrimSpace(request.Reason)})
 }
 
 func rolloutFromRow(rollout rolloutRow, nodes []AgentRolloutNode) AgentRollout {
@@ -350,6 +348,9 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 		return AgentRollout{}, false, err
 	}
 	if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, request.WorkspaceID); err != nil {
+		return AgentRollout{}, false, err
+	}
+	if err := store.LockRolloutIntent(ctx, request.WorkspaceID, request.IdempotencyKey); err != nil {
 		return AgentRollout{}, false, err
 	}
 	existingID, existingHash, err := store.FindRollout(ctx, request.WorkspaceID, request.IdempotencyKey)

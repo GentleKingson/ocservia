@@ -72,7 +72,7 @@ export const useFleetStore = defineStore("fleet", () => {
   const userGroupState = shallowRef<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
   const operationTracking = ref(false);
-  const operationError = ref("");
+  const operationError = ref<string>();
   const loading = ref(false);
   const initialized = ref(false);
   const selecting = ref(false);
@@ -264,7 +264,7 @@ export const useFleetStore = defineStore("fleet", () => {
     const selectSequenceAtStart = selectReads.revision;
     const isLatestOperation = () => operationController === controller;
     const node = selected.value;
-    operationError.value = "";
+    operationError.value = undefined;
     try {
       let currentOperation = await create(node, controller.signal);
       if (!isLatestOperation()) return;
@@ -296,8 +296,7 @@ export const useFleetStore = defineStore("fleet", () => {
       }
     } catch (error) {
       if (!isLatestOperation() || controller.signal.aborted) return;
-      operationError.value =
-        error instanceof Error ? error.message : "Operation failed";
+      operationError.value = error instanceof Error ? error.message : "";
     } finally {
       if (operationController === controller) {
         operationController = undefined;

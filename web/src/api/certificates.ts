@@ -128,17 +128,13 @@ export async function downloadCertificateArtifact(
   artifactId: string,
   token: string,
 ): Promise<Blob> {
-  try {
-    const { data } = await client.GET("/artifacts/{artifact_id}", {
-      params: {
-        path: { artifact_id: artifactId },
-        header: { "X-Artifact-Token": token },
-      },
-      parseAs: "blob",
-    });
-    if (data) return data;
-  } catch (error) {
-    if (!(error instanceof ResponseError)) throw error;
-  }
-  throw new Error("Certificate artifact download failed");
+  const { data, response } = await client.GET("/artifacts/{artifact_id}", {
+    params: {
+      path: { artifact_id: artifactId },
+      header: { "X-Artifact-Token": token },
+    },
+    parseAs: "blob",
+  });
+  if (!data) throw new ResponseError(response);
+  return data;
 }

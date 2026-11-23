@@ -337,8 +337,13 @@ ensure_sealing_key() {
     echo "preserved existing ${purpose} sealing key"
     return
   fi
-  install -o root -g root -m 0600 -- /dev/null "${path}"
-  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${path}"
+  (
+    temporary="$(mktemp "${path}.XXXXXX")"
+    trap 'rm -f -- "${temporary}"' EXIT
+    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "${temporary}"
+    mv -nT -- "${temporary}" "${path}"
+    [[ ! -e "${temporary}" ]] || fail "the ${purpose} sealing key appeared during generation"
+  )
   echo "generated ${purpose} sealing key (${path})"
 }
 

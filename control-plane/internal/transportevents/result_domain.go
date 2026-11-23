@@ -72,14 +72,10 @@ func validateDispatchedResult(envelope *agentv1.CommandEnvelope, result *agentv1
 		return invalidCommandResult("command result semantic payload hash version mismatch")
 	}
 	if len(result.GetPayloadSha256()) == sha256.Size {
-		var expectedHash [sha256.Size]byte
-		var err error
-		switch resultHashVersion {
-		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
-			expectedHash, err = semanticpayload.HashV2(envelope)
-		case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED:
-			expectedHash, err = legacySyntheticPayloadHash(envelope)
+		if resultHashVersion != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 {
+			return invalidCommandResult("command result payload hash requires version 2")
 		}
+		expectedHash, err := semanticpayload.HashV2(envelope)
 		if err != nil {
 			return invalidCommandResult("stored command semantic payload cannot be hashed")
 		}

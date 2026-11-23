@@ -66,7 +66,7 @@ async function loadOperations(reset = true): Promise<void> {
     if (!request.current()) return;
     unavailable.value = true;
     error.value =
-      cause instanceof Error ? cause.message : t("operationsUnavailable");
+      (cause instanceof Error && cause.message) || t("operationsUnavailable");
   } finally {
     if (request.finish()) {
       loading.value = false;

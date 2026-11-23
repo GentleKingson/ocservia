@@ -72,6 +72,11 @@ func (s operationStore) RolloutWorkspace(ctx context.Context, id uuid.UUID) (wor
 	return
 }
 
+func (s operationStore) LockRolloutIntent(ctx context.Context, workspace uuid.UUID, key string) error {
+	_, err := s.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('ocservia/rollout/' || $1::uuid::text || '/' || $2::text, 0))`, workspace, key)
+	return err
+}
+
 func (s operationStore) FindRollout(ctx context.Context, workspace uuid.UUID, key string) (id uuid.UUID, hash []byte, err error) {
 	err = s.QueryRow(ctx, `SELECT id,request_hash FROM agent_rollouts WHERE workspace_id=$1 AND idempotency_key=$2`, workspace, key).Scan(&id, &hash)
 	return

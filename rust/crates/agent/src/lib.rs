@@ -986,7 +986,8 @@ fn validate_command(
     }
     let hash_version = SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
         .map_err(|_| CommandError::Rejected("semantic_hash_version_unsupported"))?;
-    let payload_hash = verify_semantic_payload_hash(envelope, hash_version)?;
+    let payload_hash = ocservia_command_authorization::verify_semantic_payload_hash(envelope)
+        .map_err(|error| CommandError::Rejected(error.code()))?;
     context
         .command_keys
         .verify(envelope)
@@ -999,27 +1000,6 @@ fn validate_command(
         result,
         external,
     })
-}
-
-fn verify_semantic_payload_hash(
-    envelope: &CommandEnvelope,
-    version: SemanticPayloadHashVersion,
-) -> Result<[u8; 32], CommandError> {
-    let recomputed = match version {
-        SemanticPayloadHashVersion::V2 => semantic_payload_hash_v2(envelope)?,
-        SemanticPayloadHashVersion::Unspecified => {
-            return Err(CommandError::Rejected("semantic_hash_version_unsupported"));
-        }
-    };
-    let expected: [u8; 32] = envelope
-        .semantic_payload_sha256
-        .as_slice()
-        .try_into()
-        .map_err(|_| CommandError::Rejected("semantic_payload_hash_missing"))?;
-    if recomputed != expected {
-        return Err(CommandError::Rejected("semantic_payload_hash_mismatch"));
-    }
-    Ok(recomputed)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1069,12 +1049,7 @@ fn validate_payload(
             true,
         ),
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.common_name.is_empty()
-                || payload.common_name.len() > 253
-                || payload.dns_names.len() > 32
-                || !matches!(payload.key_bits, 2048 | 3072 | 4096)
-            {
+            if payload.common_name.len() > 253 {
                 return Err(CommandError::Rejected("certificate_csr_invalid"));
             }
             ("ocserv.certificate.issue", Vec::new(), true)
@@ -1095,14 +1070,7 @@ fn validate_payload(
             )?;
             ("ocserv.certificate.issue", Vec::new(), true)
         }
-        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.reason.is_empty()
-                || payload.reason.len() > 128
-                || payload.certificate_version == 0
-            {
-                return Err(CommandError::Rejected("certificate_revoke_invalid"));
-            }
+        Some(command_envelope::Payload::CertificateRevoke(_)) => {
             ("ocserv.certificate.revoke", Vec::new(), true)
         }
         Some(command_envelope::Payload::UserCreate(payload)) => {

@@ -95,9 +95,14 @@ The bundle adds trusted root CAs; it is not a certificate pin. Rotating or remov
 
 ### Production Relay launcher
 
-To configure production relays during installation, set `INSTALL_PRODUCTION_RELAYS=true` and populate `/etc/ocservia-agent/relays.env` with the required HTTPS `RELAY_URL_A`. Production supports only one dedicated Relay. Install the relay token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode `0640`, or set `RELAY_ACCESS_TOKEN_SOURCE` so the installer can install it.
+Set `RELAY_URL_A` to the HTTPS URL of the dedicated production Relay. Install the
+token at `/etc/ocservia-agent/relay-access-token` as `root:ocserv-agent` mode
+`0640`, or pass its path in `RELAY_ACCESS_TOKEN_SOURCE`.
 
-The production drop-in executes the packaged fixed launcher `/usr/libexec/ocservia/ocservia-agent-relays`, which constructs a single Relay URL argument and replaces itself with the Agent, leaving base development units and direct binary invocations unchanged. Archive and native installations, upgrades, rollback snapshots, and uninstall all include this launcher. The lower-level package installer and upgrades preserve operator configuration and identity. Uninstall removes the launcher but retains configuration and state unless the existing purge option is used.
+The production drop-in runs the packaged
+`/usr/libexec/ocservia/ocservia-agent-relays` launcher. Native package upgrades
+preserve operator configuration and identity. Package removal retains
+configuration and state for recovery.
 
 ### Unattended installation and recovery
 

@@ -8,7 +8,7 @@ use ocservia_command_authorization::{
     VerifiedCommand, VerifiedSessionGrant,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SessionGrantV1, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SessionGrantV1, command_envelope,
 };
 use uuid::Uuid;
 
@@ -317,10 +317,10 @@ fn validate_privileged_payload(
     }
     match command.payload.as_ref() {
         Some(command_envelope::Payload::SessionDisconnect(payload)) => {
-            validate_session(&payload.session_id, &payload.boot_id)?;
+            validate_boot_id(&payload.boot_id)?;
         }
         Some(command_envelope::Payload::SessionTerminate(payload)) => {
-            validate_session(&payload.session_id, &payload.boot_id)?;
+            validate_boot_id(&payload.boot_id)?;
         }
         Some(command_envelope::Payload::IpBanRemove(payload)) => {
             let canonical = payload
@@ -344,11 +344,8 @@ fn validate_privileged_payload(
         }
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-            if payload.common_name.is_empty()
-                || payload.common_name.len() > 253
+            if payload.common_name.len() > 253
                 || !payload.common_name.is_ascii()
-                || !(2048..=8192).contains(&payload.key_bits)
-                || payload.dns_names.len() > 64
                 || payload
                     .dns_names
                     .iter()
@@ -362,43 +359,17 @@ fn validate_privileged_payload(
         }
         Some(command_envelope::Payload::CertificateRevoke(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-            if payload.certificate_version == 0 {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "certificate version invalid",
-                ));
-            }
         }
         Some(command_envelope::Payload::CertificateP12(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
             validate_uuid(&payload.artifact_id, "artifact ID invalid")?;
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::CertificateP12Password,
-            )?;
-            if payload.certificate_version == 0 || payload.artifact_expires_at.is_none() {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "P12 secret binding invalid",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::UserCreate(payload)) => {
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::UserPassword,
-            )?;
-        }
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::UserPassword,
-            )?;
         }
         Some(
             command_envelope::Payload::ServiceReload(_)
             | command_envelope::Payload::UserDisable(_)
             | command_envelope::Payload::UserEnable(_)
+            | command_envelope::Payload::UserCreate(_)
+            | command_envelope::Payload::UserPasswordRotate(_)
             | command_envelope::Payload::CompleteConfigPlan(_)
             | command_envelope::Payload::CompleteConfigApply(_),
         ) => {}
@@ -415,48 +386,10 @@ fn validate_privileged_payload(
     Ok(())
 }
 
-fn validate_sealed_secret(
-    secret: Option<&ocservia_contracts::generated::ocserv::platform::agent::v1::SealedSecretV1>,
-    purpose: SealedSecretPurpose,
-) -> Result<(), PrivdError> {
-    let secret =
-        secret.ok_or_else(|| error(ErrorKind::InvalidRequest, "sealed secret required"))?;
-    if secret.version != 1
-        || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(purpose)
-        || secret.key_id.is_empty()
-        || secret.key_id.len() > 128
-        || secret.ciphertext.len() < 32
-        || secret.ciphertext.len() > 16 * 1024
-    {
-        return Err(error(ErrorKind::InvalidRequest, "sealed secret invalid"));
-    }
-    Ok(())
-}
-
-/// Independently validates the immutable upgrade release identity carried by a
-/// Controller-signed command. Privd never trusts the Agent-side validation and
-/// never executes package installation at this boundary.
+/// Checks the host-specific policy after signed payload validation.
 fn validate_upgrade_release(
     payload: &ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade,
 ) -> Result<(), PrivdError> {
-    if !ocservia_contracts::agent_upgrade::valid_target_version(&payload.target_version) {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade target version invalid",
-        ));
-    }
-    if payload.package_sha256.len() != 32 {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade package digest invalid",
-        ));
-    }
-    if !ocservia_contracts::agent_upgrade::valid_architecture(&payload.architecture) {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade architecture invalid",
-        ));
-    }
     if ocservia_contracts::agent_upgrade::runtime_architecture()
         != Some(payload.architecture.as_str())
     {
@@ -468,14 +401,10 @@ fn validate_upgrade_release(
     Ok(())
 }
 
-fn validate_session(session_id: &str, boot_id: &str) -> Result<(), PrivdError> {
-    let parsed = session_id
-        .parse::<u64>()
-        .map_err(|_| error(ErrorKind::InvalidRequest, "session ID invalid"))?;
-    if parsed == 0 || parsed.to_string() != session_id || Uuid::parse_str(boot_id).is_err() {
-        return Err(error(ErrorKind::InvalidRequest, "session target invalid"));
-    }
-    Ok(())
+fn validate_boot_id(boot_id: &str) -> Result<(), PrivdError> {
+    Uuid::parse_str(boot_id)
+        .map(|_| ())
+        .map_err(|_| error(ErrorKind::InvalidRequest, "session target invalid"))
 }
 
 fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {

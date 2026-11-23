@@ -126,7 +126,7 @@ describe("API transport and session contracts", () => {
     });
     await expect(
       api.downloadCertificateArtifact("artifact-a", "grant"),
-    ).rejects.toThrow("Certificate artifact download failed");
+    ).rejects.toMatchObject({ response: { status: 401 } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(assign).toHaveBeenCalledExactlyOnceWith("/login");
     expect(storage.get("ocservia.login.return-to")).toBe(
@@ -134,6 +134,30 @@ describe("API transport and session contracts", () => {
     );
     expect(api.consumeLoginReturnPath()).toBe("/nodes?sort=name#detail");
     expect(storage.has("ocservia.login.return-to")).toBe(false);
+  });
+
+  it("keeps the problem detail, status and response body for download errors", async () => {
+    const api = await loadApi();
+    const body = {
+      type: "urn:artifact-expired",
+      detail: "This download has expired.",
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status: 410,
+        headers: { "Content-Type": "application/problem+json" },
+      }),
+    );
+
+    const result: unknown = await api
+      .downloadCertificateArtifact("artifact-a", "grant")
+      .catch((error: unknown) => error);
+    expect(result).toMatchObject({
+      message: body.detail,
+      response: { status: 410 },
+    });
+    const { response } = result as { response: Response };
+    await expect(response.json()).resolves.toEqual(body);
   });
 
   it("preserves a valid earlier return path across repeated 401 redirects", async () => {

@@ -138,9 +138,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: node
       - name: Require successful Release Check for the tag commit
         id: qualify-release
         env:

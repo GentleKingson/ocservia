@@ -159,11 +159,9 @@ state = {"relay_up": True, "epoch": 2, "conn": "aa" * 16, "reloads": 1, "journal
 recorded = []
 
 sc.single_relay_argv = lambda: None
-sc.owner = lambda: {"connection_id": state["conn"], "owner_epoch": state["epoch"]}
 sc.identity_digest = lambda: "id-digest"
 sc.native_service_pids = lambda: {"ocserv": 10, "ocservia-agent": 20, "ocservia-privd": 30}
 sc.node_side_effects = lambda: {"journal": state["journal"], "privd": state["privd"], "reloads": state["reloads"], "files": "same"}
-sc.wait_for_relay_outage = lambda node: None
 
 def fake_run(*args, **kwargs):
     if args == ("docker", "stop", "relay-test"):
@@ -190,6 +188,13 @@ def fake_api(path, body=None, *, status=200, headers=None, **kwargs):
     raise AssertionError(path)
 
 def fake_sql(query):
+    if "connection_owner_fencing" in query:
+        assert "active" in query and "lease_until" not in query and "owner_epoch" not in query, query
+        if "row_to_json" in query:
+            assert "session_epoch" in query, query
+            return json.dumps({"connection_id": state["conn"], "session_epoch": state["epoch"]}) if state["relay_up"] else ""
+        assert "NOT EXISTS" in query, query
+        return "f" if state["relay_up"] else "t"
     if "published_at IS NULL" in query:
         return "0" if state["published"] else "1"
     if "published_at IS NOT NULL" in query:
@@ -207,10 +212,10 @@ sc.cross_check = lambda op: {"database_state": "succeeded", "journal_count_state
 sc.record = lambda name, **kw: recorded.append((name, kw))
 
 sc.smoke_relay_recovery(lambda: True, outage_settle_seconds=0)
-assert len(recorded) == 1 and recorded[0][0] == "resilience_relay"
-assert recorded[0][1]["offline_queued_zero_side_effects"] is True
-assert recorded[0][1]["idempotent_replay"] is True
-assert recorded[0][1]["after_epoch"] > recorded[0][1]["before_epoch"]
+assert [name for name, _ in recorded] == ["single_relay_ownership_invalidated", "resilience_relay"]
+assert recorded[-1][1]["offline_queued_zero_side_effects"] is True
+assert recorded[-1][1]["idempotent_replay"] is True
+assert recorded[-1][1]["after_epoch"] > recorded[-1][1]["before_epoch"]
 '
 
 echo 'Release package supply-chain guards passed'

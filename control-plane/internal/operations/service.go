@@ -400,57 +400,48 @@ func requestDigest(r CreateRequest) idempotency.Digest {
 	// field that selects the target, effect, authorization action, actor, audit
 	// reason, revision, or delivery behavior is deliberately bound here.
 	intent := struct {
-		CompleteProfile      bool                   `json:"complete_profile,omitempty"`
-		MaterializedHash     string                 `json:"materialized_hash,omitempty"`
-		PlanExpiresAt        *timestamppb.Timestamp `json:"plan_expires_at,omitempty"`
-		NodeID               uuid.UUID              `json:"node_id"`
-		Kind                 Kind                   `json:"kind"`
-		Message              string                 `json:"message"`
-		SessionID            string                 `json:"session_id"`
-		BootID               string                 `json:"boot_id"`
-		IP                   string                 `json:"ip"`
-		ExpectedVersion      int64                  `json:"expected_version"`
-		SupersedePending     bool                   `json:"supersede_pending"`
-		HoldDispatch         bool                   `json:"hold_dispatch,omitempty"`
-		TTLSeconds           int64                  `json:"ttl_seconds"`
-		ActorID              string                 `json:"actor_id"`
-		Action               string                 `json:"action"`
-		Reason               string                 `json:"reason"`
-		ActorSessionID       uuid.UUID              `json:"actor_session_id"`
-		ActorIdentityID      uuid.UUID              `json:"actor_identity_id"`
-		CandidateHash        string                 `json:"candidate_hash"`
-		ExpectedCurrentHash  string                 `json:"expected_current_hash"`
-		DesiredRevision      uint64                 `json:"desired_revision"`
-		PlanID               uuid.UUID              `json:"plan_id"`
-		PlanRevision         uint64                 `json:"plan_revision"`
-		PlanTemplate         string                 `json:"plan_template"`
-		OcservVersion        string                 `json:"ocserv_version"`
-		PlanCapabilities     []string               `json:"plan_capabilities"`
-		CertificateID        uuid.UUID              `json:"certificate_id"`
-		CommonName           string                 `json:"common_name"`
-		DNSNames             []string               `json:"dns_names"`
-		KeyBits              uint32                 `json:"key_bits"`
-		ArtifactID           uuid.UUID              `json:"artifact_id"`
-		CertificateChainHash string                 `json:"certificate_chain_hash" cbor:"-"`
-		SealedPasswordHash   string                 `json:"sealed_password_hash" cbor:"-"`
-		SecretKeyID          string                 `json:"secret_key_id" cbor:"-"`
-		SecretVersion        int32                  `json:"secret_version" cbor:"-"`
-		SecretPurpose        int32                  `json:"secret_purpose" cbor:"-"`
-		CertificateVersion   uint64                 `json:"certificate_version"`
-		ArtifactTokenHash    string                 `json:"artifact_token_hash" cbor:"-"`
-		ArtifactRequestHash  string                 `json:"artifact_request_hash" cbor:"-"`
-		ArtifactExpiresAt    string                 `json:"artifact_expires_at" cbor:"-"`
-		RevocationReason     string                 `json:"revocation_reason"`
-		RolloutID            uuid.UUID              `json:"-" cbor:"rollout_id,omitempty"`
-		TargetVersion        string                 `json:"target_version"`
-		PackageSHA256        string                 `json:"package_sha256"`
-		Architecture         string                 `json:"architecture"`
+		CompleteProfile     bool                   `json:"complete_profile,omitempty"`
+		MaterializedHash    string                 `json:"materialized_hash,omitempty"`
+		PlanExpiresAt       *timestamppb.Timestamp `json:"plan_expires_at,omitempty"`
+		NodeID              uuid.UUID              `json:"node_id"`
+		Kind                Kind                   `json:"kind"`
+		Message             string                 `json:"message"`
+		SessionID           string                 `json:"session_id"`
+		BootID              string                 `json:"boot_id"`
+		IP                  string                 `json:"ip"`
+		ExpectedVersion     int64                  `json:"expected_version"`
+		SupersedePending    bool                   `json:"supersede_pending"`
+		HoldDispatch        bool                   `json:"hold_dispatch,omitempty"`
+		TTLSeconds          int64                  `json:"ttl_seconds"`
+		ActorID             string                 `json:"actor_id"`
+		Action              string                 `json:"action"`
+		Reason              string                 `json:"reason"`
+		ActorSessionID      uuid.UUID              `json:"actor_session_id"`
+		ActorIdentityID     uuid.UUID              `json:"actor_identity_id"`
+		CandidateHash       string                 `json:"candidate_hash"`
+		ExpectedCurrentHash string                 `json:"expected_current_hash"`
+		DesiredRevision     uint64                 `json:"desired_revision"`
+		PlanID              uuid.UUID              `json:"plan_id"`
+		PlanRevision        uint64                 `json:"plan_revision"`
+		PlanTemplate        string                 `json:"plan_template"`
+		OcservVersion       string                 `json:"ocserv_version"`
+		PlanCapabilities    []string               `json:"plan_capabilities"`
+		CertificateID       uuid.UUID              `json:"certificate_id"`
+		CommonName          string                 `json:"common_name"`
+		DNSNames            []string               `json:"dns_names"`
+		KeyBits             uint32                 `json:"key_bits"`
+		ArtifactID          uuid.UUID              `json:"artifact_id"`
+		CertificateVersion  uint64                 `json:"certificate_version"`
+		RevocationReason    string                 `json:"revocation_reason"`
+		RolloutID           uuid.UUID              `json:"-" cbor:"rollout_id,omitempty"`
+		TargetVersion       string                 `json:"target_version"`
+		PackageSHA256       string                 `json:"package_sha256"`
+		Architecture        string                 `json:"architecture"`
 	}{NodeID: r.NodeID, Kind: r.Payload.kind(), ExpectedVersion: r.ExpectedVersion,
 		SupersedePending: r.SupersedePending, TTLSeconds: int64(r.TTL / time.Second),
 		ActorID: actorID, Action: action, Reason: reason, ActorSessionID: r.ActorSessionID,
 		ActorIdentityID: r.ActorIdentityID}
-	// Keep the historical JSON shape, including zero fields, nil lists and the
-	// generated CSR ID exclusion. Changing this projection invalidates receipts.
+	// Keep this projection stable for persisted CBOR receipts.
 	switch p := r.Payload.(type) {
 	case SyntheticEchoPayload:
 		intent.Message = p.Message
@@ -483,7 +474,7 @@ func requestDigest(r CreateRequest) idempotency.Digest {
 		intent.RolloutID = p.RolloutID
 	}
 
-	return idempotency.New("operation", intent, func() [32]byte { return idempotency.LegacyJSON("", intent) })
+	return idempotency.New("operation", intent)
 }
 
 // P12Intent binds the request to the certificate version and artifact ID.
@@ -494,7 +485,7 @@ func P12Intent(r CreateRequest, p CertificateP12Payload) idempotency.Digest {
 		"artifact_request_id": p.ArtifactID, "node_id": r.NodeID, "expected_version": r.ExpectedVersion,
 		"actor_identity_id": r.ActorIdentityID, "actor_session_id": r.ActorSessionID, "reason": r.Reason,
 	}
-	return idempotency.New("certificate-p12", intent, func() [32]byte { return idempotency.LegacyJSON("", intent) })
+	return idempotency.New("certificate-p12", intent)
 }
 
 func validSealedP12(secret *agentv1.SealedSecretV1) bool {

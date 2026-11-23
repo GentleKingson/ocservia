@@ -235,9 +235,9 @@ quick_install() {
       mv -fT -- "${staged}" "${file}"
     fi
     username="$(sed -n 's/^Username: //p' "${file}")"
+    trap 'rm -f -- "${secret_dir}"/local-bootstrap-admin-password' EXIT
     sed -n 's/^Password: //p' "${file}" |
       install -o 65534 -g 65532 -m 0400 /dev/stdin "${secret_dir}/local-bootstrap-admin-password"
-    trap 'rm -f -- "${secret_dir}"/local-bootstrap-admin-password' EXIT
     status=0
     output="$(compose run --rm --no-deps -T \
       -e "OCSERV_LOCAL_BOOTSTRAP_USERNAME=${username}" \

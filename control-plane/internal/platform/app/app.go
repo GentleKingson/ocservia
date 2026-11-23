@@ -49,17 +49,33 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger, access
 		return err
 	}
 	defer conn.Close()
-	backend := conn.Store
-	auditManager, err := initializeDatabase(ctx, conn, cfg, logger)
-	if err != nil || auditManager == nil {
+	if cfg.MigrateOnly || cfg.ProvisionWorkspace || cfg.BootstrapLocalAdmin {
+		_, err := initializeDatabase(ctx, conn, cfg, logger)
 		return err
 	}
-	releaseLock, err := conn.AcquireControllerLock(ctx)
+	monitorLock, releaseLock, err := conn.AcquireControllerLock(ctx)
 	if err != nil {
 		return err
 	}
 	defer releaseLock()
-	return runController(ctx, cfg, build, backend, auditManager, logger, accessLogger, shutdownDeadline)
+	runCtx, stop := context.WithCancel(ctx)
+	lockResult := make(chan error, 1)
+	go func() {
+		err := monitorLock(runCtx)
+		if err != nil {
+			stop()
+		}
+		lockResult <- err
+	}()
+	auditManager, runErr := initializeDatabase(runCtx, conn, cfg, logger)
+	if runErr == nil {
+		runErr = runController(runCtx, cfg, build, conn.Store, auditManager, logger, accessLogger, shutdownDeadline)
+	}
+	stop()
+	if lockErr := <-lockResult; lockErr != nil {
+		return errors.Join(lockErr, failureCause(runErr))
+	}
+	return runErr
 }
 
 func runController(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger, accessLogger *slog.Logger, shutdownDeadline func() time.Time) (runErr error) {

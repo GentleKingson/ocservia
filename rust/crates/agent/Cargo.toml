@@ -20,7 +20,6 @@ prost-types.workspace = true
 rand.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 rustix.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
@@ -28,6 +27,7 @@ uuid = { workspace = true, features = ["v7"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 iroh = { workspace = true, features = ["test-utils"] }

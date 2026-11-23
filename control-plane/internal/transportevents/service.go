@@ -6,7 +6,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -265,37 +264,6 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 	default:
 		return "synthetic.command"
 	}
-}
-
-// legacySyntheticPayloadHash preserves the historical UNSPECIFIED hash for
-// synthetic Noop/Echo commands. Versioned canonical hashes use semanticpayload.
-func legacySyntheticPayloadHash(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
-	var capability string
-	var payload []byte
-	var err error
-	switch {
-	case envelope.GetSyntheticNoop() != nil:
-		capability = "synthetic.noop"
-		payload, err = proto.Marshal(envelope.GetSyntheticNoop())
-	case envelope.GetSyntheticEcho() != nil:
-		capability = "synthetic.echo"
-		payload, err = proto.Marshal(envelope.GetSyntheticEcho())
-	default:
-		return [sha256.Size]byte{}, errors.New("command result payload type is not reconcilable")
-	}
-	if err != nil {
-		return [sha256.Size]byte{}, fmt.Errorf("encode command payload for result verification: %w", err)
-	}
-	hash := sha256.New()
-	_, _ = hash.Write([]byte(capability))
-	_, _ = hash.Write(envelope.GetNodeId())
-	var revision [8]byte
-	binary.BigEndian.PutUint64(revision[:], envelope.GetExpectedRevision())
-	_, _ = hash.Write(revision[:])
-	_, _ = hash.Write(payload)
-	var result [sha256.Size]byte
-	copy(result[:], hash.Sum(nil))
-	return result, nil
 }
 
 func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {

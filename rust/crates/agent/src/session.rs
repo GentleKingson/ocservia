@@ -102,7 +102,6 @@ pub(super) fn supported_capabilities() -> Vec<String> {
         .chain([
             "synthetic.noop",
             "synthetic.echo",
-            "command.semantic-hash.v1",
             "command.strict-wire.v1",
             "privd_result_attestation_v1",
             "ocserv.session.disconnect",

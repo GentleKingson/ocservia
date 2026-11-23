@@ -16,6 +16,7 @@ import {
   revokeCertificate,
 } from "../../api/certificates";
 import { getOperation } from "../../api/operations";
+import { ResponseError } from "../../api/transport";
 import {
   beginNodeMutation,
   createNodeWorkflow,
@@ -142,7 +143,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateRecordsFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateRecordsFailed");
     } finally {
       if (certificateWorkflow.isCurrent(context))
         certificateLoading.value = false;
@@ -207,7 +209,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateRequestFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateRequestFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -242,7 +245,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateIssueFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateIssueFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -268,12 +272,12 @@ export function useNodeCertificates({
     if (!ticket) return;
     certificateLoading.value = true;
     certificateError.value = "";
+    const exportKey = JSON.stringify([
+      context.workspaceId,
+      context.nodeId,
+      current.id,
+    ]);
     try {
-      const exportKey = JSON.stringify([
-        context.workspaceId,
-        context.nodeId,
-        current.id,
-      ]);
       let request = pendingExports.get(exportKey);
       if (!request) {
         request = {
@@ -298,9 +302,14 @@ export function useNodeCertificates({
         certificateError.value = t("p12GrantUnavailable");
       await trackOperation(grant.operation.id);
     } catch (error) {
+      if (
+        error instanceof ResponseError &&
+        [400, 409].includes(error.response.status)
+      )
+        pendingExports.delete(exportKey);
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("p12CreationFailed");
+        (error instanceof Error && error.message) || t("p12CreationFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -343,7 +352,7 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("p12DownloadFailed");
+        (error instanceof Error && error.message) || t("p12DownloadFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -387,7 +396,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateRevokeFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateRevokeFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))

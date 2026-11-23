@@ -248,6 +248,17 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, grant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
+	setSessionRevoked := func(revoked bool) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=CASE WHEN $2::boolean THEN now() ELSE NULL END WHERE id=$1`, requesterSession, revoked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setSessionRevoked(true)
+	if _, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID, requesterSession); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("revoked session could request artifact: %v", err)
+	}
+	setSessionRevoked(false)
 	var originalCertificateExpiry, originalArtifactExpiry pgtype.Timestamptz
 	testutil.NoError(t, pool.QueryRow(ctx, `SELECT c.not_after,a.expires_at FROM certificates c JOIN artifact_operations a ON a.certificate_id=c.id WHERE a.id=$1`, grant.ArtifactID).Scan(&originalCertificateExpiry, &originalArtifactExpiry))
 	past := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
@@ -283,7 +294,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 			if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET expires_at=$2 WHERE id=$1`, grant.ArtifactID, artifactDeadline); err != nil {
 				t.Fatal(err)
 			}
-			download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
+			download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID, requesterSession)
 			if !tc.allowed {
 				if !errors.Is(err, ErrArtifactDenied) {
 					t.Fatal("expired or NULL certificate accepted", err)
@@ -308,13 +319,13 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET expires_at=$2 WHERE id=$1`, grant.ArtifactID, originalArtifactExpiry); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, strings.Repeat("x", 43), requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, strings.Repeat("x", 43), requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("wrong artifact token err=%v", err)
 	}
-	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, uuid.New()); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, uuid.New(), requesterSession); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("another identity used the requester's artifact token: %v", err)
 	}
-	download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
+	download, err := service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID, requesterSession)
 	testutil.NoError(t, err)
 	received, err := io.ReadAll(download.Reader)
 	download.Reader.Close()
@@ -327,18 +338,23 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if artifactTransport.consumeCount != 0 {
 		t.Fatal("interrupted artifact transfer was consumed")
 	}
-	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("active interrupted lease was reissued: %v", err)
 	}
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET lease_until=now()-interval '1 second',active_grant_expires_at=now()-interval '1 second' WHERE id=$1`, grant.ArtifactID); err != nil {
 		t.Fatal(err)
 	}
-	download, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID)
+	download, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID, requesterSession)
 	if err != nil {
 		t.Fatalf("resume interrupted artifact: %v", err)
 	}
 	_, _ = io.Copy(io.Discard, download.Reader)
 	_ = download.Reader.Close()
+	setSessionRevoked(true)
+	if err = service.CompleteArtifact(ctx, grant.ArtifactID, download.GrantID, download.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-download"); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("revoked session could consume artifact: %v", err)
+	}
+	setSessionRevoked(false)
 	otherArtifactID := uuid.Must(uuid.NewV7())
 	if err = service.CompleteArtifact(ctx, otherArtifactID, download.GrantID, download.Grant, digest[:], int64(len(artifactBytes)), requesterID, requesterSession, "artifact-download"); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("grant for a different artifact err=%v", err)
@@ -367,7 +383,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if artifactTransport.consumeCount != 1 {
 		t.Fatalf("exact replay repeated root consumption: %d", artifactTransport.consumeCount)
 	}
-	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, grant.ArtifactID, grant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("second download err=%v", err)
 	}
 	staleArtifactID := uuid.Must(uuid.NewV7())
@@ -379,7 +395,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE certificates SET version=version+1,updated_at=now() WHERE id=$1`, certificate.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.OpenArtifact(ctx, staleGrant.ArtifactID, staleGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, staleGrant.ArtifactID, staleGrant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("old grant survived certificate revision change: %v", err)
 	}
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='revoked',updated_at=now() WHERE id=$1`, staleGrant.ArtifactID); err != nil {
@@ -393,7 +409,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, consumeFailureGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	consumeFailureDownload, err := service.OpenArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureGrant.DownloadToken, requesterID)
+	consumeFailureDownload, err := service.OpenArtifact(ctx, consumeFailureGrant.ArtifactID, consumeFailureGrant.DownloadToken, requesterID, requesterSession)
 	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, consumeFailureDownload.Reader)
 	_ = consumeFailureDownload.Reader.Close()
@@ -432,7 +448,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, releasedGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	releasedDownload, err := service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID)
+	releasedDownload, err := service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID, requesterSession)
 	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, releasedDownload.Reader)
 	_ = releasedDownload.Reader.Close()
@@ -450,7 +466,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, releasedGrant.ArtifactID).Scan(&releasedState); err != nil || releasedState != "ready" {
 		t.Fatalf("released lease state=%q err=%v", releasedState, err)
 	}
-	releasedDownload, err = service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID)
+	releasedDownload, err = service.OpenArtifact(ctx, releasedGrant.ArtifactID, releasedGrant.DownloadToken, requesterID, requesterSession)
 	if err != nil {
 		t.Fatalf("re-lease recovered artifact: %v", err)
 	}
@@ -465,7 +481,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, revokeRaceGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	revokeRaceDownload, err := service.OpenArtifact(ctx, revokeRaceGrant.ArtifactID, revokeRaceGrant.DownloadToken, requesterID)
+	revokeRaceDownload, err := service.OpenArtifact(ctx, revokeRaceGrant.ArtifactID, revokeRaceGrant.DownloadToken, requesterID, requesterSession)
 	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, revokeRaceDownload.Reader)
 	_ = revokeRaceDownload.Reader.Close()
@@ -494,7 +510,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, revokeRaceGrant.ArtifactID).Scan(&revokeRaceState); err != nil || revokeRaceState != "revoked" {
 		t.Fatalf("revoke race state=%q err=%v", revokeRaceState, err)
 	}
-	if _, err = service.OpenArtifact(ctx, revokeRaceGrant.ArtifactID, revokeRaceGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, revokeRaceGrant.ArtifactID, revokeRaceGrant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("revoked grant remained downloadable: %v", err)
 	}
 	certificateAfterRevokeRace, err := service.Get(ctx, certificate.ID)
@@ -507,7 +523,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, crashGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	crashDownload, err := service.OpenArtifact(ctx, crashGrant.ArtifactID, crashGrant.DownloadToken, requesterID)
+	crashDownload, err := service.OpenArtifact(ctx, crashGrant.ArtifactID, crashGrant.DownloadToken, requesterID, requesterSession)
 	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, crashDownload.Reader)
 	_ = crashDownload.Reader.Close()
@@ -542,7 +558,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3,expires_at=now()-interval '1 second' WHERE id=$1`, expiredGrant.ArtifactID, digest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = service.OpenArtifact(ctx, expiredGrant.ArtifactID, expiredGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err = service.OpenArtifact(ctx, expiredGrant.ArtifactID, expiredGrant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("expired artifact err=%v", err)
 	}
 	testutil.NoError(t, service.Maintain(ctx))
@@ -559,7 +575,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',content_sha256=$2,content_size=$3 WHERE id=$1`, hashGrant.ArtifactID, wrongDigest[:], len(artifactBytes)); err != nil {
 		t.Fatal(err)
 	}
-	download, err = service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID)
+	download, err = service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID, requesterSession)
 	testutil.NoError(t, err)
 	_, _ = io.Copy(io.Discard, download.Reader)
 	_ = download.Reader.Close()
@@ -606,7 +622,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err != nil || expired.State != "expired" {
 		t.Fatalf("expired certificate=%+v err=%v", expired, err)
 	}
-	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID); !errors.Is(err, ErrArtifactDenied) {
+	if _, err := service.OpenArtifact(ctx, hashGrant.ArtifactID, hashGrant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("certificate expiry left artifact downloadable: %v", err)
 	}
 	var expiringAlerts, expiredAlerts int

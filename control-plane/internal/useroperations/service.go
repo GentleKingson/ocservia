@@ -446,7 +446,7 @@ func policyDigest(request PolicyRequest) idempotency.Digest {
 		Intent                      any
 		ActorIdentity, ActorSession uuid.UUID
 		Reason                      string
-	}{intent, request.ActorIdentityID, request.ActorSessionID, request.Reason}, func() [32]byte { return idempotency.LegacyJSON("", intent) })
+	}{intent, request.ActorIdentityID, request.ActorSessionID, request.Reason})
 }
 
 func quotaValue(direction string, rx, tx int64) int64 {

@@ -153,7 +153,7 @@ export function useNodeConfiguration({
     } catch (error) {
       if (configWorkflow.isCurrent(context))
         configError.value =
-          error instanceof Error ? error.message : t("configPlanFailed");
+          (error instanceof Error && error.message) || t("configPlanFailed");
     } finally {
       if (configWorkflow.isCurrent(context)) configLoading.value = false;
     }
@@ -247,7 +247,7 @@ export function useNodeConfiguration({
     } catch (error) {
       if (!configWorkflow.isCurrent(context)) return;
       configError.value =
-        error instanceof Error ? error.message : t("configPlanFailed");
+        (error instanceof Error && error.message) || t("configPlanFailed");
     } finally {
       finishNodeMutation(ticket);
       if (configWorkflow.isCurrent(context)) configLoading.value = false;
@@ -284,7 +284,7 @@ export function useNodeConfiguration({
     } catch (error) {
       if (!configWorkflow.isCurrent(context)) return;
       configError.value =
-        error instanceof Error ? error.message : t("configApplyFailed");
+        (error instanceof Error && error.message) || t("configApplyFailed");
     } finally {
       finishNodeMutation(ticket);
       if (configWorkflow.isCurrent(context)) configLoading.value = false;

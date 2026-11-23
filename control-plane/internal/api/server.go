@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -77,6 +78,7 @@ type Server struct {
 // HTTPConfig contains final HTTP values. EventStreams must be explicitly valid;
 // callers wanting defaults should supply eventstream.DefaultConfig().
 type HTTPConfig struct {
+	Context            context.Context
 	Address            string
 	BodyLimit          int64
 	RequestTimeout     time.Duration
@@ -159,6 +161,9 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	handler := s.requestContext(s.limitBody(s.timeout(routePaths(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
 	s.http = &http.Server{Addr: config.Address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	if config.Context != nil {
+		s.http.BaseContext = func(net.Listener) context.Context { return config.Context }
+	}
 	return s, nil
 }
 

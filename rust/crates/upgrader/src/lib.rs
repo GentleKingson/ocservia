@@ -24,7 +24,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustix::fs::FlockOperation;
+use rustix::fs::{FlockOperation, Mode, OFlags};
+use rustix::io::Errno;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
@@ -335,6 +336,9 @@ impl UpgradeScheduler {
                     if existing != *intent {
                         return Err(UpgradeStoreError::IdentityConflict);
                     }
+                    if self.active_sibling(Some(intent.operation_id))?.is_some() {
+                        return Err(UpgradeStoreError::ActiveConflict);
+                    }
                     write_atomic(
                         &operation_dir.join("state"),
                         format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
@@ -342,7 +346,9 @@ impl UpgradeScheduler {
                     )?;
                     ScheduleOutcome::Scheduled
                 }
-                OperationPieces::Complete { intent: existing } => {
+                OperationPieces::Complete {
+                    intent: existing, ..
+                } => {
                     if existing != *intent {
                         return Err(UpgradeStoreError::IdentityConflict);
                     }
@@ -392,8 +398,11 @@ impl UpgradeScheduler {
             if Some(candidate) == exclude {
                 continue;
             }
-            let state = load_state(&entry.path())?;
-            if state == OperationState::Accepted || state == OperationState::Running {
+            if let OperationPieces::Complete {
+                state: OperationState::Accepted | OperationState::Running,
+                ..
+            } = read_operation_pieces(&entry.path())?
+            {
                 return Ok(Some(candidate));
             }
         }
@@ -411,6 +420,7 @@ enum OperationPieces {
     },
     Complete {
         intent: UpgradeIntent,
+        state: OperationState,
     },
 }
 
@@ -439,21 +449,22 @@ fn read_operation_pieces(operation_dir: &Path) -> Result<OperationPieces, Upgrad
     validate_directory_strict(operation_dir)?;
     let intent_path = operation_dir.join("intent");
     let state_path = operation_dir.join("state");
-    let intent_present = fs::symlink_metadata(&intent_path).is_ok();
-    let state_present = fs::symlink_metadata(&state_path).is_ok();
+    let present = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    let intent_present = present(&intent_path)?;
+    let state_present = present(&state_path)?;
     match (intent_present, state_present) {
         (false, false) => Ok(OperationPieces::Partial { intent: None }),
         (true, false) => Ok(OperationPieces::Partial {
             intent: Some(load_intent(operation_dir)?),
         }),
-        (true, true) => {
-            // The state file is loaded purely for validation; any durable
-            // state combined with a matching intent is a legal replay.
-            load_state(operation_dir)?;
-            Ok(OperationPieces::Complete {
-                intent: load_intent(operation_dir)?,
-            })
-        }
+        (true, true) => Ok(OperationPieces::Complete {
+            intent: load_intent(operation_dir)?,
+            state: load_state(operation_dir)?,
+        }),
         (false, true) => Err(UpgradeStoreError::Unsafe(
             "durable operation state exists without its immutable intent",
         )),
@@ -461,27 +472,49 @@ fn read_operation_pieces(operation_dir: &Path) -> Result<OperationPieces, Upgrad
 }
 
 fn load_intent(operation_dir: &Path) -> Result<UpgradeIntent, UpgradeStoreError> {
-    let path = operation_dir.join("intent");
-    validate_record_file(&path)?;
-    let bytes = fs::read(&path).map_err(UpgradeStoreError::Io)?;
-    if bytes.len() > 1024 {
-        return Err(UpgradeStoreError::Unsafe(
-            "durable intent exceeds its bound",
-        ));
-    }
-    UpgradeIntent::parse(&bytes)
+    UpgradeIntent::parse(&read_record(&operation_dir.join("intent"), 1024)?)
 }
 
 fn load_state(operation_dir: &Path) -> Result<OperationState, UpgradeStoreError> {
-    let path = operation_dir.join("state");
-    validate_record_file(&path)?;
+    OperationState::parse(&read_record(&operation_dir.join("state"), 64)?)
+}
+
+fn read_record(path: &Path, limit: usize) -> Result<Vec<u8>, UpgradeStoreError> {
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(path_error)?;
+    let file = File::from(fd);
+    validate_record_metadata(&file.metadata()?)?;
     let mut bytes = Vec::new();
-    File::open(&path)
-        .map_err(UpgradeStoreError::Io)?
-        .take(64)
-        .read_to_end(&mut bytes)
-        .map_err(UpgradeStoreError::Io)?;
-    OperationState::parse(&bytes)
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable record exceeds its bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn optional_text_record(path: &Path, limit: usize) -> Result<Option<String>, UpgradeStoreError> {
+    match read_record(path, limit) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| UpgradeStoreError::Unsafe("durable record is not UTF-8")),
+        Err(UpgradeStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn path_error(error: Errno) -> UpgradeStoreError {
+    if error == Errno::LOOP || error == Errno::NOTDIR {
+        return UpgradeStoreError::Unsafe(
+            "trusted upgrade path contains a symlink or unexpected file",
+        );
+    }
+    UpgradeStoreError::Io(io::Error::from(error))
 }
 
 /// One durable terminal upgrade outcome read back from the fixed store.
@@ -511,6 +544,13 @@ pub fn read_recent_results(
 ) -> Result<Vec<DurableUpgradeResult>, UpgradeStoreError> {
     let limit = limit.clamp(1, 32);
     let mut results = Vec::new();
+    match open_operations_root(operations_dir, false) {
+        Ok(()) => {}
+        Err(UpgradeStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(results);
+        }
+        Err(error) => return Err(error),
+    }
     let entries = match fs::read_dir(operations_dir) {
         Ok(entries) => entries,
         // A node that never ran an upgrade has no durable evidence at all.
@@ -532,27 +572,20 @@ pub fn read_recent_results(
         }
         let record_dir = entry.path();
         validate_directory_strict(&record_dir)?;
-        let intent = load_intent(&record_dir)?;
+        let bytes = match read_record(&record_dir.join("result"), 1024) {
+            Err(UpgradeStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                continue;
+            }
+            result => result?,
+        };
+        let OperationPieces::Complete { intent, .. } = read_operation_pieces(&record_dir)? else {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable result has no committed operation",
+            ));
+        };
         if intent.operation_id != candidate {
             return Err(UpgradeStoreError::Unsafe(
                 "durable intent operation identity does not match its directory",
-            ));
-        }
-        let result_path = entry.path().join("result");
-        match fs::symlink_metadata(&result_path) {
-            Err(failure) if failure.kind() == io::ErrorKind::NotFound => {
-                // No terminal result record exists yet; the operation is still
-                // in flight and simply carries no reconciliation evidence.
-                continue;
-            }
-            Err(failure) => return Err(UpgradeStoreError::Io(failure)),
-            Ok(_) => {}
-        }
-        validate_record_file(&result_path)?;
-        let bytes = fs::read(&result_path).map_err(UpgradeStoreError::Io)?;
-        if bytes.len() > 1024 {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable result exceeds its bound",
             ));
         }
         let lines = decode_record_lines(&bytes, 7)?;
@@ -640,9 +673,15 @@ impl UpgradeRunner {
     pub fn run(&self, operation: &str) -> Result<OperationState, UpgradeStoreError> {
         let operation_id = parse_canonical_operation(operation)?;
         let operations_root = self.operations_dir();
-        validate_directory_strict(&operations_root)?;
+        open_operations_root(&operations_root, false)?;
         let operation_dir = operations_root.join(operation_id.to_string());
+        validate_directory_strict(&operation_dir)?;
         let intent = load_intent(&operation_dir)?;
+        if intent.operation_id != operation_id {
+            return Err(UpgradeStoreError::Unsafe(
+                "durable intent operation identity does not match its directory",
+            ));
+        }
         let state = load_state(&operation_dir)?;
         if state.is_terminal() {
             tracing::info!(operation = %operation_id, state = state.as_str(), "durable upgrade already terminal");
@@ -690,8 +729,8 @@ impl UpgradeRunner {
         let spool = self.spool_dir();
         ensure_operations_root(&spool)?;
         let previous_file = operation_dir.join("previous-version");
-        let previous_version = if previous_file.try_exists()? {
-            fs::read_to_string(&previous_file)?
+        let previous_version = if let Some(version) = optional_text_record(&previous_file, 128)? {
+            version
         } else {
             let version = self.installed_version(manager)?;
             write_atomic(&previous_file, version.as_bytes(), TempOwner::Run)?;
@@ -701,10 +740,11 @@ impl UpgradeRunner {
             return Err(UpgradeStoreError::Unsafe("invalid cached package version"));
         }
         let previous = spool.join(manager.filename(&previous_version, &intent.architecture));
-        validate_spool_file(&previous)?;
+        open_spool_file(&previous)?;
         let rollback_file = operation_dir.join("rollback-reason");
-        let failure = if rollback_file.try_exists()? {
-            fs::read_to_string(rollback_file)?
+        let failure = if let Some(reason) = optional_text_record(&rollback_file, MAX_DETAIL_BYTES)?
+        {
+            reason
         } else {
             let target = self.authorized_package(manager, intent)?;
             write_atomic(&operation_dir.join("state"), b"running\n", TempOwner::Run)?;
@@ -771,8 +811,7 @@ impl UpgradeRunner {
                         .arg(&temporary)
                         .arg(url),
                 )?;
-                verify_digest(&temporary, intent)?;
-                File::open(&temporary)?.sync_all()?;
+                verify_digest(&temporary, intent)?.sync_all()?;
                 fs::rename(&temporary, &target)?;
                 sync_directory(&self.spool_dir())
             })();
@@ -840,7 +879,7 @@ impl UpgradeRunner {
         }
         let systemctl = self.root.join("usr/bin/systemctl");
         let units = ["ocservia-privd.service", "ocservia-agent.service"];
-        checked(Command::new(&systemctl).arg("restart").args(units))?;
+        checked(Command::new(&systemctl).arg("start").args(units))?;
         // Give both daemons time to run their startup probes. Query individually:
         // systemctl is-active with multiple arguments succeeds if *any* is active.
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -869,14 +908,14 @@ impl NativePackage {
     }
 }
 
-fn verify_digest(path: &Path, intent: &UpgradeIntent) -> Result<(), UpgradeStoreError> {
-    validate_spool_file(path)?;
-    if sha256_file(path)? != intent.package_sha256 {
+fn verify_digest(path: &Path, intent: &UpgradeIntent) -> Result<File, UpgradeStoreError> {
+    let mut file = open_spool_file(path)?;
+    if sha256_reader(&mut file)? != intent.package_sha256 {
         return Err(UpgradeStoreError::Package(
             "native package digest mismatches authorized intent".into(),
         ));
     }
-    Ok(())
+    Ok(file)
 }
 
 fn checked(command: &mut Command) -> Result<String, UpgradeStoreError> {
@@ -988,8 +1027,13 @@ impl UpgradeLock {
     /// convergence owns recovery after a crashed runner.
     fn acquire_execution(operations_dir: &Path) -> Result<Self, UpgradeStoreError> {
         let file = Self::open(operations_dir, EXECUTION_LOCK_FILE)?;
-        rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| UpgradeStoreError::ActiveConflict)?;
+        rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            if error == Errno::WOULDBLOCK {
+                UpgradeStoreError::ActiveConflict
+            } else {
+                UpgradeStoreError::Io(io::Error::from(error))
+            }
+        })?;
         Ok(Self { _file: file })
     }
 }
@@ -1114,7 +1158,10 @@ fn validate_directory_strict(directory: &Path) -> Result<(), UpgradeStoreError> 
 }
 
 fn validate_record_file(path: &Path) -> Result<(), UpgradeStoreError> {
-    let metadata = fs::symlink_metadata(path).map_err(UpgradeStoreError::Io)?;
+    validate_record_metadata(&fs::symlink_metadata(path)?)
+}
+
+fn validate_record_metadata(metadata: &fs::Metadata) -> Result<(), UpgradeStoreError> {
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.uid() != trusted_euid()
@@ -1128,16 +1175,23 @@ fn validate_record_file(path: &Path) -> Result<(), UpgradeStoreError> {
     Ok(())
 }
 
-fn validate_spool_file(path: &Path) -> Result<(), UpgradeStoreError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
+fn open_spool_file(path: &Path) -> Result<File, UpgradeStoreError> {
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == Errno::NOENT {
             UpgradeStoreError::Package(
                 "trusted package spool does not provide the authorized release".to_owned(),
             )
         } else {
-            UpgradeStoreError::Io(error)
+            path_error(error)
         }
     })?;
+    let file = File::from(fd);
+    let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.uid() != trusted_euid()
@@ -1150,10 +1204,14 @@ fn validate_spool_file(path: &Path) -> Result<(), UpgradeStoreError> {
             "trusted package spool input has unsafe metadata".to_owned(),
         ));
     }
-    Ok(())
+    Ok(file)
 }
 
 fn ensure_operations_root(operations_dir: &Path) -> Result<(), UpgradeStoreError> {
+    open_operations_root(operations_dir, true)
+}
+
+fn open_operations_root(operations_dir: &Path, create: bool) -> Result<(), UpgradeStoreError> {
     if !operations_dir.is_absolute()
         || operations_dir
             .components()
@@ -1163,36 +1221,33 @@ fn ensure_operations_root(operations_dir: &Path) -> Result<(), UpgradeStoreError
             "durable operations path must be absolute and canonical",
         ));
     }
-    // The deepest already-existing ancestor becomes the trust base; every
-    // component below it is created mode 0700 and revalidated.
-    let mut ancestor = operations_dir;
-    while fs::symlink_metadata(ancestor).is_err() {
-        ancestor = ancestor.parent().ok_or(UpgradeStoreError::Unsafe(
-            "durable operations path has no anchor",
-        ))?;
-    }
-    validate_directory_strict(ancestor)?;
-    let missing = operations_dir
-        .strip_prefix(ancestor)
-        .map_err(|_| UpgradeStoreError::Unsafe("durable operations path escapes its anchor"))?;
-    let mut current = PathBuf::from(ancestor);
-    for component in missing.components() {
-        let Component::Normal(name) = component else {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable operations path must be canonical",
-            ));
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir = rustix::fs::open("/", flags, Mode::empty()).map_err(path_error)?;
+    let mut components = operations_dir.components().skip(1).peekable();
+    while let Some(Component::Normal(name)) = components.next() {
+        let next = match rustix::fs::openat(&dir, name, flags, Mode::empty()) {
+            Err(Errno::NOENT) if create => {
+                match rustix::fs::mkdirat(&dir, name, Mode::RWXU) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(error) => return Err(path_error(error)),
+                }
+                rustix::fs::openat(&dir, name, flags, Mode::empty()).map_err(path_error)?
+            }
+            result => result.map_err(path_error)?,
         };
-        current.push(name);
-        match fs::DirBuilder::new()
-            .recursive(false)
-            .mode(0o700)
-            .create(&current)
+        let metadata = rustix::fs::fstat(&next).map_err(path_error)?;
+        let last = components.peek().is_none();
+        let owner = metadata.st_uid;
+        let mode = metadata.st_mode;
+        let protected_ancestor = !last && owner == 0 && mode & 0o1000 != 0;
+        if (owner != trusted_euid() && (last || owner != 0))
+            || (mode & 0o022 != 0 && !protected_ancestor)
         {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(UpgradeStoreError::Io(error)),
+            return Err(UpgradeStoreError::Unsafe(
+                "trusted upgrade path ancestry must be operator-owned real directories",
+            ));
         }
-        validate_directory_strict(&current)?;
+        dir = next;
     }
     Ok(())
 }
@@ -1273,7 +1328,15 @@ fn cleanup_stale_temporaries(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let stale = ["intent", "state", "result"].iter().any(|record| {
+        let stale = [
+            "intent",
+            "state",
+            "result",
+            "previous-version",
+            "rollback-reason",
+        ]
+        .iter()
+        .any(|record| {
             let prefix = format!(".{record}.{}.tmp", owner.as_str());
             if name == prefix {
                 return true;
@@ -1303,8 +1366,7 @@ fn sync_directory(directory: &Path) -> Result<(), UpgradeStoreError> {
         .map_err(UpgradeStoreError::Io)
 }
 
-fn sha256_file(path: &Path) -> Result<[u8; 32], UpgradeStoreError> {
-    let mut file = File::open(path).map_err(UpgradeStoreError::Io)?;
+fn sha256_reader(file: &mut File) -> Result<[u8; 32], UpgradeStoreError> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
@@ -1459,6 +1521,38 @@ mod tests {
         root.scheduler()
             .schedule_and_trigger(&new_intent([0xff; 32]))
             .expect("after history");
+    }
+
+    #[test]
+    fn partial_operations_do_not_block_new_work_or_result_reads() {
+        let root = TempRoot::new("partial-sibling");
+        let partial = new_intent([1; 32]);
+        let partial_dir = root.ops().join(partial.operation_id.to_string());
+        ensure_operations_root(&partial_dir).expect("operation directory");
+        assert!(
+            read_recent_results(&root.ops(), 1)
+                .expect("read partial")
+                .is_empty()
+        );
+        let current = new_intent([2; 32]);
+        root.scheduler()
+            .schedule_and_trigger(&current)
+            .expect("schedule past partial sibling");
+        write_atomic(
+            &partial_dir.join("intent"),
+            partial.render().as_bytes(),
+            TempOwner::Schedule,
+        )
+        .expect("persist partial intent");
+        assert!(matches!(
+            root.scheduler().schedule_and_trigger(&partial),
+            Err(UpgradeStoreError::ActiveConflict)
+        ));
+        assert!(
+            read_recent_results(&root.ops(), 1)
+                .expect("read partial intent")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1713,7 +1807,7 @@ mod tests {
             ("dpkg", "test \"$1\" = -i && cat \"$2\" > \"$status\""),
             (
                 "systemctl",
-                "test \"$1\" != is-active || test \"$3\" != ocservia-agent.service || test ! -f \"$status.fail\" || test \"$(cat \"$status\")\" = 1.0.0",
+                "test \"$1\" != restart; test \"$1\" != is-active || test \"$3\" != ocservia-agent.service || test ! -f \"$status.fail\" || test \"$(cat \"$status\")\" = 1.0.0",
             ),
         ] {
             let path = bin.join(name);
@@ -1731,7 +1825,10 @@ mod tests {
         let target = spool.join(NativePackage::Deb.filename("1.2.3", arch));
         fs::write(&old, b"1.0.0").unwrap();
         fs::write(&target, b"1.2.3").unwrap();
-        let intent = new_intent(sha256_file(&target).expect("authorized digest"));
+        let intent = new_intent(
+            sha256_reader(&mut open_spool_file(&target).expect("target"))
+                .expect("authorized digest"),
+        );
         root.scheduler()
             .schedule_and_trigger(&intent)
             .expect("schedule");
