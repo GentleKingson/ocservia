@@ -13,13 +13,7 @@ import (
 )
 
 func TestCredentialFile(t *testing.T) {
-	directory, err := os.MkdirTemp(".", ".credential-test-")
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	directory, err = filepath.Abs(directory)
-	testutil.NoError(t, err)
-	directory, err = filepath.EvalSymlinks(directory)
-	testutil.NoError(t, err)
+	directory := testutil.PrivateTempDir(t)
 	want := "postgres://app:fixture@postgres/ocservia\n"
 	write := func(path, value string) {
 		t.Helper()

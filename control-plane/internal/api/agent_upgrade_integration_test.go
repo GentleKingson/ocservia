@@ -477,7 +477,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 
 	// Second-layer in-transaction authorization must reject a revoked session even
 	// if HTTP authorization already succeeded before the session was revoked.
-	if _, err := pool.Exec(ctx, "UPDATE sessions SET revoked_at=now() WHERE id=$1", operator.SessionID); err != nil {
+	if _, err := pool.Exec(ctx, "UPDATE auth_sessions SET revoked_at=now() WHERE id=$1", operator.SessionID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := server.operations.ResumeAgentRollout(ctx, batchSkipRolloutID, operator.Subject, operator.IdentityID, operator.SessionID, "req-revoked-resume", testfixture.Traceparent); !errors.Is(err, auth.ErrForbidden) {

@@ -93,9 +93,10 @@ For day-to-day work inside a single module, use `make test-go`,
 `control-plane` and `signer` without `gofmt`, `go vet`, `-count=1` or race
 runs. `make go-check` (`scripts/go-check.sh`, default mode `full`) covers both
 `control-plane` and `signer` with `gofmt`, `go vet`, `go test -count=1`, and
-(except in `standard` mode) `go test -race`, using a private `TMPDIR` under
-`.cache/` because the signer store refuses state directories beneath a group-
-or world-writable parent such as `/tmp`. Basic CI invokes
+(except in `standard` mode) `go test -race`, using a private `0700` `TMPDIR`
+outside the repository checkout (such as `$XDG_RUNTIME_DIR` or `$HOME/.cache`)
+because the signer store and UDS checks refuse state directories beneath a
+group- or world-writable parent such as `/tmp` or a `0775` checkout. Basic CI invokes
 `go-check.sh standard` in Quick runs and `go-check.sh full` in Full runs. The top-level `make test` (`scripts/test.sh`) runs
 `control-plane` and `signer` Go tests, Rust workspace tests, and Web `npm test`
 without linters or race runs. For Rust, `make rust-check` runs

@@ -107,6 +107,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		return &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: hash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: state, AcceptedAt: now, CompletedAt: now}
 	}
 
+	var effectSeq uint64
 	for _, start := range []string{"dispatched", "unknown"} {
 		t.Run("unsigned_rejected_from_"+start, func(t *testing.T) {
 			operationID, commandID, outboxID := stage(start, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY)
@@ -134,7 +135,8 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 			// Genuine signed completion still settles the command and its outbox.
 			envelope = storedEnvelope(commandID)
 			success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-			testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, 1))
+			effectSeq++
+			testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, effectSeq))
 			ingest(envelope, success)
 			if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 				t.Fatalf("signed result did not settle the command: operation=%s command=%s", operation, command)
@@ -162,7 +164,8 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		}
 		// The signed completion from the original execution still recovers it.
 		success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-		testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, 2))
+		effectSeq++
+		testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, effectSeq))
 		ingest(envelope, success)
 		if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 			t.Fatalf("signed recovery did not settle the command: operation=%s command=%s", operation, command)

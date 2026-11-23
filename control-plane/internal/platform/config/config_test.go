@@ -32,14 +32,7 @@ func baseEnv(overrides map[string]string) map[string]string {
 
 func secureKeyTestDirectory(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp(".", ".audit-key-test-")
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	abs, err := filepath.Abs(dir)
-	testutil.NoError(t, err)
-	resolved, err := filepath.EvalSymlinks(abs)
-	testutil.NoError(t, err)
-	return resolved
+	return testutil.PrivateTempDir(t)
 }
 
 func prodBaseEnv(t *testing.T) map[string]string {

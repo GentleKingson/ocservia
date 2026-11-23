@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -34,12 +33,7 @@ func (h schedulerLog) Handle(ctx context.Context, record slog.Record) error {
 
 func socketDirectory(t *testing.T) string {
 	t.Helper()
-	root, err := filepath.Abs("../../../..")
-	testutil.NoError(t, err)
-	dir, err := os.MkdirTemp(root, ".app-")
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testutil.PrivateTempDir(t)
 }
 
 type shutdownFunc func(context.Context) error
