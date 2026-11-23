@@ -1,5 +1,6 @@
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, symlink};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
@@ -367,18 +368,86 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
     }
 }
 
+struct PrivateTempDir(PathBuf);
+
+impl PrivateTempDir {
+    fn new(prefix: &str) -> Self {
+        let uid = rustix::process::geteuid().as_raw();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(|p| fs::canonicalize(p).ok());
+        let mut candidates = Vec::with_capacity(3);
+        if let Some(dir) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
+            candidates.push(PathBuf::from(dir));
+        }
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+            candidates.push(PathBuf::from(dir));
+        }
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            let home_path = PathBuf::from(home);
+            let cache = home_path.join(".cache");
+            if home_path.is_dir() && !cache.exists() {
+                let _ = fs::DirBuilder::new().mode(0o700).create(&cache);
+                let _ = fs::set_permissions(&cache, fs::Permissions::from_mode(0o700));
+            }
+            candidates.push(cache);
+        }
+        let base = candidates
+            .into_iter()
+            .filter_map(|candidate| fs::canonicalize(candidate).ok())
+            .find(|resolved| {
+                if let Some(root) = repo.as_deref()
+                    && resolved.starts_with(root)
+                {
+                    return false;
+                }
+                let mut current = Some(resolved.as_path());
+                while let Some(dir) = current {
+                    let Ok(meta) = fs::symlink_metadata(dir) else {
+                        return false;
+                    };
+                    if !meta.is_dir()
+                        || meta.file_type().is_symlink()
+                        || (meta.uid() != 0 && meta.uid() != uid)
+                        || meta.permissions().mode() & 0o022 != 0
+                    {
+                        return false;
+                    }
+                    current = dir.parent();
+                }
+                true
+            })
+            .expect("private temp directory outside repository");
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = base.join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .expect("mkdir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("700");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn verification_key_loader_and_shared_metadata_policy() {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let dir = std::env::current_dir()
-        .expect("cwd")
-        .join(format!(".command-key-test-{}-{suffix}", std::process::id()));
-    fs::create_dir(&dir).expect("mkdir");
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("700");
-    let key_path = dir.join("controller.pem");
+    let dir = PrivateTempDir::new("cmd-key-test");
+    let key_path = dir.path().join("controller.pem");
     let key = SigningKey::from_bytes(&[7; 32]).verifying_key();
     fs::write(
         &key_path,
@@ -398,12 +467,12 @@ fn verification_key_loader_and_shared_metadata_policy() {
     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).expect("644");
     assert!(load_verification_key(&key_path, uid, gid).is_err());
     fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("600");
-    let link = dir.join("controller-link.pem");
+    let link = dir.path().join("controller-link.pem");
     symlink(&key_path, &link).expect("symlink");
     assert!(load_verification_key(&link, uid, gid).is_err());
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o770)).expect("770");
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).expect("770");
     assert!(load_verification_key(&key_path, uid, gid).is_err());
-    let _ = fs::remove_dir_all(&dir);
+    drop(dir);
 
     let (agent_user_id, agent_group_id) = (997, 998);
     for mode in [0o440, 0o640] {

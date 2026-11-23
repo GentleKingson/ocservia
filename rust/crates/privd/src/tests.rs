@@ -1541,10 +1541,8 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
     let keys = keyring(&signing);
     let node_id = *Uuid::now_v7().as_bytes();
     let adapter = Adapter::new(FixedResources::default(), Limits::default());
-    let dir = std::env::temp_dir().join(format!("ocservia-privd-upgrade-read-{}", Uuid::now_v7()));
-    fs::create_dir(&dir).expect("dir");
-    let ops = dir.join("var/lib/ocservia-upgrade/operations");
-    fs::create_dir_all(&ops).expect("ops");
+    let dir = ocservia_test_support::PrivateTempDir::new("privd-upg");
+    let ops = dir.create_subdir_all("var/lib/ocservia-upgrade/operations");
     let scheduler = UpgradeScheduler::new(ops, UpgradeTrigger::Disabled);
     let intent = UpgradeIntent::new(
         *Uuid::now_v7().as_bytes(),
@@ -1557,7 +1555,7 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
     .expect("intent");
     scheduler.schedule_and_trigger(&intent).expect("schedule");
     assert!(
-        ocservia_upgrader::UpgradeRunner::new(dir.clone())
+        ocservia_upgrader::UpgradeRunner::new(dir.path().to_path_buf())
             .run(&intent.operation_id.to_string())
             .is_err()
     );
@@ -1611,5 +1609,4 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
         (proof.result_sha256.len(), proof.signature.len()),
         (32, ed25519_dalek::SIGNATURE_LENGTH)
     );
-    fs::remove_dir_all(&dir).expect("cleanup");
 }

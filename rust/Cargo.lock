@@ -2592,6 +2592,7 @@ dependencies = [
  "ocservia-command-authorization",
  "ocservia-contracts",
  "prost-types",
+ "rustix",
  "uuid",
 ]
 
@@ -2631,6 +2632,7 @@ name = "ocservia-transportd-stub"
 version = "0.1.0"
 dependencies = [
  "ocservia-contracts",
+ "ocservia-test-support",
  "prost",
  "prost-types",
  "rustix",

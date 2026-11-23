@@ -53,17 +53,15 @@ pub(super) fn write_executable(path: &Path, bytes: impl AsRef<[u8]>) {
         .expect("chmod fixture executable");
 }
 
-struct TempDir(PathBuf);
+struct TempDir(ocservia_test_support::PrivateTempDir);
 
 impl TempDir {
     fn new(prefix: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("ocservia-{prefix}-{}", Uuid::now_v7()));
-        std::fs::create_dir(&path).expect("create temp dir");
-        Self(path)
+        Self(ocservia_test_support::PrivateTempDir::new(prefix))
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
 
     fn join(&self, name: impl AsRef<Path>) -> PathBuf {
@@ -98,12 +96,6 @@ impl TempDir {
 
     fn user_adapter(&self, ocpasswd: PathBuf, openssl: PathBuf, limits: Limits) -> Adapter {
         Adapter::new(self.user_resources(ocpasswd, openssl), limits)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
