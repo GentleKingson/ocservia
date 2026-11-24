@@ -147,6 +147,28 @@ def check_specific_contracts(errors):
     for item in includes:
         if item.get('profile') == 'npm-security' and item.get('cache_npm') is True:
             errors.append('security.yml: npm-security audit must not enable cache-npm')
+        if item.get('name') == 'Go & Web licenses' and item.get('cache_npm') is True:
+            errors.append('security.yml: Go & Web licenses must not enable cache-npm')
+        if item.get('profile') == 'rust-security':
+            cmd_lines = [line.strip() for line in str(item.get('command', '')).splitlines()]
+            if any(line == 'cargo audit' for line in cmd_lines):
+                errors.append('security.yml: rust-security must not run duplicate bare cargo audit alongside cargo deny')
+
+    ci_doc = load_yaml(ROOT / '.github/workflows/ci.yml')
+    for wf_name, doc in (('ci.yml', ci_doc), ('security.yml', security_doc)):
+        on_triggers = doc.get('on') or doc.get(True) or {}
+        if isinstance(on_triggers, dict) and 'workflow_call' in on_triggers:
+            errors.append(f'{wf_name}: unused workflow_call trigger must stay removed')
+
+    recovery_steps = ci_doc['jobs']['database-recovery-full'].get('steps') or []
+    for step in recovery_steps:
+        if isinstance(step, dict) and step.get('uses') == './.github/actions/setup-tools':
+            errors.append('ci.yml: database-recovery-full must not invoke setup-tools')
+
+    controller_wf = (ROOT / '.github/workflows/release-controller.yml').read_text(encoding='utf-8')
+    for flag in ('scan-release-images.sh --update-db-only', 'scan-release-images.sh --use-prefetched-db'):
+        if flag not in controller_wf:
+            errors.append(f'release-controller.yml: must invoke {flag}')
 
 
 def check_required_go_tests(errors):

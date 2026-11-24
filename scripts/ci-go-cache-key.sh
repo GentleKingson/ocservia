@@ -20,4 +20,8 @@ identity="$(
     git hash-object go.work go.work.sum control-plane/go.mod control-plane/go.sum signer/go.mod signer/go.sum
   } | git hash-object --stdin
 )"
-printf 'identity=%s\n' "${identity%% *}"
+mod_identity="$(
+  git hash-object go.work go.work.sum control-plane/go.mod control-plane/go.sum signer/go.mod signer/go.sum |
+    git hash-object --stdin
+)"
+printf 'identity=%s\nmod_identity=%s\n' "${identity%% *}" "${mod_identity%% *}"

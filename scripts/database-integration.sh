@@ -16,7 +16,6 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid python3 curl
 require_test_docker
 require_go_race
-bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 
 RUN_ID="${RUN_ID:-database-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
@@ -29,6 +28,14 @@ export OCSERV_AUDIT_EVENT_KEY_ID=test-audit-event-v1
 export OCSERV_TEST_AUDIT_EVENT_KEY_HEX=1111111111111111111111111111111111111111111111111111111111111111
 export OCSERV_AUDIT_CHECKPOINT_KEY=2222222222222222222222222222222222222222222222222222222222222222
 PG_MAJOR="${PG_MAJOR:-all}"
+case "${PG_MAJOR}" in
+  all) POSTGRES_MAJORS=(18) ;;
+  18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
+  *)
+    echo "PG_MAJOR must be all or 18" >&2
+    exit 2
+    ;;
+esac
 API_PORT_BASE=$((18000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 10000))
 PIDS=()
 CONTAINERS=()
@@ -71,6 +78,23 @@ trap 'exit 143' TERM
 
 mkdir -p "${TMP_ROOT}"
 export DATABASE_CASE_RESULTS="${TMP_ROOT}/required-case-results.jsonl"
+
+# Start PostgreSQL early so image pull and initdb overlap with migration checks and controller build.
+for major in "${POSTGRES_MAJORS[@]}"; do
+  container="${PREFIX}-pg${major}"
+  CONTAINERS+=("${container}")
+  # Keep the selected loopback port stable across the lifecycle restart test.
+  port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  case "${major}" in
+    18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
+  esac
+  docker run -d --name "${container}" \
+    -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
+    -p "127.0.0.1:${port}:5432" "${postgres_image}" >/dev/null
+done
+
+bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
+
 STARTUP_BIN=""
 if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
   [[ -x "${BIN}" ]] || {
@@ -83,15 +107,6 @@ else
 fi
 
 TEST_CONTROL_PLANE="${ROOT}/control-plane"
-
-case "${PG_MAJOR}" in
-  all) POSTGRES_MAJORS=(18) ;;
-  18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
-  *)
-    echo "PG_MAJOR must be all or 18" >&2
-    exit 2
-    ;;
-esac
 
 expected_migration_version() {
   (
@@ -129,18 +144,18 @@ wait_for_postgres() {
   local container=$1
   # TCP probe: the entrypoint's initdb temporary server listens on the Unix
   # socket only, so a socket probe can report ready before the final server.
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 240); do
     if docker exec -e PGPASSWORD=test-owner-only "${container}" psql -h 127.0.0.1 -U ocservia_owner -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then return 0; fi
-    sleep 1
+    sleep 0.25
   done
   return 1
 }
 
 wait_for_http() {
   local url=$1
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 240); do
     if curl --fail --silent "${url}" >/dev/null; then return 0; fi
-    sleep 1
+    sleep 0.25
   done
   return 1
 }
@@ -148,12 +163,12 @@ wait_for_http() {
 wait_for_tcp() {
   local host=$1
   local port=$2
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 240); do
     if (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; then
       exec 3>&- 3<&-
       return 0
     fi
-    sleep 1
+    sleep 0.25
   done
   return 1
 }
@@ -256,15 +271,6 @@ run_postgres_business_tests() {
 for major in "${POSTGRES_MAJORS[@]}"; do
   : >"${DATABASE_CASE_RESULTS}"
   container="${PREFIX}-pg${major}"
-  CONTAINERS+=("${container}")
-  # Keep the selected loopback port stable across the lifecycle restart test.
-  port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-  case "${major}" in
-    18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
-  esac
-  docker run -d --name "${container}" \
-    -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-    -p "127.0.0.1:${port}:5432" "${postgres_image}" >/dev/null
   wait_for_postgres "${container}"
   port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"

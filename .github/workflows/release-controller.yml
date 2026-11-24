@@ -48,19 +48,33 @@ jobs:
           } >>"${GITHUB_ENV}"
       - name: Relay optional BuildKit cache credentials
         uses: ./.github/actions/build-cache-credentials
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: image-security
       # Each leg builds natively (no QEMU) and exports one Docker image
       # archive per image. Nothing is written to GHCR here: the legs hold
       # only source read, and every production registry write happens inside
       # the single reviewer-gated publish job.
-      - name: Build Controller images
+      - name: Build Controller images and prefetch fresh vulnerability DB
         id: build-images
         run: |
+          grype_db="$RUNNER_TEMP/grype-db"
+          mkdir -p "$grype_db"
+          echo "GRYPE_DB_CACHE_DIR=$grype_db" >>"$GITHUB_ENV"
+          (
+            source scripts/env.sh
+            GRYPE_DB_CACHE_DIR="$grype_db" bash scripts/scan-release-images.sh --update-db-only
+          ) >"$RUNNER_TEMP/grype-db-update.log" 2>&1 &
+          db_pid=$!
           VERSION="${version}" SOURCE_COMMIT="${source_commit}" \
             CONTROLLER_ARCH="${{ inputs.arch }}" OUTPUT_DIR="${RUNNER_TEMP}/controller-images" \
-            bash scripts/build-release-controller.sh
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: image-security
+            bash scripts/build-release-controller.sh &
+          build_pid=$!
+          db_status=0; build_status=0
+          wait "$build_pid" || build_status=$?
+          wait "$db_pid" || db_status=$?
+          cat "$RUNNER_TEMP/grype-db-update.log"
+          ((build_status == 0 && db_status == 0))
       - name: Scan exact Controller image archives
         id: scan-images
         env:
@@ -72,7 +86,7 @@ jobs:
           for name in gateway control transport backup edge relay signer; do
             printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
           done
-          IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh
+          IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh --use-prefetched-db
       - name: Smoke Controller images on the native runner
         id: smoke-images
         env:
@@ -102,4 +116,6 @@ jobs:
           if-no-files-found: error
       - name: Remove Controller BuildKit builder
         if: always()
-        run: docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true
+        run: |
+          docker rm -fv "buildx_buildkit_${BUILDX_BUILDER}0" >/dev/null 2>&1 || true
+          docker buildx rm --force "${BUILDX_BUILDER}" >/dev/null 2>&1 || true

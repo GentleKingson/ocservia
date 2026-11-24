@@ -14,6 +14,11 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 [[ $# -le 1 ]] || exit 2
+max_jobs="${CONTROLLER_BUILD_PARALLELISM:-3}"
+[[ "${max_jobs}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "CONTROLLER_BUILD_PARALLELISM must be a positive integer: ${max_jobs}" >&2
+  exit 2
+}
 cache_images=(gateway control transport backup edge relay signer)
 if [[ "${export_cache}" == true && -n "${CONTROLLER_CACHE_IMAGES:-}" ]]; then
   [[ "${CONTROLLER_CACHE_IMAGES}" != *$'\n'* && "${CONTROLLER_CACHE_IMAGES}" != *$'\r'* ]] || exit 2
@@ -47,7 +52,6 @@ trap 'rm -rf -- "${timing_dir}"' EXIT
 
 build_image() {
   local name="$1" dockerfile="$2" cache_mode=min
-  if [[ "${export_cache}" == true && " ${cache_images[*]} " != *" ${name} "* ]]; then return 0; fi
   local -a args=(--builder "${BUILDX_BUILDER}" --platform "linux/${CONTROLLER_ARCH}"
     --provenance=false --pull
     --label "org.opencontainers.image.version=${VERSION}"
@@ -71,9 +75,9 @@ build_image() {
   # Keep compiler/dependency layers only for the expensive native builds.
   case "${name}" in control|transport|relay|signer) cache_mode=max ;; esac
   # Release and Business restore only; main CI refreshes both native arches.
-  local started="${SECONDS}" result=0 log_file="${timing_dir}/${name}.log"
+  local started="${SECONDS}" result=0 log_file="${timing_dir}/${name}.log" timing_file="${timing_dir}/${name}.timing"
   BUILD_CACHE_MODE="${cache_mode}" bash "${ROOT}/scripts/buildx-cache.sh" "controller-v1-${name}-linux-${CONTROLLER_ARCH}" "${export_cache}" \
-    "controller-${name}-${CONTROLLER_ARCH}" --progress plain "${args[@]}" "${ROOT}" 2>&1 | tee "${log_file}" || result=$?
+    "controller-${name}-${CONTROLLER_ARCH}" --progress plain "${args[@]}" "${ROOT}" >"${log_file}" 2>&1 || result=$?
   local compiler_steps
   compiler_steps="$(awk '
     /#0 building with/ { delete compilation; delete observed }
@@ -93,16 +97,61 @@ build_image() {
   local cache_retry=no
   if grep -qF 'retrying once without external cache' "${log_file}"; then cache_retry=yes; fi
   printf 'controller-build-timing image=%s arch=%s seconds=%s %s external_cache_retry=%s exit=%s\n' \
-    "${name}" "${CONTROLLER_ARCH}" "$((SECONDS - started))" "${compiler_steps}" "${cache_retry}" "${result}"
+    "${name}" "${CONTROLLER_ARCH}" "$((SECONDS - started))" "${compiler_steps}" "${cache_retry}" "${result}" >"${timing_file}"
   ((result == 0)) || return "${result}"
   if [[ "${export_cache}" == false ]]; then
     test -s "${OUTPUT_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   fi
 }
-build_image gateway deploy/production/gateway.Dockerfile
-build_image control control-plane/Dockerfile
-build_image transport rust/transportd.Dockerfile
-build_image backup deploy/production/backup.Dockerfile
-build_image edge deploy/production/edge.Dockerfile
-build_image relay deploy/production/relay.Dockerfile
-build_image signer deploy/production/signer.Dockerfile
+
+all_targets=(
+  "transport:rust/transportd.Dockerfile"
+  "relay:deploy/production/relay.Dockerfile"
+  "control:control-plane/Dockerfile"
+  "gateway:deploy/production/gateway.Dockerfile"
+  "backup:deploy/production/backup.Dockerfile"
+  "signer:deploy/production/signer.Dockerfile"
+  "edge:deploy/production/edge.Dockerfile"
+)
+
+targets=()
+for spec in "${all_targets[@]}"; do
+  name="${spec%%:*}"
+  if [[ "${export_cache}" == true && " ${cache_images[*]} " != *" ${name} "* ]]; then
+    continue
+  fi
+  targets+=("${spec}")
+done
+
+pids=()
+names=()
+build_errors=0
+for idx in "${!targets[@]}"; do
+  spec="${targets[idx]}"
+  name="${spec%%:*}"
+  dockerfile="${spec#*:}"
+  build_image "${name}" "${dockerfile}" &
+  pids+=("$!")
+  names+=("${name}")
+  if ((idx + 1 >= max_jobs)); then
+    if ! wait "${pids[idx + 1 - max_jobs]}"; then
+      build_errors=1
+    fi
+  fi
+done
+start_wait=$((${#pids[@]} >= max_jobs ? ${#pids[@]} - max_jobs + 1 : 0))
+for ((idx = start_wait; idx < ${#pids[@]}; idx++)); do
+  if ! wait "${pids[idx]}"; then
+    build_errors=1
+  fi
+done
+
+for name in "${names[@]}"; do
+  if [[ -f "${timing_dir}/${name}.log" ]]; then
+    cat "${timing_dir}/${name}.log"
+  fi
+  if [[ -f "${timing_dir}/${name}.timing" ]]; then
+    cat "${timing_dir}/${name}.timing"
+  fi
+done
+((build_errors == 0))

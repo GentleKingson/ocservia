@@ -40,11 +40,14 @@ if [[ "${MODE}" != "race" ]]; then
   test -z "$(gofmt -l "${GO_MODULES[@]/#/${ROOT}/}")"
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go vet ./...)
-    (cd "${ROOT}/${module}" && go test -count=1 ./...)
   done
 fi
 
-if [[ "${MODE}" != "standard" ]]; then
+if [[ "${MODE}" == "standard" ]]; then
+  for module in "${GO_MODULES[@]}"; do
+    (cd "${ROOT}/${module}" && go test -count=1 ./...)
+  done
+else
   for module in "${GO_MODULES[@]}"; do
     (cd "${ROOT}/${module}" && go test -race -count=1 ./...)
   done

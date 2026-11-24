@@ -9,6 +9,7 @@ const crossEngineSpecs =
 const parsedWorkers = Number(process.env.PLAYWRIGHT_WORKERS);
 const workers =
   Number.isInteger(parsedWorkers) && parsedWorkers > 0 ? parsedWorkers : 1;
+const recordArtifacts = process.env.PLAYWRIGHT_DISABLE_ARTIFACTS !== "1";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -55,8 +56,8 @@ export default defineConfig({
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:4173",
     // The gateway run uses a throwaway self-signed certificate.
     ignoreHTTPSErrors: process.env.PLAYWRIGHT_GATEWAY === "1",
-    screenshot: "only-on-failure",
-    trace: "retain-on-failure",
-    video: "retain-on-failure",
+    screenshot: recordArtifacts ? "only-on-failure" : "off",
+    trace: recordArtifacts ? "retain-on-failure" : "off",
+    video: recordArtifacts ? "retain-on-failure" : "off",
   },
 });
