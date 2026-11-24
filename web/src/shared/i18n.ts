@@ -49,6 +49,22 @@ export const i18n = createI18n({
       loginRetryAfter:
         "Too many attempts. Please try again in {seconds} seconds.",
       loginRetry: "Try again",
+      changePassword: "Change password",
+      currentPassword: "Current password",
+      newPassword: "New password",
+      confirmNewPassword: "Confirm new password",
+      changingPassword: "Changing password…",
+      passwordChangeSignInAgain:
+        "You’ll sign in again after changing your password.",
+      passwordConfirmationMismatch: "The new passwords do not match.",
+      passwordChangeRejected:
+        "Check your current password or wait before trying again.",
+      passwordChangePolicy:
+        "Choose a unique password with at least 8 characters and at most 1024 UTF-8 bytes.",
+      passwordChangeForbidden:
+        "Sign in with a Local administrator account to change your password.",
+      passwordChangeUnavailable:
+        "The password change could not be confirmed. Try signing in with your new password or try again.",
       overview: "Overview",
       nodes: "Nodes",
       fleet: "Fleet",

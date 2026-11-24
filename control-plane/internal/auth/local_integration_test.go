@@ -8,11 +8,104 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
+
+func TestLocalAdminPasswordResetIntegration(t *testing.T) {
+	ctx := context.Background()
+	runtime, owner := testfixture.OpenIsolated(t, t, "local_admin_reset")
+	s, err := NewBackend(postgres.WrapPool(runtime), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	testutil.NoError(t, err)
+	if _, _, err := s.ResetLocalAdminPassword(ctx); !errors.Is(err, ErrLocalAdminUnavailable) {
+		t.Fatalf("reset before bootstrap: %v", err)
+	}
+	const username, oldPassword = "first-admin", "original password for administrator reset integration"
+	workspace := uuid.Must(uuid.NewV7())
+	testutil.Exec(t, ctx, owner, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Admin reset','reset',now(),now())`, workspace)
+	id, err := s.BootstrapLocalAdmin(ctx, username, oldPassword, workspace)
+	testutil.NoError(t, err)
+	first, _, err := s.AuthenticateLocal(ctx, username, oldPassword)
+	testutil.NoError(t, err)
+	second, _, err := s.AuthenticateLocal(ctx, username, oldPassword)
+	testutil.NoError(t, err)
+
+	testutil.Exec(t, ctx, owner, `UPDATE identities SET disabled_at=now() WHERE id=$1`, id)
+	if _, _, err := s.ResetLocalAdminPassword(ctx); !errors.Is(err, ErrLocalAdminUnavailable) {
+		t.Fatalf("reset disabled administrator: %v", err)
+	}
+	testutil.Exec(t, ctx, owner, `UPDATE identities SET disabled_at=NULL WHERE id=$1`, id)
+	testutil.Exec(t, ctx, owner, `DELETE FROM workspace_admins WHERE identity_id=$1`, id)
+	if _, _, err := s.ResetLocalAdminPassword(ctx); !errors.Is(err, ErrLocalAdminUnavailable) {
+		t.Fatalf("reset unbound administrator: %v", err)
+	}
+	testutil.Exec(t, ctx, owner, `INSERT INTO workspace_admins(workspace_id,identity_id) VALUES($1,$2)`, workspace, id)
+
+	// Model a login suspended after verifying the old credential and before
+	// creating a session, along with an independently admitted password change.
+	lease, err := s.reserveLocalAttempt(ctx, username)
+	testutil.NoError(t, err)
+	stale, err := s.localCredential(ctx, username)
+	testutil.NoError(t, err)
+	stale.attemptLease = lease
+	_, err = s.reserveLocalAttempt(ctx, authstore.PasswordChangeAttemptKey(id))
+	testutil.NoError(t, err)
+	testutil.Exec(t, ctx, owner, `ALTER TABLE audit_events ADD CONSTRAINT test_admin_reset_audit_failure CHECK (action <> 'local_user.reset-password')`)
+	if name, password, err := s.ResetLocalAdminPassword(ctx); err == nil || name != "" || password != "" {
+		t.Fatal("failed audit transaction returned credentials or succeeded")
+	}
+	afterFailure, err := s.localCredential(ctx, username)
+	testutil.NoError(t, err)
+	if afterFailure.passwordHash != stale.passwordHash {
+		t.Fatal("failed reset changed the password hash")
+	}
+	_, err = s.Authenticate(ctx, first)
+	testutil.NoError(t, err)
+	var attempts int
+	testutil.NoError(t, owner.QueryRow(ctx, `SELECT count(*) FROM local_auth_attempts WHERE username IN ($1,$2)`, username, authstore.PasswordChangeAttemptKey(id)).Scan(&attempts))
+	if attempts != 2 {
+		t.Fatal("failed reset removed attempt state")
+	}
+	testutil.Exec(t, ctx, owner, `ALTER TABLE audit_events DROP CONSTRAINT test_admin_reset_audit_failure`)
+
+	name, password, err := s.ResetLocalAdminPassword(ctx)
+	testutil.NoError(t, err)
+	if name != username || len(password) != 32 {
+		t.Fatal("reset did not return the bootstrapped username and a generated credential")
+	}
+	testutil.NoError(t, owner.QueryRow(ctx, `SELECT count(*) FROM local_auth_attempts WHERE username IN ($1,$2)`, username, authstore.PasswordChangeAttemptKey(id)).Scan(&attempts))
+	if attempts != 0 {
+		t.Fatal("reset left attempt state")
+	}
+	if _, _, err := s.createSession(ctx, LocalIssuer, username, &stale); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("in-flight login with the old password issued a session: %v", err)
+	}
+	for _, cookie := range []*http.Cookie{first, second} {
+		if _, err := s.Authenticate(ctx, cookie); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("old cookie survived reset: %v", err)
+		}
+	}
+	if _, _, err := s.AuthenticateLocal(ctx, username, oldPassword); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("old password survived reset: %v", err)
+	}
+	_, principal, err := s.AuthenticateLocal(ctx, username, password)
+	testutil.NoError(t, err)
+	if principal.IdentityID != id {
+		t.Fatal("reset changed the administrator identity")
+	}
+	var auditAndBinding bool
+	testutil.NoError(t, owner.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM audit_events WHERE workspace_id=$1 AND resource_id=$2
+		 AND action='local_user.reset-password' AND result='succeeded' AND auth_version=1)=1
+		AND EXISTS (SELECT 1 FROM local_auth_bootstrap b JOIN workspace_admins a USING(workspace_id,identity_id)
+		 WHERE b.workspace_id=$1 AND b.identity_id=$2)`, workspace, id).Scan(&auditAndBinding))
+	if !auditAndBinding {
+		t.Fatal("reset did not preserve the bootstrap binding and append its audit event")
+	}
+}
 
 func TestLocalAuthenticationIntegration(t *testing.T) {
 	ctx := context.Background()

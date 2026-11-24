@@ -17,6 +17,7 @@ usage() {
   echo "usage: $0 {install|upgrade} --release-file /path/controller-release-<amd64|arm64>.json" >&2
   echo "       $0 rollback" >&2
   echo "       $0 {start|health}" >&2
+  echo "       $0 reset-local-admin" >&2
   echo "       $0 uninstall [--purge-data]" >&2
   exit 2
 }
@@ -364,6 +365,10 @@ case "${command}" in
     validate_release_file_path "${RELEASE_FILE}"
     ;;
   start|rollback|health) (($# == 1)) || usage ;;
+  reset-local-admin)
+    (($# == 1)) || usage
+    [[ -t 0 && -t 1 ]] || fail "administrator password reset requires an interactive terminal for input and output"
+    ;;
   uninstall)
     if (($# == 2)) && [[ "$2" == --purge-data ]]; then
       PURGE_DATA=true
@@ -432,6 +437,12 @@ fi
 
 case "${command}" in
   health) "${SMOKE_SCRIPT}" --release-file "${STAGED_RELEASE}"; exit ;;
+  reset-local-admin)
+    running="$("${COMPOSE_LAUNCHER}" ps --status running --quiet control-plane)"
+    [[ -n "${running}" ]] || fail "start the Controller with controller.sh start before resetting the administrator password"
+    "${COMPOSE_LAUNCHER}" exec control-plane /usr/local/bin/ocserv-control --reset-local-admin
+    exit
+    ;;
   uninstall)
     down=(down)
     if [[ "${PURGE_DATA}" == true ]]; then

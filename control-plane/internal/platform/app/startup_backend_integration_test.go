@@ -305,27 +305,33 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		output, _ := os.ReadFile(logPath)
 		t.Fatalf("Controller never became ready\n%s", output)
 	}
-	payload, _ := json.Marshal(map[string]string{"username": "process-admin", "password": password})
-	request, _ := http.NewRequestWithContext(ctx, "POST", base+"/api/v1/auth/login", bytes.NewReader(payload))
-	request.Header.Set("Content-Type", "application/json")
 	origin := base
 	if production {
 		origin = "https://controller.example.test"
 	}
-	request.Header.Set("Origin", origin)
+	login := func(password string) (int, []*http.Cookie) {
+		t.Helper()
+		payload, err := json.Marshal(map[string]string{"username": "process-admin", "password": password})
+		testutil.NoError(t, err)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/v1/auth/login", bytes.NewReader(payload))
+		testutil.NoError(t, err)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", origin)
+		response, err := client.Do(request)
+		testutil.NoError(t, err)
+		defer response.Body.Close()
+		return response.StatusCode, response.Cookies()
+	}
+	status, cookies := login(password)
+	if status != http.StatusNoContent || len(cookies) != 1 {
+		t.Fatalf("real process login: %d", status)
+	}
+	cookie := cookies[0]
+	request, _ := http.NewRequestWithContext(ctx, "GET", base+"/api/v1/nodes", nil)
+	request.AddCookie(cookie)
 	response, err := client.Do(request)
 	testutil.NoError(t, err)
 	body, _ := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusNoContent || len(response.Cookies()) != 1 {
-		t.Fatalf("real process login: %d %s", response.StatusCode, body)
-	}
-	cookie := response.Cookies()[0]
-	request, _ = http.NewRequestWithContext(ctx, "GET", base+"/api/v1/nodes", nil)
-	request.AddCookie(cookie)
-	response, err = client.Do(request)
-	testutil.NoError(t, err)
-	body, _ = io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
 		t.Fatalf("real process authorized reader: %d %s", response.StatusCode, body)
@@ -345,6 +351,42 @@ func controllerProcessCheck(t *testing.T, smoke bool) {
 		}
 		return
 	}
+	if output, err := runOutput(runtimeOptions, nil, "--reset-local-admin"); err == nil ||
+		!bytes.Contains(output, []byte("interactive terminal")) || bytes.Contains(output, []byte("New password:")) {
+		t.Fatal("password reset reached terminal delivery without a TTY")
+	}
+	reset := exec.CommandContext(ctx, "script", "-qec", `exec "$OCSERV_TEST_RESET_BINARY" --reset-local-admin`, "/dev/null")
+	extra["OCSERV_TEST_RESET_BINARY"] = binary
+	reset.Env = environment(runtimeOptions, extra)
+	output, err := reset.CombinedOutput()
+	if err != nil {
+		t.Fatalf("interactive password reset failed: %v", err)
+	}
+	username, generated, ok := strings.Cut(strings.TrimSpace(string(output)), "\r\nNew password: ")
+	if !ok || username != "Username: process-admin" || len(generated) != 32 {
+		t.Fatal("reset did not display the administrator and a single generated password")
+	}
+	request, _ = http.NewRequestWithContext(ctx, "GET", base+"/api/v1/workspaces", nil)
+	request.AddCookie(cookie)
+	response, err = client.Do(request)
+	testutil.NoError(t, err)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old cookie survived the reset: %d", response.StatusCode)
+	}
+	if status, _ := login(password); status != http.StatusUnauthorized {
+		t.Fatalf("old password survived the reset: %d", status)
+	}
+	status, cookies = login(generated)
+	if status != http.StatusNoContent || len(cookies) != 1 {
+		t.Fatalf("login with generated password: %d", status)
+	}
+	serviceLog, err := os.ReadFile(logPath)
+	testutil.NoError(t, err)
+	if bytes.Contains(serviceLog, []byte(generated)) {
+		t.Fatal("generated password appeared in Controller logs")
+	}
+	cookie = cookies[0]
 	streamRequest, _ := http.NewRequestWithContext(ctx, "GET", base+"/api/v1/events/stream", nil)
 	streamRequest.AddCookie(cookie)
 	streamRequest.Header.Set("X-Workspace-ID", workspace.String())

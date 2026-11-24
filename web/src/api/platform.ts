@@ -1,4 +1,4 @@
-import { client, read } from "./transport";
+import { client, read, ResponseError } from "./transport";
 
 let authenticationProbe: Promise<void> | undefined;
 
@@ -19,6 +19,17 @@ export async function loginLocal(
     body: { username, password },
   });
   return response;
+}
+
+export async function changeLocalPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const { response } = await client.POST("/auth/change-password", {
+    cache: "no-store",
+    body: { current_password: currentPassword, new_password: newPassword },
+  });
+  if (response.status !== 204) throw new ResponseError(response);
 }
 
 export function probeAuthentication(): Promise<void> {

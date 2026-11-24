@@ -277,7 +277,11 @@ replay initialization to reset a password.
 
 ### Self-service password changes
 
-For self-service password changes, write a private JSON file containing only
+In the Web console, open **Settings → Change password**, enter your current
+password and confirm the new password. After success, sign in again with the
+new password.
+
+To use the same endpoint from a script, write a private JSON file containing only
 `current_password` and `new_password` (omitting any identity ID or workspace
 field) and submit it over HTTPS using a cookie jar from an active Local session
 and the exact configured `Origin`:
@@ -299,6 +303,35 @@ backoff, returning `401` on invalid or stale credentials or an active cooldown
 and `400` on password-policy violations; Break-glass sessions cannot call this
 endpoint.
 
+### Reset the Local administrator password
+
+Use this recovery command when the current password is lost. From the
+installed release runtime, in an interactive terminal, run the command with the
+same host account and protected configuration used for Controller lifecycle
+commands. Quick and Integrated installations use the root lifecycle.
+
+On a Quick installation, load the generated configuration with the release
+runtime's allowlist. For a manual installation, use its protected `install.env`.
+
+```bash
+source deploy/lib/install-env.sh
+install_env_load /etc/ocservia/install.env "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
+deploy/production/controller.sh reset-local-admin
+```
+
+The Controller container and PostgreSQL must be running. If the Controller is
+stopped, use `controller.sh start` first. The command targets the active Local
+administrator recorded at bootstrap, including a custom username from a manual
+installation. It generates a random password, clears the account's login and
+password-change attempt state, revokes its sessions, and records
+`local_user.reset-password` in the audit chain.
+
+The command displays the username and new password in the terminal after the
+transaction commits. Save the new password in your credential manager and use
+it to sign in. The initial Quick credential file continues to contain the
+original password. If the command reports an uncertain result or the terminal
+disconnects before delivery, run it again in an interactive terminal.
+
 ### Management protection and recovery
 
 If no working administrator remains, preserve incident evidence and follow
@@ -308,8 +341,8 @@ sessions before reopening access.
 
 ## Local new-password policy
 
-Bootstrap, managed user creation, self-service password changes, and
-administrator password resets all enforce the same new-password policy:
+Local bootstrap, self-service password changes, and administrator password
+resets enforce the same new-password policy:
 
 - Passwords must contain at least eight Unicode code points and at most 1024
   UTF-8 bytes. Invalid UTF-8 sequences are rejected.
