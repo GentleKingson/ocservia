@@ -234,6 +234,7 @@ jobs:
           persist-credentials: false
       - name: Relay launcher and installer contracts
         run: |
+          export PYTHONDONTWRITEBYTECODE=1
           work="$(mktemp -d)"
           trap 'rm -rf -- "${work}"' EXIT
           pids=()
@@ -244,7 +245,6 @@ jobs:
             "$@" >"${logs[idx]}" 2>&1 &
             pids[idx]=$!
           }
-          run_bg python3 scripts/test-node-bootstrap.py
           run_bg bash scripts/test-controller-install.sh
           run_bg bash scripts/test-controller-bootstrap.sh
           run_bg bash scripts/test-controller-host-bootstrap.sh
@@ -264,6 +264,11 @@ jobs:
             fi
             cat "${logs[idx]}"
           done
+          # Run after test-controller-lifecycle.sh because BootstrapTest creates
+          # .bootstrap-test-* directories inside the repository root.
+          if ! python3 scripts/test-node-bootstrap.py; then
+            status=1
+          fi
           exit "${status}"
 
   web:
