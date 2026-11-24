@@ -18,7 +18,7 @@ PRODUCTS = ('agent_amd64', 'agent_arm64', 'controller_amd64', 'controller_arm64'
 VERSION = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?')
 SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(r'[0-9a-f]{64}')
-POLL_SECONDS = 30
+POLL_SECONDS = 10
 WAIT_SECONDS = 225 * 60
 
 

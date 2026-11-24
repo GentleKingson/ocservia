@@ -300,6 +300,18 @@ install_govulncheck() {
   [[ "$(govulncheck -version 2>&1)" == *"v$(version govulncheck)"* ]]
 }
 
+install_go_licenses() {
+  local expected actual
+  expected="v$(version go_licenses)"
+  actual="$(go version -m "${TOOLS}/bin/go-licenses" 2>/dev/null | awk '$1 == "mod" { print $3 }' || true)"
+  if [[ "${actual}" != "${expected}" ]]; then
+    GOBIN="${TOOLS}/bin" go install \
+      "github.com/google/go-licenses/v2@${expected}"
+  fi
+  actual="$(go version -m "${TOOLS}/bin/go-licenses" 2>/dev/null | awk '$1 == "mod" { print $3 }' || true)"
+  [[ "${actual}" == "${expected}" ]]
+}
+
 install_cargo_audit() {
   local artifact archive
   artifact="cargo-audit-${cargo_audit_platform}-v$(version cargo_audit).tgz"
@@ -347,6 +359,7 @@ install_contract_tools() {
 
 install_go_quality_tools() {
   install_govulncheck
+  install_go_licenses
 }
 
 install_rust_quality_tools() {
@@ -410,6 +423,7 @@ case "${PROFILE}" in
   go-security)
     install_go
     install_govulncheck
+    install_go_licenses
     ;;
   rust-basic)
     install_rust

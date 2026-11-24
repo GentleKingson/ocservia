@@ -143,7 +143,7 @@ classify_path() {
 
     # Broader release/installer/packaging/deployment paths.
     .github/workflows/release*.yml)
-      tools_suite guards; tools_suite release; run_installers=true ;;
+      tools_suite guards; tools_suite release ;;
     deploy/systemd/*)
       run_rust=true; tools_suite release; run_installers=true ;;
     install.env.example|\

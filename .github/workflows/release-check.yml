@@ -198,8 +198,8 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/agent-${{ matrix.arch }}-*
-          key: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
+          key: release-agent-target-v3-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v3-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Validate RC to final package lifecycle (${{ matrix.arch }})
         env:
           RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
@@ -299,12 +299,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-tools
-        if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
+        if: needs.ci.outputs.database_done != 'true'
         with:
           profiles: go-test
+      - id: cache-key
+        if: needs.ci.outputs.database_done != 'true'
+        run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: needs.ci.outputs.database_done != 'true'
+        with:
+          path: .cache/go-mod
+          key: basic-go-mod-v2-${{ steps.cache-key.outputs.mod_identity }}
+          restore-keys: basic-go-mod-v2-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: needs.ci.outputs.database_done != 'true'
+        with:
+          path: .cache/go-build
+          key: basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
+          restore-keys: |
+            basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
+            basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
       - if: needs.ci.outputs.database_done != 'true'
         env:
           PG_MAJOR: '18'
@@ -316,10 +332,19 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/database-recovery-postgres
         run: |
+          mkdir -p "$ARTIFACT_DIR/bundled"
           RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres-bundled" \
-            ARTIFACT_DIR="$ARTIFACT_DIR/bundled" bash scripts/postgres-backup-restore-smoke.sh
+            ARTIFACT_DIR="$ARTIFACT_DIR/bundled" \
+            bash scripts/postgres-backup-restore-smoke.sh >"$RUNNER_TEMP/recovery-bundled.log" 2>&1 &
+          bundled_pid=$!
           RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres" \
-            bash scripts/external-postgres-backup-restore-smoke.sh
+            bash scripts/external-postgres-backup-restore-smoke.sh >"$RUNNER_TEMP/recovery-external.log" 2>&1 &
+          ext_pid=$!
+          bundled_status=0; ext_status=0
+          wait "$bundled_pid" || bundled_status=$?
+          wait "$ext_pid" || ext_status=$?
+          cat "$RUNNER_TEMP/recovery-bundled.log" "$RUNNER_TEMP/recovery-external.log"
+          ((bundled_status == 0 && ext_status == 0))
       - if: always() && needs.ci.outputs.recovery_done != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

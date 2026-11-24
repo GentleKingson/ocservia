@@ -9,13 +9,12 @@ on:
         description: Expected main commit when dispatched by Release Check
         type: string
         required: false
-  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: security-${{ github.event_name == 'workflow_call' && github.run_id || github.ref }}
+  group: security-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -34,23 +33,37 @@ jobs:
             profile: go-security
             restore_go_mod: true
             command: |
-              (cd control-plane && govulncheck ./...)
-              (cd signer && govulncheck ./...)
+              work="$(mktemp -d)"
+              trap 'rm -rf -- "${work}"' EXIT
+              (cd control-plane && govulncheck ./...) >"${work}/cp.log" 2>&1 &
+              cp_pid=$!
+              (cd signer && govulncheck ./...) >"${work}/signer.log" 2>&1 &
+              signer_pid=$!
+              cp_status=0; signer_status=0
+              wait "${cp_pid}" || cp_status=$?
+              wait "${signer_pid}" || signer_status=$?
+              cat "${work}/cp.log" "${work}/signer.log"
+              ((cp_status == 0 && signer_status == 0))
           - name: Rust advisories
             profile: rust-security
             command: |
-              cd rust
-              cargo audit
-              cargo audit --file ../deploy/production/relay.Cargo.lock
-              cargo deny --locked check advisories bans licenses sources
+              work="$(mktemp -d)"
+              trap 'rm -rf -- "${work}"' EXIT
+              (cd rust && cargo audit --file ../deploy/production/relay.Cargo.lock) >"${work}/relay.log" 2>&1 &
+              relay_pid=$!
+              (cd rust && cargo deny --locked check advisories bans licenses sources) >"${work}/deny.log" 2>&1 &
+              deny_pid=$!
+              relay_status=0; deny_status=0
+              wait "${relay_pid}" || relay_status=$?
+              wait "${deny_pid}" || deny_status=$?
+              cat "${work}/relay.log" "${work}/deny.log"
+              ((relay_status == 0 && deny_status == 0))
           - name: npm vulnerabilities
             profile: npm-security
             command: |
               (cd web && npm audit --package-lock-only --ignore-scripts)
           - name: Go & Web licenses
-            profile: go-test web
-            cache_label: go-test-web
-            cache_npm: true
+            profile: go-security
             restore_go_mod: true
             command: scripts/license-check.sh --skip-rust
     steps:
@@ -78,7 +91,8 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
-          key: basic-go-mod-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache-key.outputs.identity }}
+          key: basic-go-mod-v2-${{ steps.go-cache-key.outputs.mod_identity }}
+          restore-keys: basic-go-mod-v2-
       - name: Scan
         shell: bash
         run: |

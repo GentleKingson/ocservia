@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import unquote
 from zipfile import ZipFile
 
 import release_evidence as evidence
@@ -178,6 +179,63 @@ class Publication(unittest.TestCase):
             with self.subTest(kwargs=kwargs), patch.object(evidence, 'gh', side_effect=self.fixture('2.0.0', **kwargs)):
                 with self.assertRaisesRegex(RuntimeError, message):
                     evidence.qualify(REPO, SHA, '2.0.0')
+
+    def test_publish_token_cache_and_parallel_checks(self):
+        spec = importlib.util.spec_from_file_location('publish_release', Path(__file__).with_name('publish-release.py'))
+        publisher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(publisher)
+        publisher._TOKEN_CACHE.clear()
+        token_requests = []
+
+        class FakeResponse:
+            def __init__(self, payload, headers=None):
+                self._payload = payload
+                self.headers = headers or {}
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def fake_urlopen(req, timeout=60):
+            url = req.full_url
+            if url.startswith('https://ghcr.io/token?'):
+                token_requests.append(url)
+                repo = unquote(url.split('repository%3A', 1)[1].split('%3Apull', 1)[0])
+                return FakeResponse(json.dumps({'token': f'tok-{repo}'}).encode())
+            if url.startswith('https://ghcr.io/v2/'):
+                tag = url.rsplit('/', 1)[-1]
+                repo = url.split('/v2/', 1)[1].split('/manifests/', 1)[0]
+                assert req.headers['Authorization'] == f'Bearer tok-{repo}'
+                payload = json.dumps({'schemaVersion': 2}).encode()
+                digest = 'sha256:' + publisher.hashlib.sha256(payload).hexdigest()
+                if tag == 'v1.0.0-bad':
+                    digest = 'sha256:' + ('0' * 64)
+                return FakeResponse(payload, {'Docker-Content-Digest': digest})
+            raise AssertionError(url)
+
+        with patch.dict(os.environ, GITHUB_ACTOR='actor', GH_TOKEN='secret'), \
+                patch.object(publisher, 'urlopen', side_effect=fake_urlopen):
+            publisher.manifest('gateway', 'v1.0.0-amd64')
+            publisher.manifest('gateway', 'v1.0.0-arm64')
+            publisher.manifest('control', 'v1.0.0-amd64')
+            self.assertEqual(len(token_requests), 2)
+            with self.assertRaisesRegex(RuntimeError, 'Registry digest mismatch'):
+                publisher.verify_images({('gateway', 'v1.0.0-bad'): 'sha256:' + ('f' * 64)})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            images = Path(tmp)
+            for role in publisher.ROLES:
+                for arch in publisher.ARCHES:
+                    (images / f'{role}-linux-{arch}.tar').write_bytes(b'tar')
+            with patch.object(publisher, 'api', return_value=[[]]), \
+                    patch.object(publisher, 'absent', side_effect=[None, None, RuntimeError('tag exists')]):
+                with self.assertRaisesRegex(RuntimeError, 'tag exists'):
+                    publisher.preflight(REPO, 'v1.0.0', images)
 
 
 if __name__ == '__main__':

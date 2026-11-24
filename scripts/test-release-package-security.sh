@@ -17,6 +17,7 @@ agent_builder = (root / '.github/workflows/release-agent.yml').read_text()
 release = (root / '.github/workflows/release.yml').read_text()
 release_check = (root / '.github/workflows/release-check.yml').read_text()
 smoke_script = (root / 'scripts/release-native-package-smoke.sh').read_text()
+agent_build_script = (root / 'scripts/build-agent-binaries.sh').read_text()
 builder = (root / 'rust/agent-build.Dockerfile').read_text()
 
 
@@ -46,6 +47,8 @@ rc_result_job = job(release_check, 'result')
 
 require('scripts/release-native-package-smoke.sh' not in build_job,
         'the package builder must not run privileged lifecycle smoke')
+require('builder_id' not in agent_build_script and 'BUILD_CACHE_KEY' not in agent_build_script,
+        'build-agent-binaries.sh must not embed ephemeral Docker builder_id in CARGO_TARGET_DIR')
 require('id: upload' in build_job and
         'artifact_id: ${{ steps.upload.outputs.artifact-id }}' in build_job,
         'the package builder must expose the immutable upload by exact artifact ID')

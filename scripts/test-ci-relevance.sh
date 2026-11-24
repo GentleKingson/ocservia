@@ -115,6 +115,7 @@ resolve_ci_tools_profiles
 assert_eq "release.yml ci_suites" "guards release" "${ci_suites[*]}"
 assert_eq "release.yml ci_tools_profiles" "node" "${ci_tools_profiles}"
 assert_eq "release.yml ci_tools_cache_label" "node" "${ci_tools_cache_label}"
+assert_flag "release.yml" run_installers false
 
 reset_state
 classify_path scripts/release_business_scenarios.py

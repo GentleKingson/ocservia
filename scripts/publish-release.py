@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-shot release publication. Existing drafts/tags are never resumed or replaced."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -33,6 +35,8 @@ ACCEPT = ', '.join(('application/vnd.oci.image.index.v1+json',
                     'application/vnd.docker.distribution.manifest.list.v2+json',
                     'application/vnd.oci.image.manifest.v1+json',
                     'application/vnd.docker.distribution.manifest.v2+json'))
+_TOKEN_CACHE = {}
+_TOKEN_LOCK = threading.Lock()
 
 
 def require(condition, message):
@@ -78,14 +82,24 @@ def digest(path):
         return 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def manifest(name, tag):
-    repository = f'gentlekingson/ocservia/{name}'
+def registry_token(repository):
+    with _TOKEN_LOCK:
+        cached = _TOKEN_CACHE.get(repository)
+    if cached is not None:
+        return cached
     credentials = base64.b64encode(f"{os.environ['GITHUB_ACTOR']}:{os.environ['GH_TOKEN']}".encode()).decode()
     query = urlencode({'service': 'ghcr.io', 'scope': f'repository:{repository}:pull'})
     # Token failures (including 404) are errors, never evidence of a missing tag.
     with urlopen(Request('https://ghcr.io/token?' + query,
                          headers={'Authorization': 'Basic ' + credentials}), timeout=60) as response:
         token = json.load(response)['token']
+    with _TOKEN_LOCK:
+        return _TOKEN_CACHE.setdefault(repository, token)
+
+
+def manifest(name, tag):
+    repository = f'gentlekingson/ocservia/{name}'
+    token = registry_token(repository)
     request = Request(f'https://ghcr.io/v2/{repository}/manifests/{tag}',
                       headers={'Authorization': 'Bearer ' + token, 'Accept': ACCEPT})
     try:
@@ -148,8 +162,11 @@ def preflight(repo, tag, images):
             path = images / f'{name}-linux-{arch}.tar'
             require(path.is_file() and not path.is_symlink() and path.stat().st_size > 0,
                     f'Missing image archive: {path.name}')
-        for suffix in ('', '-amd64', '-arm64'):
-            absent(name, tag + suffix)
+    with ThreadPoolExecutor(max_workers=len(ROLES)) as executor:
+        futures = [executor.submit(absent, name, tag + suffix)
+                   for name in ROLES for suffix in ('', '-amd64', '-arm64')]
+        for future in futures:
+            future.result()
 
 
 def verify_assets(repo, release_id, files):
@@ -177,9 +194,15 @@ def draft(repo, tag, sha, prerelease):
 
 
 def verify_images(expected):
-    for (name, tag), expected_digest in expected.items():
+    def verify_one(name, tag, expected_digest):
         current = manifest(name, tag)
         require(current is not None and current[0] == expected_digest, f'Published image changed: {name}:{tag}')
+
+    with ThreadPoolExecutor(max_workers=len(ROLES)) as executor:
+        futures = [executor.submit(verify_one, name, tag, expected_digest)
+                   for (name, tag), expected_digest in expected.items()]
+        for future in futures:
+            future.result()
 
 
 def generate_release_manifests(version, sha, directory, image_digests):
@@ -197,6 +220,35 @@ def generate_release_manifests(version, sha, directory, image_digests):
                     directory / 'controller-release.json')
 
 
+def publish_role(name, version, tag, images):
+    children = {}
+    role_expected = {}
+    for arch in ARCHES:
+        source = f'{PREFIX}/{name}:{version}-linux-{arch}'
+        target = f'{PREFIX}/{name}:{tag}-{arch}'
+        command('docker', 'load', '--input', str(images / f'{name}-linux-{arch}.tar'))
+        local = json.loads(command('docker', 'image', 'inspect', source))[0]
+        require(local['Os'] == 'linux' and local['Architecture'] == arch, f'Wrong image platform: {source}')
+        command('docker', 'tag', source, target)
+        push_image(name, f'{tag}-{arch}')
+        remote = manifest(name, f'{tag}-{arch}')
+        require(remote is not None and remote[1].get('config', {}).get('digest') == local['Id'],
+                f'Pushed image does not match scanned archive: {target}')
+        children[arch] = remote[0]
+        role_expected[name, f'{tag}-{arch}'] = remote[0]
+    absent(name, tag)
+    command('docker', 'buildx', 'imagetools', 'create', '--tag', f'{PREFIX}/{name}:{tag}',
+            *(f'{PREFIX}/{name}@{children[arch]}' for arch in ARCHES))
+    index = manifest(name, tag)
+    require(index is not None, f'Missing multi-arch index: {name}')
+    descriptors = index[1].get('manifests', [])
+    require(len(descriptors) == 2 and
+            {(d['platform']['os'], d['platform']['architecture'], d['digest']) for d in descriptors}
+            == {('linux', arch, children[arch]) for arch in ARCHES}, f'Invalid multi-arch index: {name}')
+    role_expected[name, tag] = index[0]
+    return role_expected, index[0]
+
+
 def finish(repo, version, sha, assets, images):
     tag = 'v' + version
     prerelease = '-rc.' in version
@@ -206,32 +258,12 @@ def finish(repo, version, sha, assets, images):
             input=os.environ['GH_TOKEN'])
     expected = {}
     image_digests = {}
-    for name in ROLES:
-        children = {}
-        for arch in ARCHES:
-            source = f'{PREFIX}/{name}:{version}-linux-{arch}'
-            target = f'{PREFIX}/{name}:{tag}-{arch}'
-            command('docker', 'load', '--input', str(images / f'{name}-linux-{arch}.tar'))
-            local = json.loads(command('docker', 'image', 'inspect', source))[0]
-            require(local['Os'] == 'linux' and local['Architecture'] == arch, f'Wrong image platform: {source}')
-            command('docker', 'tag', source, target)
-            push_image(name, f'{tag}-{arch}')
-            remote = manifest(name, f'{tag}-{arch}')
-            require(remote is not None and remote[1].get('config', {}).get('digest') == local['Id'],
-                    f'Pushed image does not match scanned archive: {target}')
-            children[arch] = remote[0]
-            expected[name, f'{tag}-{arch}'] = remote[0]
-        absent(name, tag)
-        command('docker', 'buildx', 'imagetools', 'create', '--tag', f'{PREFIX}/{name}:{tag}',
-                *(f'{PREFIX}/{name}@{children[arch]}' for arch in ARCHES))
-        index = manifest(name, tag)
-        require(index is not None, f'Missing multi-arch index: {name}')
-        descriptors = index[1].get('manifests', [])
-        require(len(descriptors) == 2 and
-                {(d['platform']['os'], d['platform']['architecture'], d['digest']) for d in descriptors}
-                == {('linux', arch, children[arch]) for arch in ARCHES}, f'Invalid multi-arch index: {name}')
-        expected[name, tag] = index[0]
-        image_digests[name] = index[0]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {name: executor.submit(publish_role, name, version, tag, images) for name in ROLES}
+        for name in ROLES:
+            role_expected, index_digest = futures[name].result()
+            expected.update(role_expected)
+            image_digests[name] = index_digest
     # Bind release assets only after the complete published index set is stable.
     generate_release_manifests(version, sha, assets, image_digests)
     files = asset_files(version, assets)

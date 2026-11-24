@@ -92,8 +92,8 @@ For day-to-day work inside a single module, use `make test-go`,
 `make test-rust`, or `make test-web`. `make test-go` runs `go test ./...` in
 `control-plane` and `signer` without `gofmt`, `go vet`, `-count=1` or race
 runs. `make go-check` (`scripts/go-check.sh`, default mode `full`) covers both
-`control-plane` and `signer` with `gofmt`, `go vet`, `go test -count=1`, and
-(except in `standard` mode) `go test -race`, using a private `0700` `TMPDIR`
+`control-plane` and `signer` with `gofmt`, `go vet`, and `go test -race -count=1`
+(or non-race `go test -count=1` in `standard` mode), using a private `0700` `TMPDIR`
 outside the repository checkout (such as `$XDG_RUNTIME_DIR` or `$HOME/.cache`)
 because the signer store and UDS checks refuse state directories beneath a
 group- or world-writable parent such as `/tmp` or a `0775` checkout. Basic CI invokes
@@ -409,7 +409,7 @@ The workflow file defines the matrices. The jobs and what they own:
 | `rust` | `rust-check.sh` across the Rust workspace against the locked crates.io `iroh` dependency in [`rust/Cargo.lock`](../../rust/Cargo.lock) |
 | `installers` | Installer (including host bootstrap) and Relay-launcher contract self-tests |
 | `web` | `web-check.sh basic`; no browser installation |
-| `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs` inside the version-matched Playwright container image (`PLAYWRIGHT_WORKERS=4`); Full also serves the build through the Standalone and Integrated gateways with CSP enforcement checks. A missing browser or non-declared skip fails the job |
+| `web-browser` | Stubbed production-build browser regressions through `web/test/run-auth-browser.mjs` inside the version-matched Playwright container image (`PLAYWRIGHT_WORKERS=4`, with discarded trace/video recording disabled); Full serves the full regression spec set through the Standalone gateway and the core auth/install/CSP suite through the Integrated gateway with CSP enforcement checks. A missing browser or non-declared skip fails the job |
 | `database-smoke` | PostgreSQL 18.x; Quick runs smoke, Full runs full database acceptance; both enforce Goose migration artifact policy via `scripts/database-artifact-policy.sh` (see [SQL artifact acceptance](#sql-artifact-acceptance)) |
 | `database-recovery-full` | Bundled and external PostgreSQL physical backup/restore with Goose version-history verification, Full only |
 | `Basic CI Result` | Always checks routing and the selected job results |
@@ -451,9 +451,10 @@ analysis and is the source of the exact rule order. In outline:
   harness and web build/lock files also select `web-browser`), `rust/*`
   selects `rust`, and `control-plane/{cmd,migrations,internal}/*`, Go locks and
   the database scripts select `go` plus PostgreSQL database smoke.
-- Installer, release, package, Controller and Agent-upgrade scripts, release
-  workflows and `deploy/{package,systemd,bootstrap,managed-node,production}`
-  select the release contract suite and/or installer self-tests. Manual-acceptance
+- Installer, release, package, Controller and Agent-upgrade scripts, and
+  `deploy/{package,systemd,bootstrap,managed-node,production}` select the
+  release contract suite and/or installer self-tests; `release*.yml` selects
+  `guards` and `release` without unrelated installer self-tests. Manual-acceptance
   harnesses (`scripts/resilience-*`, `scripts/security-acceptance-*`) are
   checked for syntax/contracts but not executed in Basic CI.
 - `ci.yml`, `security.yml`, `release*.yml`, `scripts/ci-*`, the required-test
@@ -525,36 +526,43 @@ latest same-commit `main` result and dispatches a scan if there is no matching
 run. Its read-only scan jobs use pinned bootstrap profiles and no
 production secrets: full-history `scripts/security-check.sh` (including its
 Gitleaks rule regression check); `govulncheck ./...` in both Go modules;
-`cargo audit` against `rust/Cargo.lock` and `deploy/production/relay.Cargo.lock`
-with `cargo deny --locked check advisories bans licenses sources` across the
+`cargo audit --file deploy/production/relay.Cargo.lock` with
+`cargo deny --locked check advisories bans licenses sources` across the
 Rust workspace; `npm audit --package-lock-only --ignore-scripts` against `web/package-lock.json`,
 including development dependencies; and `scripts/license-check.sh --skip-rust`
-for Go (`control-plane` and `signer`) and Web dependency licenses. Any scan
-failure blocks qualification. The result reflects the advisory databases used
-at scan time.
+using `go-security` (pinned `go-licenses`) for Go (`control-plane` and `signer`)
+and lockfile-direct inspection for Web dependency licenses without running `npm ci`.
+Any scan failure blocks qualification. The result reflects the advisory databases
+used at scan time.
 
 ### Caches
 
-Go jobs keep module and build caches next to locked bootstrap downloads. Only
-passing pushes on main write cache entries; pull requests, Security scans and
-manual runs restore only, and a restored build cache never skips real database
-tests. Bootstrap downloads and `.tools` are managed through
+Go jobs keep module caches keyed by module lockfiles (`basic-go-mod-v2`) and
+compiler build caches (`basic-go-build-v1`). Only passing pushes on main write
+cache entries; pull requests, Security scans and manual runs restore only, and a
+restored build cache never skips real database tests (Release database acceptance
+restores the Go caches read-only when running on `release-check.yml`).
+`.tools` is managed through
 [`.github/actions/setup-tools`](../../.github/actions/setup-tools/action.yml)
 and keyed by profile, OS, architecture and tool/bootstrap identity (with an
 optional `Cargo.lock` suffix and base toolchain fallback when `.tools/cargo`
-caches crates). Web CI, `contracts` checks and the license scan cache
-`.cache/npm` instead of `node_modules`, and Web jobs still run `npm ci`; the
-lockfile-only `npm audit` job skips `.cache/npm`. Rust jobs restore
-`rust/target/debug` with
-`CARGO_INCREMENTAL=0` and save them only on passing pushes to main, falling
+caches crates), without caching `.cache/downloads`. Web CI and `contracts`
+checks cache `.cache/npm` instead of `node_modules`, and Web jobs still run
+`npm ci`; lockfile-only `npm audit` and `Go & Web licenses` jobs skip
+`.cache/npm`. Rust jobs restore `rust/target/debug` built with
+`CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`, prune incremental/stale
+workspace test binaries before saving only on passing pushes to main, and fall
 back to the matching Rust toolchain prefix when manifests or lockfiles change.
-Native Agent release builds save their isolated Rocky compilation cache only on
-`main`, and `smoke-agent-packages` restores it read-only when running
-`RC_LIFECYCLE=true`. Image builds use per-image, per-architecture BuildKit
-GitHub Actions caches. No workflow caches runtime state or credentials, and
-build caches are never accepted release products or qualification evidence.
-Release Controller jobs cache image-security scanner binaries but never the
-vulnerability database: each run fetches fresh advisory data and fails if the
+Native Agent release builds key their isolated Rocky 9 compilation cache
+(`release-agent-target-v3`) deterministically by Rocky glibc/gcc ABI, save only
+on `main` (pruning older ABI directories), and `smoke-rc-lifecycle` restores it
+read-only when running `RC_LIFECYCLE=true`. Image builds use per-image,
+per-architecture BuildKit GitHub Actions caches. No workflow caches runtime
+state or credentials, and build caches are never accepted release products or
+qualification evidence.
+Release Controller jobs cache image-security scanner binaries and overlap a
+fresh uncached Grype vulnerability database download in `$RUNNER_TEMP` with
+parallel image builds: each run fetches fresh advisory data and fails if the
 feed is unavailable or invalid. Image scans inspect the built image archives
 before smoke tests and registry uploads; Business diagnostic runs do not scan
 images.
