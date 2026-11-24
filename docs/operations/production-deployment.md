@@ -819,7 +819,10 @@ path. Run subsequent upgrades, rollbacks, and uninstalls through the Controller
 lifecycle scripts as described in
 [Upgrade, rollback and uninstall](#upgrade-rollback-and-uninstall).
 
-Lifecycle commands never create or rotate secrets, certificates, or identity keys. Run commands from the retained runtime's `deploy/production/controller.sh` with the validated configuration. The lifecycle verifies the runtime's `RELEASE` version/source commit against the manifest and its full `SHA256SUMS` inventory, retaining each selected bundle under the protected state root as `runtime-<tag>`. Upgrade downloads the exact target bundle if absent; rollback, start and uninstall reuse retained bundles. Existing invalid or modified bundles fail closed. Keep these files for recovery; they are not database backups and uninstall does not remove them. Legacy clean Git checkouts remain supported for existing explicit source-based calls and are not migrated automatically.
+Install, upgrade, rollback, start, and uninstall never create or rotate secrets, certificates, or identity keys. Run commands from the retained runtime's `deploy/production/controller.sh` with the validated configuration. The lifecycle verifies the runtime's `RELEASE` version/source commit against the manifest and its full `SHA256SUMS` inventory, retaining each selected bundle under the protected state root as `runtime-<tag>`. Upgrade downloads the exact target bundle if absent; rollback, start and uninstall reuse retained bundles. Existing invalid or modified bundles fail closed. Keep these files for recovery; they are not database backups and uninstall does not remove them. Legacy clean Git checkouts remain supported for existing explicit source-based calls and are not migrated automatically.
+
+Use the [interactive administrator reset](authentication.md#reset-the-local-administrator-password)
+to generate a replacement Local administrator password while the Controller is running.
 
 ### Manual installation
 

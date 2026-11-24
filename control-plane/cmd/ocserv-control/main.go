@@ -28,6 +28,13 @@ func main() {
 		slog.Error("configuration rejected", "error", err)
 		os.Exit(2)
 	}
+	if cfg.ResetLocalAdmin {
+		if err := resetLocalAdmin(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "reset Local administrator:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	stdout := logSink(os.Stdout)
 	stderr := logSink(os.Stderr)
@@ -70,6 +77,24 @@ func main() {
 	if failed {
 		os.Exit(1)
 	}
+}
+
+func resetLocalAdmin(cfg config.Config) error {
+	for _, descriptor := range []uintptr{os.Stdin.Fd(), os.Stdout.Fd()} {
+		if _, err := unix.IoctlGetWinsize(int(descriptor), unix.TIOCGWINSZ); err != nil {
+			return errors.New("an interactive terminal is required for input and output")
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	username, password, err := app.ResetLocalAdminPassword(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "Username: %s\nNew password: %s\n", username, password); err != nil {
+		return errors.New("password changed but terminal delivery failed; run the reset again from an interactive terminal")
+	}
+	return nil
 }
 
 // Go may inherit blocking pipes or sockets without registering them with

@@ -264,6 +264,19 @@ func TestSensitiveFilesAndLocalBootstrapProtection(t *testing.T) {
 	if normalCfg, err := loadEnv(nil, bootEnv); err != nil || normalCfg.LocalBootstrapPassword != "" {
 		t.Fatal("normal startup loaded bootstrap credential")
 	}
+	resetCfg, err := loadEnv([]string{"--reset-local-admin"}, bootEnv)
+	testutil.NoError(t, err)
+	if !resetCfg.ResetLocalAdmin || resetCfg.LocalBootstrapPassword != "" {
+		t.Fatal("reset loaded the bootstrap credential or failed to enter reset mode")
+	}
+	for _, other := range []string{"--bootstrap-local-admin", "--migrate-only", "--provision-management-workspace", "--telemetry-retention-only"} {
+		if _, err := loadEnv([]string{"--reset-local-admin", other}, bootEnv); err == nil {
+			t.Fatalf("reset accepted with %s", other)
+		}
+	}
+	if _, err := loadEnv([]string{"--reset-local-admin"}, baseEnv(nil)); err == nil {
+		t.Fatal("reset accepted with Local authentication disabled")
+	}
 	bootEnv["OCSERV_LOCAL_BOOTSTRAP_PASSWORD"] = password
 	if _, err := loadEnv([]string{"--bootstrap-local-admin"}, bootEnv); err == nil || strings.Contains(err.Error(), password) {
 		t.Fatal("plaintext bootstrap env accepted or leaked password")

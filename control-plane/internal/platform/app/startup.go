@@ -26,6 +26,29 @@ func validateBootstrapPasswords(cfg config.Config) error {
 	return nil
 }
 
+// ResetLocalAdminPassword runs the database-only recovery command alongside the
+// live Controller, using the same runtime database role and audit key.
+func ResetLocalAdminPassword(ctx context.Context, cfg config.Config) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conn, err := connection.Open(ctx, connection.Options{Environment: cfg.Environment, URL: cfg.DatabaseURL, CAFile: cfg.DatabaseTLSCAFile, BundledPostgres: cfg.DatabaseBundledPostgres})
+	if err != nil {
+		return "", "", err
+	}
+	defer conn.Close()
+	if err := conn.ValidateRuntime(ctx); err != nil {
+		return "", "", err
+	}
+	if _, err := newAuditManager(conn.Store, cfg); err != nil {
+		return "", "", err
+	}
+	service, err := auth.NewBackend(conn.Store, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+	if err != nil {
+		return "", "", err
+	}
+	return service.ResetLocalAdminPassword(ctx)
+}
+
 // A nil manager means the requested one-shot command has finished.
 func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg config.Config, logger *slog.Logger) (*audit.Manager, error) {
 	backend := conn.Store

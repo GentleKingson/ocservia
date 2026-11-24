@@ -86,7 +86,13 @@ request does not repair missing transport evidence.
 
 ## Lost Local administration authority
 
-When a deployment loses its last working administrator, halt application writes and preserve the incident evidence. Recover to a
+When the Local administrator forgets the password and the Controller and
+database are available, use the [interactive administrator reset](authentication.md#reset-the-local-administrator-password).
+Record the recovery in the incident record and verify administrator login with
+the generated password before resuming normal operation.
+
+If the administrator identity or its binding is lost, or database recovery is
+required, halt application writes and preserve the incident evidence. Recover to a
 verified state that has independently controlled credentials by following the
 authorized [database recovery procedure](#database-recovery),
 leaving all initialization markers and audit history intact. Before reopening
@@ -99,10 +105,8 @@ UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
 
 Log the offline recovery in the incident and change record, confirm that the
 administrator login and direct authorized operations work, and rotate any
-exposed credentials through standard rotation flows. Ocservia provides no
-generic account-unlock CLI or unauthenticated HTTP recovery endpoint, and
-operators must never delete or edit the Bootstrap marker to force
-reinitialization.
+exposed credentials through standard rotation flows. Preserve the Bootstrap
+marker so the incident and initialization history remains verifiable.
 
 ### Break-glass credential after use
 

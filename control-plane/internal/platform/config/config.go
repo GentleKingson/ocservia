@@ -34,6 +34,7 @@ type Config struct {
 	TelemetryRetentionInterval time.Duration
 	ProvisionWorkspace         bool
 	BootstrapLocalAdmin        bool
+	ResetLocalAdmin            bool
 	LocalBootstrapUsername     string
 	LocalBootstrapPassword     string
 	LocalBootstrapWorkspace    string
@@ -295,6 +296,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
+	resetLocalAdmin := fs.Bool("reset-local-admin", false, "generate a new password for the existing Local administrator, then exit")
 	role := fs.String("role", "all", "legacy compatibility flag; only all is supported")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	telemetryRetentionOnly := fs.Bool("telemetry-retention-only", false, "prune expired telemetry partitions as the database owner, then exit")
@@ -307,6 +309,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, errors.New("unexpected command-line arguments")
 	}
 	cfg.BootstrapLocalAdmin = *bootstrap
+	cfg.ResetLocalAdmin = *resetLocalAdmin
 	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD"); ok {
 		return Config{}, errors.New("plaintext bootstrap password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
 	}
@@ -335,6 +338,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.ResetLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.TelemetryRetentionOnly) {
+		return errors.New("administrator password reset requires Local auth and cannot be combined with other one-shot commands")
+	}
 	if c.BootstrapLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
@@ -422,7 +428,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.TelemetryRetentionOnly
+	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.ResetLocalAdmin || c.TelemetryRetentionOnly
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}

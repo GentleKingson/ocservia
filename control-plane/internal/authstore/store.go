@@ -51,6 +51,7 @@ type Store interface {
 	LockActiveSession(context.Context, uuid.UUID, uuid.UUID, bool) error
 	LockPassword(context.Context, uuid.UUID, string, string) error
 	ManagementWorkspace(context.Context) (uuid.UUID, error)
+	LockBootstrapAdmin(context.Context) (identity, workspace uuid.UUID, username string, err error)
 	SetPassword(context.Context, uuid.UUID, string, time.Time) error
 	RevokeIdentitySessions(context.Context, uuid.UUID, time.Time) error
 	BreakGlassUsed(context.Context, []byte, []byte) (bool, error)

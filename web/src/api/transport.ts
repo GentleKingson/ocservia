@@ -40,13 +40,15 @@ client.use({
   },
   async onResponse({ response, schemaPath }) {
     if (schemaPath === "/auth/login") return;
-    if (response.status === 401) redirectToLogin();
+    const passwordChange = schemaPath === "/auth/change-password";
+    if (response.status === 401 && !passwordChange) redirectToLogin();
     // A failed audit verification is a structured result.
     if (
       !response.ok &&
       !(schemaPath === "/audit:verify" && response.status === 409)
     ) {
       let detail = "";
+      let type = "";
       if (
         response.headers
           .get("content-type")
@@ -54,18 +56,22 @@ client.use({
       ) {
         try {
           const problem: unknown = await response.clone().json();
-          if (
-            problem &&
-            typeof problem === "object" &&
-            "detail" in problem &&
-            typeof problem.detail === "string"
-          ) {
-            detail = problem.detail;
+          if (problem && typeof problem === "object") {
+            if ("detail" in problem && typeof problem.detail === "string")
+              detail = problem.detail;
+            if ("type" in problem && typeof problem.type === "string")
+              type = problem.type;
           }
         } catch {
           // Keep the HTTP status available for caller-specific handling.
         }
       }
+      if (
+        passwordChange &&
+        response.status === 401 &&
+        type !== "https://ocservia.dev/problems/password-change"
+      )
+        redirectToLogin();
       throw new ResponseError(response, detail);
     }
   },

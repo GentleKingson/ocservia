@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { CheckCircle2, CircleAlert } from "@lucide/vue";
 import type { BuildInfo, Workspace } from "@/api/models";
+import { ResponseError } from "@/api/transport";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import DataState from "../components/common/DataState.vue";
 import PageHeader from "../components/common/PageHeader.vue";
 import { getWorkspace } from "../api/workspace";
-import { getVersion } from "../api/platform";
+import { changeLocalPassword, getVersion } from "../api/platform";
 import { useReadinessStore } from "../shared/readiness";
 
 const readiness = useReadinessStore();
@@ -16,6 +20,48 @@ const loading = ref(true);
 const unavailable = ref(false);
 const buildUnavailable = ref(false);
 let loadSequence = 0;
+const currentPassword = ref("");
+const newPassword = ref("");
+const confirmNewPassword = ref("");
+const changingPassword = ref(false);
+const passwordError = ref("");
+
+async function submitPassword(): Promise<void> {
+  if (changingPassword.value) return;
+  if (newPassword.value !== confirmNewPassword.value) {
+    passwordError.value = "passwordConfirmationMismatch";
+    return;
+  }
+  changingPassword.value = true;
+  passwordError.value = "";
+  try {
+    const request = changeLocalPassword(
+      currentPassword.value,
+      newPassword.value,
+    );
+    currentPassword.value = newPassword.value = confirmNewPassword.value = "";
+    await request;
+    window.location.replace("/login");
+  } catch (error) {
+    const status = error instanceof ResponseError ? error.response.status : 0;
+    switch (status) {
+      case 400:
+        passwordError.value = "passwordChangePolicy";
+        break;
+      case 401:
+      case 429:
+        passwordError.value = "passwordChangeRejected";
+        break;
+      case 403:
+        passwordError.value = "passwordChangeForbidden";
+        break;
+      default:
+        passwordError.value = "passwordChangeUnavailable";
+    }
+  } finally {
+    changingPassword.value = false;
+  }
+}
 
 async function loadWorkspace(): Promise<void> {
   const sequence = ++loadSequence;
@@ -62,6 +108,71 @@ onBeforeUnmount(() => {
       :message="$t('noWorkspace')"
     />
     <div v-else class="grid gap-4 md:grid-cols-2">
+      <section
+        class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs md:col-span-2"
+        aria-labelledby="settings-change-password"
+      >
+        <h2 id="settings-change-password" class="m-0 text-sm font-semibold">
+          {{ $t("changePassword") }}
+        </h2>
+        <p class="text-muted-foreground mt-2 mb-4 text-sm">
+          {{ $t("passwordChangeSignInAgain") }}
+        </p>
+        <form
+          class="grid max-w-sm gap-3"
+          aria-labelledby="settings-change-password"
+          @submit.prevent="submitPassword"
+        >
+          <p
+            v-if="passwordError"
+            class="text-destructive m-0 text-sm"
+            role="alert"
+          >
+            {{ $t(passwordError) }}
+          </p>
+          <Label for="settings-current-password">{{
+            $t("currentPassword")
+          }}</Label>
+          <Input
+            id="settings-current-password"
+            v-model="currentPassword"
+            type="password"
+            name="current-password"
+            autocomplete="current-password"
+            required
+            :disabled="changingPassword"
+          />
+          <Label for="settings-new-password">{{ $t("newPassword") }}</Label>
+          <Input
+            id="settings-new-password"
+            v-model="newPassword"
+            type="password"
+            name="new-password"
+            autocomplete="new-password"
+            required
+            :disabled="changingPassword"
+          />
+          <Label for="settings-confirm-password">{{
+            $t("confirmNewPassword")
+          }}</Label>
+          <Input
+            id="settings-confirm-password"
+            v-model="confirmNewPassword"
+            type="password"
+            name="confirm-password"
+            autocomplete="new-password"
+            required
+            :disabled="changingPassword"
+          />
+          <Button
+            class="justify-self-start"
+            type="submit"
+            :disabled="changingPassword"
+          >
+            {{ $t(changingPassword ? "changingPassword" : "changePassword") }}
+          </Button>
+        </form>
+      </section>
       <section
         class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs"
         aria-labelledby="settings-workspace"

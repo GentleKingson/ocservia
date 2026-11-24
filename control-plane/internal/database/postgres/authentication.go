@@ -122,6 +122,16 @@ func (s authenticationStore) ManagementWorkspace(ctx context.Context) (uuid.UUID
 	err := s.tx.QueryRow(ctx, `SELECT workspace_id FROM local_auth_bootstrap WHERE singleton`).Scan(&id)
 	return id, err
 }
+func (s authenticationStore) LockBootstrapAdmin(ctx context.Context) (identity, workspace uuid.UUID, username string, err error) {
+	err = s.tx.QueryRow(ctx, `SELECT i.id, b.workspace_id, c.username
+		FROM local_auth_bootstrap b
+		JOIN identities i ON i.id=b.identity_id
+		JOIN local_credentials c ON c.identity_id=i.id AND c.username=i.subject
+		JOIN workspace_admins a ON a.workspace_id=b.workspace_id AND a.identity_id=i.id
+		WHERE b.singleton AND i.issuer='local' AND i.disabled_at IS NULL
+		FOR UPDATE OF i, c`).Scan(&identity, &workspace, &username)
+	return
+}
 func (s authenticationStore) SetPassword(ctx context.Context, id uuid.UUID, hash string, now time.Time) error {
 	_, err := s.tx.Exec(ctx, `UPDATE local_credentials SET password_hash=$2,password_changed_at=$3,updated_at=$3 WHERE identity_id=$1`, id, hash, now)
 	return err
