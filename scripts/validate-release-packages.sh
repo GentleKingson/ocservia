@@ -47,7 +47,8 @@ for arch in amd64 arm64; do
   [[ "$(rpm -qp --qf '%{VERSION}-%{RELEASE}' --nosignature "$ASSET_DIR/$rpm" 2>/dev/null)" == "${VERSION/-rc./~rc.}-1" ]]
   mkdir -p "$work/deb-$arch" "$work/rpm-$arch"
   dpkg-deb -x "$ASSET_DIR/$deb" "$work/deb-$arch"
-  (cd "$work/rpm-$arch" && rpm2cpio "$ASSET_DIR/$rpm" | cpio -idm --quiet --no-absolute-filenames)
+  # rpm2cpio on Ubuntu 24.04 returns 1 for these valid gzip payloads.
+  rpm2archive --nocompression "$ASSET_DIR/$rpm" | tar -xf - -C "$work/rpm-$arch"
   for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
     path="usr/libexec/ocservia/$binary"
     [[ "$(file -b "$work/deb-$arch/$path")" == *"$elf_word"* ]]

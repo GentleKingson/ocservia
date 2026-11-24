@@ -125,7 +125,7 @@ jobs:
           done
           scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends rpm cpio
+          sudo apt-get install -y --no-install-recommends rpm
           scripts/validate-release-packages.sh
       - name: Check pre-publication asset inventory
         id: check-assets
