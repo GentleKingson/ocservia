@@ -1,14 +1,14 @@
 # Command semantic hash v2
 
-The Controller signs semantic payload hash v2 as the canonical command identity
-for all commands. Semantic hash v1 has been removed: `SemanticPayloadHashVersion`
+The Controller signs semantic payload hash v2 as the command identity for all
+commands. Semantic hash v1 has been removed: `SemanticPayloadHashVersion`
 defines only `UNSPECIFIED (0)` and `V2 (2)`, and both Go and Rust reject v1.
 
 ## Canonical digest construction
 
-The semantic hash is computed as SHA-256 over a null-terminated ASCII domain
-separator followed by an RFC 8949 Core Deterministic CBOR map, independent of
-Protobuf wire serialization:
+The semantic hash is SHA-256 over a null-terminated ASCII domain separator
+followed by an RFC 8949 Core Deterministic CBOR map, independent of Protobuf
+wire serialization:
 
 ```
 SHA-256(
@@ -62,13 +62,12 @@ the same `node_id`.
 
 ## Verification and test vectors
 
-The Controller issues only v2. Both the Agent and privd recompute semantic hash
-v2 independently, and the Agent validates the digest before recording acceptance
-in its journal. Stored commands replay only under v2, command results preserve
-that exact version, and backend stores reject unsupported hash versions without
-fallback.
+The Controller issues v2 only. Both the Agent and privd recompute semantic hash
+v2, and the Agent checks the digest before recording acceptance in its journal.
+Stored commands replay only under v2, command results keep that version, and
+backend stores reject unsupported hash versions with no fallback.
 
 Shared Go and Rust test vectors live in `testdata/semantic-payload-hash-v2.json`,
 `testdata/semantic-payload-hash-v2-agent-upgrade.json`, and
-`testdata/complete-config-v1.json`. Semantic hash v2 is frozen; any future
-semantic change requires a new hash version or a new `payload_kind`.
+`testdata/complete-config-v1.json`. Semantic hash v2 is frozen; any semantic
+change requires a new hash version or a new `payload_kind`.

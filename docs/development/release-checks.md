@@ -1,12 +1,12 @@
 # Validation and release
 
 Pick the smallest validation target that covers the code or documentation you
-touched, and run compilation, linters, static checks, and tests inside an
-authorized, task-isolated environment that has the required dependencies. If
-that environment is unavailable, report which checks were blocked.
+touched, and run compilation, linters, static checks, and tests inside a
+task-isolated environment that has the required dependencies. If that
+environment is unavailable, report which checks were blocked.
 
-Validation runs in separate layers. Each layer proves something different, and
-a result from one layer never stands in for another:
+Validation runs in separate layers. Each layer covers a different scope, and
+a pass in one layer does not substitute for another:
 
 - Local checks run what you choose on your own checkout. GitHub Actions remains
   authoritative for the pull request commit itself.
@@ -71,11 +71,11 @@ pipe-to-shell install examples in the entry pages), and verifies that
 ASCII GitHub heading anchors resolve across `README.md`, `AGENTS.md`,
 `CLAUDE.md`, `SECURITY.md`, and `docs/*.md`. It does not check external URLs,
 duplicate-heading suffixes, SQL syntax, authentication modes, database support
-claims, or other prose facts. `make policy-check` separately rejects tracked
+claims, or other prose facts. `make policy-check` rejects tracked
 local implementation-control paths (including `AGENTS.override.md`) and private
 disclosures. In Basic CI, the `docs` job runs `docs-check.sh` and
-`check-public-repository.sh`. Validate executable command examples in the docs in an authorized
-isolated environment.
+`check-public-repository.sh`. Validate executable command examples in the docs in
+an isolated environment.
 
 For a new workspace, run the supported bootstrap profile that matches your
 target check and host platform; tool versions come from
@@ -147,10 +147,11 @@ The database-backed Go groups over the Controller services and HTTP layer are
 `regression-auth` and the startup group. They run over restricted runtime
 database connections and cover signed command intent, transactional session and
 workspace-admin checks and rollback, policy cleanup errors, leadership fencing,
-HTTP status ordering, Secret access denials and first-request server assembly.
+HTTP status ordering, secret access denials, and first-request server assembly.
 Owner credentials are for schema setup and fault injection only. Every required
 case must execute: skipped database tests do not satisfy acceptance, and HTTP
-intent tests do not verify Agent execution, package installation or release readiness.
+intent tests do not verify Agent execution, package installation, or release
+readiness.
 
 Native ocserv adapter integration runs via `scripts/native-ocserv-integration.sh`
 as root in a disposable Linux environment with TUN and `NET_ADMIN`.
@@ -163,7 +164,7 @@ historical vectors plus every payload variant populated with non-default field
 values, and a full echo envelope for authorization, owner fences, timestamps and
 envelope metadata. The Go test uses reflection to verify that at least one
 fixture populates every field reachable from `CommandEnvelope`, and the Rust
-suite independently asserts the decoded values.
+suite asserts the decoded values on its own.
 
 The Rust tests compare the hand-maintained wire policy against the generated
 `FILE_DESCRIPTOR_SET` rooted at `CommandEnvelope`, and Go writes the imported
@@ -180,7 +181,7 @@ fields, carry dummy signature bytes, and do not relax protocol 1.1's runtime
 rejection of legacy password fields. Canonical signing inputs, owner fences, and
 privd receipts have their own golden suites.
 
-Run the focused contract suites in an authorized, isolated checkout:
+Run the focused contract suites from an isolated checkout:
 
 ```bash
 (cd control-plane && go test -race -count=1 -skip Integration ./internal/commandauth ./internal/semanticpayload ./internal/privdattestation)
@@ -216,9 +217,9 @@ Validate bundled PostgreSQL initialization in an isolated Linux Docker environme
 
 ### Signer and certificate verification
 
-Run the suite inside an authorized, isolated environment with the pinned Go and
-Rust toolchains, a checkout under trusted directory ancestry, and a private
-`TMPDIR`. Tests generate disposable fixture CAs and node keys only.
+Run the suite with the pinned Go and Rust toolchains, a checkout under trusted
+directory ancestry, and a private `TMPDIR`. Tests generate disposable fixture
+CAs and node keys only.
 
 ```sh
 cd signer
@@ -251,7 +252,7 @@ request size limits and disabled bindings.
 OS packages. Linux `aarch64`, Linux AMD64, and Darwin ARM64 all provide full
 artifact mappings across every bootstrap profile (including `all`, `web`,
 `source-style`, `contracts`, and security profiles). The ARM64 Go procedure
-below validates neither other platforms nor Rust acceptance.
+below covers only Linux ARM64 Go, not other platforms or Rust acceptance.
 
 On Linux ARM64, `scripts/bootstrap.sh go-test` fetches
 `go<VERSION>.linux-arm64.tar.gz` for the version locked in `toolchains.lock`
@@ -304,11 +305,11 @@ readiness.
 
 Verify the host dependencies before starting, and never run sudo to install
 global system packages as part of a validation task. Create the working
-directory under a short, private path inside a trusted home directory, avoiding
+directory under a short, private path inside a trusted home directory. Avoid
 `/tmp` and symlinks: the transport socket tests check directory ownership up the
 ancestor chain and reject group- or world-writable directories (including sticky
 `/tmp`), and deep paths can exceed the Unix socket length limit. Keep each task's
-checkout, temporary directory and evidence directory isolated:
+checkout, temporary directory, and evidence directory isolated:
 
 ```bash
 task="$(mktemp -d "$HOME/oa-XXXXXX")"
@@ -336,12 +337,12 @@ database prerequisites are present.
 
 When the host lacks the extra userland tools, build a task-scoped ARM64 helper
 container and mount the workspace into it. Rerun it for each candidate and keep
-that candidate's own evidence. The image deliberately omits Go so that every
-command in the container runs the native `.tools/go/bin/go` installed on the
-host, and system packages stay confined to this disposable image. The Debian
-base image is pinned by digest, but APT resolves Bookworm packages at build
-time, so save the build log, image ID and installed package versions with the
-evidence instead of assuming `toolchains.lock` freezes them.
+that candidate's evidence. The image omits Go so every command in the container
+runs `.tools/go/bin/go` from the host and keeps system packages inside the
+disposable image. The Debian base image is pinned by digest, while APT resolves
+Bookworm packages at build time, so save the build log, image ID, and installed
+package versions with the evidence instead of assuming `toolchains.lock` freezes
+them.
 
 ```bash
 image="ocservia-go-validation:$(basename "$task")"
@@ -383,10 +384,10 @@ altering permission checks, SQL assertions, timeouts or race flags.
 Record the exit codes and logs alongside the candidate SHA. Each script tears
 down its own fixtures and database containers, and `--rm` removes the runner
 container. After saving the evidence, delete only this task's helper image and
-private directory, leaving shared Docker base images, caches and other tasks'
+private directory. Leave shared Docker base images, caches, and other tasks'
 `.tools` directories alone. In your report, distinguish initial failures,
 skipped non-required integration tests, simulated platform checks, native host
-Go runs and containerized runs.
+Go runs, and containerized runs.
 
 ## CI layers
 
@@ -439,7 +440,7 @@ acceptance or license compliance.
 
 [`scripts/ci-relevance.sh`](../../scripts/ci-relevance.sh) evaluates changed
 paths with ordered first-match patterns instead of package or call-graph
-analysis and is the source of the exact rule order. In outline:
+analysis and is the source of the exact rule order:
 
 - Rules for executable code and deployment configuration sit ahead of the
   generic Markdown fallback. Markdown under `web/`, `rust/`, `proto/`,
@@ -569,8 +570,7 @@ images.
 
 ### Manual deep checks and reproduction
 
-Run the standalone deep-validation scripts directly in an authorized, isolated
-environment that has their dependencies. They are distinct from Full CI:
+Run the standalone deep-validation scripts directly; they are separate from Full CI:
 
 ```bash
 # In an authorized isolated environment with the required dependencies; expensive opt-in checks:
@@ -597,11 +597,10 @@ because they need dedicated resources or systemd/privd/PKI fixtures:
   Results use `SSE_CAPACITY_ACCEPTANCE` and `PRIVD_ACCEPTANCE`, with
   `sse-capacity-summary.json` and `privd-summary.txt` respectively.
 
-To reproduce the Go unit checks, Quick database smoke and the Full-only
-PostgreSQL backup/restore smoke scripts, run these against the candidate commit
-in an authorized, isolated environment. They omit docs, Rust, Web, the
-PostgreSQL volume-layout check and the full database suite (Quick smoke still
-runs `database-artifact-policy.sh`):
+To reproduce the Go unit checks, Quick database smoke, and the Full-only
+PostgreSQL backup/restore smoke scripts, run these against the candidate commit.
+They omit docs, Rust, Web, the PostgreSQL volume-layout check, and the full
+database suite (Quick smoke still runs `database-artifact-policy.sh`):
 
 ```bash
 scripts/bootstrap.sh go-test
@@ -623,31 +622,31 @@ Integrated Business Smoke runs directly inside [`release-check.yml`](../../.gith
 on the native `amd64` runner once Security passes and the dual-architecture
 build is verified. It exercises the real Controller, production Signer
 sealing and internal TLS, dedicated Relay, native systemd
-Agent/`privd`/`ocserv` services, one Local Admin browser sign-in, Workspace
+Agent/`privd`/`ocserv` services, one local administrator browser sign-in, workspace
 isolation, VPN user creation, direct reload, ConfigPlan apply, an OpenConnect
 VPN session with ICMP, four single-instance recovery scenarios, and terminal
-real-node revocation. Every production binary, service, Relay and VPN path runs
+real-node revocation. Every production binary, service, Relay, and VPN path runs
 without mocks.
 
 The driver ([`scripts/release-business-probe.sh`](../../scripts/release-business-probe.sh),
 paired with [`scripts/release_business_scenarios.py`](../../scripts/release_business_scenarios.py),
 [`scripts/release-business-browser.mjs`](../../scripts/release-business-browser.mjs),
 and [`scripts/release-common.sh`](../../scripts/release-common.sh)) consumes
-the exact verified `amd64` Agent package and Controller image artifacts from the
+the verified `amd64` Agent package and Controller image artifacts from the
 same Release Check run, loads and pushes the candidate images to a loopback
 registry, and installs through `controller.sh install --release-file` with
 standard v2 JSON configuration. It never publishes releases, pushes to GHCR, or
-reads production Secrets.
+reads production secrets.
 
 ### Evidence and limits
 
 `real_browser_subset` runs Playwright Chromium against the built gateway and
-Controller API without route mocks, transport simulators or TLS bypasses, and
+Controller API without route mocks, transport simulators, or TLS bypasses, and
 captures Content Security Policy violations into `browser-csp.json` (failing on
 any unexpected violation or missed positive control). Both `smoke_user` and
-browser flows exercise the single Local Admin identity, exact request replay,
+browser flows exercise the single local administrator identity, exact request replay,
 changed-intent idempotency conflicts, production Signer password sealing, and
-durable cross-checks across the API, database, Agent SQLite journal and `privd`
+durable cross-checks across the API, database, Agent SQLite journal, and `privd`
 receipts.
 
 GitHub Actions job status is the pass/fail authority. `result.json` records
@@ -693,7 +692,7 @@ container.
 
 ### Lightweight checks
 
-Inside an isolated environment with the repository's Rust toolchain, run:
+Run the Relay filter tests with the repository's Rust toolchain:
 
 ```sh
 cd rust
@@ -705,8 +704,8 @@ The Relay test filter exercises URL parsing, normalized duplicate detection,
 forbidden URL rejection, token-file loading, and the default, disabled, and
 single-relay recovery behavior of the transport and agent crates. Production
 installers and launch entry points admit only one Relay, so these unit tests
-certify neither multi-Relay deployments nor failover, and they do not validate
-an authenticated dedicated Relay deployment.
+do not certify multi-Relay deployments, failover, or an authenticated dedicated
+Relay deployment.
 
 To check the installer contracts, use a disposable Linux container with Bash,
 Node, sudo, jq and Python, and run the scripts as an unprivileged user with
@@ -824,7 +823,7 @@ Recovery procedures and boundaries are in
 
 Single-instance recovery checks run under the Business and database owners.
 Manual Release Check invokes Integrated Business Smoke, which always runs all
-four resilience scenarios (`R1`–`R4`).
+four resilience scenarios (`R1`-`R4`).
 
 | Check | Owner and entrypoint | Required observation |
 | --- | --- | --- |
@@ -839,17 +838,18 @@ Full CI can provide those database results.
 
 Acceptance relies on the Business job status and the scenario checkpoints in
 `result.json`; sanitized failure diagnostics are kept as seven-day Actions
-artifacts. Only `controller`, `agent`, `database` and `relay` are required
+artifacts. Only `controller`, `agent`, `database`, and `relay` are required
 checkpoints, with no synthetic overall checkpoint or standalone transport
 scenario, and each must finish and pass. During Business runs the harness loads
 the prebuilt candidate Controller images (including `relay`) from `IMAGES_DIR`;
-the standalone [network probe](#network-probe) verifies transport reachability
-in isolation and does not exercise the business recovery chain. In
-every scenario the command pipeline still enforces owner/epoch/fence/lease
-validation, the transactional outbox, session and workspace-admin authorization, signatures, idempotent command IDs, the Agent SQLite journal and privd
-receipts. A queued offline command proven never sent must never be treated as
-expected Unknown if it fails. Passing these checks does not imply exactly-once
-execution or production RTO/RPO guarantees.
+the standalone [network probe](#network-probe) checks transport reachability
+in isolation and does not exercise the business recovery chain. In every
+scenario the command pipeline enforces owner/epoch/fence/lease validation, the
+transactional outbox, session and workspace-admin authorization, signatures,
+idempotent command IDs, the Agent SQLite journal, and privd receipts. A queued
+offline command proven never sent must never be treated as expected unknown if
+it fails. Passing these checks does not imply exactly-once execution or
+production RTO/RPO guarantees.
 
 ### Simulated load and capacity
 
@@ -909,39 +909,39 @@ percentiles, telemetry volume, path distribution, goroutines, simulator tasks,
 RSS, file descriptors, database pool activity, SSE and watcher counters,
 per-phase sample counts and sampler exit status.
 
-The topology runs simulated components on one host, so passing it establishes
-neither production capacity nor multi-host Relay behavior. Every Docker resource
+The topology runs simulated components on one host, so passing it does not
+establish production capacity or multi-host Relay behavior. Every Docker resource
 carries the Compose project label, and the cleanup trap deletes only that
-project's containers, networks, volumes and locally built images on success,
-failure or signal. The run directory keeps the parameters, metrics, JSON summary,
+project's containers, networks, volumes, and locally built images on success,
+failure, or signal. The run directory keeps the parameters, metrics, JSON summary,
 samples, slow-SSE output, interrupted-operation state, disk snapshots, Compose
-logs, container statuses and exit code; no workflow uploads them, so point
+logs, container statuses, and exit code; no workflow uploads them, so point
 `ARTIFACT_DIR` outside the temporary directory to keep them. The script does not
-preflight host disk, CPU or memory, so an undersized machine shows up as a
+preflight host disk, CPU, or memory, so an undersized machine shows up as a
 timeout or failed assertion, and the harness never lowers the configured load.
 
 ## Web validation
 
-Run verification checks inside an authorized, isolated environment with all dependencies installed, selecting suites according to [Choose the validation scope](#choose-the-validation-scope). Unless a repository-root script is shown, file paths in the table below are relative to `web/`.
+Select suites according to [Choose the validation scope](#choose-the-validation-scope). Unless a repository-root script is shown, file paths in the table below are relative to `web/`.
 
 | Change | Relevant evidence |
 | --- | --- |
-| API adapters, session or Workspace | `test/api-client.test.ts`, request serialization checks; `node test/run-auth-browser.mjs` against the production build for login/Workspace/SSE races |
+| API adapters, session or workspace | `test/api-client.test.ts`, request serialization checks; `node test/run-auth-browser.mjs` against the production build for login/workspace/SSE races |
 | Configuration/certificate workflows | `test/configuration-feature.test.ts`, `test/certificates-feature.test.ts`, `test/node-workflows.test.ts`; browser spec `e2e/node-forms.spec.ts` on desktop/mobile |
 | Operations/rollouts | `test/operation-state-tone.test.ts`, `test/rollout-views.test.ts`, `test/nodes-rollout-submit.test.ts`; browser spec `e2e/agent-rollout.spec.ts` for unknown states, partial failure, polling disposal and single resume; a real one-node rollout runs in [Business validation](#business-validation) |
-| Audit, overview | Corresponding view/unit tests (`test/audit-view.test.ts`, `test/overview.test.ts`) and browser spec `e2e/apple-layout.spec.ts`; verify authorization, stale/empty states and Workspace switching |
+| Audit, overview | Corresponding view/unit tests (`test/audit-view.test.ts`, `test/overview.test.ts`) and browser spec `e2e/apple-layout.spec.ts`; verify authorization, stale/empty states and workspace switching |
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts` |
 
-`scripts/web-check.sh basic` runs formatting checks, ESLint (over `web/` and the root JS scripts), `vue-tsc --noEmit`, Vitest unit tests, and the production Vite build. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. Neither this runner nor stubbed Playwright specs validate a live Controller, database recovery, or host installation. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
+`scripts/web-check.sh basic` runs formatting checks, ESLint (over `web/` and the root JS scripts), `vue-tsc --noEmit`, Vitest unit tests, and the production Vite build. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. This runner and stubbed Playwright specs do not validate a live Controller, database recovery, or host installation. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
 
-Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (and therefore does not provide Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/Workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and audit. `npm run test:e2e` executes all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; always report any project whose browser engine is not installed as not run.
+Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (not Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and audit. `npm run test:e2e` runs all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; report any project whose browser engine is not installed as not run.
 
 Passing `--gateway` (which requires Docker) serves `dist/` behind the pinned production Caddy image and `deploy/production/Caddyfile` over HTTPS in place of Vite preview. Passing `--gateway=integrated` places the Integrated Edge container (`edge.Dockerfile` base image with the NGINX template and entrypoint from `deploy/production/integrated`) in front of the Integrated Caddyfile at `https://controller.localhost` on `127.0.0.1:443` so Caddy receives traffic only through Edge's SNI router and PROXY protocol. The cross-engine specs import `e2e/csp.ts`, which fails the test on any `securitypolicyviolation` event. `csp-control.spec.ts` also triggers a deliberate inline violation and asserts that the browser blocks it with `disposition=enforce` across every selected project, because the Content Security Policy is enforced without a report endpoint. Playwright's WebKit and Firefox builds do not substitute for testing on minimum supported Safari 16.4 or Firefox 128 releases.
 
 When a pull request modifies shared UI primitives, layout, or styles, include the following evidence in the PR description:
 
-- Before-and-after screenshots captured against identical fixtures at both 1440 px and 390 px widths for overview, nodes, node detail (including missing-node state), operations, rollout, audit, settings, and login, confirming that the document itself never scrolls horizontally.
+- Before-and-after screenshots captured against identical fixtures at both 1440 px and 390 px widths for overview, nodes, node detail (including missing-node state), operations, rollout, audit, settings, and login that confirm the document never scrolls horizontally.
 - Verification of the keyboard skip link, desktop sidebar and mobile Sheet navigation, Nodes filter controls and detail links, and dialog open, cancel, and confirm flows returning focus to the triggering element.
 - CSS and JS production bundle size comparisons against the base branch, along with the rationale for any newly added package dependencies.
 - Manual Safari and Firefox test results whenever the change touches browser-sensitive CSS or DOM APIs, since Chromium mobile emulation does not cover those engines.
@@ -1014,7 +1014,7 @@ safe extraction and service lifecycle transitions, the upgrade path checks the
 downloaded archive's SHA-256 against the command and aborts on a mismatch. All
 standard command guarantees stay in force: runtime command authorization,
 transactional session and workspace-admin checks, owner/epoch/fence/lease checks,
-idempotency, the Agent SQLite journal, privd receipts, Unknown outcome
+idempotency, the Agent SQLite journal, privd receipts, unknown outcome
 reconciliation, semantic payload hashes, command/fence/receipt signatures and
 durable immutable operation intent. The operator-provisioned release catalog
 supplies the authorized upgrade package digests. When changing upgrade or
@@ -1151,9 +1151,9 @@ it to breaking changes or user-facing security fixes.
 
 After GitHub generates the initial notes body,
 [`scripts/strip-release-owner-attribution.py`](../../scripts/strip-release-owner-attribution.py)
-removes the repeated ` by @GentleKingson` suffix from PR list items, leaving
-external contributor attributions, PR links, category headings, manual notes and
-the `Full Changelog` link untouched. Cleanup is idempotent within draft
+removes the repeated ` by @GentleKingson` suffix from PR list items. External
+contributor attributions, PR links, category headings, manual notes, and the
+`Full Changelog` link stay untouched. Cleanup is idempotent within draft
 preparation, because the workflow compares the stripped text with the current
 release body before calling `gh release edit --notes-file`, and existing releases
 are rejected before note preparation on reruns. Do not add `GentleKingson` to
@@ -1170,10 +1170,10 @@ is fine, and no CI job enforces it.
 [`CHANGELOG.md`](../../CHANGELOG.md) tracks concise, durable summaries of stable
 releases and keeps older entries intact. For new releases, omit empty headings,
 link to the GitHub Release instead of duplicating its PR list or workflow logs,
-and include Highlights, Upgrade notes, Known issues or a brief Validation note
-only when backed by actual results, leaving detailed run evidence in GitHub
+and include Highlights, Upgrade notes, Known issues, or a brief Validation note
+only when backed by actual results. Detailed run evidence stays in GitHub
 Actions. None of these note rules alters Release Check qualification or the
-native build, image-security, smoke and publication gates.
+native build, image-security, smoke, and publication gates.
 
 For release notes, `rc.1` and final stable releases diff against the most
 recently published non-draft stable Release (ignoring the target release itself
@@ -1194,15 +1194,15 @@ the exact commit for every RC and final tag.
 After an RC's Release workflow has uploaded its assets, run
 [`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) against the
 published tag (`VERSION=<X.Y.Z-rc.N>`) on a disposable native runner to download the
-exact release’s DEB, RPM and managed-node bootstrap over HTTPS. The smoke check validates the embedded release tag and installs the downloaded native packages. The summary records the requested version, architecture and asset URLs.
+exact release's DEB, RPM, and managed-node bootstrap over HTTPS. The smoke check validates the embedded release tag and installs the downloaded native packages. The summary records the requested version, architecture, and asset URLs.
 
 ### Existing checks
 
 | Behavior | Owner |
 | --- | --- |
-| Native `oit1_` -> `obt2_` bootstrap installation and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-check.yml`, `amd64`) |
+| Native `oit1_` -> `obt2_` bootstrap installation and online node, browser administrator login/workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Controller/transport, Agent/privd, bundled PostgreSQL and UDP-isolated sole-Relay offline-queue/exactly-once/idempotent-replay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
-| Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
+| Terminal real-node revocation: rejected unauthorized requests, direct administrator revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Default shared-domain Quick Install with Pebble, credential and root-CA custody, rerun, bootstrap resume, upgrade and rollback, real Agent reload over Relay, and renewed QUIC certificate after a controlled Relay restart | Quick Install (`release-check.yml`, `amd64`) |
 | DEB/RPM file ownership, install/removal and state preservation on `amd64`/`arm64` | Native package smoke in Release Check |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Controller build jobs in Release Check |
@@ -1233,7 +1233,7 @@ The `relay-network-probe` target in `rust/test-runtime.Dockerfile` accepts
 upgrade and an explicit bad-token rejection, then runs QUIC address discovery
 with HTTPS fallback probes disabled. Mount only its test CA and token, map the
 test hostname to the authorized public IP, and run it from the same-host egress
-network. A timeout is neither an authentication rejection nor a QUIC pass. The
+network. A timeout is not an authentication rejection or a QUIC pass. The
 diagnostic runs as UID/GID 65532, so use a task-owned token copy owned by
 65532:65532 with mode 0400 and a public CA file readable by that UID. From the
 repository root, set `RELAY_EGRESS_NETWORK` to the same-host egress network,
