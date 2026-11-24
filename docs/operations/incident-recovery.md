@@ -1,33 +1,31 @@
 # Production incident recovery
 
-This is the single backup and recovery manual for database, Signer, identity,
-credential and Unknown command incidents. Supported deployments run a single
-Controller, a single PostgreSQL 18.x database instance, and one dedicated Relay
+Supported deployments run one Controller, one PostgreSQL 18.x database
+instance, and one dedicated Relay
 (see [Database support](production-deployment.md#database-support)). Both
-Integrated and standalone topologies remain supported, as do bundled and
-external PostgreSQL deployments.
+Integrated and standalone topologies are supported, as are bundled and external
+PostgreSQL deployments.
 
-Out of scope are Controller high availability, multi-Relay failover, database
-replication clusters, PostgreSQL automatic failover, and point-in-time recovery
-(PITR) readiness. Standard backups, backup verification, and isolated restores
-remain supported. Across all recovery scenarios, the command pipeline still
-enforces owner/epoch/fence/lease validation, the transactional outbox,
-authorization, cryptographic signatures,
-idempotent command IDs, the Agent SQLite journal, and privd receipts. Passing
-recovery checks does not imply general exactly-once execution or production
-RTO/RPO guarantees.
+Controller high availability, multi-Relay failover, database replication
+clusters, PostgreSQL automatic failover, and point-in-time recovery (PITR)
+are out of scope. Standard backups, backup verification, and isolated restores
+are supported. Across recovery scenarios, the command pipeline enforces
+owner/epoch/fence/lease validation, the transactional outbox, authorization,
+cryptographic signatures, idempotent command IDs, the Agent SQLite journal, and
+privd receipts. Passing recovery checks does not guarantee exactly-once
+execution or production RTO/RPO targets.
 
-The Signer ledger, its CA and its revision floor are recovered independently of
-the Controller database. Application rollback never runs reverse database
-migrations.
+The Signer ledger, its CA, and its revision floor are backed up and restored
+separately from the Controller database. Application rollback never runs
+reverse database migrations.
 
 ## Authentication outage
 
-Deployments use Local single-admin authentication (`OCSERV_LOCAL_AUTH_ENABLED=true`) without external OIDC identity providers:
+Deployments use local single-administrator authentication (`OCSERV_LOCAL_AUTH_ENABLED=true`) without external OIDC identity providers:
 
-- Keep Local account, rate-limit, session, and workspace checks enabled across all incidents; never disable password verification or bypass session checks.
-- Established sessions continue under their normal expiration, revocation, and account-state rules; do not extend session lifetimes during an outage.
-- If the sole workspace Admin has lost access, follow [Lost Local administration authority](#lost-local-administration-authority) rather than inserting unverified sessions or resetting initialization markers.
+- Keep local account, rate-limit, session, and workspace checks enabled across all incidents; never disable password verification or bypass session checks.
+- Established sessions follow their normal expiration, revocation, and account-state rules; do not extend session lifetimes during an outage.
+- If the sole workspace administrator has lost access, follow [Lost Local administration authority](#lost-local-administration-authority) rather than inserting unverified sessions or resetting initialization markers.
 
 ## Revocation committed with synchronization pending
 
@@ -45,7 +43,7 @@ Treat these as separate states:
 | Controller trust | Database node/endpoint revocation and authorization revision block new handshakes and reject events from lingering revoked sessions. |
 | Transport trust | transportd's in-memory policy applies exact trust revisions and reloads the database TrustSnapshot at startup. A missing RPC acknowledgement leaves its result uncertain to the caller. |
 | Connection owner | The owner lease/epoch authorizes mutations. Offline status or a missing connection/fence is a current snapshot, not proof of a previous close. |
-| Queue convergence | `update_applied`, `close_required` and `close_applied` record progress under the existing RPC contracts. In particular, CloseNode `NOT_FOUND` satisfies current absence, not historical execution. |
+| Queue convergence | `update_applied`, `close_required` and `close_applied` record progress under the existing RPC contracts. CloseNode `NOT_FOUND` satisfies current absence, not historical execution. |
 
 1. Preserve the original Request ID, node ID, EndpointID, reason,
    authorization revision, response and Controller/transportd errors. Use
@@ -86,18 +84,17 @@ request does not repair missing transport evidence.
 
 ## Lost Local administration authority
 
-When the Local administrator forgets the password and the Controller and
+When the local administrator forgets the password and the Controller and
 database are available, use the [interactive administrator reset](authentication.md#reset-the-local-administrator-password).
 Record the recovery in the incident record and verify administrator login with
 the generated password before resuming normal operation.
 
 If the administrator identity or its binding is lost, or database recovery is
-required, halt application writes and preserve the incident evidence. Recover to a
-verified state that has independently controlled credentials by following the
-authorized [database recovery procedure](#database-recovery),
-leaving all initialization markers and audit history intact. Before reopening
-traffic, use the protected administrative PostgreSQL connection to revoke all
-active restored sessions:
+required, halt application writes and keep the incident evidence. Recover to a
+verified state with separately controlled credentials by following the
+[database recovery procedure](#database-recovery). Keep all initialization
+markers and audit history intact. Before reopening traffic, use the protected
+administrative PostgreSQL connection to revoke all active restored sessions:
 
 ```sql
 UPDATE auth_sessions SET revoked_at=now() WHERE revoked_at IS NULL;
@@ -144,13 +141,13 @@ the process restarts. This is deliberate; do not bypass it.
 
 ## Signer backup and restore
 
-The Signer ledger, its issuer CA and its audit revision floor are backed up and
-restored independently of the Controller database. Recovery across the two
+The Signer ledger, its issuer CA, and its audit revision floor are backed up and
+restored separately from the Controller database. Recovery across the two
 services is still coupled: restoring the Signer ledger without the matching
 issuer CA, or without reconciling Controller certificate state and all
 subsequent issuances, revocations, key imports, and key disables, leaves the
 deployment inconsistent. Restoring the Controller database and the Signer ledger
-independently does not by itself prove a consistent recovery point.
+separately does not prove a consistent recovery point.
 
 ### Ledger state
 
@@ -179,10 +176,10 @@ interrupted backup is unusable, so always validate a new snapshot by running
 read-only `verify --state` and `inspect --state` against it.
 
 For exclusive Signer maintenance in an Integrated deployment, quiesce mutations
-and reconcile in-flight results first. The existing non-purging uninstall is a
-full maintenance stop; it preserves database volumes, Secrets, ledger and
-lifecycle evidence. This also interrupts the public Controller and Relay, not
-just signing. The snapshot commands below use the same `backup` and `inspect`
+and reconcile in-flight results first. Non-purging uninstall is a full
+maintenance stop that keeps database volumes, secrets, ledger, and lifecycle
+evidence intact. This also stops the public Controller and Relay, not just
+signing. The snapshot commands below use the same `backup` and `inspect`
 subcommands for a standalone Signer, with the CA and state flags configured for
 that Signer.
 
@@ -217,21 +214,21 @@ accepted backups.
 
 When recovering, `restore --state /protected/snapshot.db --output /protected/new-ledger.db
 --minimum-revision N` verifies the snapshot and refuses to write if its audit
-revision falls below the independently reconciled high-water mark `N` or if the
-output path already exists. Place the restored ledger in a mode `0700`
-directory with runtime ownership and permissions, paired with the original
-issuer CA (whose private key custody and backup are managed separately). Put
-the restored ledger into service only after reconciling Controller state and
-accounting for all certificate issuances, revocations, imports, and disables
-that occurred after the snapshot. Never take `--minimum-revision` solely from
-the old snapshot itself. If both the ledger and independent audit evidence are
-lost, no local CLI can prove state freshness; halt automated recovery and
-reconcile manually instead of passing a zero floor, wiping state, swapping CAs,
-or rolling back container images automatically.
+revision falls below the reconciled high-water mark `N` or if the output path
+already exists. Place the restored ledger in a mode `0700` directory with
+runtime ownership and permissions, paired with the original issuer CA (whose
+private key custody and backup are managed separately). Put the restored ledger
+into service only after reconciling Controller state and accounting for all
+certificate issuances, revocations, imports, and disables that occurred after
+the snapshot. Never take `--minimum-revision` solely from the old snapshot
+itself. If both the ledger and external audit evidence are lost, no local CLI
+can prove state freshness; halt automated recovery and reconcile manually instead
+of passing a zero floor, wiping state, swapping CAs, or rolling back container
+images automatically.
 
 To rehearse recovery while still stopped, set `MINIMUM_REVISION` from the
-independently reconciled live high-water mark and later issuance/revocation,
-import and disable evidence, not merely from the snapshot being restored:
+reconciled live high-water mark and later issuance/revocation, import, and
+disable evidence, not just from the snapshot being restored:
 
 ```bash
 signer_admin restore --state /backup/snapshot.db \
@@ -241,15 +238,15 @@ signer_admin inspect --state /var/lib/ocservia-signer/restored.db \
   > "$BACKUP_DIR/restored-inspect.json"
 ```
 
-All destination files must be new. Compare issuer, policy, state version and
-revision with independent evidence before activating the restored file. Keep
-the original ledger intact until verification succeeds. Preserve UID/GID
+All destination files must be new. Compare issuer, policy, state version, and
+revision with external evidence before activating the restored file. Keep the
+original ledger intact until verification succeeds. Preserve UID/GID
 65532:65532 and mode 0600, and the same issuer CA and node identities. Do not
 lower `signer-checkpoint.json` to make an old snapshot start. If freshness
-cannot be established, leave the deployment recoverably stopped.
+cannot be established, leave the deployment stopped.
 
-Only after those comparisons succeed, activate within the same stopped state
-directory, keeping the original under a new, non-overwriting recovery name:
+Once those comparisons succeed, activate within the stopped state directory.
+Keep the original under a new, non-overwriting recovery name:
 
 ```bash
 test ! -e "$OCSERV_SIGNER_STATE_DIR/ledger.before-restore.db"
@@ -315,7 +312,7 @@ mode `0400`, then derive and verify the Controller EndpointID before starting
 transportd. Never generate a replacement key silently. If the key backup is
 unavailable or fails the EndpointID check, leave transport offline, revoke trust
 in the old EndpointID, generate a new protected key, and re-enroll every node
-through the authenticated Admin workflow. Record both the old and new EndpointIDs
+through the authenticated administrator workflow. Record both the old and new EndpointIDs
 along with the trust transition in the incident record.
 
 The session encryption key, audit checkpoint key, and audit event key (paired
@@ -362,7 +359,7 @@ lock before reading its baseline state. Once locked, the workflow:
 3. Verifies that new connections succeed with the new passwords and fail with
    the old ones.
 4. Atomically updates all four Compose secret files.
-5. Recreates the Control Plane and backup containers with the new credentials.
+5. Recreates the Controller and backup containers with the new credentials.
    The running PostgreSQL and transport containers remain available.
 
 If an error triggers rollback, the script restores the prior verifiers and
@@ -407,12 +404,12 @@ and [Controlled session and service operations](../reference/stable-contracts.md
    Deploy matched Controller/transportd and Agent/privd packages, because
    upgrading the node package does not reconcile pending commands.
 
-An Unknown write is never replayed after a restore either; see
+An unknown write is never replayed after a restore either; see
 [Security state reconciliation before cutover](#security-state-reconciliation-before-cutover).
 
 ## Deployment rollback
 
-Before rolling back, stop new writes and reconcile any operation in the Unknown
+Before rolling back, stop new writes and reconcile any operation in the unknown
 state (see [Unknown command reconciliation](#unknown-command-reconciliation)).
 Run the guarded [Controller rollback](production-deployment.md#rollback)
 or [Agent rollback](agent-lifecycle.md#rollback) while satisfying the
@@ -421,7 +418,7 @@ Version ordering, schema ranges, and descriptor equality are not
 enforced as admission gates and do not guarantee cross-version safety. Rolling
 back the Controller swaps only the installed images and Compose project without
 running down migrations or restoring database state. Rolling back an Agent
-similarly restores only local node files without modifying the Controller.
+restores only local node files without modifying the Controller.
 Neither action substitutes for the other or for a database restore. When
 same-target upgrade recovery and package rollback cannot bring the deployment
 back, proceed to [database recovery](#database-recovery), and record the exact
@@ -439,22 +436,22 @@ scripts never automatically reverse schema or state after a partial activation,
 reset node or Signer identity, or lower a recorded checkpoint to make an older
 binary start. A failed activation retains current and pending evidence. Diagnose
 the failure before retrying the same verified target; do not delete pending
-state, replay an Unknown operation, initialize another ledger, or automatically
+state, replay an unknown operation, initialize another ledger, or automatically
 roll back potentially committed effects. A changed database or deployment
 contract, or insufficient backup or recovery state, can refuse rollback.
 
 Enrollment possession proofs, purpose-separated keys, ALPNs, and real command
 capability checks remain mandatory across upgrades and rollbacks. Unresolved
-Unknown effects block conflicting work on the affected resource and require
+unknown effects block conflicting work on the affected resource and require
 reconciliation. No high availability, process merger, HSM/KMS integration,
 automatic CRL distribution, cross-version rollback safety, or guaranteed
-automatic recovery of every Unknown mutation is promised.
+automatic recovery of every unknown mutation is promised.
 
 ## Database backup and restore
 
 Every backup must preserve the full `goose_db_version` table (see
 [Schema provenance after restore](#schema-provenance-after-restore)) and the
-Local bootstrap marker table. A completed backup job alone is never recovery
+local bootstrap marker table. A completed backup job alone is never recovery
 proof without a verified restore. The checks that must pass before cutover are
 listed once in [Database recovery](#database-recovery).
 
@@ -536,7 +533,7 @@ Neither substitutes for testing an actual production archive.
   schema receipts.
 - `scripts/external-postgres-backup-restore-smoke.sh` covers the external
   PostgreSQL contract. It runs a TLS server outside the Controller network,
-  verifies routing and hostname rejection, applies migrations prior to backup,
+  verifies routing and hostname rejection, applies migrations before backup,
   confirms that `pg_verifybackup` catches corruption, restores into an isolated
   server, compares the `goose_db_version` journal across a repeat owner
   migration, and tests the restored runtime account's read and privilege
@@ -582,7 +579,7 @@ instance:
    audit chain and runtime database grants. This does not re-check migration
    receipts.
 3. Inspect the restored scheduler and owner state.
-4. Reconcile all in-flight operations and commands, including any Unknown
+4. Reconcile all in-flight operations and commands, including any unknown
    outcomes (see [Unknown command reconciliation](#unknown-command-reconciliation)).
 5. Complete the [security state reconciliation](#security-state-reconciliation-before-cutover).
 
@@ -603,11 +600,11 @@ any restored database:
    connection, revoke every unrevoked session with the statement shown in
    [Lost Local administration authority](#lost-local-administration-authority).
    Keep the rows and their audit links.
-2. Reapply every identity disable and workspace-admin change or password rotation
+2. Reapply every identity disable and workspace-administrator change or password rotation
    made after the snapshot using change records and audit evidence outside the
-   restored database, keeping the bootstrapped administrator intact.
+   restored database. Leave the bootstrapped administrator intact.
 3. Reapply post-snapshot node and `privd` attestation-key revocations from
-   independent evidence, using the normal node-revocation workflows on the
+   external evidence, using the normal node-revocation workflows on the
    isolated Controller. Reconcile node authorization revisions, endpoint-key
    state and pending trust convergence, and verify that `transportd` has
    received the revoked trust state before reconnecting nodes. Updating only
@@ -616,16 +613,16 @@ any restored database:
 4. Reconcile `local_auth_bootstrap` completion, administrator `identities`,
    `workspace_admins`, `local_credentials`, and `break_glass_uses` consumption
    and `rotation_required` markers against records outside the snapshot.
-   Preserve initialization and consumption evidence; do not delete markers or
-   reopen bootstrap to regain access. Rotate any Break-glass credential
+   Keep initialization and consumption evidence intact; do not delete markers or
+   reopen bootstrap to regain access. Rotate any break-glass credential
    consumed after the snapshot, or whose usage cannot be established, in the
    external protected configuration before cutover. Follow
    [Lost Local administration authority](#lost-local-administration-authority)
-   for recovery and keep Local/Break-glass access closed until reconciled.
+   for recovery and keep local and break-glass access closed until reconciled.
 5. Keep the current Signer ledger; never roll it back to match an older
    Controller database. If the ledger itself must be restored, follow the
    [Signer backup and restore](#signer-backup-and-restore)
-   procedure with an independently reconciled `--minimum-revision`, and
+   procedure with a reconciled `--minimum-revision`, and
    account for every issuance, revocation, import and disable after the
    snapshot. When the evidence for any of these changes is incomplete, keep the
    affected function closed and reconcile manually; never derive a high-water
@@ -635,7 +632,7 @@ any restored database:
 7. Record the snapshot, the reconciliation cut-off, the changes reapplied and
    the operator in the incident record.
 
-Never guess the result of an Unknown remote write. Retain logs and scoped
+Never guess the result of an unknown remote write. Retain logs and scoped
 diagnostics, rotate any credentials that may have been exposed, and coordinate
 with the external PKI/HSM, relay, or telemetry operators whenever a failure
 crosses an external trust boundary.

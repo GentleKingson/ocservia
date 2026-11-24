@@ -15,23 +15,21 @@ commit `75c4403f07b8ad25893f7832dbe8fc6814b53b2d`:
   `29ca0fa5303165f012f3e9775e3e95a3071cdd59f219973ec1cbb308d0214a6f`.
 
 `service-passwords.txt` is an ocservia-authored supplement, version 1, maintained
-under the repository license. It contains complete, obvious product/domain and
-administrator/default-password candidates. It supplements, not replaces, the
-upstream common/breached list.
+under the repository license. It contains obvious product, domain, and
+default administrator password candidates and supplements the upstream list.
 
 Both lists are embedded in the binary. Checks compare the complete candidate
-case-insensitively, without trimming or substring/dictionary-word matching.
+case-insensitively without trimming or substring/dictionary-word matching.
 Only the lookup copy is lowercased; password hashing uses the original bytes.
-There are no online lookups, password uploads, runtime downloads or bypass flags.
-This is a bounded blocklist, not a claim to contain every compromised password.
+There are no online lookups, password uploads, runtime downloads, or bypass flags.
+This blocklist is bounded and does not cover every compromised password.
 
 ## Maintenance
 
-Update by a normal reviewed repository change: select an immutable Django
-release/commit, download its gzip list and license, decompress without editing
-entries, and update the version, source, count and SHA-256 above. Review license
-changes and list differences. Add concrete service-related whole candidates to
-the supplement as needed and bump its version. Run the auth policy and Local
-lifecycle tests in an authorized isolated environment with the required
-dependencies, then ship the files with the normal binary build.
-Do not add a separate password service or periodic forced password changes.
+To update, select an immutable Django release or commit, download its gzip list
+and license, decompress without editing entries, and update the version, source,
+count, and SHA-256 above. Review license changes and list differences. Add
+concrete service-related whole candidates to the supplement as needed and bump
+its version. Run the auth policy and local lifecycle tests before shipping the
+files in the binary build. Do not add a separate password service or periodic
+forced password changes.

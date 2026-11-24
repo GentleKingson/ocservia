@@ -9,16 +9,16 @@ relaying the command bytes. `transportd` never holds a Controller signing key,
 so it cannot mint or modify an executable command. Command authorization itself
 stays with the Agent and privd.
 
-The Controller signs a command only after finalizing single-Admin workspace
+The Controller signs a command only after checking single-administrator workspace
 authorization, operation identity, required capability, revision, delivery mode,
-and the semantic payload hash. The Controller issues and signs semantic hash v2
-for all commands; semantic hash v1 has been removed and is rejected across the
-Controller, Agent, and privd. Both the Agent and privd pin Controller public keys
-independently: the Agent verifies the proof before recording the command in its
-local journal, and privd verifies the original proof again before reserving or
-executing any root effect, with no unsigned mutation fallback at either boundary.
-A valid proof authorizes a single command's execution; it does not by itself
-indicate that the command has been dispatched, executed, or confirmed.
+and the semantic payload hash. It issues and signs semantic hash v2 for all
+commands; semantic hash v1 has been removed and is rejected by the Controller,
+Agent, and privd. Both the Agent and privd pin Controller public keys: the Agent
+verifies the proof before writing to its local journal, and privd verifies the
+original proof again before reserving or executing any root effect, with no
+unsigned mutation fallback on either side. A valid proof authorizes a single
+command's execution; it does not mean the command was dispatched, executed, or
+confirmed.
 
 ## Key identity
 
@@ -74,10 +74,10 @@ strictly later than the issuance timestamp, and
 `CommandAuthorizationProof.signature` is excluded from the signing preimage.
 
 Binding the delivery mode into the signature stops an untrusted relay from
-converting an observation-only reconciliation request into an execution or
-retry. The payload kind, action, and required capability must match the typed
-command defined in the frozen protocol mapping, and both the Agent and privd
-recompute the semantic hash independently.
+turning an observation-only reconciliation request into an execution or retry.
+The payload kind, action, and required capability must match the typed command
+in the frozen protocol mapping, and both the Agent and privd recompute the
+semantic hash.
 
 ## Verification
 
@@ -85,28 +85,28 @@ Before writing to its command journal or calling privd, the Agent checks the
 protocol version, bounded typed payload, target node ID, validity window,
 active-session authorization revision, required capability, UUIDs, semantic
 hash version, and recomputed semantic hash. It then rebuilds the canonical
-authorization preimage, looks up the pinned public key for `key_id`, and runs
-strict Ed25519 signature verification. Any mismatch aborts processing before
-journal persistence or privilege escalation.
+authorization preimage, looks up the pinned public key for `key_id`, and checks
+the Ed25519 signature. Any mismatch aborts before journal persistence or
+privilege escalation.
 
 For mutation-capable sessions, the Agent verifies the Controller-signed
-`SessionGrantV1` and binds the command to its active session. Privd independently
-verifies the grant and session epoch against its pinned node ID and Agent
+`SessionGrantV1` and binds the command to its active session. The privd daemon
+also verifies the grant and session epoch against its pinned node ID and Agent
 `EndpointID`. It persists the accepted epoch before evaluating the requested
-effect. Artifact access also requires a separate, Controller-signed
-`ArtifactGrantV1` scoped to the artifact, operation and requester.
+effect. Artifact access requires a separate Controller-signed `ArtifactGrantV1`
+scoped to the artifact, operation, and requester.
 
 Across the local Unix socket, the Agent forwards the original signed
 `CommandEnvelope` intact without supplying separate Agent-chosen mutation
-arguments. Privd pins its own node ID and Controller keyring, repeats strict
+arguments. The privd daemon pins its own node ID and Controller keyring, repeats
 validation of the signature, expiry, node ID, UUIDs, action, delivery mode, and
-semantic hash, and derives the fixed adapter invocation and effect identity
-from the signed typed payload. Its authenticated durable effect ledger binds
-the node, command, operation, idempotency key, action, revisions, semantic
-hash, effect kind, and target resource. Replaying an exact match of a succeeded
-command returns the stored typed result without repeating the root effect. A
-prepared record in an unknown state stays fail-closed until an explicitly
-Controller-signed retry-after-absence flow resolves it.
+semantic hash, and derives the fixed adapter call and effect identity from the
+signed typed payload. Its authenticated durable effect ledger binds the node,
+command, operation, idempotency key, action, revisions, semantic hash, effect
+kind, and target resource. Replaying an exact match of a succeeded command
+returns the stored typed result without repeating the root effect. A prepared
+record in an unknown state fails closed until a Controller-signed
+retry-after-absence flow resolves it.
 
 Shared Go and Rust test vectors live in `testdata/command-authorization-v1.json`,
 which pairs exact canonical preimage bytes with deterministic Go-generated
@@ -146,13 +146,13 @@ ASCII("ocservia/controller-session-grant/cbor.v1") || 0x00 || deterministic_cbor
 | `expires_at_seconds` | signed integer (`int64`) |
 | `expires_at_nanos` | unsigned integer (`uint32`) |
 
-Upon receiving the grant, the Agent validates the signature, `key_id`, node ID,
+When it receives the grant, the Agent validates the signature, `key_id`, node ID,
 EndpointID, protocol version, sorted capability list, issuance window, and
 expiration time. Every subsequent command on that session must carry the same
 nonzero authorization revision and request a capability from the verified set.
-Before opening an Agent command stream, `transportd` independently rejects any
-command whose revision mismatches the session, whose session has expired, or
-whose required capability was not negotiated. Advancing the authoritative trust
+Before opening an Agent command stream, `transportd` also rejects any command
+whose revision mismatches the session, whose session has expired, or whose
+required capability was not negotiated. Advancing the authoritative trust
 revision closes any connection still holding an older grant.
 
 Protocol `1.0` and grantless handshakes are retired and rejected by the Controller,
@@ -163,7 +163,7 @@ under protocol `1.1`. The shared test vector for session grants is
 ## Provisioning and rotation
 
 Generate the Controller key pair outside the repository checkout under a
-restrictive umask, keeping the private key exclusively on the Controller:
+restrictive umask. Keep the private key on the Controller only:
 
 ```bash
 umask 077
@@ -174,14 +174,14 @@ chmod 0400 controller-command-signing-key.pem
 ```
 
 Install the public verification key on each managed node as `root:ocserv-agent`
-with mode `0640` inside a root-owned directory hierarchy that is neither group-
-nor world-writable. Point the Controller at its private key via
+with mode `0640` inside a root-owned directory hierarchy that is not group- or
+world-writable. Point the Controller at its private key via
 `OCSERV_COMMAND_SIGNING_KEY_FILE`, and pass one or more
 `--controller-command-key-file` flags to both the Agent and privd. In
-production, startup aborts if either verifier is missing a configured key or if
-the key file's type, ownership, permissions, hardlink count, symlink status, or
-parent directory ancestry is unsafe. Privd also checks its locally
-configured node UUID and rejects valid proofs addressed to any other node.
+production, startup aborts if either verifier lacks a configured key or if the
+key file's type, ownership, permissions, hardlink count, symlink status, or
+parent directory ancestry is unsafe. The privd daemon also checks its local node
+UUID and rejects valid proofs addressed to any other node.
 
 To rotate the signing key, distribute the new public key to every Agent and
 privd instance first, then switch the Controller to the new private key. Keep

@@ -7,35 +7,35 @@
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-black.svg?logo=rust)](rust/Cargo.toml)
 [![Vue](https://img.shields.io/badge/Frontend-Vue%203%20%2B%20TS-4FC08D.svg?logo=vuedotjs)](web/package.json)
 
-ocservia is a central control plane for clusters of [ocserv](https://ocserv.openconnect-vpn.net/) (OpenConnect VPN) servers. From one web console or HTTP API, you can monitor node health, provision user credentials and traffic quotas, inspect active sessions, and distribute signed configuration updates, without opening a shell on each server.
+ocservia is a central control plane for [ocserv](https://ocserv.openconnect-vpn.net/) (OpenConnect VPN) servers. From a single Web console or HTTP API, operators monitor node health, manage user credentials and traffic quotas, inspect active sessions, and distribute signed configuration updates without opening a shell on each host.
 
-ocservia does not replace ocserv. Every managed server keeps running ocserv, which terminates client tunnels and forwards their traffic. ocservia installs its node daemons alongside it and connects them to a central Controller.
+ocservia runs alongside ocserv rather than replacing it. Each managed server keeps running ocserv to terminate client tunnels and forward traffic, while ocservia's node daemons connect back to a central Controller.
 
 [Operating model](#operating-model) · [Deploy the Controller](#1-deploy-the-controller) · [Install a managed node](#2-install-a-managed-node) · [Documentation](#documentation) · [Development](#development)
 
 ## Features
 
 - Monitor node connection states, daemon versions, active sessions, IP bans, and telemetry streams.
-- Manage user credentials centrally, with group policies, traffic quotas, and account expiration.
-- Terminate sessions and revoke IP bans through cryptographically signed administrative operations, each with an audit record.
-- Validate configuration before it is deployed. A failed deployment rolls back automatically; if the rollback itself fails, the node is left for manual recovery.
-- Install and activate nodes with single-use tokens, signed endpoint proofs and automatic privd key registration.
-- Install, upgrade, roll back, and remove managed nodes using verified, pinned releases.
+- Manage user credentials centrally with group policies, traffic quotas, and account expiration.
+- Terminate sessions and revoke IP bans via signed administrative commands, each recorded in an audit log.
+- Validate configuration changes before applying them. Failed deployments roll back automatically; if a rollback fails, the node stops automated changes for manual recovery.
+- Enroll and activate nodes with single-use tokens, signed endpoint proofs, and automatic privd key registration.
+- Install, upgrade, roll back, and remove managed nodes using pinned releases.
 
 <a id="-what-makes-ocservia-different"></a>
 ## Operating model
 
 ### VPN traffic stays on ocserv
 
-Client VPN tunnels terminate directly on the ocserv nodes, so the Controller is never in the packet path. If the Controller becomes unavailable, management workflows pause, and client VPN sessions that are already established stay connected.
+Client VPN tunnels terminate on the ocserv nodes. The Controller is never in the packet path. If the Controller goes down, management operations pause while established VPN sessions stay connected.
 
 ### Privileged operations are bounded
 
-On each managed host, the node agent runs as an unprivileged process. When it needs a root-level action, it asks a local helper daemon, `privd`, over an authenticated Unix domain socket. `privd` exposes only a fixed set of ocserv maintenance tasks, so neither the agent nor the Controller can invoke arbitrary binaries or shell commands.
+On each managed host, the Agent runs as an unprivileged process. For root actions, it calls `privd` over an authenticated Unix domain socket. `privd` exposes only a fixed set of ocserv maintenance routines, so the Agent and Controller cannot run arbitrary binaries or shell commands.
 
 ### One Admin can complete management operations
 
-An authenticated administrator manages nodes, users, configuration, certificates, and upgrades without a second identity or approval step. The Controller checks current workspace permissions and binds signed commands to the requested content. Short-lived single-use installation tokens automate node activation and root-key registration while preserving TLS verification, key isolation, audit records, and recovery checks.
+One authenticated administrator manages nodes, users, configuration, certificates, and upgrades without a second identity or approval step. The Controller checks workspace permissions and binds signed commands to the requested payload. Short-lived single-use installation tokens automate node activation and root-key registration. TLS verification, key isolation, audit records, and recovery checks still apply.
 
 ### 1. Deploy the Controller
 
@@ -47,13 +47,13 @@ wget https://github.com/GentleKingson/ocservia/releases/download/vX.Y.Z/controll
 bash install.sh
 ```
 
-The wizard detects the platform, collects Quick or Manual settings, checks prerequisites and asks for confirmation. It requires a TTY. For automation, use `bash install.sh --non-interactive --config ./install.env`; missing required configuration fails without prompting. Release scripts embed their version, so production installation needs neither Git nor a source checkout.
+The wizard detects the platform, collects Quick or Manual settings, checks prerequisites, and asks for confirmation. It requires a TTY. For automation, run `bash install.sh --non-interactive --config ./install.env`; missing required settings fail without prompting. Release scripts embed their version, so production installation does not require Git or a source checkout.
 
-Operators authenticate with local credentials (`OCSERV_LOCAL_AUTH_ENABLED=true`). A fresh installation has no default administrator account. In a manual setup, create the single Local administrator with the one-shot bootstrap command described in [Production authentication](docs/operations/authentication.md#bootstrap-the-first-local-admin).
+Operators authenticate with local credentials (`OCSERV_LOCAL_AUTH_ENABLED=true`). Fresh installations have no default administrator account. In a manual setup, create the single local administrator with the one-shot bootstrap command in [Production authentication](docs/operations/authentication.md#bootstrap-the-first-local-admin).
 
-The default Standalone mode runs the Relay and the Signer on separate hosts. Integrated mode runs them on the Controller host under the root lifecycle and needs additional configuration. Before you run the bootstrap, provision the required secrets as described in [Production deployment](docs/operations/production-deployment.md#prepare-the-configuration).
+Standalone mode (the default) runs the Relay and Signer on separate hosts. Integrated mode runs them on the Controller host under the root lifecycle and needs additional configuration. Provision the required secrets before running bootstrap as described in [Production deployment](docs/operations/production-deployment.md#prepare-the-configuration).
 
-For a new Integrated host, the Quick preset can generate the configuration, cryptographic material, and initial local administrator, as long as the stable or RC release you selected includes Quick mode. Releases up to v1.2.0 do not ship this preset (see [Quick mode](docs/operations/production-deployment.md#quick-mode)).
+For a new Integrated host, the Quick preset generates the configuration, cryptographic material, and initial local administrator on stable or RC releases after v1.2.0 (see [Quick mode](docs/operations/production-deployment.md#quick-mode)).
 
 ### 2. Install a managed node
 
@@ -65,7 +65,7 @@ wget --https-only --secure-protocol=TLSv1_2 https://github.com/GentleKingson/ocs
 bash install.sh --join-token
 ```
 
-The installer securely retrieves configuration, installs the package, registers and activates the Agent, registers its root-owned privd key and starts the services. It reports `ONLINE` only after the Controller observes active trust and fresh telemetry. No second identity or confirmation is required. The host must trust the Controller's HTTPS certificate. See [Agent lifecycle](docs/operations/agent-lifecycle.md#one-token-installation) for prerequisites and safe interruption recovery.
+The installer fetches configuration over verified HTTPS, installs the package, registers and activates the Agent, registers its root-owned privd key, and starts the services. It reports `ONLINE` only after the Controller observes active trust and fresh telemetry. No second identity or confirmation is needed, and the host must trust the Controller's HTTPS certificate. See [Agent lifecycle](docs/operations/agent-lifecycle.md#one-token-installation) for prerequisites and recovery from interrupted runs.
 
 <a id="-documentation"></a>
 ## Documentation
@@ -76,8 +76,8 @@ The installer securely retrieves configuration, installs the package, registers 
 | [Stable contracts](docs/reference/stable-contracts.md) | Rules that changes must keep: command delivery and receipts, identity and authorization, database artifacts, and protocol generation. |
 | [Production deployment](docs/operations/production-deployment.md) | Support scope, Controller and Relay installation in Quick or manual, Standalone or Integrated form, and upgrade, rollback and uninstall. |
 | [Agent lifecycle](docs/operations/agent-lifecycle.md) | Node installation, enrollment, upgrade, rollback, and removal. |
-| [Authentication](docs/operations/authentication.md) | Single Local admin authentication, bootstrap, and session operations. |
-| [Incident recovery](docs/operations/incident-recovery.md) | Database and Signer backup and restore, Unknown command reconciliation, and credential recovery. |
+| [Authentication](docs/operations/authentication.md) | Single local administrator authentication, bootstrap, and session operations. |
+| [Incident recovery](docs/operations/incident-recovery.md) | Database and Signer backup and restore, unknown command reconciliation, and credential recovery. |
 | [Validation and release](docs/development/release-checks.md) | Checks for each kind of change, CI layers, business acceptance, and the release process. |
 
 The frozen wire formats for signed commands are specified in [command authorization v1](docs/development/command-authorization-v1.md) and [command semantic hash v2](docs/development/command-semantic-hash-v2.md). HTTP endpoints and fields are defined in [`openapi/openapi.yaml`](openapi/openapi.yaml), and Protobuf messages in [`proto/`](proto/).
@@ -101,15 +101,15 @@ Pin production deployments to official [published releases](https://github.com/G
 
 ## VPN audit history
 
-Open **Audit → VPN audit history** to search the current workspace by node, username and time. Session events show logins and logouts. Session snapshots show the last counters seen by occtl and the first snapshot in which a previously observed session was absent. Network connections additionally support an exact destination IP filter. Each page returns up to 200 matches. **Load older records** continues the same query. **Export results** downloads all loaded rows as JSON with byte counts preserved as decimal strings.
+Open **Audit → VPN audit history** to search the current workspace by node, username, and time. Session events show logins and logouts. Session snapshots show the last counters seen by occtl and the first snapshot where a previously observed session was absent. Network connections also filter by exact destination IP. Each page returns up to 200 matches; **Load older records** continues the query, and **Export results** downloads all loaded rows as JSON with byte counts preserved as decimal strings.
 
-The managed complete configuration enables session hooks when applied. Existing externally managed configurations need to invoke the packaged hooks. Network auditing is opt-in per node and records connection metadata. The Controller retains session events and closed snapshots for 90 days and network records for 30 days. [Node setup and verification](docs/operations/agent-lifecycle.md#vpn-audit-collection) · [Query and retention contract](docs/reference/stable-contracts.md#vpn-audit-history)
+Applying the complete configuration enables session hooks. Externally managed configurations must call the packaged hooks. Network auditing is opt-in per node and records connection metadata. The Controller retains session events and closed snapshots for 90 days and network records for 30 days. [Node setup and verification](docs/operations/agent-lifecycle.md#vpn-audit-collection) · [Query and retention contract](docs/reference/stable-contracts.md#vpn-audit-history)
 
 ## Security
 
-Administrative commands require cryptographic authorization. Changes are covered by replay protection, a command ledger, and signed receipts. On the node, root execution is restricted to a fixed set of operations.
+Administrative commands require cryptographic authorization, replay protection, a command ledger, and signed receipts. Root execution on each node is limited to a fixed set of operations.
 
-Accepting, dispatching, and executing a command are distinct states. When the Controller answers `202 Accepted`, it has atomically recorded the operation, its outbox entry, and the audit intent; that alone does not establish remote execution. A transport acknowledgement does not prove execution either. If a command's outcome is uncertain, its state remains Unknown until exact durable evidence establishes the result, and operators must pause conflicting changes while reconciliation is in progress. See the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary) for details.
+Accepting, dispatching, and executing a command are distinct states. When the Controller returns `202 Accepted`, it has committed the operation, its outbox entry, and the audit intent in one database transaction; that does not mean the command ran on the node. A transport acknowledgement does not prove execution either. If a command's outcome is uncertain, its state remains unknown until durable evidence settles the result, and operators must pause conflicting changes during reconciliation. See the [recovery boundary](docs/reference/stable-contracts.md#matched-release-recovery-boundary).
 
 To report a suspected vulnerability, follow the private process in [SECURITY.md](SECURITY.md).
 
