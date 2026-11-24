@@ -143,6 +143,13 @@ assert_flag "web e2e spec" run_web_browser true
 assert_eq "web e2e spec ci_suites" guards "${ci_suites[*]}"
 
 reset_state
+classify_path web/playwright.Dockerfile
+assert_flag "web playwright dockerfile" run_web true
+assert_flag "web playwright dockerfile" run_web_browser false
+assert_flag "web playwright dockerfile" run_controller_cache false
+assert_eq "web playwright dockerfile ci_suites" guards "${ci_suites[*]}"
+
+reset_state
 classify_path scripts/required-go-tests.txt
 assert_flag "required go tests" run_database true
 assert_eq "required go tests ci_suites" guards "${ci_suites[*]}"

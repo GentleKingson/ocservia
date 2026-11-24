@@ -13,14 +13,14 @@ declared() {
 }
 
 expect_equal() {
-  local tool="$1" expected="$2" actual="$3" source="$4"
+  local tool="$1" expected="$2" actual="$3" source="$4" pin_source="${5:-toolchains.lock}"
   if [[ -z "${actual}" ]]; then
     echo "${source} no longer declares a ${tool} version" >&2
     exit 1
   fi
   if [[ "${actual}" != "${expected}" ]]; then
-    echo "${source} declares ${tool} ${actual} but toolchains.lock pins ${expected}" >&2
-    echo "align ${source} with toolchains.lock so local toolchains match CI" >&2
+    echo "${source} declares ${tool} ${actual} but ${pin_source} pins ${expected}" >&2
+    echo "align ${source} with ${pin_source} so local toolchains match CI" >&2
     exit 1
   fi
 }
@@ -45,3 +45,14 @@ expect_equal Node "${node_pin}" "$(head -n 1 "${ROOT}/.nvmrc")" ".nvmrc"
 expect_equal Node "${node_pin}" "$(head -n 1 "${ROOT}/.node-version")" ".node-version"
 expect_equal Node "${node_pin}" "$(jq -r '.engines.node // empty' "${ROOT}/web/package.json")" "web/package.json"
 expect_equal npm "${npm_pin}" "$(jq -r '.engines.npm // empty' "${ROOT}/web/package.json")" "web/package.json"
+
+playwright_pin="$(jq -r '.devDependencies["@playwright/test"] // empty' "${ROOT}/web/package.json")"
+playwright_pin="${playwright_pin#^}"
+if [[ -z "${playwright_pin}" ]]; then
+  echo "web/package.json no longer declares a @playwright/test version" >&2
+  exit 1
+fi
+expect_equal Playwright "${playwright_pin}" \
+  "$(sed -n 's/^FROM mcr\.microsoft\.com\/playwright:v\([0-9][0-9.]*\)-noble$/\1/p' "${ROOT}/web/playwright.Dockerfile" | head -n 1)" \
+  "web/playwright.Dockerfile" \
+  "web/package.json"

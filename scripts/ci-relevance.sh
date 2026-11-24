@@ -112,7 +112,7 @@ classify_path() {
       run_go=true; run_database=true ;;
 
     # Web, Rust, Go and Signer modules.
-    web/package.json) run_web=true; tools_suite guards ;;
+    web/package.json|web/playwright.Dockerfile) run_web=true; tools_suite guards ;;
     web/e2e/*|web/test/run-auth-browser.mjs) run_web=true; tools_suite guards ;;
     web/*|scripts/web-check.sh|scripts/e2e.sh) run_web=true ;;
     rust/rust-toolchain.toml) run_rust=true; tools_suite guards ;;
