@@ -13,8 +13,9 @@ use iroh::EndpointId;
 use iroh::endpoint::RelayMode;
 use ocservia_agent::{ExternalEffectObservation, PrivdClient};
 use ocservia_agent_protocol::{
-    DesiredEffectObservation, DesiredEffectState, ErrorKind, OcservVersion, PrivdRequest,
-    PrivdResponse, PrivilegedRequestMode, privd_request, privd_response, read_frame, write_frame,
+    ConfigApplyResult, DesiredEffectObservation, DesiredEffectState, ErrorKind, OcservVersion,
+    PrivdRequest, PrivdResponse, PrivilegedRequestMode, privd_request, privd_response, read_frame,
+    write_frame,
 };
 use ocservia_command_authorization::{
     ControllerCommandKeyring, canonical_session_grant_v1, session_grant_claims_v1,
@@ -34,7 +35,7 @@ use uuid::Uuid;
 
 use crate::commands::{
     map_external_effect, observe_external_effect_with_reconcile, response_proof,
-    terminal_privd_error_code,
+    settle_privd_response, terminal_privd_error_code,
 };
 use crate::session::{
     activate_session_epoch, negotiate_session_mode, negotiate_session_mode_at_instant,
@@ -47,6 +48,94 @@ use crate::startup::{
 };
 
 const NOW: i64 = 1_700_000_050;
+
+#[test]
+fn only_successful_config_apply_advances_the_applied_revision() {
+    use ocservia_agent::{CommandContext, CommandExecutor, ExternalPreparation};
+    use ocservia_command_journal::CommandState;
+    use ocservia_contracts::config_profile::APPLY_CAPABILITY;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        CommandDeliveryMode, PrivdResultReceiptV1, PrivilegedResultProof,
+    };
+    use ocservia_test_support::{sign_command_envelope_v2, sign_command_v2};
+    use prost::Message as _;
+
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../testdata/complete-config-v1.json"))
+            .expect("config fixture");
+    let bytes = hex::decode(fixture["apply_proto"].as_str().expect("apply fixture")).expect("hex");
+    let fixture = CommandEnvelope::decode(bytes.as_slice()).expect("fixture command");
+    let node = fixture.node_id.as_slice().try_into().expect("node");
+    let payload = fixture.payload.expect("config payload");
+    let signing = SigningKey::from_bytes(&[49; 32]);
+    let context = CommandContext {
+        node_id: node,
+        authorization_revision: fixture.expected_revision,
+        capabilities: [APPLY_CAPABILITY.to_owned()].into(),
+        session_expires_at_unix_seconds: NOW + 300,
+        command_keys: keyring(&signing),
+        now_unix_seconds: NOW,
+        cancelled: false,
+    };
+
+    for (rolled_back, failed_critical, applied_revision) in [
+        (true, false, 8),
+        (false, true, 8),
+        (false, false, 0),
+        (false, false, 8),
+    ] {
+        let directory = TempDir::new("config-result");
+        let mut executor = CommandExecutor::new(
+            Journal::open(&directory.join("journal.sqlite3")).expect("open journal"),
+        );
+        let mut envelope = sign_command_v2(
+            &signing,
+            node,
+            NOW,
+            NOW + 60,
+            fixture.expected_revision,
+            "config.apply",
+            APPLY_CAPABILITY,
+            payload.clone(),
+        );
+        envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        sign_command_envelope_v2(&signing, &mut envelope);
+        let ExternalPreparation::Execute(command) = executor
+            .begin_attested_recovery(&envelope, &context)
+            .expect("recover")
+        else {
+            panic!("resume configuration command");
+        };
+        let response = PrivdResponse {
+            result: Some(privd_response::Result::ConfigApply(ConfigApplyResult {
+                rolled_back,
+                failed_critical,
+                applied_revision,
+                ..ConfigApplyResult::default()
+            })),
+            privileged_result_proof: Some(PrivilegedResultProof {
+                version: 1,
+                receipt_v1: Some(PrivdResultReceiptV1 {
+                    receipt_version: 1,
+                    completed_at: Some(ts(NOW + 1, 0)),
+                    ..PrivdResultReceiptV1::default()
+                }),
+                signature: vec![0; 64],
+            }),
+            ..PrivdResponse::default()
+        };
+        let result = settle_privd_response(&mut executor, &command, &envelope, response, NOW + 1)
+            .expect("settle attested response");
+        assert_eq!(result.record.state, CommandState::Succeeded);
+        assert_eq!(
+            executor
+                .journal()
+                .applied_revision("config", "ocserv.conf")
+                .expect("revision"),
+            (!rolled_back && !failed_critical && applied_revision != 0).then_some(applied_revision)
+        );
+    }
+}
 
 struct TempDir(PathBuf);
 

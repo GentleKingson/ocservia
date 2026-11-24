@@ -328,7 +328,11 @@ func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, r
 	if since.IsZero() {
 		return nil, database.ErrConstraint
 	}
-	query := `SELECT sampled_at,metric,1,value,value,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at >= $3 ORDER BY sampled_at LIMIT 2000`
+	query := `SELECT sampled_at,metric,1,value,value,value FROM (
+		SELECT sampled_at,metric,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at>=$3
+		UNION ALL
+		SELECT sampled_at,metric,value FROM telemetry_samples_default WHERE node_id=$1 AND metric=$2 AND sampled_at>=$3
+	) samples ORDER BY sampled_at LIMIT 2000`
 	switch resolution {
 	case "raw":
 	case "5m", "1h":
@@ -352,26 +356,70 @@ func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, r
 	return points, rows.Err()
 }
 
+func (s telemetryStore) EnsureUpcomingPartitions(ctx context.Context) error {
+	_, err := s.tx.Exec(ctx, `SELECT telemetry_ensure_upcoming_partitions()`)
+	return err
+}
+
 func (s telemetryStore) MaintainHistory(ctx context.Context, now time.Time) error {
-	for _, table := range []struct {
-		name, interval string
-		width          time.Duration
-	}{{"telemetry_rollups_5m", "5 minutes", 5 * time.Minute}, {"telemetry_rollups_1h", "1 hour", time.Hour}} {
-		// Recompute the entire accepted lateness window, including the complete
-		// first bucket; a partial bucket would overwrite its earlier samples.
-		since := now.UTC().Add(-14 * 24 * time.Hour).Truncate(table.width)
-		_, err := s.tx.Exec(ctx, fmt.Sprintf(`INSERT INTO %s AS existing(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin($1::interval,sampled_at,'2000-01-01 00:00:00+00'::timestamptz),count(*),min(value),max(value),avg(value) FROM telemetry_samples WHERE sampled_at >= $2 GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value WHERE (existing.sample_count,existing.min_value,existing.max_value,existing.avg_value) IS DISTINCT FROM (EXCLUDED.sample_count,EXCLUDED.min_value,EXCLUDED.max_value,EXCLUDED.avg_value)`, table.name), table.interval, since)
-		if err != nil {
+	// The trigger locks every affected queue key, even when it was already
+	// dirty. Read raw data in a fresh statement after locking the keys, so
+	// samples committed during selection are either included or leave a mark.
+	var keys []byte
+	if err := s.tx.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(d),'[]'::jsonb) FROM (
+		SELECT bucket_at,node_id,metric FROM telemetry_rollup_queue
+		ORDER BY bucket_at,node_id,metric LIMIT 4096 FOR UPDATE SKIP LOCKED
+	) d`).Scan(&keys); err != nil {
+		return err
+	}
+	if string(keys) != "[]" {
+		if err := s.refreshRollups(ctx, keys); err != nil {
 			return err
 		}
 	}
 	if _, err := s.tx.Exec(ctx, `SELECT telemetry_prune_rollups($1)`, now); err != nil {
 		return err
 	}
-	if _, err := s.tx.Exec(ctx, `SELECT prune_vpn_history()`); err != nil {
-		return err
-	}
-	_, err := s.tx.Exec(ctx, `SELECT telemetry_drop_expired_partitions($1)`, now.Add(-14*24*time.Hour))
+	_, err := s.tx.Exec(ctx, `SELECT prune_vpn_history()`)
+	return err
+}
+
+func (s telemetryStore) refreshRollups(ctx context.Context, keys []byte) error {
+	_, err := s.tx.Exec(ctx, `WITH dirty AS (
+		SELECT * FROM jsonb_to_recordset($1::jsonb) AS d(bucket_at timestamptz,node_id uuid,metric text)
+	), consumed AS (
+		DELETE FROM telemetry_rollup_queue q USING dirty d
+		WHERE (q.bucket_at,q.node_id,q.metric)=(d.bucket_at,d.node_id,d.metric)
+		RETURNING q.bucket_at,q.node_id,q.metric
+	), fresh AS (
+		INSERT INTO telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value)
+		SELECT d.node_id,d.metric,d.bucket_at,count(*),min(s.value),max(s.value),avg(s.value)
+		FROM consumed d CROSS JOIN LATERAL (
+			SELECT value FROM telemetry_samples
+			WHERE node_id=d.node_id AND metric=d.metric
+			AND sampled_at BETWEEN d.bucket_at AND d.bucket_at+interval '5 minutes'-interval '1 microsecond'
+			UNION ALL
+			SELECT value FROM telemetry_samples_default
+			WHERE node_id=d.node_id AND metric=d.metric
+			AND sampled_at BETWEEN d.bucket_at AND d.bucket_at+interval '5 minutes'-interval '1 microsecond'
+		) s GROUP BY 1,2,3
+		ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value
+		RETURNING node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value
+	), affected_hours AS (
+		SELECT DISTINCT node_id,metric,date_bin(interval '1 hour',bucket_at,'2000-01-01 00:00:00+00'::timestamptz) bucket_at FROM fresh
+	), hour_input AS (
+		SELECT * FROM fresh
+		UNION ALL
+		SELECT r.node_id,r.metric,r.bucket_at,r.sample_count,r.min_value,r.max_value,r.avg_value
+		FROM affected_hours h JOIN telemetry_rollups_5m r ON r.node_id=h.node_id AND r.metric=h.metric
+			AND r.bucket_at BETWEEN h.bucket_at AND h.bucket_at+interval '1 hour'-interval '1 microsecond'
+		WHERE NOT EXISTS (SELECT 1 FROM fresh f WHERE (f.node_id,f.metric,f.bucket_at)=(r.node_id,r.metric,r.bucket_at))
+	)
+	INSERT INTO telemetry_rollups_1h(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value)
+	SELECT node_id,metric,date_bin(interval '1 hour',bucket_at,'2000-01-01 00:00:00+00'::timestamptz),
+		sum(sample_count),min(min_value),max(max_value),sum(avg_value::numeric*sample_count)/sum(sample_count)
+	FROM hour_input GROUP BY 1,2,3
+	ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`, keys)
 	return err
 }
 
@@ -379,7 +427,19 @@ var _ telemetrystore.Store = telemetryStore{}
 
 func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 	var safe bool
-	err := b.QueryRow(ctx, `SELECT NOT has_schema_privilege(current_user,'public','CREATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_5m','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'telemetry_rollups_1h','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'vpn_network_history','DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'vpn_session_events','DELETE,TRUNCATE') AND has_function_privilege(current_user,'prune_vpn_history()','EXECUTE') AND has_function_privilege(current_user,'telemetry_prune_rollups(timestamptz)','EXECUTE') AND has_function_privilege(current_user,'telemetry_drop_expired_partitions(timestamptz)','EXECUTE') AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb FROM pg_catalog.pg_roles WHERE rolname=current_user`).Scan(&safe)
+	err := b.QueryRow(ctx, `SELECT NOT has_schema_privilege(current_user,'public','CREATE')
+		AND NOT has_table_privilege(current_user,'telemetry_rollups_5m','DELETE,TRUNCATE')
+		AND NOT has_table_privilege(current_user,'telemetry_rollups_1h','DELETE,TRUNCATE')
+		AND NOT has_table_privilege(current_user,'vpn_network_history','DELETE,TRUNCATE')
+		AND NOT has_table_privilege(current_user,'vpn_session_events','DELETE,TRUNCATE')
+		AND has_function_privilege(current_user,'prune_vpn_history()','EXECUTE')
+		AND has_function_privilege(current_user,'telemetry_prune_rollups(timestamptz)','EXECUTE')
+		AND has_function_privilege(current_user,'telemetry_ensure_upcoming_partitions()','EXECUTE')
+		AND has_table_privilege(current_user,'telemetry_samples_default','SELECT')
+		AND NOT has_table_privilege(current_user,'telemetry_samples_default','INSERT,UPDATE,DELETE,TRUNCATE')
+		AND NOT pg_has_role(current_user,(SELECT relowner FROM pg_class WHERE oid='public.telemetry_samples'::regclass),'USAGE')
+		AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb
+		FROM pg_catalog.pg_roles WHERE rolname=current_user`).Scan(&safe)
 	if err != nil {
 		return err
 	}
@@ -392,7 +452,19 @@ func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 	if !safe {
 		return fmt.Errorf("runtime has indirect telemetry partition DDL capability: %w", database.ErrPermission)
 	}
-	if err := b.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM generate_series(date_trunc('month',(now()-interval '14 days') AT TIME ZONE 'UTC'),date_trunc('month',(now()+interval '5 minutes') AT TIME ZONE 'UTC'),interval '1 month') month WHERE NOT EXISTS(SELECT 1 FROM pg_inherits WHERE inhparent='public.telemetry_samples'::regclass AND inhrelid=to_regclass('public.telemetry_samples_'||to_char(month,'YYYYMM'))))`).Scan(&safe); err != nil {
+	const requiredMonthsProvisioned = `SELECT NOT EXISTS(SELECT 1 FROM generate_series(date_trunc('month',(now()-interval '14 days') AT TIME ZONE 'UTC'),date_trunc('month',(now()+interval '5 minutes') AT TIME ZONE 'UTC'),interval '1 month') month WHERE NOT EXISTS(SELECT 1 FROM pg_inherits WHERE inhparent='public.telemetry_samples'::regclass AND NOT inhdetachpending AND inhrelid=to_regclass('public.telemetry_samples_'||to_char(month,'YYYYMM'))))`
+	if err := b.QueryRow(ctx, requiredMonthsProvisioned).Scan(&safe); err != nil {
+		return err
+	}
+	if safe {
+		return nil
+	}
+	// A stopped Controller can outlive its pre-created partitions. The
+	// restricted routine restores current and future coverage at startup.
+	if _, err := b.Exec(ctx, `SELECT public.telemetry_ensure_upcoming_partitions()`); err != nil {
+		return fmt.Errorf("provision upcoming telemetry partitions: %w", err)
+	}
+	if err := b.QueryRow(ctx, requiredMonthsProvisioned).Scan(&safe); err != nil {
 		return err
 	}
 	if !safe {

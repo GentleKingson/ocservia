@@ -121,6 +121,19 @@ func TestProductionConfigurationAndFailClosedGates(t *testing.T) {
 		t.Fatalf("production --migrate-only rejected: %v", err)
 	}
 
+	retentionEnv := make(map[string]string, len(base))
+	for k, v := range base {
+		retentionEnv[k] = v
+	}
+	delete(retentionEnv, "OCSERV_COMMAND_SIGNING_KEY_FILE")
+	delete(retentionEnv, "OCSERV_CONTROLLER_ENDPOINT_ID")
+	if cfg, err := loadEnv([]string{"--telemetry-retention-only"}, retentionEnv); err != nil || !cfg.TelemetryRetentionOnly {
+		t.Fatalf("production telemetry retention command rejected: %v", err)
+	}
+	if _, err := loadEnv([]string{"--telemetry-retention-only", "--migrate-only"}, migrateEnv); err == nil {
+		t.Fatal("telemetry retention and migration flags were accepted together")
+	}
+
 	mutations := []struct {
 		name string
 		key  string

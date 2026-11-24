@@ -41,6 +41,10 @@ class FakeEventSource extends EventTarget {
 
 const latestEvent = "019fc0a4-6d92-765c-a8a1-4af556614cc7";
 const streamedEvent = "019fc0a4-6d92-765c-a8a1-4af556614cc8";
+const platformEvent = (type: string, nodeId = "node") =>
+  new MessageEvent("platform", {
+    data: JSON.stringify({ type, node_id: nodeId }),
+  });
 
 describe("fleet event stream", () => {
   beforeEach(() => {
@@ -94,6 +98,58 @@ describe("fleet event stream", () => {
     );
     expect(listEvents).toHaveBeenCalledTimes(1);
     store.disconnect();
+  });
+
+  it("keeps the stream cursor when a fresh lookup fails", async () => {
+    const store = useFleetStore();
+    await store.rebuild();
+    await store.connect();
+    FakeEventSource.instances.at(-1)?.dispatchEvent(
+      new MessageEvent("platform", {
+        lastEventId: streamedEvent,
+        data: JSON.stringify({ type: "heartbeat", node_id: "node" }),
+      }),
+    );
+    store.stop();
+    vi.mocked(listEvents).mockRejectedValueOnce(new Error("unavailable"));
+    await store.rebuild();
+    await store.connect();
+    expect(eventStreamPath).toHaveBeenLastCalledWith(streamedEvent);
+    store.$dispose();
+  });
+
+  it("keeps heartbeat and other nodes' command results off the fleet rebuild path", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getNode).mockResolvedValue({ id: "node" } as never);
+    vi.mocked(listNodeSessions).mockResolvedValue({
+      items: [],
+      page: { hasMore: false },
+    });
+    vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
+    vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
+    const store = useFleetStore();
+    store.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const stream = FakeEventSource.instances.at(-1);
+    stream?.onopen?.();
+    await store.select("node");
+
+    for (let i = 0; i < 40; i += 1) {
+      stream?.dispatchEvent(platformEvent("heartbeat", "node"));
+      stream?.dispatchEvent(platformEvent("telemetry", "other-node"));
+      stream?.dispatchEvent(platformEvent("command_result", "other-node"));
+      await vi.advanceTimersByTimeAsync(150);
+    }
+    expect(listNodes).toHaveBeenCalledTimes(1);
+    expect(getNode).toHaveBeenCalledTimes(1);
+
+    stream?.dispatchEvent(platformEvent("command_result"));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(listNodes).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    expect(getNode).toHaveBeenCalledTimes(2);
+    store.$dispose();
   });
 
   it("suspends the stream in the background and recovers a stale snapshot when visible", async () => {
@@ -255,16 +311,16 @@ describe("fleet event stream", () => {
         };
       });
     });
-    stream?.dispatchEvent(new MessageEvent("platform"));
+    stream?.dispatchEvent(platformEvent("connected"));
     await vi.advanceTimersByTimeAsync(100);
     for (let index = 0; index < 5; index += 1) {
-      stream?.dispatchEvent(new MessageEvent("platform"));
+      stream?.dispatchEvent(platformEvent("connected"));
       await vi.advanceTimersByTimeAsync(150);
     }
     expect(listNodes).toHaveBeenCalledTimes(2);
     expect(signal?.aborted).toBe(false);
     finish();
-    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(listNodes).toHaveBeenCalledTimes(3);
     store.$dispose();
   });

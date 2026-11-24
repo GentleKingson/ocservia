@@ -220,7 +220,12 @@ async fn execute_external_command(
         }
         CommandDeliveryMode::ReconcileOnly => {
             let response = session.privd.call_reconcile(envelope).await;
-            if response.as_ref().ok().and_then(response_proof).is_some() {
+            // A present proof goes through settlement even when malformed. Its
+            // result cannot serve as proofless evidence that the effect is absent.
+            if response
+                .as_ref()
+                .is_ok_and(|response| response.privileged_result_proof.is_some())
+            {
                 match session
                     .command_executor
                     .begin_attested_recovery(envelope, context)?
@@ -266,7 +271,7 @@ async fn execute_external_command(
     }
 }
 
-fn settle_privd_response(
+pub(super) fn settle_privd_response(
     executor: &mut CommandExecutor,
     command: &ExternalCommand,
     envelope: &CommandEnvelope,
@@ -274,7 +279,12 @@ fn settle_privd_response(
     now: i64,
 ) -> Result<CommandOutcome, CommandError> {
     let Some((proof, completed_at)) = response_proof(&response) else {
-        return executor.mark_external_unknown(command, "privd_receipt_missing_or_malformed", now);
+        let code = if response.privileged_result_proof.is_some() {
+            "receipt_invalid"
+        } else {
+            "receipt_missing"
+        };
+        return executor.mark_external_unknown(command, code, now);
     };
     let mut applied_revision = None;
     let terminal = match response.result {
@@ -284,9 +294,12 @@ fn settle_privd_response(
         }
         Some(privd_response::Result::ConfigPlan(result)) => Ok(result.encode_to_vec()),
         Some(privd_response::Result::ConfigApply(result)) => {
-            applied_revision = Some(
-                desired_resource(envelope).ok_or(CommandError::Rejected("config_apply_invalid"))?,
-            );
+            if !result.rolled_back && !result.failed_critical && result.applied_revision != 0 {
+                applied_revision = Some(
+                    desired_resource(envelope)
+                        .ok_or(CommandError::Rejected("config_apply_invalid"))?,
+                );
+            }
             Ok(result.encode_to_vec())
         }
         Some(privd_response::Result::CertificateCsr(result)) => Ok(result.encode_to_vec()),
@@ -620,5 +633,177 @@ fn rejected_result(envelope: &CommandEnvelope, code: &str, now: i64) -> CommandR
         replayed: false,
         semantic_payload_hash_version: SemanticPayloadHashVersion::Unspecified as i32,
         privileged_result_proof: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::SigningKey;
+    use ocservia_agent_protocol::{
+        DesiredEffectObservation, MutationResult, PrivdRequest, PrivilegedRequestMode, read_frame,
+        write_frame,
+    };
+    use ocservia_command_journal::Journal;
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        GroupApply, ServiceReload, SessionGrantV1,
+    };
+    use ocservia_test_support::{keyring, sign_command_envelope_v2, sign_command_v2};
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn settlement_publishes_canonical_receipt_failure_codes() {
+        let directory = std::env::temp_dir().join(format!("ocservia-receipt-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("test directory");
+        let journal = Journal::open(&directory.join("journal.sqlite3")).expect("test journal");
+        let mut executor = CommandExecutor::new(journal);
+        let signing = SigningKey::from_bytes(&[49; 32]);
+        let now = 1_700_000_050;
+        let node_id = *Uuid::now_v7().as_bytes();
+        let context = CommandContext {
+            node_id,
+            authorization_revision: 1,
+            capabilities: ["ocserv.service.reload".to_owned()].into(),
+            session_expires_at_unix_seconds: now + 300,
+            command_keys: keyring(&signing),
+            now_unix_seconds: now,
+            cancelled: false,
+        };
+        for (proof, code) in [
+            (None, "receipt_missing"),
+            (Some(PrivilegedResultProof::default()), "receipt_invalid"),
+        ] {
+            let envelope = sign_command_v2(
+                &signing,
+                node_id,
+                now,
+                now + 60,
+                context.authorization_revision,
+                "service.reload",
+                "ocserv.service.reload",
+                command_envelope::Payload::ServiceReload(ServiceReload {}),
+            );
+            let ExternalPreparation::Execute(command) = executor
+                .prepare_external(&envelope, &context)
+                .expect("prepare")
+            else {
+                panic!("new command should execute");
+            };
+            let response = PrivdResponse {
+                result: Some(privd_response::Result::Mutation(MutationResult {
+                    applied: true,
+                })),
+                privileged_result_proof: proof,
+                ..PrivdResponse::default()
+            };
+            let outcome =
+                settle_privd_response(&mut executor, &command, &envelope, response, now + 1)
+                    .expect("persist unknown result");
+            let result = command_result(&outcome.record, outcome.replayed);
+            assert_eq!(result.state, i32::from(CommandResultState::Unknown));
+            assert_eq!(result.error_code, code);
+            assert!(result.privileged_result_proof.is_none());
+        }
+        drop(executor);
+        std::fs::remove_dir_all(directory).expect("cleanup journal");
+    }
+
+    #[tokio::test]
+    async fn reconciliation_rejects_malformed_receipts_before_using_effect_observation() {
+        let directory = std::env::temp_dir().join(format!("ocservia-reconcile-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).expect("test directory");
+        let mut executor = CommandExecutor::new(
+            Journal::open(&directory.join("journal.sqlite3")).expect("test journal"),
+        );
+        let signing = SigningKey::from_bytes(&[49; 32]);
+        let now = 1_700_000_050;
+        let node_id = Uuid::now_v7();
+        let context = CommandContext {
+            node_id: *node_id.as_bytes(),
+            authorization_revision: 1,
+            capabilities: ["ocserv.groups.write".to_owned()].into(),
+            session_expires_at_unix_seconds: now + 300,
+            command_keys: keyring(&signing),
+            now_unix_seconds: now,
+            cancelled: false,
+        };
+        let socket = directory.join("privd.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("test socket");
+        let privd = PrivdClient::new(socket, Duration::from_secs(1)).expect("privd client");
+        let server = tokio::spawn(async move {
+            for proof in [None, Some(PrivilegedResultProof::default())] {
+                let (mut stream, _) = listener.accept().await.expect("test connection");
+                let request: PrivdRequest =
+                    read_frame(&mut stream).await.expect("reconcile request");
+                assert_eq!(
+                    request.privileged_mode,
+                    i32::from(PrivilegedRequestMode::Reconcile)
+                );
+                write_frame(
+                    &mut stream,
+                    &PrivdResponse {
+                        request_id: request.request_id,
+                        result: Some(privd_response::Result::DesiredEffectObservation(
+                            DesiredEffectObservation {
+                                state: DesiredEffectState::Absent.into(),
+                                observed_revision: 1,
+                            },
+                        )),
+                        privileged_result_proof: proof,
+                    },
+                )
+                .await
+                .expect("reconcile response");
+            }
+        });
+        let mut fence_epoch_floor = 1;
+        let mut session = SessionContext {
+            node_id,
+            endpoint_id: iroh::SecretKey::generate().public(),
+            privd: &privd,
+            command_executor: &mut executor,
+            session_cache: crate::telemetry::SessionCache::default(),
+            boot_id: "",
+            os_release: "",
+            agent_instance_id: Uuid::now_v7(),
+            command_keys: &context.command_keys,
+            sealing_keys: &[],
+            fence_epoch_floor: &mut fence_epoch_floor,
+        };
+        let authority = SessionGrantAuthority {
+            raw_grant: SessionGrantV1::default(),
+            negotiated_capabilities: context.capabilities.clone(),
+            authorization_revision: context.authorization_revision,
+            session_epoch: 1,
+            expires_at_unix_seconds: context.session_expires_at_unix_seconds,
+        };
+        for code in ["effect_absent", "receipt_invalid"] {
+            let mut envelope = sign_command_v2(
+                &signing,
+                *node_id.as_bytes(),
+                now,
+                now + 60,
+                context.authorization_revision,
+                "group.apply",
+                "ocserv.groups.write",
+                command_envelope::Payload::GroupApply(GroupApply {
+                    group_name: "staff".to_owned(),
+                    members: vec!["alice".to_owned()],
+                    desired_revision: 1,
+                }),
+            );
+            envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+            sign_command_envelope_v2(&signing, &mut envelope);
+            let outcome =
+                execute_external_command(&mut session, &authority, &envelope, &context, now + 1)
+                    .await
+                    .expect("record reconciliation outcome");
+            assert_eq!(outcome.record.state, CommandState::Unknown);
+            assert_eq!(outcome.record.error_code.as_deref(), Some(code));
+        }
+        server.await.expect("test server");
+        drop(executor);
+        std::fs::remove_dir_all(directory).expect("cleanup journal");
     }
 }

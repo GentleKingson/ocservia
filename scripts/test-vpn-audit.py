@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import runpy
+import tempfile
 import unittest
 
 audit = runpy.run_path(str(Path(__file__).resolve().parents[1] / "deploy/managed-node/vpn-audit.py"))
@@ -33,6 +34,32 @@ class AuditTest(unittest.TestCase):
     def test_invalid_statistics(self):
         for value in ("-1", "NaN", str(2**63)):
             self.assertIsNone(audit["counter"]({"count": value}, "count"))
+
+    def test_bounded_queue_evicts_oldest_without_disrupting_leases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.sqlite"
+            db = audit["database"](path)
+            reader = audit["database"](path)
+            try:
+                self.assertEqual(reader.execute("PRAGMA journal_mode").fetchone(), ("wal",))
+                self.assertEqual(reader.execute("PRAGMA busy_timeout").fetchone(), (1000,))
+                with db:
+                    db.execute("INSERT INTO leases (boot, session_id) VALUES ('boot', 'lease')")
+                    db.executemany("INSERT INTO pending VALUES (?, '{}')",
+                                   ((str(i),) for i in range(audit["MAX_PENDING"])))
+                reader.execute("BEGIN")
+                self.assertIsNotNone(reader.execute("SELECT event_id FROM pending WHERE event_id='0'").fetchone())
+                with db:
+                    audit["enqueue"](db, {"new": True})
+                reader.commit()
+                self.assertIsNone(reader.execute("SELECT event_id FROM pending WHERE event_id='0'").fetchone())
+                self.assertEqual(reader.execute("SELECT count(*) FROM pending").fetchone(), (audit["MAX_PENDING"],))
+                self.assertEqual(reader.execute("SELECT session_id FROM leases").fetchone(), ("lease",))
+                self.assertEqual(reader.execute("SELECT body FROM pending ORDER BY rowid DESC LIMIT 1").fetchone(),
+                                 ('{"new":true}',))
+            finally:
+                reader.close()
+                db.close()
 
 
 if __name__ == "__main__":

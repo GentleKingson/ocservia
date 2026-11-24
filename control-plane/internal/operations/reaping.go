@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
@@ -83,20 +84,23 @@ func (s *Service) reconcileExpiredSending(ctx context.Context, store operationst
 		if err != nil {
 			return err
 		}
-		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now, Schedule: command.CommandState == "queued" || command.Attempts < maxAttempts}
+		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now}
 		expires := command.ExpiresAt
-		if update.Schedule {
-			if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
-				update.Envelope, expires, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
-			} else {
-				update.Schedule = expires.After(now)
-				if update.Schedule {
-					update.Envelope, err = prepareRecoveryContinuationEnvelope(envelope, now, s.signer)
-				}
-			}
+		mode := envelope.GetDeliveryMode()
+		cap := command.AttemptLimit
+		if mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && command.CommandState != "queued" {
+			cap = min(cap, maxAttempts)
+		}
+		if command.Attempts < cap {
+			var nextDeadline time.Time
+			update.Envelope, nextDeadline, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
 			if err != nil {
 				return err
 			}
+			if nextDeadline.After(expires) {
+				expires = nextDeadline
+			}
+			update.Schedule = expires.After(now)
 		}
 		update.ExpiresAt = expires.UTC()
 		changed, err := store.ReconcileExpiredSending(ctx, update)
@@ -129,11 +133,21 @@ func (s *Service) reconcileExpiredApplies(ctx context.Context, store operationst
 		if err != nil {
 			return err
 		}
-		payload, expires, err := PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
-		if err != nil {
-			return err
+		expires := command.ExpiresAt
+		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now}
+		if command.Attempts < command.AttemptLimit {
+			var nextDeadline time.Time
+			update.Envelope, nextDeadline, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
+			if err != nil {
+				return err
+			}
+			if nextDeadline.After(expires) {
+				expires = nextDeadline
+			}
+			update.Schedule = expires.After(now)
 		}
-		if err := store.ReconcileExpiredApply(ctx, operationstore.RecoveryUpdate{Command: command, Envelope: payload, ExpiresAt: expires.UTC(), At: now, Schedule: true}); err != nil {
+		update.ExpiresAt = expires.UTC()
+		if err := store.ReconcileExpiredApply(ctx, update); err != nil {
 			return err
 		}
 	}
@@ -170,17 +184,22 @@ func (s *Service) reconcileMissingResults(ctx context.Context, store operationst
 				continue
 			}
 		}
-		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now, Schedule: command.Attempts < reconciliationAttemptLimit}
-		expires := envelope.GetExpiresAt().AsTime()
+		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now, Schedule: command.Attempts < command.AttemptLimit}
+		expires := command.ExpiresAt
 		if update.Schedule {
 			if s.signer == nil {
 				return errors.New("operations: reconciliation signer is unavailable")
 			}
 			priorMessageID := hex.EncodeToString(envelope.GetMessageId())
-			update.Envelope, expires, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
+			var nextDeadline time.Time
+			update.Envelope, nextDeadline, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
 			if err != nil {
 				return err
 			}
+			if nextDeadline.After(expires) {
+				expires = nextDeadline
+			}
+			update.Schedule = expires.After(now)
 			slog.InfoContext(ctx, "missing-result reconciliation prepared; transaction not yet committed",
 				"event_type", "command_reconciliation_prepared", "reason", "sent_result_timeout",
 				"command_id", id, "operation_id", command.OperationID, "node_id", command.NodeID,
@@ -203,7 +222,7 @@ func (s *Service) reconcileMissingResults(ctx context.Context, store operationst
 }
 
 func (s *Service) continueReconciliations(ctx context.Context, store operationstore.Store) error {
-	commands, err := store.StaleReconciliations(ctx, reconciliationAttemptLimit, commandResultResponseTimeout, reconciliationCandidateScanLimit)
+	commands, err := store.StaleReconciliations(ctx, operationstore.ReconciliationAttemptLimit, commandResultResponseTimeout, reconciliationCandidateScanLimit)
 	if err != nil || len(commands) == 0 {
 		return err
 	}
@@ -235,7 +254,7 @@ func (s *Service) continueReconciliations(ctx context.Context, store operationst
 		if envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
 			continue
 		}
-		payload, err := prepareRecoveryContinuationEnvelope(envelope, now, s.signer)
+		payload, _, err := PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
 		if err != nil {
 			return err
 		}

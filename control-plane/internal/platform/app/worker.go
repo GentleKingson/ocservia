@@ -34,14 +34,14 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 	if cfg.ControllerEndpointID != "" {
 		ownerSessions, err = ownersession.NewManagerBackend(backend, logger)
 		if err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("configure connection owner sessions: %w", err)
+
+			return nil, cleanup, fmt.Errorf("configure connection owner sessions: %w", err)
 		}
 		life.start("watch owner transport", func(ctx context.Context) error { return ownerSessions.WatchTransport(ctx, workerTransport) })
 		trust, err := trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessionsBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions), backend), cfg.TransportUID)
 		if err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("configure trust server: %w", err)
+
+			return nil, cleanup, fmt.Errorf("configure trust server: %w", err)
 		}
 		life.trust = trust
 		life.start("serve trust UDS", func(context.Context) error { return trust.Serve() })
@@ -57,14 +57,14 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		life.start("run transport event worker", worker.Run)
 		operationWorker, err := operations.NewWorker(operationService, transport, logger)
 		if err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("configure outbox worker: %w", err)
+
+			return nil, cleanup, fmt.Errorf("configure outbox worker: %w", err)
 		}
 		life.start("run outbox worker", operationWorker.Run)
 		trustWorker, err := enrollment.NewTrustConvergenceWorkerBackend(backend, transport, logger)
 		if err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("configure trust convergence worker: %w", err)
+
+			return nil, cleanup, fmt.Errorf("configure trust convergence worker: %w", err)
 		}
 		life.start("run trust convergence worker", trustWorker.Run)
 	}

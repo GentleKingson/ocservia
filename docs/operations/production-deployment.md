@@ -538,12 +538,19 @@ Default file paths and listener settings:
 | Input | Default |
 | --- | --- |
 | HTTPS listener | `:9443` |
+| Client certificate lifetime | `2160h` (90 days) |
 | Online issuing intermediate chain, intermediate first and root last | `/run/secrets/issuer-chain.pem` |
 | Online intermediate private key, unencrypted PEM | `/run/secrets/issuer-key.pem` |
 | HTTPS certificate/key | `/run/secrets/tls-cert.pem`, `/run/secrets/tls-key.pem` |
 | Independent API Bearer token, 32..256 non-whitespace bytes | `/run/secrets/api-token` |
 | Exclusive writable state volume | `/var/lib/ocservia-signer/ledger.db` |
 | Health client's public trust bundle | `/run/secrets/tls-ca.pem` |
+
+Set `--cert-ttl` or `OCSERV_SIGNER_CERT_TTL` to a Go duration between `24h`
+and `8760h`, inclusive. The flag takes precedence over the environment value.
+The Integrated deployment passes `OCSERV_SIGNER_CERT_TTL` to the Signer from
+the installation environment. An out-of-range value fails startup. The
+issuer must remain valid beyond the resulting certificate expiry.
 
 All configured paths must be absolute canonical paths residing under real
 directories owned by root or the runtime process, with no group- or
@@ -556,8 +563,9 @@ checks on the chain and the ledger are in
 [Signer custody and idempotency](../reference/stable-contracts.md#signer-custody-and-idempotency).
 
 First-time installation runs `init` with the same CA and state flags as
-`serve` to create a fresh ledger when none exists. Do not use `init` to repair
-lost state.
+`serve` to create a fresh ledger. Use `ocserv-signer verify` with those CA and
+state flags on a protected snapshot or while the Signer is stopped to verify
+the entire ledger. The command opens the ledger read-only.
 
 On the Controller, set `OCSERV_CERTIFICATE_SIGNER_URL=https://signer:9443/sign`
 alongside the token-file setting and point `OCSERV_CERTIFICATE_SIGNER_CA_FILE`
@@ -1140,7 +1148,7 @@ Check the backup and database compatibility of the previous release before rolli
 deploy/production/controller.sh rollback
 ```
 
-The launcher reads the previous manifest from the protected release history, activates it and checks public health. Once the smoke check passes, the restored release becomes current and the replaced release becomes previous.
+The launcher reads the previous manifest from the protected release history, activates the application services and checks public health. Bundled rollback still requires healthy PostgreSQL. Once the smoke check passes, the restored release becomes current and the replaced release becomes previous. The launcher then attempts to start the backup service and reports a failure to start it.
 
 ### Pending state and recovery
 
@@ -1237,6 +1245,26 @@ because neither replacing a container image nor updating a secret file on disk
 changes a password stored inside the database. Signer ledger backup, restore,
 and CRL maintenance are in
 [Signer backup and restore](incident-recovery.md#signer-backup-and-restore).
+
+### Telemetry partition retention
+
+The running Controller uses its restricted database account to provision the
+current UTC telemetry month and the next two. Startup also provisions a
+missing current month after a long outage. If the ingestion window reaches
+into a missing previous month, run the owner `--migrate-only` command before
+starting the Controller. Schedule the one-shot owner task daily using the installed bundle's Compose wrapper under the account
+that manages database migration secrets:
+
+```bash
+deploy/production/compose.sh run --rm migrate --telemetry-retention-only
+```
+
+Each run retires at most one calendar month once its upper bound is more than
+14 days and five minutes old. Rerun the same command after interruption. It
+finishes a pending detach and preserves applicable rollups before deleting an
+already detached table. Complete any interrupted retirement before running
+another schema migration. Historical samples from the former default
+partition remain available for reads.
 
 ## Relay and networking
 

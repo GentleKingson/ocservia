@@ -78,7 +78,21 @@ const usersState = computed(() =>
 const groupsState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "group"),
 );
-const operationBusy = computed(() => fleet.operationTracking);
+const currentOperation = computed(() => {
+  const operation = fleet.latestOperation;
+  return currentNode.value && operation?.nodeId === currentNode.value.id
+    ? operation
+    : undefined;
+});
+const operationBelongsToNode = computed(
+  () => !!currentNode.value && fleet.operationNodeId === currentNode.value.id,
+);
+const operationBusy = computed(
+  () =>
+    operationBelongsToNode.value &&
+    fleet.operationTracking &&
+    (!fleet.latestOperation || !!currentOperation.value),
+);
 function closeNodeDialogs(): void {
   userGroup.value?.close();
   nodeAction.value?.close();
@@ -94,6 +108,7 @@ async function selectRouteNode(): Promise<void> {
   detailLoading.value = true;
   detailState.value = "loading";
   if (!nodeId) {
+    fleet.detachOperation();
     detailLoading.value = false;
     detailState.value = "not-found";
     return;
@@ -243,7 +258,7 @@ function openPolicy(username: string): void {
             {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
           </p>
           <div
-            v-if="fleet.latestOperation"
+            v-if="currentOperation"
             class="flex flex-wrap items-center gap-2 text-sm"
             data-testid="operation-status"
             aria-live="polite"
@@ -252,19 +267,20 @@ function openPolicy(username: string): void {
               $t("latestOperation")
             }}</span>
             <StatusBadge
-              :tone="operationTone(fleet.latestOperation)"
-              :label="$t(operationStatusKey(fleet.latestOperation))"
+              :tone="operationTone(currentOperation)"
+              :label="$t(operationStatusKey(currentOperation))"
               data-testid="operation-state"
             />
             <code
-              v-if="fleet.latestOperation.agentUpgradeTargetVersion"
+              v-if="currentOperation.agentUpgradeTargetVersion"
               class="text-xs"
-              >{{ fleet.latestOperation.agentUpgradeTargetVersion }}</code
+              >{{ currentOperation.agentUpgradeTargetVersion }}</code
             >
             <Button
               v-if="
-                fleet.operationTracking &&
-                fleet.latestOperation.state === 'unknown'
+                operationBusy &&
+                (currentOperation.state === 'unknown' ||
+                  currentOperation.state === 'offline_pending')
               "
               type="button"
               variant="ghost"
@@ -277,7 +293,7 @@ function openPolicy(username: string): void {
             </Button>
           </div>
           <p
-            v-if="fleet.operationError !== undefined"
+            v-if="operationBelongsToNode && fleet.operationError !== undefined"
             class="text-destructive m-0 text-sm break-words"
             role="alert"
           >

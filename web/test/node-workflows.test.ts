@@ -113,6 +113,8 @@ interface View {
     submitDesired(): Promise<void>;
   };
   page: {
+    currentOperation: Operation | undefined;
+    operationBusy: boolean;
     detailState: string;
     detailLoading: boolean;
     selectRouteNode(): Promise<void>;
@@ -281,6 +283,19 @@ async function startPollingWorkflow(
 }
 
 describe("node workflow context isolation", () => {
+  it("binds the displayed operation and action lock to the route node", async () => {
+    const view = await mount();
+    mocks.fleet.operationTracking = true;
+    mocks.fleet.operationNodeId = "node-a";
+    mocks.fleet.latestOperation = { ...operation, state: "offline_pending" };
+    expect(view.page.currentOperation?.id).toBe(operation.id);
+    expect(view.page.operationBusy).toBe(true);
+
+    await changeContext(view, "node");
+    expect(view.page.currentOperation).toBeUndefined();
+    expect(view.page.operationBusy).toBe(false);
+  });
+
   it.each([
     ["config", "node"],
     ["config", "close"],
@@ -548,6 +563,12 @@ describe("node workflow context isolation", () => {
       await view.certificates.createP12();
       const blob = Promise.withResolvers<Blob>();
       const click = vi.fn();
+      const createObjectURL = vi
+        .spyOn(URL, "createObjectURL")
+        .mockReturnValue("blob:p12");
+      const revokeObjectURL = vi
+        .spyOn(URL, "revokeObjectURL")
+        .mockImplementation(() => {});
       const createElement = vi.fn(() => ({ href: "", download: "", click }));
       vi.stubGlobal("document", { createElement });
       mocks.downloadCertificateArtifact.mockReturnValueOnce(blob.promise);
@@ -563,6 +584,11 @@ describe("node workflow context isolation", () => {
       await reopening;
       expect(createElement).toHaveBeenCalledExactlyOnceWith("a");
       expect(click).toHaveBeenCalledTimes(1);
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:p12");
       expect(mocks.downloadCertificateArtifact).toHaveBeenCalledExactlyOnceWith(
         "artifact-a",
         "one-time-token",

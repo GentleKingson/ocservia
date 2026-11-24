@@ -81,6 +81,10 @@ impl EffectStore {
                 }
                 continue;
             }
+            if record.expires_at <= now && current_hmac == record.before_hmac {
+                update_effect_state(&transaction, &self.hmac_key, record, "absent", now)?;
+                continue;
+            }
             let same_pending = record.mutation_kind == mutation_kind
                 && record.resource_key == resource_key
                 && record.revision == revision
@@ -100,17 +104,25 @@ impl EffectStore {
                     transaction.commit().map_err(sqlite_io)?;
                     return Ok(PrepareEffect::AlreadyApplied);
                 }
-                if current_hmac == existing.after_hmac {
-                    if mutation_kind == "config_apply" {
+                if existing.state == "prepared" {
+                    if current_hmac == existing.after_hmac {
+                        if mutation_kind == "config_apply" {
+                            transaction.commit().map_err(sqlite_io)?;
+                            return Ok(PrepareEffect::Proceed);
+                        }
+                        update_effect_state(
+                            &transaction,
+                            &self.hmac_key,
+                            existing,
+                            "applied",
+                            now,
+                        )?;
                         transaction.commit().map_err(sqlite_io)?;
-                        return Ok(PrepareEffect::Proceed);
+                        return Ok(PrepareEffect::AlreadyApplied);
                     }
-                    update_effect_state(&transaction, &self.hmac_key, existing, "applied", now)?;
-                    transaction.commit().map_err(sqlite_io)?;
-                    return Ok(PrepareEffect::AlreadyApplied);
-                }
-                if current_hmac != existing.before_hmac {
-                    return Err(AdapterError::Unavailable);
+                    if current_hmac != existing.before_hmac {
+                        return Err(AdapterError::Unavailable);
+                    }
                 }
             }
         } else {
@@ -243,10 +255,8 @@ impl EffectStore {
         } else if current_hmac == record.after_hmac {
             update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
             DesiredEffectState::AppliedExact
-        } else if current_hmac == record.before_hmac && mutation_kind == "config_apply" {
-            update_effect_state(&transaction, &self.hmac_key, record, "absent", now)?;
-            DesiredEffectState::Absent
         } else if current_hmac == record.before_hmac {
+            update_effect_state(&transaction, &self.hmac_key, record, "absent", now)?;
             DesiredEffectState::Absent
         } else {
             DesiredEffectState::Unknown

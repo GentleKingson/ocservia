@@ -225,7 +225,9 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT, UPDATE ON agent_rollouts, agent_rollout_nodes TO " + identifier,
 		"GRANT SELECT, INSERT ON telemetry_security_events, telemetry_samples TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON telemetry_rollups_5m, telemetry_rollups_1h TO " + identifier,
-		"GRANT EXECUTE ON FUNCTION telemetry_drop_expired_partitions(timestamptz) TO " + identifier,
+		"GRANT SELECT ON telemetry_samples_default TO " + identifier,
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON telemetry_rollup_queue TO " + identifier,
+		"GRANT EXECUTE ON FUNCTION telemetry_ensure_upcoming_partitions() TO " + identifier,
 		"REVOKE ALL ON FUNCTION telemetry_ensure_month_partition(timestamptz) FROM " + identifier,
 		"REVOKE DELETE, TRUNCATE ON telemetry_rollups_5m, telemetry_rollups_1h FROM " + identifier,
 		"GRANT EXECUTE ON FUNCTION telemetry_prune_rollups(timestamptz) TO " + identifier,
@@ -247,11 +249,13 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	if unsafe {
 		return errors.New("runtime inherits unrestricted telemetry cleanup privileges; remove the inherited grant")
 	}
-	if err := pool.QueryRow(ctx, `SELECT has_function_privilege($1,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')`, role).Scan(&unsafe); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT has_schema_privilege($1,'public','CREATE')
+		OR has_function_privilege($1,'telemetry_ensure_month_partition(timestamptz)','EXECUTE')
+		OR NOT has_function_privilege($1,'telemetry_ensure_upcoming_partitions()','EXECUTE')`, role).Scan(&unsafe); err != nil {
 		return err
 	}
 	if unsafe {
-		return errors.New("runtime inherits telemetry partition DDL capability")
+		return errors.New("runtime telemetry partition maintenance privileges are missing or unrestricted")
 	}
 	return nil
 }

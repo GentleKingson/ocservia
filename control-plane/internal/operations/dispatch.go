@@ -218,7 +218,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 
 func validateResultDispatchState(state string) error {
 	switch state {
-	case "succeeded", "failed", "rejected", "rolled_back", "unknown":
+	case "accepted", "succeeded", "failed", "rejected", "rolled_back", "unknown":
 		return nil
 	default:
 		return fmt.Errorf("agent result did not advance command from %s", state)

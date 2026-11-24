@@ -17,20 +17,26 @@ import (
 	"time"
 )
 
-const policy = "rsa-client-v1-24h"
+const (
+	policy         = "rsa-client-v1"
+	defaultCertTTL = 2160 * time.Hour
+	minCertTTL     = 24 * time.Hour
+	maxCertTTL     = 8760 * time.Hour
+)
 
 type authority struct {
 	cert          *x509.Certificate
 	key           crypto.Signer
 	chain         []byte
 	id            string
+	certTTL       time.Duration
 	roots         *x509.CertPool
 	intermediates *x509.CertPool
 }
 
 func digest(b []byte) string { d := sha256.Sum256(b); return hex.EncodeToString(d[:]) }
 
-func loadAuthority(chainFile, keyFile string) (*authority, error) {
+func loadAuthority(chainFile, keyFile string, certTTL time.Duration) (*authority, error) {
 	chain, err := os.ReadFile(chainFile)
 	if err != nil {
 		return nil, err
@@ -111,6 +117,7 @@ func loadAuthority(chainFile, keyFile string) (*authority, error) {
 		key:           signer,
 		chain:         chain,
 		id:            digest(ca.Raw),
+		certTTL:       certTTL,
 		roots:         roots,
 		intermediates: leafIntermediates,
 	}, nil
@@ -166,12 +173,16 @@ func validName(s string, max int) bool {
 	return true
 }
 
+func (a *authority) canIssueAt(now time.Time) bool {
+	return !now.Before(a.cert.NotBefore) && now.Add(a.certTTL).Before(a.cert.NotAfter)
+}
+
 func (a *authority) issue(csr *x509.CertificateRequest, serial *big.Int) ([]byte, error) {
 	now := time.Now().UTC()
-	if now.Before(a.cert.NotBefore) || !now.Add(24*time.Hour).Before(a.cert.NotAfter) {
+	if !a.canIssueAt(now) {
 		return nil, errors.New("CA validity insufficient")
 	}
-	leaf := &x509.Certificate{SerialNumber: serial, RawSubject: csr.RawSubject, DNSNames: csr.DNSNames, NotBefore: now, NotAfter: now.Add(24 * time.Hour), BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+	leaf := &x509.Certificate{SerialNumber: serial, RawSubject: csr.RawSubject, DNSNames: csr.DNSNames, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.Add(a.certTTL), BasicConstraintsValid: true, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, leaf, a.cert, csr.PublicKey, a.key)
 	if err != nil {
 		return nil, err

@@ -30,6 +30,7 @@ impl Adapter {
         {
             return Err(AdapterError::InvalidRequest);
         }
+        let _guard = self.certificate_artifact_lock.lock().await;
         tokio::fs::create_dir_all(&self.resources.certificate_key_dir)
             .await
             .map_err(AdapterError::Io)?;
@@ -70,7 +71,33 @@ impl Adapter {
         };
         let subject = format!("/CN={common_name}");
         let key_spec = format!("rsa:{key_bits}");
-        let key_path_text = key_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let mut staged_key = if existing_key {
+            None
+        } else {
+            // OpenSSL writes the key by path. Precreate the file with private
+            // permissions and publish it only after the key has been read back.
+            let path = self
+                .resources
+                .certificate_key_dir
+                .join(format!(".ocservia-key-{id}"));
+            // Discard staging left by a process crash before publication.
+            StagingFile::new(path.clone()).remove().await?;
+            let file = StdOpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(AdapterError::Io)?;
+            let staging = StagingFile::new(path);
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(AdapterError::Io)?;
+            Some(staging)
+        };
+        let key_path_text = staged_key
+            .as_ref()
+            .map_or(key_path.as_path(), StagingFile::path)
+            .to_str()
+            .ok_or(AdapterError::InvalidResource)?;
         let mut owned = vec!["req".to_owned(), "-new".to_owned()];
         if existing_key {
             owned.extend(["-key".to_owned(), key_path_text.to_owned()]);
@@ -101,7 +128,6 @@ impl Adapter {
             ));
         }
         let args = owned.iter().map(String::as_str).collect::<Vec<_>>();
-        let mut new_key_guard = (!existing_key).then(|| StagingFile::new(key_path.clone()));
         let csr = match self.execute(&self.resources.openssl, &args).await {
             Ok(output) if output.stdout.len() >= 64 && output.stdout.len() <= 64 * 1024 => {
                 output.stdout
@@ -109,11 +135,6 @@ impl Adapter {
             Ok(_) => return Err(AdapterError::MalformedOutput),
             Err(error) => return Err(error),
         };
-        if !existing_key {
-            tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
-                .await
-                .map_err(AdapterError::Io)?;
-        }
         let public = self
             .execute(
                 &self.resources.openssl,
@@ -123,8 +144,9 @@ impl Adapter {
         if public.stdout.is_empty() || public.stdout.len() > 64 * 1024 {
             return Err(AdapterError::MalformedOutput);
         }
-        if let Some(guard) = new_key_guard.as_mut() {
-            guard.disarm();
+        if let Some(staging) = staged_key.as_mut() {
+            atomic_replace(staging.path(), &key_path).await?;
+            staging.disarm();
         }
         Ok(CertificateCsrResult {
             certificate_id: certificate_id.to_vec(),
@@ -185,6 +207,13 @@ impl Adapter {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(AdapterError::Io(error)),
         }
+        StagingFile::new(
+            self.resources
+                .certificate_key_dir
+                .join(format!(".ocservia-key-{id}")),
+        )
+        .remove()
+        .await?;
         Ok(CertificateRevokeResult {
             certificate_id: certificate_id.to_vec(),
             key_removed: true,

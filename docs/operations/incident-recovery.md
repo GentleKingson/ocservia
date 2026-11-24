@@ -322,10 +322,14 @@ The rotation script below applies only to bundled PostgreSQL deployments;
 external PostgreSQL credentials must be rotated through their own database
 administration workflows. Editing `postgres-app-password`,
 `postgres-backup-password`, `database-app-url`, or `postgres.pgpass` on disk
-does not update the password verifier stored inside PostgreSQL. Against
-`deploy/production/compose.yaml` (or the file named by
-`OCSERV_ROTATION_COMPOSE_FILE`), the script uses the `ocservia-production` Compose project and the
-`bundled-postgres` profile, which supplies the `postgres` and `backup` services. Test the procedure on a non-production copy first. If the
+does not update the password verifier stored inside PostgreSQL. Run the script
+from the active release runtime with the same environment used to start
+production, including the digest-pinned images. The script uses the production
+Compose launcher to select the bundled PostgreSQL profile and, in Integrated mode, derive
+the Relay and Signer endpoints and validate their secrets. An explicit
+`OCSERV_ROTATION_COMPOSE_FILE` selects a custom Compose file that must contain
+the existing `postgres`, `control-plane`, and `backup` services. Test the
+procedure on a non-production copy first. If the
 script reports a missing or unknown service, or fails its initial credential
 check, stop immediately and preserve its output without retrying blindly.
 
@@ -350,8 +354,8 @@ lock before reading its baseline state. Once locked, the workflow:
 3. Verifies that new connections succeed with the new passwords and fail with
    the old ones.
 4. Atomically updates all four Compose secret files.
-5. Recreates the Control Plane and backup containers to verify their fresh
-   connections.
+5. Recreates the Control Plane and backup containers with the new credentials.
+   The running PostgreSQL and transport containers remain available.
 
 If an error triggers rollback, the script restores the prior verifiers and
 secret files only if the database and on-disk files still match either the
@@ -451,11 +455,12 @@ The Controller backup includes VPN audit records committed by the backup point. 
 ### PostgreSQL
 
 The production backup worker runs `scripts/postgres-backup.sh` to take a
-checksummed `pg_basebackup` and stream the WAL segments needed to make that
-snapshot consistent. Once `pg_verifybackup` succeeds, the script atomically
-updates `LATEST` and prunes older base backups to the configured retention
-bound. Mount `OCSERV_BACKUP_DIR` from separately protected storage; copying the
-database volume directly does not produce a usable backup.
+checksummed `pg_basebackup` using a spread checkpoint, then streams the WAL
+segments needed to recover the snapshot. Once `pg_verifybackup` succeeds, the
+worker compresses the snapshot as `base/<backup-id>/base.tar.gz`, atomically
+updates `LATEST`, and prunes older base backups. Allocate space for the plain
+staging copy and compressed archive during backup creation. Mount
+`OCSERV_BACKUP_DIR` from separately protected storage.
 
 During initialization, the production setup creates a dedicated
 `ocservia_backup` login granted replication permission, distinct from both the
@@ -465,14 +470,12 @@ copied off the application host under the deployment retention policy.
 
 #### Retention and connection credentials
 
-Bundled PostgreSQL deployments keep the configured number of verified base
-backups on disk. WAL cleanup is anchored to the oldest retained base backup,
-preserving the archived WAL stream from that point forward while bounding local
-disk growth. Keeping those WAL files does not establish point-in-time recovery
-(PITR) readiness, and no PITR procedure is documented or exercised here.
-Operators should monitor backup-worker health and the `LATEST` timestamp, copy
-each finished base backup with its required WAL range to protected off-host
-storage, and verify the remote copy before lowering local retention.
+The worker defaults to `OCSERV_BACKUP_INTERVAL_SECONDS=900` and
+`OCSERV_BACKUP_RETENTION_COUNT=8` for both bundled and external PostgreSQL.
+It logs failed attempts and retries after the configured interval. Monitor
+backup-worker health and the `LATEST` timestamp, copy completed archives to
+protected off-host storage, and verify the remote copy before lowering local
+retention.
 
 Connection credentials live in `postgres.pgpass`. On bundled PostgreSQL, set
 this file to `postgres:5432:*:ocservia_backup:<password>` with the protected
@@ -486,9 +489,10 @@ passwords, see [PostgreSQL credential rotation](#postgresql-credential-rotation)
 
 #### Deployment boundaries
 
-Bundled PostgreSQL 18 enables `archive_mode` with an `archive_command` that
-writes continuous WAL into the backup mount. These archive and retention
-settings do not certify PITR readiness, even while they remain active.
+Bundled PostgreSQL 18 runs with `archive_mode = off`. Each backup includes its
+required WAL in the archive. If upgrading from a release with WAL archiving,
+the existing `wal/` directory remains available for any legacy recovery
+procedure that depends on it. Its contents age out only under that procedure.
 
 External PostgreSQL support is restricted to major version 18, and all owner,
 runtime, and backup connections must use `sslmode=verify-full` against the
@@ -501,8 +505,14 @@ external database operator and require separate verification.
 #### Restore a PostgreSQL backup
 
 1. Stop all application writers and log the incident timestamp.
-2. Choose a verified base backup along with the streamed WAL required for consistency.
-3. Extract the backup into a fresh, empty PostgreSQL 18 data directory without overwriting the existing copy. On the official container layout, mount the volume at `/var/lib/postgresql` and restore into `/var/lib/postgresql/18/docker`, because the parent mount point is not `PGDATA`.
+2. Choose a verified base backup. Current `base.tar.gz` files include the WAL
+   required for consistency. Older plain backups already contain an unpacked
+   data directory.
+3. Extract the archive with `tar -xzf "$SNAPSHOT/base.tar.gz" -C "$RESTORE_PGDATA"`
+   into a fresh, empty data directory, then run `pg_verifybackup "$RESTORE_PGDATA"`
+   with PostgreSQL 18 tools. For the official container, mount the volume at
+   `/var/lib/postgresql` and restore into `/var/lib/postgresql/18/docker` as the
+   PostgreSQL user with a mode-0700 data directory.
 4. Bring PostgreSQL up in isolation. Check schema provenance (see
    [Schema provenance after restore](#schema-provenance-after-restore)),
    audit-chain checkpoints, table row counts, and a read-only application smoke test.

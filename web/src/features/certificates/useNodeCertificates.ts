@@ -342,12 +342,15 @@ export function useNodeCertificates({
       // this user-initiated download even if its originating dialog has closed.
       consumeCertificateGrant(context, certificateId, grant.artifactId);
       const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
+      link.href = url;
       link.download = "certificate.p12";
       try {
         link.click();
       } finally {
-        URL.revokeObjectURL(link.href);
+        setTimeout(() => {
+          URL.revokeObjectURL(url);
+        }, 1_000);
       }
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;

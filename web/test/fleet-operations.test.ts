@@ -71,8 +71,9 @@ const session: NodeSession = {
   bytesIn: 0,
   bytesOut: 0,
 };
-const operation = (state: Operation["state"]): Operation => ({
+const operation = (state: Operation["state"], nodeId = node.id): Operation => ({
   id: "019fc0a4-6d92-765c-a8a1-4af556614cc5",
+  nodeId,
   state,
   version: 1,
   createdAt: new Date(0).toISOString(),
@@ -134,7 +135,7 @@ describe("controlled fleet operations", () => {
     expect(store.sessions).toEqual([]);
   });
 
-  it("keeps accepted operation tracking but stops detail reads after leaving the view", async () => {
+  it("stops operation tracking and clears detail state when leaving the view", async () => {
     vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
     vi.mocked(getOperation).mockResolvedValue(operation("succeeded"));
     const store = useFleetStore();
@@ -142,12 +143,68 @@ describe("controlled fleet operations", () => {
     const completion = store.disconnectSession(session.id, "support case");
     await vi.advanceTimersByTimeAsync(0);
     store.stop();
-    expect(store.operationTracking).toBe(true);
+    expect(store.operationTracking).toBe(false);
     await vi.advanceTimersByTimeAsync(750);
     await completion;
-    expect(store.latestOperation?.state).toBe("succeeded");
+    expect(store.latestOperation).toBeUndefined();
+    expect(getOperation).not.toHaveBeenCalled();
     expect(store.selected).toBeUndefined();
     expect(getNode).toHaveBeenCalledTimes(1);
+  });
+
+  it("backs off offline polling, suspends it while hidden, and allows detaching", async () => {
+    const page = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+    });
+    vi.stubGlobal("document", page);
+    vi.mocked(disconnectSession).mockResolvedValue(
+      operation("offline_pending"),
+    );
+    vi.mocked(getOperation).mockResolvedValue(operation("offline_pending"));
+    const store = useFleetStore();
+    await store.select(node.id);
+
+    const completion = store.disconnectSession(session.id, "support case");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(getOperation).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getOperation).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(getOperation).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getOperation).toHaveBeenCalledTimes(2);
+
+    page.visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(getOperation).toHaveBeenCalledTimes(2);
+    page.visibilityState = "visible";
+    page.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getOperation).toHaveBeenCalledTimes(3);
+
+    page.visibilityState = "hidden";
+    await vi.advanceTimersByTimeAsync(40_000);
+    store.detachOperation();
+    await completion;
+    page.visibilityState = "visible";
+    page.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getOperation).toHaveBeenCalledTimes(3);
+    expect(store.operationTracking).toBe(false);
+    store.$dispose();
+  });
+
+  it("ignores a tracked operation from a different node", async () => {
+    vi.mocked(getOperation).mockResolvedValue(
+      operation("offline_pending", nodeB.id),
+    );
+    const store = useFleetStore();
+    await store.select(node.id);
+    await store.trackOperation("foreign");
+    expect(store.latestOperation).toBeUndefined();
+    expect(store.operationTracking).toBe(false);
+    expect(getOperation).toHaveBeenCalledTimes(1);
+    store.$dispose();
   });
 
   it("retries a failed create at the current desired version", async () => {
@@ -229,7 +286,7 @@ describe("controlled fleet operations", () => {
     let pollingSignal: AbortSignal | undefined;
     vi.mocked(disconnectSession)
       .mockResolvedValueOnce(operation("queued"))
-      .mockResolvedValueOnce(operation("succeeded"));
+      .mockResolvedValueOnce(operation("succeeded", nodeB.id));
     vi.mocked(getOperation).mockImplementation((_operationId, signal) => {
       pollingSignal = signal;
       return Promise.resolve(operation("unknown"));
@@ -245,11 +302,14 @@ describe("controlled fleet operations", () => {
     expect(store.latestOperation?.state).toBe("unknown");
     await store.select(nodeB.id);
     await completion;
+    expect(store.latestOperation).toBeUndefined();
+    expect(store.operationTracking).toBe(false);
     await store.disconnectSession(session.id, "node b support case");
 
     expect(pollingSignal?.aborted).toBe(true);
     expect(store.selected?.id).toBe(nodeB.id);
     expect(store.latestOperation?.state).toBe("succeeded");
+    expect(store.latestOperation?.nodeId).toBe(nodeB.id);
     expect(disconnectSession).toHaveBeenCalledTimes(2);
     store.$dispose();
   });

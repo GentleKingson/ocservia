@@ -30,11 +30,18 @@ func validateBootstrapPasswords(cfg config.Config) error {
 func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg config.Config, logger *slog.Logger) (*audit.Manager, error) {
 	backend := conn.Store
 	databaseTimeout := 30 * time.Second
-	if cfg.MigrateOnly {
+	if cfg.MigrateOnly || cfg.TelemetryRetentionOnly {
 		databaseTimeout = 10 * time.Minute
 	}
 	databaseCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
+	if cfg.TelemetryRetentionOnly {
+		if err := conn.PruneTelemetryPartitions(databaseCtx); err != nil {
+			return nil, fmt.Errorf("retire expired telemetry partitions: %w", err)
+		}
+		logger.Info("telemetry partition retention complete")
+		return nil, nil
+	}
 	if cfg.MigrateOnly {
 		auditManager, err := newAuditManager(backend, cfg)
 		if err != nil {

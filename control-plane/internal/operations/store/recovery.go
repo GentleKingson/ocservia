@@ -10,6 +10,7 @@ import (
 type AmbiguousDispatch struct {
 	OperationID uuid.UUID
 	Envelope    []byte
+	ExpiresAt   time.Time
 }
 
 type RecoveryProjection struct {

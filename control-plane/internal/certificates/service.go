@@ -176,13 +176,13 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 	return certificate, false, err
 }
 
-func (s *Service) releaseOperation(ctx context.Context, operationID uuid.UUID) error {
+func (s *Service) releaseOperation(ctx context.Context, operationID, certificateID uuid.UUID) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		return store.ReleaseOperation(ctx, operationID)
+		return store.ReleaseOperation(ctx, operationID, certificateID)
 	})
 }
 
@@ -199,6 +199,9 @@ func (s *Service) operationExists(ctx context.Context, workspace uuid.UUID, key 
 }
 
 func (s *Service) Maintain(ctx context.Context) error {
+	if err := s.reconcileRevocations(ctx); err != nil {
+		return err
+	}
 	if err := s.reconcileConsumingArtifacts(ctx); err != nil {
 		return err
 	}

@@ -381,7 +381,15 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     END \$\$;
   " >/dev/null
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_app -d ocservia -c \
-    "SELECT telemetry_drop_expired_partitions(now() - interval '14 days')" >/dev/null
+    "SELECT public.telemetry_ensure_upcoming_partitions()" >/dev/null
+  test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT NOT has_schema_privilege('ocservia_app','public','CREATE') AND NOT has_function_privilege('ocservia_app','public.telemetry_ensure_month_partition(timestamptz)','EXECUTE')")" = "t"
+  if OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${runtime_url}" \
+    "${BIN}" --telemetry-retention-only >"${TMP_ROOT}/pg${major}-runtime-telemetry-retention.log" 2>&1; then
+    echo "runtime role was allowed to run owner telemetry retention" >&2
+    exit 1
+  fi
+  OCSERV_ENVIRONMENT=test OCSERV_DATABASE_URL="${owner_url}" \
+    "${BIN}" --telemetry-retention-only >"${TMP_ROOT}/pg${major}-owner-telemetry-retention.log" 2>&1
   test "$(docker exec "${container}" psql -U ocservia_owner -d ocservia -Atc "SELECT count(*) FROM pg_class WHERE relname = 'telemetry_samples_' || to_char(date_trunc('month', now()) - interval '2 months', 'YYYYMM')")" = "0"
   stop_process "${pid}"
   run_postgres_business_tests "${container}" "${major}" "${port}" "${runtime_url}" "${owner_url}" \

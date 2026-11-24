@@ -305,6 +305,15 @@ func (s *Service) claimRolloutPendingNodes(ctx context.Context, q operationstore
 		if err != nil {
 			return nil, err
 		}
+		if node.DispatchVersion > 0 {
+			// A committed create can make the node ineligible before its
+			// rollout linkage is recorded. Try the pinned request first;
+			// Create validates live eligibility if no operation exists.
+			if digest, ok := s.releaseCatalog.Lookup(rollout.TargetVersion, observation.Architecture, observation.OSRelease); ok {
+				eligible[node.NodeID] = eligibleClaim{observation: observation, digest: digest}
+				continue
+			}
+		}
 		reason, digest, ok := s.rolloutNodeEligibility(now, observation, rollout.TargetVersion)
 		if !ok {
 			if _, err := pauseRolloutForSkippedNode(ctx, q, rollout, node, reason, now, appendEvent); err != nil {

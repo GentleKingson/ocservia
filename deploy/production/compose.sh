@@ -257,6 +257,15 @@ production_compose() {
       build|--build) echo "production lifecycle only consumes prebuilt images" >&2; return 2 ;;
     esac
   done
+  if [[ "${1:-}" == recreate-database-clients ]]; then
+    if [[ "${database_deployment}" != bundled || $# != 2 || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+      echo "usage for bundled PostgreSQL: recreate-database-clients <timeout-seconds>" >&2
+      return 2
+    fi
+    protected_directory "${OCSERV_BACKUP_DIR:-}" 999:999:700 '%u:%g:%a' || return
+    "${compose[@]}" up -d --force-recreate --no-deps --wait --wait-timeout "$2" control-plane backup
+    return
+  fi
   case "${1:-}" in
     run|create|up)
       if [[ "${backup_checked}" == false ]]; then

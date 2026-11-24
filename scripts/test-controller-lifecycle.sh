@@ -24,7 +24,13 @@ x-service: &service
       timeout: 1s
       retries: 5
 services:
-  backup: *service
+  backup:
+    <<: *service
+    healthcheck:
+      test: [CMD, python, -c, "import os,sys; sys.exit(os.path.exists('/tmp/health-failure'))"]
+      interval: 1s
+      timeout: 1s
+      retries: 1
   postgres: *service
   controller:
     <<: *service
@@ -68,6 +74,15 @@ rm "${OCSERV_CONTROLLER_STATE_ROOT}/fail-smoke"
 jq -e '.current.release_version == "2.0.1" and .previous.release_version == "2.0.0"' "${history}" >/dev/null
 jq -S . "${work}/2.0.1.json" >"${work}/reordered.json"
 "${ctl}" upgrade --release-file "${work}/reordered.json"
+docker compose exec -T backup touch /tmp/health-failure
+backup_id="$(docker compose ps -q backup)"
+for _ in {1..20}; do
+  if [[ "$(docker inspect -f '{{.State.Health.Status}}' "${backup_id}")" == unhealthy ]]; then
+    break
+  fi
+  sleep 1
+done
+[[ "$(docker inspect -f '{{.State.Health.Status}}' "${backup_id}")" == unhealthy ]]
 "${ctl}" rollback
 jq -e '.current.release_version == "2.0.0" and .previous.release_version == "2.0.1"' "${history}" >/dev/null
 "${ctl}" health

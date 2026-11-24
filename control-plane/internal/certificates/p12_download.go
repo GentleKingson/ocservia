@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -221,17 +222,30 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	values := make([]pendingArtifactConsumption, 0, 20)
 	for _, record := range records {
-		value := pendingArtifactConsumption{id: record.ID, grantID: record.GrantID, grant: &agentv1.ArtifactGrantV1{}, digest: record.Digest, size: record.Size, actorID: record.ActorID, expiresAt: record.ExpiresAt}
-		if err := proto.Unmarshal(record.Grant, value.grant); err != nil || !bytes.Equal(value.grant.GetArtifactId(), value.id[:]) || !bytes.Equal(value.grant.GetGrantId(), value.grantID[:]) || value.grant.GetAuthorizedSubject() != value.actorID.String() || value.grant.GetMaxBytes() != uint64(value.size) {
-			return ErrArtifactDenied
+		item := pendingArtifactConsumption{id: record.ID, grantID: record.GrantID, grant: &agentv1.ArtifactGrantV1{}, digest: record.Digest, size: record.Size, actorID: record.ActorID, expiresAt: record.ExpiresAt}
+		err := proto.Unmarshal(record.Grant, item.grant)
+		nodeID, nodeErr := uuid.FromBytes(item.grant.GetNodeId())
+		if err != nil || nodeErr != nil || nodeID == uuid.Nil || item.grantID == uuid.Nil || item.actorID == uuid.Nil ||
+			item.size <= 0 || item.expiresAt.IsZero() || item.grant.GetExpiresAt().CheckValid() != nil ||
+			!bytes.Equal(item.grant.GetArtifactId(), item.id[:]) || !bytes.Equal(item.grant.GetGrantId(), item.grantID[:]) ||
+			item.grant.GetAuthorizedSubject() != item.actorID.String() || item.grant.GetMaxBytes() != uint64(item.size) {
+			slog.ErrorContext(ctx, "invalid pending artifact consumption", "artifact_id", record.ID)
+			err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+				store, err := certificatestore.ArtifactFromTransaction(tx)
+				if err != nil {
+					return err
+				}
+				return store.FailConsumption(ctx, record.ID, record.GrantID, record.Grant)
+			})
+		} else {
+			err = s.reconcileArtifactConsumption(ctx, item)
 		}
-		values = append(values, value)
-	}
-	for _, item := range values {
-		if err := s.reconcileArtifactConsumption(ctx, item); err != nil {
-			return err
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			slog.WarnContext(ctx, "artifact consumption reconciliation failed", "artifact_id", record.ID, "error", err)
 		}
 	}
 	return nil
@@ -247,23 +261,16 @@ type pendingArtifactConsumption struct {
 }
 
 func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pendingArtifactConsumption) error {
-	if _, nodeErr := uuid.FromBytes(item.grant.GetNodeId()); nodeErr != nil {
-		return nil
-	}
 	consumed, confirmErr := s.artifacts.ConfirmArtifactConsumed(ctx, item.grant, item.digest, item.size)
 	if confirmErr != nil {
 		// Reconciliation is item-scoped. A disconnected node or restarting
 		// Agent must not turn one durable artifact into a global scheduler
 		// failure; exact evidence remains in consuming for the next pass.
-		return nil
+		return confirmErr
 	}
-	grantExpires := item.grant.GetExpiresAt()
-	if grantExpires == nil {
-		return ErrArtifactDenied
-	}
-	if !consumed && grantExpires.AsTime().After(s.now()) {
+	if !consumed && item.grant.GetExpiresAt().AsTime().After(s.now()) {
 		if err := s.artifacts.ConsumeArtifact(ctx, item.grant, item.digest, item.size); err != nil {
-			return nil
+			return err
 		}
 		consumed = true
 	}
@@ -277,9 +284,6 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 		}
 	} else {
 		now := s.now().UTC()
-		if item.expiresAt.IsZero() {
-			return ErrArtifactDenied
-		}
 		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 			store, err := certificatestore.ArtifactFromTransaction(tx)
 			if err != nil {

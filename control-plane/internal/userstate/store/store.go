@@ -18,8 +18,7 @@ type Desired struct {
 }
 
 type Revision struct {
-	State, Kind  string
-	SafeRejected bool
+	State, Kind string
 }
 
 type Resource struct {
@@ -29,7 +28,6 @@ type Resource struct {
 	DesiredVersion, DesiredRevision, ObservedRevision *int64
 	OperationID                                       *uuid.UUID
 	OperationState, CommandState, PayloadType         *string
-	SafeRejected                                      *bool
 	ObservedAt                                        *time.Time
 }
 

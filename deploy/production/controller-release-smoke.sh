@@ -6,7 +6,7 @@ COMPOSE_LAUNCHER="${OCSERV_CONTROLLER_COMPOSE_SH:-${ROOT}/deploy/production/comp
 PUBLIC_URL="${OCSERV_CONTROLLER_PUBLIC_URL:-}"
 
 usage() {
-  echo "usage: $0 --release-file /path/controller-release.json" >&2
+  echo "usage: $0 --release-file /path/controller-release.json [--skip-backup]" >&2
   exit 2
 }
 
@@ -15,7 +15,8 @@ fail() {
   exit 1
 }
 
-if (($# != 2)) || [[ "$1" != "--release-file" ]]; then
+if (( $# < 2 || $# > 3 )) || [[ "$1" != "--release-file" ]] ||
+  [[ $# == 3 && "$3" != "--skip-backup" ]]; then
   usage
 fi
 
@@ -77,9 +78,12 @@ PUBLIC_URL="${PUBLIC_URL%/}"
 [[ "${PUBLIC_URL}" =~ ^https://[^[:space:]]+$ ]] ||
   fail "public Controller URL must use HTTPS"
 
-services=(control-plane transportd backup)
+services=(control-plane transportd)
 if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]]; then
-  services=(postgres control-plane transportd backup)
+  services=(postgres "${services[@]}")
+fi
+if [[ "${3:-}" != --skip-backup ]]; then
+  services+=(backup)
 fi
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
   relay=relay

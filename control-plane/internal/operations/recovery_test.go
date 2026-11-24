@@ -66,6 +66,24 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 	}
 }
 
+func TestRecoveryEnvelopeExtendsOnlyTheFirstObservationWindow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	_, sent := recoveryTestDispatch(t, now, time.Minute)
+	var envelope agentv1.CommandEnvelope
+	testutil.NoError(t, proto.Unmarshal(sent, &envelope))
+	signer := testCommandSigner(t)
+	_, first, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now.Add(time.Minute), signer)
+	testutil.NoError(t, err)
+	if !first.Equal(now.Add(time.Minute + recoveryCommandTTL)) {
+		t.Fatalf("first reconciliation deadline=%v", first)
+	}
+	_, next, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now.Add(2*time.Minute), signer)
+	testutil.NoError(t, err)
+	if !next.Equal(now.Add(time.Minute)) {
+		t.Fatalf("follow-up attempted to renew expiry, got %v", next)
+	}
+}
+
 func TestDecodeClaimedEnvelopeRequiresMatchingIdentity(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	dispatch, sent := recoveryTestDispatch(t, now, 10*time.Minute)
@@ -84,29 +102,24 @@ func TestDecodeClaimedEnvelopeRequiresMatchingIdentity(t *testing.T) {
 	}
 }
 
-func TestRecoveryExecutionDeadlineAndLegacyAuthority(t *testing.T) {
+func TestRecoveryPreservesExecutionDeadline(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	for _, legacy := range []bool{false, true} {
-		for _, priorMode := range []agentv1.CommandDeliveryMode{agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT} {
-			dispatch, _ := recoveryTestDispatch(t, now, time.Minute)
-			var command agentv1.CommandEnvelope
-			testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &command))
-			if legacy {
-				command.ProtocolVersion = commandauth.LegacyProtocolVersion
+	for _, priorMode := range []agentv1.CommandDeliveryMode{agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT} {
+		dispatch, _ := recoveryTestDispatch(t, now, time.Minute)
+		var command agentv1.CommandEnvelope
+		testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &command))
+		command.DeliveryMode = priorMode
+		for _, observed := range []time.Time{now.Add(30 * time.Second), now.Add(2 * time.Minute)} {
+			recovered := proto.Clone(&command).(*agentv1.CommandEnvelope)
+			_, _, err := PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observed, testCommandSigner(t))
+			testutil.NoError(t, err)
+			if !proto.Equal(command.GetExpiresAt(), recovered.GetExpiresAt()) {
+				t.Fatal("observation renewed execution authority")
 			}
-			command.DeliveryMode = priorMode
-			for _, observed := range []time.Time{now.Add(30 * time.Second), now.Add(2 * time.Minute)} {
-				recovered := proto.Clone(&command).(*agentv1.CommandEnvelope)
-				_, _, err := PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observed, testCommandSigner(t))
-				testutil.NoError(t, err)
-				if !proto.Equal(command.GetExpiresAt(), recovered.GetExpiresAt()) {
-					t.Fatal("observation renewed execution authority")
-				}
-				_, _, err = PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT, observed, testCommandSigner(t))
-				allowed := observed.Before(now.Add(time.Minute)) && (!legacy || priorMode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY)
-				if (err == nil) != allowed {
-					t.Fatalf("legacy=%v mode=%v observed=%v retry err=%v", legacy, priorMode, observed, err)
-				}
+			_, _, err = PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT, observed, testCommandSigner(t))
+			allowed := observed.Before(now.Add(time.Minute))
+			if (err == nil) != allowed {
+				t.Fatalf("mode=%v observed=%v retry err=%v", priorMode, observed, err)
 			}
 		}
 	}

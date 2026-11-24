@@ -120,6 +120,10 @@ type Store interface {
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error
 }
 
+type PartitionEnsurer interface {
+	EnsureUpcomingPartitions(context.Context) error
+}
+
 type BatchMaintainer interface {
 	MaintainBatch(context.Context, time.Time) (done bool, err error)
 }

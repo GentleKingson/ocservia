@@ -74,8 +74,11 @@ when reconciliation proves that the effect never occurred may the Controller
 sign and send a `RETRY_IF_EFFECT_ABSENT` command.
 
 Command envelope protocol `1.2` keeps its signed `expires_at` as the immutable
-execution deadline. Recovery renews only the database's observation/outbox
-window; the signed command deadline never changes. An expired, signed
+execution deadline. The first transition to `RECONCILE_ONLY` reserves at least
+five minutes in the database observation window. Later attempts share that
+window, with exponential backoff from 5 seconds to a 60-second cap. Invalid
+or missing privileged receipts raise a critical alert and cap automatic
+reconciliation at three further attempts. An expired, signed
 `RECONCILE_ONLY` command may read authenticated durable evidence under the
 current session, capability and owner fence, with a bounded transport timeout.
 Both Controller retry admission and privd execution still reject an expired
@@ -288,9 +291,12 @@ the command Unknown if the proof is missing or malformed. Transportd checks only
 the bounded shape and version before forwarding the payload unchanged.
 
 On the Controller, the result handler reconstructs the canonical transcript. It
-accepts a privileged terminal outcome (success or rejection) only when its
+accepts a privileged terminal outcome (`SUCCEEDED` or `FAILED`) only when its
 claims match the issued command and the signing key is an independently
-registered, active, in-window key for that node. If verification fails, the
+registered key for that node. Acceptance and activation allow five minutes
+of clock skew. An accepted command may complete up to five minutes after
+execution expiry. Completion must be at or after acceptance, and key
+revocation is enforced at its recorded time. If verification fails, the
 Controller emits audit and security-alert records and routes the command into
 reconciliation without advancing desired state.
 
@@ -916,14 +922,15 @@ state transition separately.
   and client IP attributes belong only to the node session read model and are
   never attached as metric labels.
 - In PostgreSQL, raw telemetry samples land in monthly table partitions.
-- Background scheduler maintenance computes 5-minute and 1-hour rollups and
-  enforces the 14-day, 90-day, and 13-month retention windows idempotently.
-  Each rollup pass recomputes the full 14-day lateness window starting from the
-  resolution's complete UTC bucket. Each retention pass deletes up to 1,000
-  expired rows per rollup table and retires at most one expired month.
-  Retention cutoffs are evaluated against server time, cannot advance into the
-  future, and always aggregate the oldest retirement candidate before its raw
-  partition is retired.
+- Ingestion marks changed five-minute buckets, including late samples. Maintenance
+  recomputes up to 4,096 dirty buckets per pass and derives affected hours from
+  five-minute rollups weighted by sample count. Five-minute and hourly retention
+  remain 90 days and 13 months.
+- The restricted Controller refreshes the current UTC month and the following
+  two months using the database clock. The owner runs `--telemetry-retention-only`
+  to detach an expired month concurrently, preserve its rollups, and drop it.
+  A durable marker lets the owner resume an interrupted retirement. The former
+  default partition remains readable as a historical table.
 - On ingress, the Controller accepts snapshot, metric, and
   security-observation timestamps ranging from 14 days in the past up to five
   minutes in the future. It rejects out-of-window events before selecting a
@@ -1053,6 +1060,10 @@ Candidate builds are gated by [Release Check](../development/release-checks.md),
 Nodes that advertise `ocserv.config.complete.plan` and `ocserv.config.complete.apply` follow the [complete node-local TLS profile](#node-local-tls-provisioning). `Apply` performs a daemon reload only, so startup-only settings (authentication mode, listeners, worker privilege settings, socket paths, and TLS file paths) must match the active protected configuration. Acceptance requires end-to-end VPN client authentication, verified rollback, and durable state recovery beyond simple config-parser or `occtl` status checks.
 
 ## Identity, authorization and audit
+
+Controller startup validates the authenticated audit checkpoint and its trailing
+events. A workspace without a trusted checkpoint is verified from genesis and
+anchored. Explicit audit verification still scans the full chain.
 
 Production API access uses Local single-admin authentication (`OCSERV_LOCAL_AUTH_ENABLED=true`). Every production configuration requires a 32-byte session encryption key, a 32-byte audit checkpoint key, and an independent 32-byte audit event authentication key paired with a stable key ID. Browsers receive only Secure, HttpOnly, SameSite session cookies, and credentials are never written to browser storage.
 
@@ -1327,11 +1338,11 @@ Both writes are idempotent by certificate ID. Repeating `/sign` with the same CS
 
 The server exposes four POST endpoints: `/sign`, `/sign/revoke`, `/sign/seal`, and `/sign/public-key`. JSON request bodies are capped at 64 KiB, while raw sealing payloads are bounded to 512 bytes at ingress and further constrained by the RSA-OAEP payload limit (190 bytes for RSA-2048). Concurrency is limited to 32 in-flight business requests, with additional requests rejected as `503`. Header, read, write, and idle timeouts are fixed at 5, 10, 15, and 30 seconds, and error responses return fixed status messages without echoing request content. `GET /healthz` returns `204` while the ledger is readable, the issuer certificate has sufficient remaining lifetime, and no storage error has latched readiness off, without performing any signing operation. Recovery from a latched storage fault is in [Signer unavailable](../operations/incident-recovery.md#signer-unavailable).
 
-Normal `serve` startup refuses to run if the ledger is absent, empty, incompatible, corrupt, owned by another user, or bound to a different issuer, and never initializes a replacement automatically, so `init` is not a way to repair lost state. At startup, the service verifies that the intermediate-and-root chain matches the intermediate private key, carries CA certificate-signing and CRL-signing key usages, and has at least 24h of remaining validity; it never generates CA, node, or TLS keys of its own.
+Normal `serve` startup refuses to run if the ledger is absent, empty, incompatible, corrupt, owned by another user, or bound to a different issuer, and never initializes a replacement automatically, so `init` is not a way to repair lost state. At startup, the service verifies that the intermediate-and-root chain matches the intermediate private key, carries CA certificate-signing and CRL-signing key usages, and has enough remaining validity for the configured certificate lifetime; it never generates CA, node, or TLS keys of its own.
 
 ### Policy and durable effects
 
-The `rsa-client-v1-24h` signing policy accepts CSRs using RSA-2048, RSA-3072, or RSA-4096 keys with public exponent 65537, signed with SHA-256, SHA-384, or SHA-512 RSA or RSA-PSS, containing one CN and up to 32 DNS SANs. Both CN and DNS SAN values must be bounded printable ASCII strings free of whitespace and path separators; any non-DNS SAN or other X.509 extension is rejected. Issued certificates carry only digital-signature, key-encipherment, and `clientAuth` usages without CA privileges, are valid for 24h within the issuer's validity window, and are verified against the CA chain before being persisted. Subject authorization, operation binding, and privd receipt validation remain Controller responsibilities, as a CSR self-signature never establishes authorization.
+The `rsa-client-v1` signing policy accepts CSRs using RSA-2048, RSA-3072, or RSA-4096 keys with public exponent 65537, signed with SHA-256, SHA-384, or SHA-512 RSA or RSA-PSS, containing one CN and up to 32 DNS SANs. Both CN and DNS SAN values must be bounded printable ASCII strings free of whitespace and path separators; any non-DNS SAN or other X.509 extension is rejected. Issued certificates carry only digital-signature, key-encipherment, and `clientAuth` usages without CA privileges, are valid for 90 days by default, with a configurable lifetime of 24h to 8760h and a five-minute NotBefore offset, and are verified against the CA chain before being persisted. Subject authorization, operation binding, and privd receipt validation remain Controller responsibilities, as a CSR self-signature never establishes authorization.
 
 Each certificate's unsigned 128-bit UUID is used directly as its positive X.509 serial number, so a single certificate ID can never receive multiple serials. Before returning a response, a single-writer bbolt transaction binds the certificate UUID, exact CSR bytes and digest, issued certificate chain, serial number, and audit record. If the process crashes before that transaction commits, no certificate is exposed externally. If a response is lost after commit, replaying the identical CSR returns the stored certificate chain, while submitting a different CSR for the same ID conflicts even after revocation.
 
@@ -1339,7 +1350,7 @@ Revocation commits the timestamp and exact reason string and rejects any later a
 
 Running `crl` reads durable revocations from the ledger and writes a signed PEM CRL to stdout with a one-hour `nextUpdate` window and the current audit revision as the CRL number. The operator steps are in [CRL refresh](../operations/incident-recovery.md#crl-refresh). The X.509 CRL reason code extension is omitted because the ledger stores free-form reason text. Receiving a `204` from `/sign/revoke` confirms only that the ledger recorded the revocation. It does not clean up node files, terminate active VPN sessions, or distribute the updated CRL, and the system exposes no public CRL endpoint or OCSP responder.
 
-The ledger uses state format version 1 backed by bbolt (version pinned in [`signer/go.mod`](../../signer/go.mod)) with an exclusive process lock, transaction-consistent snapshots, and default synchronous commits enabled. The underlying local filesystem must honor `fsync`; network filesystems, multi-node replication, and high-availability clustering are unsupported. Four buckets organize state: `meta` (schema version, issuer SHA-256, and policy name), `issued` (certificate records keyed by UUID), `bindings` (node key mappings), and `audit` (monotonic revision log). On startup, Signer runs bbolt's consistency check and validates `meta`, certificate signatures, CSR bindings, and imported key descriptors. Never edit or downgrade the ledger file by hand. Backup, restore floors, and the audit high-water mark are in [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore).
+The ledger uses state format version 1 backed by bbolt (version pinned in [`signer/go.mod`](../../signer/go.mod)) with an exclusive process lock, transaction-consistent snapshots, and default synchronous commits enabled. The underlying local filesystem must honor `fsync`; network filesystems, multi-node replication, and high-availability clustering are unsupported. Four buckets organize state: `meta` (schema version, issuer SHA-256, and policy name), `issued` (certificate records keyed by UUID), `bindings` (node key mappings), and `audit` (monotonic revision log). Startup checks ledger metadata and structure. The explicit `verify` command runs the full bbolt, certificate signature, CSR binding, and key descriptor checks. Never edit or downgrade the ledger file by hand. Backup, restore floors, and the audit high-water mark are in [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore).
 
 ### Trusted public-key transfer
 

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-COMPOSE_FILE="${OCSERV_ROTATION_COMPOSE_FILE:-${ROOT}/deploy/production/compose.yaml}"
+COMPOSE_FILE="${OCSERV_ROTATION_COMPOSE_FILE:-}"
 secret_dir="${OCSERV_SECRET_DIR:-}"
 new_app_file="${OCSERV_NEW_POSTGRES_APP_PASSWORD_FILE:-}"
 new_backup_file="${OCSERV_NEW_POSTGRES_BACKUP_PASSWORD_FILE:-}"
@@ -96,13 +96,17 @@ pgpass_escape() {
   printf '%s' "${value}"
 }
 
-if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+if [[ -n "${COMPOSE_FILE}" && "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
   export OCSERV_SIGNER_CA_SECRET=certificate_signer_ca
   export OCSERV_CERTIFICATE_SIGNER_CA_FILE=/run/secrets/certificate_signer_ca
 fi
 
 compose() {
-  docker compose --env-file /dev/null -p ocservia-production -f "${COMPOSE_FILE}" --profile bundled-postgres "$@"
+  if [[ -n "${COMPOSE_FILE}" ]]; then
+    docker compose --env-file /dev/null -p ocservia-production -f "${COMPOSE_FILE}" --profile bundled-postgres "$@"
+  else
+    "${ROOT}/deploy/production/compose.sh" "$@"
+  fi
 }
 
 alter_roles() {
@@ -154,7 +158,11 @@ atomic_secret() {
 }
 
 restart_clients() {
-  compose up -d --force-recreate --no-deps --wait --wait-timeout "${wait_timeout}" control-plane backup >/dev/null
+  if [[ -n "${COMPOSE_FILE}" ]]; then
+    compose up -d --force-recreate --no-deps --wait --wait-timeout "${wait_timeout}" control-plane backup >/dev/null
+  else
+    compose recreate-database-clients "${wait_timeout}" >/dev/null
+  fi
 }
 
 credential_pair_active() {
@@ -247,7 +255,10 @@ recover() {
 [[ "${terminate_sessions}" == "true" || "${terminate_sessions}" == "false" ]] || fail "OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS must be true or false"
 [[ "${wait_timeout}" =~ ^[1-9][0-9]*$ ]] || fail "OCSERV_ROTATION_WAIT_TIMEOUT_SECONDS must be a positive integer"
 [[ "${lock_timeout}" =~ ^[1-9][0-9]*$ ]] || fail "OCSERV_ROTATION_LOCK_TIMEOUT_SECONDS must be a positive integer"
-[[ -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ]] || fail "rotation compose file must be a regular file"
+[[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]] ||
+  fail "credential rotation requires bundled PostgreSQL"
+[[ -z "${COMPOSE_FILE}" || ( -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ) ]] ||
+  fail "rotation compose file must be a regular file"
 validate_private_directory "${secret_dir}"
 acquire_rotation_lock
 for name in postgres-app-password postgres-backup-password database-app-url postgres.pgpass; do

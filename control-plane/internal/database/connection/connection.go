@@ -125,6 +125,10 @@ func (c *Connection) Migrate(ctx context.Context) error {
 	return migrations.Migrate(ctx, c.pg)
 }
 
+func (c *Connection) PruneTelemetryPartitions(ctx context.Context) error {
+	return migrations.PruneTelemetryPartitions(ctx, c.pg)
+}
+
 func (c *Connection) GrantRuntimePrivileges(ctx context.Context, account string) error {
 	return migrations.GrantRuntimePrivileges(ctx, c.pg, account)
 }

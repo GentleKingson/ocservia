@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -26,6 +27,25 @@ func telemetryBackend(t *testing.T) database.Backend {
 // This calls the real ingestion service with the runtime principal, including
 // shared usage, observed groups/security, history and the same rollback boundary.
 func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
+	t.Run("startup provisions a missing current month", func(t *testing.T) {
+		runtime, owner := testfixture.OpenIsolated(t, t, "dbtest_telemetry_startup")
+		ctx := t.Context()
+		testutil.NoError(t, postgres.WrapPool(runtime).ValidateTelemetryRuntime(ctx))
+		_, err := owner.Exec(ctx, `DO $$
+		BEGIN
+			EXECUTE format('DROP TABLE public.%I', 'telemetry_samples_' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMM'));
+		END;
+		$$`)
+		testutil.NoError(t, err)
+		testutil.NoError(t, postgres.WrapPool(runtime).ValidateTelemetryRuntime(ctx))
+		var hasIndex bool
+		err = owner.QueryRow(ctx, `SELECT to_regclass('public.telemetry_samples_' ||
+			to_char(now() AT TIME ZONE 'UTC', 'YYYYMM') || '_query_idx') IS NOT NULL`).Scan(&hasIndex)
+		testutil.NoError(t, err)
+		if !hasIndex {
+			t.Fatal("startup created the month without its query index")
+		}
+	})
 	backend := telemetryBackend(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -231,6 +251,17 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	if _, err := service.Ingest(stopped, testBatch(node, 5, now)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled: %v", err)
 	}
+	historyOwner := postgres.WrapPool(testfixture.OpenOwnerPool(t))
+	hour := now.Truncate(time.Hour).Add(-2 * time.Hour)
+	insertHistory := func(offset time.Duration, value float64) {
+		t.Helper()
+		if _, err := historyOwner.Exec(ctx, `INSERT INTO telemetry_samples(node_id,batch_id,sampled_at,metric,value)
+			VALUES($1,$2,$3,'connection_rtt_ms',$4)`, node, batch.ID, hour.Add(offset), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertHistory(time.Minute, 10)
+	insertHistory(6*time.Minute, 20)
 	service.now = func() time.Time { return now.Add(5 * time.Minute) }
 	checkState := func(status string, events int) {
 		t.Helper()
@@ -247,11 +278,23 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		}
 	}
 	checkState("active", 0)
-	for range 2 {
+	for i := range 2 {
+		if i == 1 {
+			insertHistory(2*time.Minute, 60)
+		}
 		if err := service.Maintain(ctx); err != nil {
 			t.Fatal(err)
 		}
 		checkState("offline", 1)
+		var sampleCount int64
+		var average float64
+		if err := backend.QueryRow(ctx, `SELECT sample_count,avg_value FROM telemetry_rollups_1h
+			WHERE node_id=$1 AND metric='connection_rtt_ms' AND bucket_at=$2`, node, hour).Scan(&sampleCount, &average); err != nil {
+			t.Fatal(err)
+		}
+		if sampleCount != int64(2+i) || average != []float64{15, 30}[i] {
+			t.Fatalf("hourly rollup after pass %d = %d observations, avg %v", i+1, sampleCount, average)
+		}
 		for _, resolution := range []string{"5m", "1h"} {
 			points, err := service.History(ctx, node, "connection_rtt_ms", resolution, now.Add(-time.Hour))
 			if err != nil || len(points) == 0 {

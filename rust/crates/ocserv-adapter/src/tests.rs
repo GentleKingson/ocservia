@@ -985,9 +985,9 @@ fn effect_store_scale_rollback_crash_tamper_and_missing_evidence() {
     assert_eq!(
         store
             .observe("user_password_rotate", "alice", 1, test_effect(), b"other")
-            .expect("other")
+            .expect("authenticated absence persists")
             .state,
-        DesiredEffectState::Unknown as i32
+        DesiredEffectState::Absent as i32
     );
     store
         .mark_applied("user_password_rotate", "alice", 1, test_effect())
@@ -1166,6 +1166,47 @@ fn effect_store_transitions_config_aba_and_schema_migration() {
             .state,
         DesiredEffectState::AppliedExact as i32
     );
+
+    store
+        .prepare("group_apply", "developers", 1, test_effect(), b"f5", b"f6")
+        .expect("prepare group");
+    assert_eq!(
+        store
+            .observe("group_apply", "developers", 1, test_effect(), b"f5")
+            .expect("group not applied")
+            .state,
+        DesiredEffectState::Absent as i32
+    );
+    store
+        .prepare("user_create", "dan", 1, test_effect(), b"f5", b"f7")
+        .expect("absent group no longer blocks a user mutation");
+
+    let expired = EffectIdentity {
+        expires_at_unix_seconds: effect_now().expect("clock") - 1,
+        ..test_effect()
+    };
+    let identity =
+        validate_effect_context("user_create", "dan", 1, expired, 0).expect("valid identity");
+    let mac = authenticate_record(
+        &store.hmac_key,
+        "user_create",
+        "dan",
+        1,
+        identity,
+        "prepared",
+        &authenticate_file(&store.hmac_key, b"f5"),
+        &authenticate_file(&store.hmac_key, b"f7"),
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE desired_effects SET expires_at=?1,record_hmac=?2 WHERE resource_key='dan'",
+            params![identity.expires_at, mac.as_slice()],
+        )
+        .expect("expire without observing dan");
+    store
+        .prepare("group_apply", "design", 1, test_effect(), b"f5", b"f8")
+        .expect("expired and unpublished user effect no longer blocks group changes");
 
     // Config absent reconciliation + hash ABA fence + schema migration.
     let cfg_dir = TempDir::new("config-effects");
@@ -1832,25 +1873,45 @@ async fn native_reload_failure_is_bounded() {
 async fn certificate_csr_keeps_private_key_local() {
     let dir = TempDir::new("cert");
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("0700");
+    let mut resources = FixedResources::default()
+        .with_certificate_key_dir(dir.path().to_path_buf())
+        .expect("cert res");
+    resources.openssl = dir.join("check-openssl");
+    write_executable(
+        &resources.openssl,
+        br#"#!/bin/sh
+set -eu
+seen_keyout=
+for arg in "$@"; do
+    if [ -n "$seen_keyout" ]; then
+        test "$(stat -c '%a' "$arg")" = 600
+        break
+    fi
+    if [ "$arg" = -keyout ]; then seen_keyout=1; fi
+done
+exec /usr/bin/openssl "$@"
+"#,
+    );
     let adapter = Adapter::new(
-        FixedResources::default()
-            .with_certificate_key_dir(dir.path().to_path_buf())
-            .expect("cert res"),
+        resources,
         Limits {
             timeout: Duration::from_secs(10),
             output_bytes: DEFAULT_OUTPUT_BYTES,
         },
     );
     let id = Uuid::now_v7();
-    let result = adapter
-        .certificate_csr(
-            id.as_bytes(),
-            "vpn.example.test",
-            &["alt.example.test".to_owned()],
-            2048,
-        )
-        .await
-        .expect("csr");
+    let dns_names = ["alt.example.test".to_owned()];
+    let (result, parallel) = tokio::join!(
+        adapter.certificate_csr(id.as_bytes(), "vpn.example.test", &dns_names, 2048),
+        adapter.certificate_csr(id.as_bytes(), "vpn.example.test", &[], 2048),
+    );
+    let result = result.expect("csr");
+    assert_eq!(
+        parallel
+            .expect("same key for parallel CSR")
+            .public_key_sha256,
+        result.public_key_sha256
+    );
     assert_eq!(result.certificate_id, id.as_bytes());
     assert!(result.csr_der.len() > 64 && result.public_key_sha256.len() == 32);
     assert!(!String::from_utf8_lossy(&result.csr_der).contains("PRIVATE KEY"));

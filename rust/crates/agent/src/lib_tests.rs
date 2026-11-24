@@ -771,6 +771,52 @@ fn external_command_replay_and_password_reconcile_recovery() {
 }
 
 #[test]
+fn reconcile_only_restores_receipt_from_a_running_command_after_restart() {
+    let journal = TempJournal::new("reconcile-running");
+    let node = *Uuid::now_v7().as_bytes();
+    let mut ctx = desired_context(node, 100);
+    let mut cmd = desired_command(node, DesiredMutation::Create, "alice", 1, 100);
+    {
+        let mut executor = journal.open();
+        assert!(matches!(
+            executor.prepare_external(&cmd, &ctx).expect("execute"),
+            ExternalPreparation::Execute(_)
+        ));
+    }
+    ctx.now_unix_seconds += 1;
+    cmd.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+    authorize_test_command(&mut cmd);
+    let mut executor = journal.open();
+    let ExternalPreparation::Execute(command) = executor
+        .begin_attested_recovery(&cmd, &ctx)
+        .expect("running recovery")
+    else {
+        panic!("resume running command");
+    };
+    let outcome = executor
+        .complete_external_applied_attested(
+            &command,
+            "user",
+            "alice",
+            1,
+            b"applied",
+            b"root-receipt",
+            101,
+        )
+        .expect("recovered terminal proof");
+    assert_eq!(outcome.record.state, CommandState::Succeeded);
+    assert_eq!(outcome.record.accepted_at, 100);
+    let ExternalPreparation::Replay(replay) = executor
+        .begin_attested_recovery(&cmd, &ctx)
+        .expect("Controller lost the result")
+    else {
+        panic!("replay the settled command");
+    };
+    assert!(replay.replayed);
+    assert_eq!(replay.record, outcome.record);
+}
+
+#[test]
 fn password_revision_supersession_and_stale_retry_block() {
     use DesiredMutation::{Create, Rotate};
 

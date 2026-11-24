@@ -19,6 +19,7 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 		WHERE outbox.published_at IS NULL AND outbox.available_at<=$3
 		AND (outbox.locked_until IS NULL OR outbox.locked_until<=$3)
 		AND command.state IN ('queued','unknown') AND command.expires_at>$3
+		AND (command.state='queued' OR outbox.attempts<LEAST($4,COALESCE(outbox.receipt_recovery_attempt_limit,$4)))
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases lease WHERE lease.node_id=command.node_id)
 		AND (command.resource_type IS NULL OR command.resource_key IS NULL OR NOT EXISTS (
 		 SELECT 1 FROM commands AS prior WHERE prior.node_id=command.node_id AND prior.resource_type=command.resource_type
@@ -33,7 +34,7 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 	SELECT outbox.id,command.id,command.operation_id,command.node_id,outbox.payload,command.traceparent
 	FROM selected JOIN outbox_events AS outbox ON outbox.id=selected.outbox_id JOIN commands AS command ON command.id=selected.command_id
 	ORDER BY CASE WHEN selected.state='unknown' THEN 0 ELSE 1 END,selected.available_at,selected.outbox_id
-	FOR UPDATE OF outbox SKIP LOCKED`, limit, available, at)
+	FOR UPDATE OF outbox SKIP LOCKED`, limit, available, at, operationstore.ReconciliationAttemptLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +153,11 @@ func (s operationStore) FailDispatch(ctx context.Context, d operationstore.Dispa
 		return database.ErrNotFound
 	}
 	retry := at.Add(time.Second)
-	if _, err := s.Exec(ctx, `UPDATE outbox_events SET locked_by=NULL,locked_until=NULL,available_at=$3,last_error=$2 WHERE id=$1 AND locked_by IS NOT NULL`, d.OutboxID, message, retry); err != nil {
+	if _, err := s.Exec(ctx, `UPDATE outbox_events o SET locked_by=NULL,locked_until=NULL,available_at=$3,last_error=$2,
+		published_at=CASE WHEN c.state='unknown' AND o.attempts>=LEAST($5,COALESCE(o.receipt_recovery_attempt_limit,$5))
+			THEN $4 ELSE o.published_at END
+		FROM commands c WHERE o.id=$1 AND c.id=o.command_id AND o.locked_by IS NOT NULL`,
+		d.OutboxID, message, retry, at, operationstore.ReconciliationAttemptLimit); err != nil {
 		return err
 	}
 	if _, err := s.Exec(ctx, `UPDATE command_attempts SET state='failed',finished_at=$2,error_code='transport_unavailable' WHERE id=$1 AND state='sending'`, d.AttemptID, at); err != nil {
@@ -178,8 +183,10 @@ func (s operationStore) ExpiredApplyCommands(ctx context.Context) ([]operationst
 	var result []operationstore.RecoveryCommand
 	for _, id := range ids {
 		v := operationstore.RecoveryCommand{CommandID: id}
-		err := s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope FROM commands c JOIN config_apply_operations a ON a.operation_id=c.operation_id
-			WHERE c.id=$1 AND c.state IN ('dispatched','accepted','running') AND a.state IN ('dispatched','accepted','running') AND c.expires_at<=now() FOR UPDATE OF c`, id).Scan(&v.OperationID, &v.NodeID, &v.Envelope)
+		err := s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,c.expires_at,o.attempts,LEAST($2,COALESCE(o.receipt_recovery_attempt_limit,$2))
+			FROM commands c JOIN config_apply_operations a ON a.operation_id=c.operation_id JOIN outbox_events o ON o.command_id=c.id
+			WHERE c.id=$1 AND c.state IN ('dispatched','accepted','running') AND a.state IN ('dispatched','accepted','running') AND c.expires_at<=now() FOR UPDATE OF c`,
+			id, operationstore.ReconciliationAttemptLimit).Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.ExpiresAt, &v.Attempts, &v.AttemptLimit)
 		if errors.Is(err, database.ErrNotFound) {
 			continue
 		}
@@ -205,8 +212,9 @@ func (s operationStore) ExpiredSendingCommands(ctx context.Context, limit int) (
 
 func (s operationStore) LockExpiredSendingCommand(ctx context.Context, id uuid.UUID) (v operationstore.RecoveryCommand, err error) {
 	v.CommandID = id
-	err = s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,o.id,a.id,c.state,p.state,o.attempts,c.expires_at`+reapingSendingFrom+` AND c.id=$1 FOR UPDATE OF c,p`, id).
-		Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID, &v.AttemptID, &v.CommandState, &v.OperationState, &v.Attempts, &v.ExpiresAt)
+	err = s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,o.id,a.id,c.state,p.state,o.attempts,c.expires_at,LEAST($2,COALESCE(o.receipt_recovery_attempt_limit,$2))`+reapingSendingFrom+` AND c.id=$1 FOR UPDATE OF c,p`,
+		id, operationstore.ReconciliationAttemptLimit).
+		Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID, &v.AttemptID, &v.CommandState, &v.OperationState, &v.Attempts, &v.ExpiresAt, &v.AttemptLimit)
 	return
 }
 
@@ -223,16 +231,19 @@ func (s operationStore) StaleSentCommands(ctx context.Context, timeout time.Dura
 
 func (s operationStore) LockStaleSentCommand(ctx context.Context, id uuid.UUID, timeout time.Duration) (v operationstore.RecoveryCommand, err error) {
 	v.CommandID = id
-	err = s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,o.id,o.attempts`+reapingSentFrom+` AND c.id=$1 AND a.finished_at<=clock_timestamp()-$2::interval FOR UPDATE OF c,p`, id, timeout.String()).Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID, &v.Attempts)
+	err = s.QueryRow(ctx, `SELECT c.operation_id,c.node_id,c.envelope,o.id,o.attempts,c.expires_at,LEAST($3,COALESCE(o.receipt_recovery_attempt_limit,$3))`+reapingSentFrom+`
+		AND c.id=$1 AND a.finished_at<=clock_timestamp()-$2::interval FOR UPDATE OF c,p`, id, timeout.String(), operationstore.ReconciliationAttemptLimit).
+		Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID, &v.Attempts, &v.ExpiresAt, &v.AttemptLimit)
 	return
 }
 
 func (s operationStore) StaleReconciliations(ctx context.Context, maxAttempts int, timeout time.Duration, limit int) ([]operationstore.RecoveryCommand, error) {
 	rows, err := s.Query(ctx, `SELECT c.id,c.operation_id,c.node_id,c.envelope,o.id FROM commands c
 		JOIN operations p ON p.id=c.operation_id JOIN outbox_events o ON o.command_id=c.id
-		JOIN LATERAL(SELECT state,finished_at FROM command_attempts WHERE command_id=c.id ORDER BY attempt_number DESC LIMIT 1) a ON true
+		JOIN LATERAL(SELECT state,started_at,finished_at FROM command_attempts WHERE command_id=c.id ORDER BY attempt_number DESC LIMIT 1) a ON true
 		WHERE c.state='unknown' AND p.state='unknown' AND o.published_at IS NOT NULL AND o.locked_by IS NULL
-		AND o.attempts<$1 AND a.state='sent' AND a.finished_at<=clock_timestamp()-$2::interval AND c.expires_at>clock_timestamp()
+		AND o.attempts<LEAST($1,COALESCE(o.receipt_recovery_attempt_limit,$1)) AND a.state='sent' AND a.finished_at<=clock_timestamp()-$2::interval AND c.expires_at>clock_timestamp()
+		AND NOT EXISTS(SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id AND r.created_at>=a.started_at)
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)
 		ORDER BY a.finished_at,c.id LIMIT $3 FOR UPDATE OF o SKIP LOCKED`, maxAttempts, timeout.String(), limit)
 	if err != nil {
@@ -266,7 +277,9 @@ func (s operationStore) ReconcileExpiredApply(ctx context.Context, v operationst
 	if _, err := s.Exec(ctx, `UPDATE config_apply_operations SET state='unknown',updated_at=$2 WHERE operation_id=$1 AND state IN ('dispatched','accepted','running')`, v.Command.OperationID, v.At); err != nil {
 		return err
 	}
-	if _, err := s.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,last_error='apply outcome missing; reconciliation required' WHERE command_id=$1`, v.Command.CommandID, v.Envelope, v.At); err != nil {
+	if _, err := s.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=CASE WHEN $4 THEN NULL ELSE $3::timestamptz END,locked_by=NULL,locked_until=NULL,available_at=$3,
+		last_error=CASE WHEN $4 THEN 'apply outcome missing; reconciliation required' ELSE 'apply reconciliation limit or deadline reached' END
+		WHERE command_id=$1`, v.Command.CommandID, v.Envelope, v.At, v.Schedule); err != nil {
 		return err
 	}
 	return s.recoveryEvent(ctx, v.Command.OperationID, v.At)
@@ -384,19 +397,21 @@ func (s operationStore) AmbiguousDispatches(ctx context.Context, node uuid.UUID,
 		AND operation.state IN ('dispatched','accepted','running','unknown')
 		AND NOT (command.payload_type='agent_upgrade' AND EXISTS(SELECT 1 FROM agent_command_results AS result WHERE result.command_id=command.id AND result.state='succeeded' AND result.receipt_verification_status='verified'))
 		AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
+		AND outbox.attempts<LEAST($3,COALESCE(outbox.receipt_recovery_attempt_limit,$3))
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-		ORDER BY command.created_at,command.id LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`, node, limit))
+		ORDER BY command.created_at,command.id LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`, node, limit, operationstore.ReconciliationAttemptLimit))
 }
 
 func (s operationStore) LockAmbiguousDispatch(ctx context.Context, command, node uuid.UUID) (v operationstore.AmbiguousDispatch, err error) {
-	err = s.QueryRow(ctx, `SELECT command.operation_id,command.envelope FROM commands AS command
+	err = s.QueryRow(ctx, `SELECT command.operation_id,command.envelope,command.expires_at FROM commands AS command
 		JOIN operations AS operation ON operation.id=command.operation_id JOIN outbox_events AS outbox ON outbox.command_id=command.id
 		WHERE command.id=$1 AND command.node_id=$2 AND command.state IN ('dispatched','accepted','running','unknown')
 		AND operation.state IN ('dispatched','accepted','running','unknown')
 		AND NOT (command.payload_type='agent_upgrade' AND EXISTS(SELECT 1 FROM agent_command_results AS result WHERE result.command_id=command.id AND result.state='succeeded' AND result.receipt_verification_status='verified'))
 		AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
+		AND outbox.attempts<LEAST($3,COALESCE(outbox.receipt_recovery_attempt_limit,$3))
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-		FOR UPDATE OF command,operation`, command, node).Scan(&v.OperationID, &v.Envelope)
+		FOR UPDATE OF command,operation`, command, node, operationstore.ReconciliationAttemptLimit).Scan(&v.OperationID, &v.Envelope, &v.ExpiresAt)
 	return
 }
 

@@ -28,7 +28,7 @@ func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method rejected", 405)
 			return
 		}
-		if s.failed.Load() || time.Now().Before(s.ca.cert.NotBefore) || !time.Now().Add(24*time.Hour).Before(s.ca.cert.NotAfter) || s.db.View(func(tx *bolt.Tx) error {
+		if s.failed.Load() || !s.ca.canIssueAt(time.Now()) || s.db.View(func(tx *bolt.Tx) error {
 			if tx.Bucket([]byte("meta")) == nil {
 				return invalidState
 			}

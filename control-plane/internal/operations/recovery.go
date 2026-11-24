@@ -94,9 +94,16 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 				continue
 			}
 		}
+		deadline := candidate.ExpiresAt
 		payload, expiresAt, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, reconnect.ObservedAt, s.signer)
 		if err != nil {
 			return 0, fmt.Errorf("prepare reconnect reconciliation for command %s: %w", commandID, err)
+		}
+		if deadline.After(expiresAt) {
+			expiresAt = deadline
+		}
+		if !expiresAt.After(reconnect.ObservedAt) {
+			continue
 		}
 		if err := store.ScheduleReconnectRecovery(ctx, commandID, candidate.OperationID, payload, expiresAt.UTC(), at); err != nil {
 			return 0, err
@@ -112,18 +119,6 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 // PrepareRecoveryEnvelope preserves the logical command identity and payload
 // while re-signing attempt metadata for RECONCILE_ONLY or RETRY_IF_EFFECT_ABSENT.
 func PrepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.CommandDeliveryMode, observedAt time.Time, signer *commandauth.Signer) ([]byte, time.Time, error) {
-	return prepareRecoveryEnvelope(envelope, mode, observedAt, signer, true)
-}
-
-func prepareRecoveryContinuationEnvelope(envelope *agentv1.CommandEnvelope, observedAt time.Time, signer *commandauth.Signer) ([]byte, error) {
-	if envelope == nil || envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
-		return nil, ErrInvalidRequest
-	}
-	payload, _, err := prepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observedAt, signer, false)
-	return payload, err
-}
-
-func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.CommandDeliveryMode, observedAt time.Time, signer *commandauth.Signer, extendReconcileTTL bool) ([]byte, time.Time, error) {
 	if envelope == nil || signer == nil || observedAt.IsZero() || (mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT) {
 		return nil, time.Time{}, ErrInvalidRequest
 	}
@@ -132,13 +127,7 @@ func prepareRecoveryEnvelope(envelope *agentv1.CommandEnvelope, mode agentv1.Com
 		return nil, time.Time{}, errors.New("operations: reconciliation command expiry is invalid")
 	}
 	expiresAt := expires.AsTime()
-	if envelope.GetProtocolVersion() == commandauth.LegacyProtocolVersion && envelope.GetDeliveryMode() == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY {
-		envelope.ProtocolVersion = commandauth.ProtocolVersion
-	}
-	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT && envelope.GetProtocolVersion() != commandauth.ProtocolVersion {
-		return nil, time.Time{}, errors.New("operations: legacy recovery cannot authorize execution")
-	}
-	if extendReconcileTTL && mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && expiresAt.Before(observedAt.Add(recoveryCommandTTL)) {
+	if envelope.GetDeliveryMode() == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY && mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && expiresAt.Before(observedAt.Add(recoveryCommandTTL)) {
 		expiresAt = observedAt.Add(recoveryCommandTTL)
 	}
 	if mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && !expiresAt.After(observedAt) {

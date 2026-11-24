@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
@@ -16,13 +17,13 @@ func (t *transaction) CommandResultStore() resultstore.ResultStore { return comm
 
 func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.UUID) (v resultstore.ResultCommand, err error) {
 	var outbox uuid.UUID
-	err = s.QueryRow(ctx, `SELECT id FROM outbox_events WHERE command_id=$1 FOR UPDATE`, command).Scan(&outbox)
+	err = s.QueryRow(ctx, `SELECT id,receipt_recovery_attempt_limit IS NOT NULL FROM outbox_events WHERE command_id=$1 FOR UPDATE`, command).Scan(&outbox, &v.ReceiptRecovery)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return v, err
 	}
 	// A separate statement establishes outbox-before-command ordering and a
 	// fresh snapshot after waiting for a concurrent dispatch completion.
-	err = s.QueryRow(ctx, `SELECT c.operation_id,c.envelope,c.state,c.created_at,c.details_compacted_at IS NOT NULL,f.attempt_id IS NOT NULL,
+	err = s.QueryRow(ctx, `SELECT c.operation_id,c.envelope,c.state,c.created_at,c.expires_at,c.details_compacted_at IS NOT NULL,f.attempt_id IS NOT NULL,
 		COALESCE(f.attempt_id,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE(f.lease_token,'00000000-0000-0000-0000-000000000000'::uuid)
 		FROM commands c JOIN operations p ON p.id=c.operation_id
 		LEFT JOIN LATERAL (SELECT a.id AS attempt_id,l.lease_token FROM outbox_events o
@@ -30,7 +31,7 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 		 JOIN command_attempts a ON a.command_id=l.command_id AND a.outbox_event_id=o.id AND a.worker_id=l.worker_id
 		 WHERE o.command_id=c.id AND l.leased_until>clock_timestamp() AND o.locked_by=l.worker_id AND o.locked_until>clock_timestamp()
 		 AND a.attempt_number=o.attempts AND a.state='sending' AND a.finished_at IS NULL LIMIT 1) f ON true
-		WHERE c.id=$1 AND c.node_id=$2`, command, node).Scan(&v.OperationID, &v.Envelope, &v.State, &v.CreatedAt, &v.Compacted, &v.DispatchInFlight, &v.AttemptID, &v.LeaseToken)
+		WHERE c.id=$1 AND c.node_id=$2`, command, node).Scan(&v.OperationID, &v.Envelope, &v.State, &v.CreatedAt, &v.ExpiresAt, &v.Compacted, &v.DispatchInFlight, &v.AttemptID, &v.LeaseToken)
 	return
 }
 
@@ -130,13 +131,53 @@ func (s commandResultStore) AppendEvent(ctx context.Context, id, operation uuid.
 	return err
 }
 
-func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.UUID, payload []byte, expires, at time.Time) error {
+func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.UUID, payload []byte, expires, at time.Time, receiptFailed bool) error {
+	const receiptRecoveryAttemptLimit = 3
+	var attempts, limit int
+	var published, locked bool
+	// The first invalid receipt fixes the cap relative to the attempt whose
+	// result we saw. Subsequent receipt failures and reconnects cannot reset it.
+	if err := s.QueryRow(ctx, `UPDATE outbox_events SET receipt_recovery_attempt_limit=CASE
+		WHEN $2 THEN COALESCE(receipt_recovery_attempt_limit,LEAST($3,attempts+$4)) ELSE receipt_recovery_attempt_limit END
+		WHERE command_id=$1 RETURNING attempts,LEAST($3,COALESCE(receipt_recovery_attempt_limit,$3)),published_at IS NOT NULL,locked_by IS NOT NULL`,
+		command, receiptFailed, operationstore.ReconciliationAttemptLimit, receiptRecoveryAttemptLimit).Scan(&attempts, &limit, &published, &locked); err != nil {
+		return err
+	}
+	if locked {
+		// A result arrived after the lease expired. Reaping still owns the
+		// sending attempt and its lease, and observes the persisted cap.
+		return nil
+	}
+	available := at.Add(recoveryBackoff(attempts))
+	if attempts >= limit || len(payload) == 0 || !available.Before(expires) {
+		_, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=$2,locked_by=NULL,locked_until=NULL,
+			last_error=CASE WHEN receipt_recovery_attempt_limit IS NOT NULL AND attempts>=receipt_recovery_attempt_limit
+				THEN 'receipt reconciliation attempt limit reached' ELSE 'reconciliation attempt limit or deadline reached' END
+			WHERE command_id=$1`, command, at)
+		return err
+	}
+	if !published && !receiptFailed {
+		// A duplicate result received while recovery is already pending must
+		// not move available_at or change the queued delivery mode.
+		return nil
+	}
+	if _, err := s.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=CASE WHEN published_at IS NULL THEN available_at ELSE $3 END,last_error=NULL WHERE command_id=$1`, command, payload, available); err != nil {
+		return err
+	}
 	if _, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,expires_at=$3 WHERE id=$1 AND state='unknown'`, command, payload, expires); err != nil {
 		return err
 	}
-	if _, err := s.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE id=(SELECT operation_id FROM commands WHERE id=$1) AND command_id=$1 AND state='unknown'`, command, expires); err != nil {
-		return err
-	}
-	_, err := s.Exec(ctx, `UPDATE outbox_events SET payload=$2,published_at=NULL,locked_by=NULL,locked_until=NULL,available_at=$3,last_error=NULL WHERE command_id=$1`, command, payload, at)
+	_, err := s.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE id=(SELECT operation_id FROM commands WHERE id=$1) AND command_id=$1 AND state='unknown'`, command, expires)
 	return err
+}
+
+func recoveryBackoff(attempts int) time.Duration {
+	switch {
+	case attempts <= 1:
+		return 5 * time.Second
+	case attempts >= 5:
+		return time.Minute
+	default:
+		return 5 * time.Second * (1 << (attempts - 1))
+	}
 }

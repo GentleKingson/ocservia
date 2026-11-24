@@ -32,14 +32,13 @@ type Store interface {
 	Previous(context.Context, uuid.UUID) ([]byte, error)
 	Append(context.Context, []any) error
 	Events(context.Context, uuid.UUID) (database.Rows, error)
-	EventsAfter(context.Context, uuid.UUID, time.Time, uuid.UUID) (database.Rows, error)
+	EventsFrom(context.Context, uuid.UUID, time.Time, uuid.UUID) (database.Rows, error)
 	LatestEvent(context.Context, uuid.UUID) (uuid.UUID, []byte, error)
 	RecentEvents(context.Context, uuid.UUID, int) (database.Rows, error)
-	Checkpoints(context.Context, uuid.UUID) (database.Rows, error)
 	LatestCheckpoint(context.Context, uuid.UUID) (uuid.UUID, []byte, []byte, time.Time, int16, error)
 	AddCheckpoint(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte, []byte) error
 	Workspaces(context.Context) (database.Rows, error)
-	CheckpointHash(context.Context, uuid.UUID, uuid.UUID) ([]byte, error)
+	CheckpointProof(context.Context, uuid.UUID, uuid.UUID) (hash, signature []byte, err error)
 	ExpiredDetails(context.Context, time.Time) (database.Rows, error)
 	CompactDetails(context.Context, uuid.UUID, []byte, string, []byte, time.Time) error
 	CompactSecurity(context.Context, time.Time) error

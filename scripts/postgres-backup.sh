@@ -38,16 +38,15 @@ validate_backup_dir() {
   fi
 }
 validate_backup_dir "${BACKUP_ROOT}"
-for subdir in "${BACKUP_ROOT}/base" "${BACKUP_ROOT}/wal"; do
-  if [[ ! -e "${subdir}" && ! -L "${subdir}" ]]; then
-    mkdir -m 0700 -- "${subdir}"
-  fi
-  validate_backup_dir "${subdir}"
-done
+if [[ ! -e "${BACKUP_ROOT}/base" && ! -L "${BACKUP_ROOT}/base" ]]; then
+  mkdir -m 0700 -- "${BACKUP_ROOT}/base"
+fi
+validate_backup_dir "${BACKUP_ROOT}/base"
 
-run_backup() {
+run_backup() (
   local lock="${BACKUP_ROOT}/.backup.lock"
-  local timestamp staging final latest_tmp oldest_wal server_version staging_created=false
+  local timestamp staging final latest_tmp server_version retained
+  local staging_created=false latest_created=false backups
   if [[ -L "${lock}" ]]; then
     echo "backup lock must not be a symlink" >&2
     return 1
@@ -56,24 +55,23 @@ run_backup() {
     echo "legacy backup lock directory is not empty" >&2
     return 1
   fi
-  exec 9>"${lock}"
+  exec 9>"${lock}" || return 1
   if ! flock -n 9; then
     echo "another backup is active" >&2
     return 1
   fi
-  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
   staging="${BACKUP_ROOT}/base/.${timestamp}-${RUN_ID}.tmp"
   final="${BACKUP_ROOT}/base/${timestamp}"
   latest_tmp="${BACKUP_ROOT}/.LATEST-${RUN_ID}.tmp"
-  cleanup_backup() {
+  trap '
     if [[ "${staging_created}" == true ]]; then
       rm -rf -- "${staging}"
     fi
-    rm -f -- "${latest_tmp}"
-    flock -u 9 || true
-    exec 9>&-
-  }
-  trap cleanup_backup RETURN
+    if [[ "${latest_created}" == true ]]; then
+      rm -f -- "${latest_tmp}"
+    fi
+  ' EXIT
 
   if [[ -e "${staging}" || -L "${staging}" ]]; then
     echo "backup staging path already exists: ${staging}" >&2
@@ -92,40 +90,50 @@ run_backup() {
     return 1
   fi
 
-  server_version="$(psql --no-password --tuples-only --no-align --command 'SHOW server_version_num')"
+  server_version="$(psql --no-password --tuples-only --no-align --command 'SHOW server_version_num')" || return 1
   if [[ ! "${server_version}" =~ ^[0-9]+$ ]] || (( server_version / 10000 != POSTGRES_SERVER_MAJOR )); then
     echo "PostgreSQL server must be major version ${POSTGRES_SERVER_MAJOR}" >&2
     return 1
   fi
 
+  mkdir -m 0700 -- "${staging}" || return 1
   staging_created=true
+  # Plain staging lets pg_verifybackup check both data and streamed WAL.
   pg_basebackup \
-    --pgdata="${staging}" \
+    --pgdata="${staging}/data" \
     --format=plain \
     --wal-method=stream \
-    --checkpoint=fast \
+    --checkpoint=spread \
     --manifest-checksums=SHA256 \
-    --no-password
-  pg_verifybackup "${staging}"
-  printf '%s\n' "${timestamp}" >"${staging}/OCSERVIA_BACKUP_ID"
-  mv -- "${staging}" "${final}"
+    --no-password || return 1
+  pg_verifybackup "${staging}/data" || return 1
+  tar -czf "${staging}/base.tar.gz" -C "${staging}/data" . || return 1
+  # Keep the WAL start readable by the previous backup worker after rollback.
+  cp -- "${staging}/data/backup_label" "${staging}/backup_label" || return 1
+  rm -rf -- "${staging}/data" || return 1
+  printf '%s\n' "${timestamp}" >"${staging}/OCSERVIA_BACKUP_ID" || return 1
+  sync "${staging}/base.tar.gz" "${staging}/backup_label" "${staging}/OCSERVIA_BACKUP_ID" "${staging}" || return 1
+  mv -T -- "${staging}" "${final}" || return 1
   staging_created=false
-  printf '%s\n' "${timestamp}" >"${latest_tmp}"
-  mv -- "${latest_tmp}" "${BACKUP_ROOT}/LATEST"
+  sync "${BACKUP_ROOT}/base" || return 1
+  latest_created=true
+  printf '%s\n' "${timestamp}" >"${latest_tmp}" || return 1
+  sync "${latest_tmp}" || return 1
+  mv -T -- "${latest_tmp}" "${BACKUP_ROOT}/LATEST" || return 1
+  latest_created=false
+  sync "${BACKUP_ROOT}" || return 1
 
-  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' -print | sort -r)
-  if (( ${#backups[@]} > BACKUP_RETENTION_COUNT )); then
-    printf '%s\0' "${backups[@]:BACKUP_RETENTION_COUNT}" | xargs -0r rm -rf --
+  retained="$(find "${BACKUP_ROOT}/base" -regextype posix-extended -mindepth 1 -maxdepth 1 -type d \
+    -regex '.*/20[0-9]{6}T[0-9]{6}Z' ! -name "${timestamp}" -printf '%f\n' | sort -r)" || return 1
+  if [[ -n "${retained}" ]]; then
+    mapfile -t backups <<<"${retained}"
+    if (( ${#backups[@]} >= BACKUP_RETENTION_COUNT )); then
+      printf '%s\0' "${backups[@]:BACKUP_RETENTION_COUNT-1}" |
+        xargs -0r -I '{}' rm -rf -- "${BACKUP_ROOT}/base/{}" || return 1
+    fi
   fi
-  mapfile -t backups < <(find "${BACKUP_ROOT}/base" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' -print | sort)
-  oldest_wal="$(sed -n 's/^START WAL LOCATION:.*(file \([0-9A-F]\{24\}\)).*/\1/p' "${backups[0]}/backup_label")"
-  if [[ ! "${oldest_wal}" =~ ^[0-9A-F]{24}$ ]]; then
-    echo "oldest retained backup has no valid WAL start" >&2
-    return 1
-  fi
-  pg_archivecleanup "${BACKUP_ROOT}/wal" "${oldest_wal}"
   echo "backup completed id=${timestamp}"
-}
+)
 
 if [[ "${1:-}" == "--once" ]]; then
   run_backup
@@ -136,6 +144,8 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 while true; do
-  run_backup
+  if ! run_backup; then
+    echo "backup attempt failed; retrying in ${BACKUP_INTERVAL_SECONDS} seconds" >&2
+  fi
   sleep "${BACKUP_INTERVAL_SECONDS}"
 done

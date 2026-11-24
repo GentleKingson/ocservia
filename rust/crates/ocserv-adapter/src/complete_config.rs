@@ -1150,6 +1150,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn critically_failed_complete_apply_releases_prepared_effect() {
+        for after_publish_crash in [false, true] {
+            let fixture = Fixture::new();
+            let mut apply = fixture.apply().await;
+            let effect = super::super::tests::test_effect();
+            if after_publish_crash {
+                fixture.adapter.inject_config_apply_fault(4);
+                assert!(
+                    fixture
+                        .adapter
+                        .complete_config_apply(&apply, effect)
+                        .await
+                        .is_err()
+                );
+            }
+            write(
+                &fixture.adapter.resources.systemctl,
+                b"#!/bin/sh
+exit 1
+",
+                0o700,
+            );
+            let outcome = fixture
+                .adapter
+                .complete_config_apply(&apply, effect)
+                .await
+                .expect("critical failure returned");
+            assert!(outcome.failed_critical && outcome.applied_revision == 0);
+
+            write(
+                &fixture.adapter.resources.systemctl,
+                br#"#!/bin/sh
+if [ "$1" = show ]; then printf 'LoadState=loaded\nActiveState=active\nSubState=running\n'; fi
+"#,
+                0o700,
+            );
+            apply.desired_revision += 1;
+            let outcome = fixture
+                .adapter
+                .complete_config_apply(&apply, effect)
+                .await
+                .expect("next revision proceeds");
+            assert_eq!(outcome.applied_revision, apply.desired_revision);
+        }
+    }
+
+    #[tokio::test]
     async fn complete_profile_materializes_audit_hook_without_breaking_redacted_diff() {
         let mut fixture = Fixture::new();
         let baseline = fixture

@@ -39,7 +39,7 @@ func validateDispatchedResult(envelope *agentv1.CommandEnvelope, result *agentv1
 	if stored.CreatedAt.After(lowerBound) {
 		lowerBound = stored.CreatedAt
 	}
-	if completedTime.Before(lowerBound.Add(-5 * time.Minute)) {
+	if completedTime.Before(lowerBound.Truncate(time.Second).Add(-5 * time.Minute)) {
 		return invalidCommandResult("command result completed_at precedes issued_at")
 	}
 	acceptedAt := result.GetAcceptedAt()
@@ -51,7 +51,7 @@ func validateDispatchedResult(envelope *agentv1.CommandEnvelope, result *agentv1
 		if acceptedAt == nil || acceptedAt.CheckValid() != nil || len(result.GetPayloadSha256()) != sha256.Size {
 			return invalidCommandResult("accepted command result fields are invalid")
 		}
-		if acceptedAt.AsTime().Before(lowerBound.Add(-5*time.Minute)) || acceptedAt.AsTime().After(completedTime) {
+		if acceptedAt.AsTime().Before(lowerBound.Truncate(time.Second).Add(-5*time.Minute)) || acceptedAt.AsTime().After(completedTime) {
 			return invalidCommandResult("command result accepted_at is invalid")
 		}
 		if state == "succeeded" && result.GetErrorCode() != "" {

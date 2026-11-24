@@ -147,13 +147,8 @@ func (s userStateStore) LockDesired(ctx context.Context, node uuid.UUID, name st
 	return
 }
 
-const userSafeRejected = `c.state='rejected'
- AND EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND result.state='rejected')
- AND NOT EXISTS(SELECT 1 FROM agent_command_results result WHERE result.command_id=c.id AND (result.state='unknown' OR result.accepted_at IS NOT NULL))
- AND (SELECT count(*) FROM command_attempts attempt WHERE attempt.command_id=c.id)<=1`
-
 func (s userStateStore) LastRevision(ctx context.Context, node uuid.UUID, resource, key string, expected int64) (v userstatestore.Revision, err error) {
-	err = s.QueryRow(ctx, `SELECT c.state,c.payload_type,`+userSafeRejected+` FROM commands c WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.expected_version=$4 ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, node, resource, key, expected).Scan(&v.State, &v.Kind, &v.SafeRejected)
+	err = s.QueryRow(ctx, `SELECT c.state,c.payload_type FROM commands c WHERE c.node_id=$1 AND c.resource_type=$2 AND c.resource_key=$3 AND c.expected_version=$4 ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, node, resource, key, expected).Scan(&v.State, &v.Kind)
 	return
 }
 
@@ -241,7 +236,7 @@ func (s userStateStore) List(ctx context.Context, node uuid.UUID) ([]userstatest
  UNION SELECT 'group',node_id,group_name FROM observed_groups WHERE node_id=$1
  ) SELECT r.kind,r.name,n.status,du.enabled,ou.enabled,dg.members,og.members,
  COALESCE(du.version,dg.version),COALESCE(du.revision,dg.revision),COALESCE(ou.revision,og.revision),
- op.id,op.state,c.state,c.payload_type,`+userSafeRejected+`,COALESCE(ou.observed_at,og.observed_at)
+ op.id,op.state,c.state,c.payload_type,COALESCE(ou.observed_at,og.observed_at)
  FROM resources r JOIN nodes n ON n.id=r.node_id
  LEFT JOIN desired_users du ON r.kind='user' AND du.node_id=r.node_id AND du.username=r.name
  LEFT JOIN observed_users ou ON r.kind='user' AND ou.node_id=r.node_id AND ou.username=r.name
@@ -256,7 +251,7 @@ func (s userStateStore) List(ctx context.Context, node uuid.UUID) ([]userstatest
 	result := []userstatestore.Resource{}
 	for rows.Next() {
 		var v userstatestore.Resource
-		if err := rows.Scan(&v.Kind, &v.Name, &v.NodeStatus, &v.DesiredEnabled, &v.ObservedEnabled, &v.DesiredMembers, &v.ObservedMembers, &v.DesiredVersion, &v.DesiredRevision, &v.ObservedRevision, &v.OperationID, &v.OperationState, &v.CommandState, &v.PayloadType, &v.SafeRejected, &v.ObservedAt); err != nil {
+		if err := rows.Scan(&v.Kind, &v.Name, &v.NodeStatus, &v.DesiredEnabled, &v.ObservedEnabled, &v.DesiredMembers, &v.ObservedMembers, &v.DesiredVersion, &v.DesiredRevision, &v.ObservedRevision, &v.OperationID, &v.OperationState, &v.CommandState, &v.PayloadType, &v.ObservedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, v)

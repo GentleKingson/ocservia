@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -49,7 +50,7 @@ func fixture(t *testing.T) (*service, string) {
 	must(t, err)
 	must(t, os.WriteFile(dir+"/ca.pem", chain, 0600))
 	must(t, os.WriteFile(dir+"/key.pem", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}), 0600))
-	a, err := loadAuthority(dir+"/ca.pem", dir+"/key.pem")
+	a, err := loadAuthority(dir+"/ca.pem", dir+"/key.pem", defaultCertTTL)
 	must(t, err)
 	s, err := openStore(dir+"/ledger.db", a, true)
 	must(t, err)
@@ -208,8 +209,14 @@ func TestCorruptionAndRestoreFloor(t *testing.T) {
 	}
 	must(t, s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket([]byte("issued")).Put([]byte(id.String()), []byte(`{}`)) }))
 	must(t, s.db.Close())
-	if _, err := openStore(dir+"/ledger.db", s.ca, false); err == nil {
-		t.Fatal("corruption accepted")
+	reopened, err := openLedger(dir+"/ledger.db", s.ca, false, true)
+	must(t, err)
+	defer reopened.db.Close()
+	if err := reopened.verify(); !errors.Is(err, invalidState) {
+		t.Fatalf("full verification did not catch corruption: %v", err)
+	}
+	if _, err := reopened.sign(id, der); !errors.Is(err, invalidState) {
+		t.Fatalf("sign replay used corrupt record: %v", err)
 	}
 }
 
@@ -377,7 +384,7 @@ func TestCrashChild(t *testing.T) {
 	if dir == "" {
 		t.Skip("subprocess only")
 	}
-	a, err := loadAuthority(dir+"/ca.pem", dir+"/key.pem")
+	a, err := loadAuthority(dir+"/ca.pem", dir+"/key.pem", defaultCertTTL)
 	must(t, err)
 	s, err := openStore(dir+"/ledger.db", a, false)
 	must(t, err)
@@ -509,5 +516,43 @@ func TestSingleAdminEnrollmentBinding(t *testing.T) {
 	b.ApprovalID = uuid.NewString()
 	if err := validateBinding(b); err == nil {
 		t.Fatal("orphaned legacy approval id accepted")
+	}
+}
+
+func TestCertificateTTL(t *testing.T) {
+	for _, tc := range []struct {
+		setting string
+		want    time.Duration
+	}{
+		{"24h", minCertTTL},
+		{"2160h", defaultCertTTL},
+		{"8760h", maxCertTTL},
+		{"23h59m59s", 0},
+		{"8760h1s", 0},
+		{"invalid", 0},
+	} {
+		got, err := parseCertTTL(tc.setting)
+		if got != tc.want || (err == nil) != (tc.want != 0) {
+			t.Errorf("TTL %s returned %s, %v", tc.setting, got, err)
+		}
+	}
+	authority, csr := newTestAuthorityAndCSR(t)
+	start := time.Now().Truncate(time.Second)
+	chain, err := authority.issue(csr, big.NewInt(18))
+	must(t, err)
+	block, _ := pem.Decode(chain)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	must(t, err)
+	if leaf.NotAfter.Sub(leaf.NotBefore) != defaultCertTTL+5*time.Minute ||
+		leaf.NotBefore.Before(start.Add(-5*time.Minute)) ||
+		leaf.NotBefore.After(time.Now().Add(-5*time.Minute)) {
+		t.Fatalf("unexpected issued lifetime: %v to %v", leaf.NotBefore, leaf.NotAfter)
+	}
+	if authority.canIssueAt(authority.cert.NotAfter.Add(-defaultCertTTL)) {
+		t.Fatal("issuer expiry boundary admitted")
+	}
+	authority.certTTL = maxCertTTL
+	if _, err := authority.issue(csr, big.NewInt(19)); err == nil {
+		t.Fatal("issued beyond CA expiry")
 	}
 }

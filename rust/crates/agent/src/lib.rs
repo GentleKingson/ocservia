@@ -353,15 +353,13 @@ impl CommandExecutor {
         }
     }
 
-    /// Moves an Unknown command back to Running only after privd returned an
-    /// exact cached root receipt. The caller must atomically persist that proof
-    /// with the terminal result next; a crash remains Unknown on replay.
-    ///
-    /// Begins or replays attested reconciliation for a privileged external command.
+    /// Replays a settled command or resumes an unfinished command after privd
+    /// returns its cached root receipt. For a resumed command the caller must
+    /// atomically persist that proof with the terminal result.
     ///
     /// # Errors
     ///
-    /// Rejects non-privileged, mismatched, or in-progress commands.
+    /// Rejects non-privileged or mismatched commands and propagates journal failures.
     pub fn begin_attested_recovery(
         &mut self,
         envelope: &CommandEnvelope,
@@ -394,20 +392,25 @@ impl CommandExecutor {
             }
             Err(error) => return Err(error),
         };
-        if matches!(record.state, CommandState::Succeeded | CommandState::Failed) {
+        if matches!(record.state, CommandState::Succeeded | CommandState::Failed)
+            && record.privileged_result_proof.is_some()
+        {
             return Ok(ExternalPreparation::Replay(CommandOutcome {
                 record,
                 replayed: true,
             }));
         }
-        if !matches!(record.state, CommandState::Accepted | CommandState::Unknown) {
+        if !matches!(
+            record.state,
+            CommandState::Accepted | CommandState::Unknown | CommandState::Running
+        ) {
             return Err(CommandError::Rejected("reconciliation_state_invalid"));
         }
         let record = self
             .journal
             .transition_command(
                 &validated.key,
-                &[CommandState::Accepted, CommandState::Unknown],
+                &[record.state],
                 CommandState::Running,
                 None,
                 None,

@@ -805,17 +805,20 @@ fn handshake_command_receipt_queue_and_artifact_deadline_invariants() {
         command_envelope(node_id.as_bytes(), &new_traceparent(), String::new()).as_slice(),
     )
     .expect("dec");
-    assert!(valid_privileged_result_proof(
-        &cmd,
-        &privileged_command_result(&cmd, true)
-    ));
-    assert!(!valid_privileged_result_proof(
-        &cmd,
-        &privileged_command_result(&cmd, false)
-    ));
+    assert_eq!(
+        privileged_result_proof_error(&cmd, &privileged_command_result(&cmd, true)),
+        None
+    );
+    assert_eq!(
+        privileged_result_proof_error(&cmd, &privileged_command_result(&cmd, false)),
+        Some("receipt_missing")
+    );
     let mut bad_ver = privileged_command_result(&cmd, true);
     bad_ver.privileged_result_proof.as_mut().expect("p").version = 0;
-    assert!(!valid_privileged_result_proof(&cmd, &bad_ver));
+    assert_eq!(
+        privileged_result_proof_error(&cmd, &bad_ver),
+        Some("receipt_invalid")
+    );
     let mut foreign = privileged_command_result(&cmd, true);
     foreign
         .privileged_result_proof
@@ -823,20 +826,32 @@ fn handshake_command_receipt_queue_and_artifact_deadline_invariants() {
         .and_then(|p| p.receipt_v1.as_mut())
         .expect("r")
         .command_id = Uuid::now_v7().as_bytes().to_vec();
-    assert!(!valid_privileged_result_proof(&cmd, &foreign));
+    assert_eq!(
+        privileged_result_proof_error(&cmd, &foreign),
+        Some("receipt_invalid")
+    );
     let mut rej_unsigned = privileged_command_result(&cmd, false);
     rej_unsigned.state = CommandResultState::Rejected.into();
-    assert!(!valid_privileged_result_proof(&cmd, &rej_unsigned));
+    assert_eq!(
+        privileged_result_proof_error(&cmd, &rej_unsigned),
+        Some("receipt_missing")
+    );
     let mut rej_signed = privileged_command_result(&cmd, true);
     rej_signed.state = CommandResultState::Rejected.into();
-    assert!(valid_privileged_result_proof(&cmd, &rej_signed));
+    assert_eq!(
+        privileged_result_proof_error(&cmd, &rej_signed),
+        Some("receipt_invalid")
+    );
     let synthetic = CommandEnvelope {
         payload: Some(command_envelope::Payload::SyntheticNoop(
             SyntheticNoop::default(),
         )),
         ..cmd
     };
-    assert!(valid_privileged_result_proof(&synthetic, &rej_unsigned));
+    assert_eq!(
+        privileged_result_proof_error(&synthetic, &rej_unsigned),
+        None
+    );
 
     // Command response deadline honors expiry & ReconcileOnly.
     let valid_dl = command_response_deadline(&CommandEnvelope {
@@ -1393,6 +1408,17 @@ async fn telemetry_budgets_retention_and_security_priority() {
         let _ = s4.shared.admit_telemetry(b.as_bytes(), 1).await;
     }
     assert!(!s4.shared.admit_telemetry(b.as_bytes(), 1).await);
+
+    // An exhausted audit quota never consumes telemetry's burst allowance.
+    let s5 = test_service(8);
+    for _ in 0..AUDIT_BURST_BATCHES {
+        assert!(s5.shared.admit_audit(a.as_bytes()).await);
+    }
+    assert!(!s5.shared.admit_audit(a.as_bytes()).await);
+    assert!(s5.shared.admit_audit(b.as_bytes()).await);
+    for _ in 0..32 {
+        assert!(s5.shared.admit_telemetry(a.as_bytes(), 512 * 1024).await);
+    }
 }
 
 #[tokio::test]

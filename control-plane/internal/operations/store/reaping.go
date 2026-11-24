@@ -7,11 +7,13 @@ import (
 	"github.com/google/uuid"
 )
 
+const ReconciliationAttemptLimit = 64
+
 type RecoveryCommand struct {
 	CommandID, OperationID, NodeID, OutboxID, AttemptID uuid.UUID
 	Envelope                                            []byte
 	CommandState, OperationState                        string
-	Attempts                                            int
+	Attempts, AttemptLimit                              int
 	ExpiresAt                                           time.Time
 }
 

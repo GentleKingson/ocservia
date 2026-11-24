@@ -421,6 +421,7 @@ if [[ "${command}" == uninstall ]]; then validate_prerequisites false; else vali
 map_manifest_images "${STAGED_RELEASE}"
 check_manifest_platform "${STAGED_RELEASE}"
 
+compose_launcher_path="${COMPOSE_LAUNCHER}"
 # Current runtimes expose a shell function so the protected host inputs are
 # validated once for pull/inspect/up. Older release launchers remain executable.
 if [[ -z "${OCSERV_CONTROLLER_COMPOSE_SH:-}" && ! -e "$(dirname -- "${COMPOSE_LAUNCHER}")/compose.postgres.yaml" ]]; then
@@ -445,9 +446,14 @@ case "${command}" in
     exit ;;
 esac
 
-if [[ "${command}" == upgrade || "${command}" == rollback ]]; then
-  database_services=(backup)
-  [[ "${OCSERV_DATABASE_DEPLOYMENT}" != bundled ]] || database_services+=(postgres)
+database_services=()
+if [[ "${command}" == upgrade ]]; then
+  database_services+=(backup)
+fi
+if [[ ( "${command}" == upgrade || "${command}" == rollback ) && "${OCSERV_DATABASE_DEPLOYMENT}" == bundled ]]; then
+  database_services+=(postgres)
+fi
+if (( ${#database_services[@]} > 0 )); then
   healthy="$("${COMPOSE_LAUNCHER}" ps --format json "${database_services[@]}" |
     jq -rs '.[] | select(.State == "running" and .Health == "healthy") | .Service')"
   for service in "${database_services[@]}"; do
@@ -455,7 +461,16 @@ if [[ "${command}" == upgrade || "${command}" == rollback ]]; then
   done
 fi
 
-"${COMPOSE_LAUNCHER}" pull
+activation_services=()
+if [[ "${command}" == rollback ]]; then
+  configured_services="$("${COMPOSE_LAUNCHER}" config --services)"
+  while IFS= read -r service; do
+    [[ -n "${service}" && "${service}" != backup ]] || continue
+    activation_services+=("${service}")
+  done <<<"${configured_services}"
+  (( ${#activation_services[@]} > 0 )) || fail "rollback has no configured application services"
+fi
+"${COMPOSE_LAUNCHER}" pull "${activation_services[@]}"
 record_deployment_profile
 if [[ "${command}" == install && "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
   "${COMPOSE_LAUNCHER}" stop signer
@@ -470,8 +485,15 @@ if [[ "${command}" == install && "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; t
   fi
 fi
 checkpoint_signer
-"${COMPOSE_LAUNCHER}" up -d --wait
-"${SMOKE_SCRIPT}" --release-file "${STAGED_RELEASE}"
+"${COMPOSE_LAUNCHER}" up -d --wait "${activation_services[@]}"
+if [[ "${command}" == rollback ]]; then
+  # The target release's smoke script may still require backup health.
+  OCSERV_CONTROLLER_COMPOSE_SH="${compose_launcher_path}" \
+    "${OCSERV_CONTROLLER_SMOKE_SH:-${ROOT}/deploy/production/controller-release-smoke.sh}" \
+    --release-file "${STAGED_RELEASE}" --skip-backup
+else
+  "${SMOKE_SCRIPT}" --release-file "${STAGED_RELEASE}"
+fi
 
 # A single rename records both generations after public readiness succeeds.
 # Retrying the same release reapplies Compose and keeps the rollback target.
@@ -486,3 +508,8 @@ else
   jq --slurpfile old "${CURRENT_RELEASE}" '{current: ., previous: $old[0]}' "${STAGED_RELEASE}" >"${work}/history"
 fi
 mv -fT -- "${work}/history" "${history}"
+if [[ "${command}" == rollback ]]; then
+  if ! "${COMPOSE_LAUNCHER}" create backup || ! "${COMPOSE_LAUNCHER}" start backup; then
+    echo "controller lifecycle: rollback confirmed; backup service could not start" >&2
+  fi
+fi

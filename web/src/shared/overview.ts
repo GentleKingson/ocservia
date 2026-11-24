@@ -11,7 +11,7 @@ import { useFleetStore } from "./fleet";
 export const recentOperationWindow = 20;
 export const recentEventLimit = 12;
 const retainedEventLimit = 50;
-const platformRefreshDelay = 500;
+const platformRefreshDelay = 5_000;
 
 export const useOverviewStore = defineStore("overview", () => {
   const fleet = useFleetStore();
@@ -55,35 +55,16 @@ export const useOverviewStore = defineStore("overview", () => {
 
   async function loadEvents(): Promise<void> {
     const request = eventsReads.begin();
-    const incremental = eventsLoaded.value;
-    // The first load reads one newest-first page so the cost stays bounded
-    // no matter how much durable history the workspace has. Incremental
-    // refreshes resume ascending after the newest retained event.
-    const since = incremental ? events.value.at(-1)?.id : undefined;
     try {
-      const collected: PlatformEvent[] = [];
-      if (!incremental) {
-        const page = await listEvents(
-          undefined,
-          request.signal,
-          "desc",
-          retainedEventLimit,
-        );
-        if (!request.current()) return;
-        collected.push(...[...page.items].reverse());
-      } else {
-        let cursor = since;
-        do {
-          const page = await listEvents(cursor, request.signal);
-          if (!request.current()) return;
-          collected.push(...page.items);
-          cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-        } while (cursor);
-      }
+      // The newest page bounds catch-up after the console has been hidden.
+      const page = await listEvents(
+        undefined,
+        request.signal,
+        "desc",
+        retainedEventLimit,
+      );
       if (!request.current()) return;
-      events.value = incremental
-        ? [...events.value, ...collected].slice(-retainedEventLimit)
-        : collected.slice(-retainedEventLimit);
+      events.value = page.items.slice(0, retainedEventLimit).reverse();
       eventsLoaded.value = true;
       eventsAt.value = new Date();
       eventsUnavailable.value = false;

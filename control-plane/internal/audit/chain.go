@@ -358,12 +358,12 @@ func (m *Manager) validEventMAC(event eventRow) bool {
 }
 
 func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, allowLegacyOnly bool) (chainVerification, error) {
-	checkpoints, latest, err := m.readCheckpoints(ctx, tx, workspaceID)
+	s, err := auditstore.From(tx)
 	if err != nil {
 		return chainVerification{}, err
 	}
-	s, err := auditstore.From(tx)
-	if err != nil {
+	latestID, latestHash, latestSignature, _, _, err := s.LatestCheckpoint(ctx, workspaceID)
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return chainVerification{}, err
 	}
 	rows, err := s.Events(ctx, workspaceID)
@@ -373,8 +373,8 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	defer rows.Close()
 	verified := chainVerification{Verification: Verification{WorkspaceID: workspaceID, Valid: true}}
 	var previous []byte
-	var previousID uuid.UUID
-	var checkpointHash []byte
+	var previousID, transitionAnchorID uuid.UUID
+	var checkpointHash, transitionAnchorHash []byte
 	seenAuthenticated := false
 	for rows.Next() {
 		event, err := scanEventRow(rows, workspaceID, false)
@@ -399,8 +399,8 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 			}
 		case eventAuthVersionV1:
 			if !seenAuthenticated && verified.Events > 0 {
-				checkpoint, ok := checkpoints[previousID]
-				if !ok || !m.validCheckpoint(workspaceID, checkpoint) || !bytes.Equal(checkpoint.eventHash, previous) || !isTransitionRecord(record) {
+				transitionAnchorID, transitionAnchorHash = previousID, bytes.Clone(previous)
+				if !isTransitionRecord(record) {
 					verified.Valid = false
 				}
 			}
@@ -415,7 +415,7 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		previousID = record.EventID
 		verified.lastID = record.EventID
 		verified.lastHash = append(verified.lastHash[:0], event.hash...)
-		if latest != nil && record.EventID == latest.eventID {
+		if record.EventID == latestID {
 			checkpointHash = append([]byte(nil), event.hash...)
 		}
 		verified.Events++
@@ -423,41 +423,28 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	if err := rows.Err(); err != nil {
 		return chainVerification{}, err
 	}
+	rows.Close()
+	if transitionAnchorID != uuid.Nil {
+		hash, signature, err := s.CheckpointProof(ctx, workspaceID, transitionAnchorID)
+		if err != nil && !errors.Is(err, database.ErrNotFound) {
+			return chainVerification{}, err
+		}
+		if err != nil || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: transitionAnchorID, eventHash: hash, signature: signature}) ||
+			!bytes.Equal(hash, transitionAnchorHash) {
+			verified.Valid = false
+		}
+	}
 	verified.legacyOnly = verified.Events > 0 && !seenAuthenticated
 	if verified.legacyOnly && !allowLegacyOnly {
 		verified.Valid = false
 	}
-	if latest == nil {
+	if latestID == uuid.Nil {
 		verified.Checkpoint = verified.Events == 0
 	} else {
-		checkpoint, encountered := checkpoints[latest.eventID]
-		verified.Checkpoint = encountered && len(checkpointHash) != 0 && bytes.Equal(checkpointHash, checkpoint.eventHash) && m.validCheckpoint(workspaceID, checkpoint)
+		verified.Checkpoint = len(checkpointHash) != 0 && bytes.Equal(checkpointHash, latestHash) &&
+			m.validCheckpoint(workspaceID, checkpointRecord{eventID: latestID, eventHash: latestHash, signature: latestSignature})
 	}
 	return verified, nil
-}
-
-func (m *Manager) readCheckpoints(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) (map[uuid.UUID]checkpointRecord, *checkpointRecord, error) {
-	s, err := auditstore.From(tx)
-	if err != nil {
-		return nil, nil, err
-	}
-	rows, err := s.Checkpoints(ctx, workspaceID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	checkpoints := make(map[uuid.UUID]checkpointRecord)
-	var latest *checkpointRecord
-	for rows.Next() {
-		var checkpoint checkpointRecord
-		if err := rows.Scan(&checkpoint.eventID, &checkpoint.eventHash, &checkpoint.signature); err != nil {
-			return nil, nil, err
-		}
-		checkpoints[checkpoint.eventID] = checkpoint
-		copy := checkpoint
-		latest = &copy
-	}
-	return checkpoints, latest, rows.Err()
 }
 
 func (m *Manager) validCheckpoint(workspaceID uuid.UUID, checkpoint checkpointRecord) bool {
@@ -482,7 +469,7 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 		if err != nil {
 			return err
 		}
-		lastID, lastHash, alreadyCheckpointed, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID)
+		lastID, lastHash, alreadyCheckpointed, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID, true)
 		if err != nil {
 			return err
 		}
@@ -495,14 +482,13 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 	})
 }
 
-// verifyCheckpointDeltaTx validates only events appended since the latest valid
-// v1 checkpoint so periodic checkpointing runs in O(delta) under the workspace
-// advisory lock instead of rescanning the full audit history. If no valid v1
-// checkpoint anchor exists, it falls back to the full genesis scan in verifyTx.
-func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s auditstore.Store, workspaceID uuid.UUID) (uuid.UUID, []byte, bool, error) {
+// verifyCheckpointDeltaTx validates the authenticated checkpoint anchor and
+// the appended suffix under the workspace advisory lock. If the chain has yet
+// to be anchored, the caller can request a full genesis scan.
+func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s auditstore.Store, workspaceID uuid.UUID, verifyGenesis bool) (uuid.UUID, []byte, bool, error) {
 	tailID, tailHash, err := s.LatestEvent(ctx, workspaceID)
-	if errors.Is(err, database.ErrNotFound) {
-		return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
+	if errors.Is(err, database.ErrNotFound) && !verifyGenesis {
+		return uuid.Nil, nil, false, nil
 	}
 	if err != nil {
 		return uuid.Nil, nil, false, err
@@ -511,16 +497,16 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return uuid.Nil, nil, false, err
 	}
-	if err == nil && cpAuthVersion == eventAuthVersionV1 && m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
-		if cpEventID == tailID && bytes.Equal(cpHash, tailHash) {
-			return tailID, tailHash, true, nil
+	if err == nil && cpAuthVersion == eventAuthVersionV1 {
+		if cpOccurredAt.IsZero() || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
+			return uuid.Nil, nil, false, errors.New("audit checkpoint is not authenticated")
 		}
-		rows, err := s.EventsAfter(ctx, workspaceID, cpOccurredAt, cpEventID)
+		rows, err := s.EventsFrom(ctx, workspaceID, cpOccurredAt, cpEventID)
 		if err != nil {
 			return uuid.Nil, nil, false, err
 		}
 		defer rows.Close()
-		previous := append([]byte(nil), cpHash...)
+		var previous []byte
 		var lastID uuid.UUID
 		var deltaCount int64
 		valid := true
@@ -528,6 +514,12 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 			event, err := scanEventRow(rows, workspaceID, false)
 			if err != nil {
 				return uuid.Nil, nil, false, err
+			}
+			if deltaCount == 0 {
+				if event.record.EventID != cpEventID || !bytes.Equal(cpHash, event.hash) {
+					return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
+				}
+				previous = bytes.Clone(event.previous)
 			}
 			hashValid, err := m.validEventHash(event, previous)
 			if err != nil {
@@ -543,12 +535,16 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 		if err := rows.Err(); err != nil {
 			return uuid.Nil, nil, false, err
 		}
-		if deltaCount > 0 {
-			if !valid || lastID != tailID || !bytes.Equal(previous, tailHash) {
-				return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
-			}
-			return lastID, previous, false, nil
+		if deltaCount == 0 || !valid || lastID != tailID || !bytes.Equal(previous, tailHash) {
+			return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
 		}
+		return lastID, previous, deltaCount == 1, nil
+	}
+	if err == nil && cpOccurredAt.IsZero() {
+		return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
+	}
+	if !verifyGenesis {
+		return uuid.Nil, nil, false, nil
 	}
 	verified, err := m.verifyTx(ctx, tx, workspaceID, false)
 	if err != nil {
@@ -628,6 +624,13 @@ func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID u
 		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
+		s, err := auditstore.From(tx)
+		if err != nil {
+			return err
+		}
+		if lastID, _, _, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID, false); err != nil || lastID != uuid.Nil {
+			return err
+		}
 		verified, err := m.verifyTx(ctx, tx, workspaceID, true)
 		if err != nil {
 			return err
@@ -636,21 +639,18 @@ func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID u
 			return errors.New("audit chain integrity or origin authentication is invalid")
 		}
 		if !verified.legacyOnly {
-			return nil
+			if verified.Events == 0 || len(m.checkpointKey) < sha256.Size {
+				return nil
+			}
+			return s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, verified.lastID, verified.lastHash, signCheckpoint(m.checkpointKey, workspaceID, verified.lastID, verified.lastHash))
 		}
-		if !verified.Checkpoint {
-			return errors.New("legacy audit tail is not checkpointed")
-		}
-		s, err := auditstore.From(tx)
-		if err != nil {
-			return err
-		}
-		checkpointHash, err := s.CheckpointHash(ctx, workspaceID, verified.lastID)
+		hash, signature, err := s.CheckpointProof(ctx, workspaceID, verified.lastID)
 		if err != nil {
 			return errors.New("legacy audit checkpoint does not cover the tail")
 		}
-		if !bytes.Equal(checkpointHash, verified.lastHash) {
-			return errors.New("legacy audit checkpoint hash does not match the tail")
+		if !bytes.Equal(hash, verified.lastHash) ||
+			!m.validCheckpoint(workspaceID, checkpointRecord{eventID: verified.lastID, eventHash: hash, signature: signature}) {
+			return errors.New("legacy audit checkpoint does not authenticate the tail")
 		}
 		if err := AppendChainTx(ctx, tx, ChainRecord{
 			WorkspaceID: workspaceID, ActorType: transitionActorTypeV1, ActorID: transitionActorIDV1,
@@ -659,7 +659,11 @@ func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID u
 		}); err != nil {
 			return err
 		}
-		return nil
+		lastID, lastHash, err := s.LatestEvent(ctx, workspaceID)
+		if err != nil {
+			return err
+		}
+		return s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, lastID, lastHash, signCheckpoint(m.checkpointKey, workspaceID, lastID, lastHash))
 	})
 }
 

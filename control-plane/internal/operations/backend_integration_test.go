@@ -20,8 +20,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	telemetry "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
+	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -211,7 +213,13 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			// Abandon all worker memory without MarkSent/MarkFailed, then restart.
 			service = operations.NewBackend(f.backend, 1, f.signer)
 			dispatch := original
-			for attempt := 1; attempt <= 3; attempt++ {
+			for attempt := 1; attempt <= 4; attempt++ {
+				if attempt == 4 {
+					// Reap(ctx, 3) still permits a fourth reconcile-only
+					// delivery. Jump it to the shared reconciliation ceiling.
+					f.exec(t, `UPDATE outbox_events SET attempts=$1 WHERE id=$2`, operationstore.ReconciliationAttemptLimit, dispatch.OutboxID)
+					f.exec(t, `UPDATE command_attempts SET attempt_number=$1 WHERE id=$2`, operationstore.ReconciliationAttemptLimit, dispatch.AttemptID)
+				}
 				past := time.Unix(0, 0).UTC()
 				f.exec(t, `UPDATE node_command_leases SET leased_until=$1 WHERE lease_token=$2`, past, dispatch.LeaseToken)
 				f.exec(t, `UPDATE outbox_events SET locked_until=$1 WHERE id=$2`, past, dispatch.OutboxID)
@@ -223,7 +231,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				if err := service.MarkSent(ctx, dispatch); err == nil {
 					t.Fatal("expired claim accepted")
 				}
-				if attempt == 3 {
+				if attempt == 4 {
 					break
 				}
 				dispatch = claimOutbox(t, service)
@@ -242,6 +250,53 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("receipt-fuse-bounds-automatic-recovery", func(t *testing.T) {
+		f := newOutboxFixture(t)
+		ctx := t.Context()
+		service := operations.NewBackend(f.backend, 1, f.signer)
+		created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
+		testutil.NoError(t, err)
+		operationID := uuid.MustParse(created.ID)
+		for i, backoff := range []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second} {
+			dispatch := claimOutbox(t, service)
+			testutil.NoError(t, service.MarkSent(ctx, dispatch))
+			f.exec(t, `UPDATE commands SET state='unknown' WHERE id=$1`, dispatch.CommandID)
+			f.exec(t, `UPDATE operations SET state='unknown' WHERE id=$1`, operationID)
+			var envelope agentv1.CommandEnvelope
+			testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &envelope))
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			payload, expires, err := operations.PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, f.signer)
+			testutil.NoError(t, err)
+			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
+				store, err := resultstore.Results(tx)
+				if err != nil {
+					return err
+				}
+				return store.ScheduleRecovery(ctx, dispatch.CommandID, payload, expires, now, true)
+			}))
+			var available time.Time
+			var published *time.Time
+			var limit int
+			testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT available_at,published_at,receipt_recovery_attempt_limit FROM outbox_events WHERE id=$1`, dispatch.OutboxID).Scan(&available, &published, &limit))
+			if limit != 4 {
+				t.Fatalf("receipt cap=%d after attempt %d", limit, i+1)
+			}
+			if i == 3 {
+				if published == nil || !published.Equal(now) {
+					t.Fatalf("receipt fuse published=%+v want %+v", published, now)
+				}
+				if jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute); err != nil || len(jobs) != 0 {
+					t.Fatal("receipt fuse allowed another claim", jobs, err)
+				}
+				break
+			}
+			want := now.Add(backoff)
+			if published != nil || !available.Equal(want) {
+				t.Fatalf("attempt %d available=%+v published=%+v want available=%+v", i+1, available, published, want)
+			}
+			f.exec(t, `UPDATE outbox_events SET available_at=now() WHERE id=$1`, dispatch.OutboxID)
+		}
+	})
 	t.Run("early-and-duplicate-result", func(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx := context.Background()
@@ -404,6 +459,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			testutil.NoError(t, err)
 			id := uuid.MustParse(created.ID)
 			if source == "certificate-release" {
+				f.exec(t, `UPDATE commands SET payload_type='certificate_revoke' WHERE operation_id=$1`, id)
 				f.exec(t, `UPDATE outbox_events SET available_at=$1`, time.Now().UTC().Add(24*time.Hour))
 			} else {
 				f.exec(t, `UPDATE nodes SET status='offline' WHERE id=$1`, node)
@@ -421,10 +477,10 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 						return err
 					}
 					// Missing operations retain the zero-row no-op behavior.
-					if err := store.ReleaseOperation(ctx, uuid.Must(uuid.NewV7())); err != nil {
+					if err := store.ReleaseOperation(ctx, uuid.Must(uuid.NewV7()), uuid.Nil); err != nil {
 						return err
 					}
-					return store.ReleaseOperation(ctx, id)
+					return store.ReleaseOperation(ctx, id, uuid.Nil)
 				}
 				store, err := telemetry.FromTransaction(tx)
 				if err != nil {

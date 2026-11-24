@@ -195,6 +195,9 @@ for backend in postgres:bundled postgres:external; do
     .services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_URL == "https://signer:9443/sign" and
     .services["control-plane"].environment.OCSERV_CERTIFICATE_SIGNER_CA_FILE == "/run/secrets/certificate_signer_ca" and
     .services.transportd.environment.OCSERV_RELAY_URL_A == "https://relay.example.com" and
+    .services.signer.environment.OCSERV_SIGNER_CERT_TTL == "2160h" and
+    .services.backup.environment.BACKUP_INTERVAL_SECONDS == "900" and
+    .services.backup.environment.BACKUP_RETENTION_COUNT == "8" and
     (.services.signer.networks | keys == ["signer"]) and
     (.services.signer.ports // [] | length == 0) and .networks.signer.internal
   ' "${work}/integrated.json" >/dev/null
@@ -322,6 +325,11 @@ grep -Fq ' stop control-plane transportd' "${CONFIG_TEST_LOG}"
 if grep -Fq ' stop signer' "${CONFIG_TEST_LOG}"; then
   echo "partial Controller activation stopped Signer without restarting it" >&2; exit 1
 fi
+: >"${CONFIG_TEST_LOG}"
+PATH="${work}/bin:${PATH}" OCSERV_DATABASE_DEPLOYMENT=bundled \
+  "${ROOT}/deploy/production/compose.sh" recreate-database-clients 180
+test "$(wc -l <"${CONFIG_TEST_LOG}")" -eq 1
+grep -Fq ' up -d --force-recreate --no-deps --wait --wait-timeout 180 control-plane backup' "${CONFIG_TEST_LOG}"
 rm "${OCSERV_SECRET_DIR}/session-key"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 echo "Production auth configuration: Local-only mode, installer allowlists, secret mounts and rejection checks passed"

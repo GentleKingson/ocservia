@@ -189,11 +189,15 @@ func (s *memAuditStore) LatestCheckpoint(_ context.Context, workspaceID uuid.UUI
 	return uuid.Nil, nil, nil, time.Time{}, 0, database.ErrNotFound
 }
 
-func (s *memAuditStore) Checkpoints(_ context.Context, _ uuid.UUID) (database.Rows, error) {
+func (s *memAuditStore) CheckpointProof(_ context.Context, _, eventID uuid.UUID) ([]byte, []byte, error) {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
-	cpCopy := append([]memAuditCheckpoint(nil), s.backend.checkpoints...)
-	return &memCheckpointRows{items: cpCopy, idx: -1}, nil
+	for _, cp := range s.backend.checkpoints {
+		if cp.eventID == eventID {
+			return bytes.Clone(cp.eventHash), bytes.Clone(cp.signature), nil
+		}
+	}
+	return nil, nil, database.ErrNotFound
 }
 
 func (s *memAuditStore) AddCheckpoint(_ context.Context, _, _, eventID uuid.UUID, eventHash, signature []byte) error {
@@ -220,7 +224,7 @@ func (s *memAuditStore) Events(_ context.Context, workspaceID uuid.UUID) (databa
 	return &memEventRows{items: matched, idx: -1}, nil
 }
 
-func (s *memAuditStore) EventsAfter(_ context.Context, workspaceID uuid.UUID, afterAt time.Time, afterID uuid.UUID) (database.Rows, error) {
+func (s *memAuditStore) EventsFrom(_ context.Context, workspaceID uuid.UUID, afterAt time.Time, afterID uuid.UUID) (database.Rows, error) {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	s.backend.deltaScanCalls++
@@ -229,27 +233,11 @@ func (s *memAuditStore) EventsAfter(_ context.Context, workspaceID uuid.UUID, af
 		if ev.workspaceID != workspaceID {
 			continue
 		}
-		if ev.at.After(afterAt) || (ev.at.Equal(afterAt) && bytes.Compare(ev.id[:], afterID[:]) > 0) {
+		if ev.at.After(afterAt) || (ev.at.Equal(afterAt) && bytes.Compare(ev.id[:], afterID[:]) >= 0) {
 			matched = append(matched, ev)
 		}
 	}
 	return &memEventRows{items: matched, idx: -1}, nil
-}
-
-type memCheckpointRows struct {
-	items []memAuditCheckpoint
-	idx   int
-}
-
-func (r *memCheckpointRows) Next() bool { r.idx++; return r.idx < len(r.items) }
-func (r *memCheckpointRows) Err() error { return nil }
-func (r *memCheckpointRows) Close()     {}
-func (r *memCheckpointRows) Scan(dest ...any) error {
-	cp := r.items[r.idx]
-	*(dest[0].(*uuid.UUID)) = cp.eventID
-	*(dest[1].(*[]byte)) = bytes.Clone(cp.eventHash)
-	*(dest[2].(*[]byte)) = bytes.Clone(cp.signature)
-	return nil
 }
 
 type memEventRows struct {
@@ -326,18 +314,25 @@ func TestCheckpointIncrementalDeltaNoOpAndTamperDetection(t *testing.T) {
 
 	// 2. Repeated checkpoint with no new events is an O(1) no-op.
 	testutil.NoError(t, manager.Checkpoint(ctx, workspaceID))
-	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 0 || len(backend.checkpoints) != 1 {
+	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 1 || len(backend.checkpoints) != 1 {
 		t.Fatalf("no-op checkpoint triggered scan/write: full=%d delta=%d checkpoints=%d", backend.fullScanCalls, backend.deltaScanCalls, len(backend.checkpoints))
 	}
 
-	// 3. Appending 3 events validates only the delta via EventsAfter.
+	// 3. Appending 3 events validates the anchor and delta via EventsFrom.
 	appendEvents(3)
 	testutil.NoError(t, manager.Checkpoint(ctx, workspaceID))
-	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 1 || len(backend.checkpoints) != 2 {
+	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 2 || len(backend.checkpoints) != 2 {
 		t.Fatalf("delta checkpoint scans full=%d delta=%d checkpoints=%d", backend.fullScanCalls, backend.deltaScanCalls, len(backend.checkpoints))
 	}
 	if backend.checkpoints[1].eventID != backend.events[7].id {
 		t.Fatalf("delta checkpoint anchored %s, want %s", backend.checkpoints[1].eventID, backend.events[7].id)
+	}
+
+	// Startup verifies the checkpoint and appended suffix without a genesis scan.
+	appendEvents(1)
+	testutil.NoError(t, manager.ensureWorkspaceAuthenticity(ctx, workspaceID))
+	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 3 {
+		t.Fatalf("startup scans full=%d delta=%d", backend.fullScanCalls, backend.deltaScanCalls)
 	}
 
 	// 4. Tampering with a newly appended event causes delta verification to reject.
@@ -350,7 +345,7 @@ func TestCheckpointIncrementalDeltaNoOpAndTamperDetection(t *testing.T) {
 	if !errors.Is(err, err) || len(backend.checkpoints) != 2 {
 		t.Fatalf("tampered checkpoint modified checkpoint count: %d (err=%v)", len(backend.checkpoints), err)
 	}
-	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 2 {
+	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 4 {
 		t.Fatalf("tampered delta did not short-circuit on delta scan: full=%d delta=%d", backend.fullScanCalls, backend.deltaScanCalls)
 	}
 }

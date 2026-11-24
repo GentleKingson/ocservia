@@ -60,7 +60,7 @@ func (f *fixturePKI) Sign(_ context.Context, request SignRequest) (SignResult, e
 	if err != nil {
 		return SignResult{}, err
 	}
-	template := &x509.Certificate{SerialNumber: new(big.Int).SetBytes(request.CertificateID[:]), Subject: csr.Subject, DNSNames: csr.DNSNames, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(2 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature}
+	template := &x509.Certificate{SerialNumber: new(big.Int).SetBytes(request.CertificateID[:]), Subject: csr.Subject, DNSNames: csr.DNSNames, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(2 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, template, f.certificate, csr.PublicKey, f.key)
 	if err != nil {
 		return SignResult{}, err
@@ -422,6 +422,14 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("failed consumption state=%q err=%v", consumeFailureState, err)
 	}
 	artifactTransport.confirmErr = errors.New("agent temporarily unavailable")
+	testutil.NoError(t, service.Maintain(ctx))
+	initialState, err := service.Get(ctx, certificate.ID)
+	testutil.NoError(t, err)
+	if initialState.State != "issued" || initialState.Version != issued.Version {
+		t.Fatalf("short-lived certificate alerted early: %+v", initialState)
+	}
+	_, err = pool.Exec(ctx, `UPDATE certificates SET not_before=now()-interval '100 minutes',not_after=now()+interval '20 minutes' WHERE id=$1`, certificate.ID)
+	testutil.NoError(t, err)
 	if err = service.Maintain(ctx); err != nil {
 		t.Fatalf("transient artifact confirmation stopped maintenance: %v", err)
 	}
@@ -429,7 +437,7 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 		t.Fatalf("transient confirmation state=%q err=%v", consumeFailureState, err)
 	}
 	certificateDuringOutage, err := service.Get(ctx, certificate.ID)
-	if err != nil || certificateDuringOutage.State != "expiring" {
+	if err != nil || certificateDuringOutage.State != "expiring" || certificateDuringOutage.Version != issued.Version {
 		t.Fatalf("certificate maintenance during artifact outage state=%q err=%v", certificateDuringOutage.State, err)
 	}
 	artifactTransport.confirmErr = nil
@@ -439,6 +447,12 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	}
 	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "consumed" {
 		t.Fatalf("recovered consumption state=%q err=%v", consumeFailureState, err)
+	}
+	_, err = pool.Exec(ctx, `UPDATE artifact_operations SET state='consuming',active_grant_id=NULL,consume_size=NULL,consume_grant=$2 WHERE id=$1`, consumeFailureGrant.ArtifactID, []byte{0xff})
+	testutil.NoError(t, err)
+	testutil.NoError(t, service.Maintain(ctx))
+	if err = pool.QueryRow(ctx, `SELECT state FROM artifact_operations WHERE id=$1`, consumeFailureGrant.ArtifactID).Scan(&consumeFailureState); err != nil || consumeFailureState != "failed" {
+		t.Fatalf("invalid pending consumption state=%q err=%v", consumeFailureState, err)
 	}
 	certificateAfterMaintenance, err := service.Get(ctx, certificate.ID)
 	testutil.NoError(t, err)
@@ -561,10 +575,11 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if _, err = service.OpenArtifact(ctx, expiredGrant.ArtifactID, expiredGrant.DownloadToken, requesterID, requesterSession); !errors.Is(err, ErrArtifactDenied) {
 		t.Fatalf("expired artifact err=%v", err)
 	}
+	issuedVersion := issued.Version
 	testutil.NoError(t, service.Maintain(ctx))
 	issued, err = service.Get(ctx, certificate.ID)
-	if err != nil || issued.State != "expiring" {
-		t.Fatalf("maintained certificate=%+v err=%v", issued, err)
+	if err != nil || issued.State != "expiring" || issued.Version != issuedVersion {
+		t.Fatalf("maintained certificate=%+v version want=%d err=%v", issued, issuedVersion, err)
 	}
 	hashArtifactID := uuid.Must(uuid.NewV7())
 	hashGrant, replayed, err := service.CreateP12(ctx, P12Request{CertificateID: certificate.ID, ArtifactRequestID: hashArtifactID, CertificateVersion: issued.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-p12-hash", Reason: "integrity export", RequestID: "p12-hash-request", Traceparent: "00-4123456789abcdef0123456789abcdef-0123456789abcdef-01"})
@@ -649,23 +664,63 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT c.state,o.available_at>now() FROM certificates c JOIN operations p ON p.workspace_id=c.workspace_id AND p.idempotency_key='certificate-revoke' JOIN outbox_events o ON o.command_id=p.command_id WHERE c.id=$1`, certificate.ID).Scan(&revokeState, &held); err != nil || revokeState != "revocation_unknown" || !held {
 		t.Fatalf("durable revoke intent state=%q held=%v err=%v", revokeState, held, err)
 	}
+	unknown, err := service.Get(ctx, certificate.ID)
+	testutil.NoError(t, err)
+	if _, _, err := service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, CertificateVersion: unknown.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke-duplicate", Reason: "retire certificate", RequestID: "revoke-duplicate", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("duplicate revoke allowed while original held: %v", err)
+	}
 	pki.revokeUnavailable = false
+	// Simulate a crash before the Controller could record the Signer outcome.
+	_, err = pool.Exec(ctx, `UPDATE certificates SET state='revoking',version=$2 WHERE id=$1`, certificate.ID, expired.Version+1)
+	testutil.NoError(t, err)
 	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE operation_id=$1::uuid`, op.ID); err != nil {
 		t.Fatal(err)
 	}
 	testutil.NoError(t, operations.NewBackend(postgres.WrapPool(pool), 50, nil).Expire(ctx))
+	testutil.NoError(t, service.Maintain(ctx))
+	testutil.NoError(t, service.Maintain(ctx))
+	var revokeExpiryAlerts int
+	err = pool.QueryRow(ctx, `SELECT count(*) FROM security_alerts WHERE resource_id=$1 AND kind='certificate.revocation_expired'`, certificate.ID).Scan(&revokeExpiryAlerts)
+	if err != nil || revokeExpiryAlerts != 1 || pki.revoked {
+		t.Fatalf("expired hold signer=%v alerts=%d err=%v", pki.revoked, revokeExpiryAlerts, err)
+	}
 	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, CertificateVersion: expired.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke", Reason: "retire certificate", RequestID: "revoke-request", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
 	if !errors.Is(err, ErrNotReady) || !replayed || pki.revoked {
 		t.Fatalf("expired revoke retry=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
 	}
 	revocationUnknown, fetchErr := service.Get(ctx, certificate.ID)
-	if fetchErr != nil {
-		t.Fatal(fetchErr)
+	if fetchErr != nil || revocationUnknown.State != "revocation_unknown" {
+		t.Fatalf("expired hold certificate=%+v err=%v", revocationUnknown, fetchErr)
 	}
-	op, replayed, err = service.Revoke(ctx, RevokeRequest{CertificateID: certificate.ID, CertificateVersion: revocationUnknown.Version, ActorIdentityID: requesterID, ActorSessionID: requesterSession, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke-recovered", Reason: "retire certificate", RequestID: "revoke-recovered", Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01"})
-	if err != nil || replayed || op.ID == "" || !pki.revoked {
-		t.Fatalf("recovered revoke=%+v replay=%v external=%v err=%v", op, replayed, pki.revoked, err)
+	// Recreate the durable hold left by a crash after Signer committed but
+	// before Controller released the node cleanup command.
+	op, replayed, err = service.operations.Create(ctx, operations.CreateRequest{
+		NodeID: nodeID, ExpectedVersion: nodeVersion, IdempotencyKey: "certificate-revoke-recovered",
+		ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: requesterSession,
+		Action: "certificate.revoke", Reason: "retire certificate", RequestID: "revoke-recovered",
+		Traceparent: "00-2123456789abcdef0123456789abcdef-0123456789abcdef-01", TTL: 15 * time.Minute,
+		Payload: operations.CertificateRevokePayload{CertificateID: certificate.ID, CertificateVersion: uint64(revocationUnknown.Version), RevocationReason: "retire certificate", HoldDispatch: true},
+	})
+	if err != nil || replayed || op.ID == "" {
+		t.Fatalf("create crashed revoke=%+v replay=%v err=%v", op, replayed, err)
 	}
+	var heldEnvelope []byte
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT envelope FROM commands WHERE operation_id=$1::uuid`, op.ID).Scan(&heldEnvelope))
+	var changedEnvelope agentv1.CommandEnvelope
+	testutil.NoError(t, proto.Unmarshal(heldEnvelope, &changedEnvelope))
+	changedEnvelope.GetCertificateRevoke().Reason = "a different reason"
+	changedBytes, err := proto.Marshal(&changedEnvelope)
+	testutil.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE operation_id=$1::uuid`, op.ID, changedBytes)
+	testutil.NoError(t, err)
+	testutil.NoError(t, service.Maintain(ctx))
+	if pki.revoked {
+		t.Fatal("maintenance replayed changed revocation content")
+	}
+	_, err = pool.Exec(ctx, `UPDATE commands SET envelope=$2 WHERE operation_id=$1::uuid`, op.ID, heldEnvelope)
+	testutil.NoError(t, err)
+	testutil.NoError(t, pki.Revoke(ctx, RevokeSignerRequest{CertificateID: certificate.ID, SerialNumber: revocationUnknown.SerialNumber, Reason: "retire certificate"}))
+	testutil.NoError(t, service.Maintain(ctx))
 	if err := pool.QueryRow(ctx, `SELECT available_at<=now() FROM outbox_events WHERE command_id=(SELECT command_id FROM operations WHERE id=$1::uuid)`, op.ID).Scan(&held); err != nil || !held {
 		t.Fatalf("released revoke outbox=%v err=%v", held, err)
 	}

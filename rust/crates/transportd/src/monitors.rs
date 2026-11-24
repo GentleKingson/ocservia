@@ -259,11 +259,14 @@ fn monitor_audit(
                     .await
                     .map_err(|_| protocol_error("audit length missing"))?;
                 let size = u32::from_be_bytes(prefix) as usize;
-                if size == 0
-                    || size > MAX_HANDSHAKE_BYTES
-                    || !shared.admit_telemetry(&node, size).await
-                {
+                if size == 0 || size > MAX_HANDSHAKE_BYTES {
                     return Err(protocol_error("audit frame limit exceeded"));
+                }
+                if !shared.admit_audit(&node).await {
+                    // Backpressure this upload only. The Agent retains the batch
+                    // until it receives the Controller's commit receipt.
+                    let _ = send.reset(VarInt::from_u32(0x10d));
+                    return Err(protocol_error("audit budget exceeded"));
                 }
                 let mut payload = vec![0u8; size];
                 recv.read_exact(&mut payload)
