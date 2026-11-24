@@ -15,7 +15,7 @@ source "${ROOT}/scripts/release-common.sh"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 export SOURCE_COMMIT CONTROLLER_ARCH
-[[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+[[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" ]]
 [[ ! -e /etc/ocservia && ! -e /var/lib/ocservia-controller && ! -e /root/ocservia-initial-credentials ]]
 # As in install.sh --quick: the lifecycle belongs to root; SUDO_UID keeps git's
@@ -61,16 +61,31 @@ release_verify_native_runner "${CONTROLLER_ARCH}" >/dev/null
 test -s "${IMAGES_DIR}/product-identity.json"
 
 stage=publish
-docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
+docker pull -q "${PEBBLE_IMAGE}" >/dev/null &
+pebble_pull_pid=$!
+docker pull -q registry:2 >/dev/null &
+registry_pull_pid=$!
+docker pull -q "${OCSERV_POSTGRES_IMAGE}" >/dev/null &
+postgres_pull_pid=$!
 release_load_controller_images "${IMAGES_DIR}" "${VERSION}" "${CONTROLLER_ARCH}"
+registry_pull_status=0
+wait "${registry_pull_pid}" || registry_pull_status=$?
+((registry_pull_status == 0))
+docker run -d --restart unless-stopped --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest="${work}/controller-release-${CONTROLLER_ARCH}.json"
 release_publish_local_manifest "${ROOT}" "localhost:5000" "" "${VERSION}" "${CONTROLLER_ARCH}" "${SOURCE_COMMIT}" "${manifest}"
 # The upgrade target names the same images through a second digest-pinned
 # repository, preserving a real configuration transition without mutable tags.
 upgrade_manifest="${work}/controller-release-digests.json"
 release_publish_local_manifest "${ROOT}" "localhost:5000" "upgrade-" "${VERSION}" "${CONTROLLER_ARCH}" "${SOURCE_COMMIT}" "${upgrade_manifest}"
+pg_pull_status=0
+wait "${postgres_pull_pid}" || pg_pull_status=$?
+((pg_pull_status == 0))
 
 stage=pebble
+pebble_pull_status=0
+wait "${pebble_pull_pid}" || pebble_pull_status=$?
+((pebble_pull_status == 0))
 # Pebble runs on the host network: Controller containers reach its directory
 # on the bridge gateway address, and it validates TLS-ALPN-01 on public 443.
 pebble_dir="${work}/pebble"
@@ -90,9 +105,9 @@ chmod 0444 "${pebble_dir}"/*
 docker run -d --restart unless-stopped --name "${pebble}" --network host \
   -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -v "${pebble_dir}:/pebble:ro" \
   "${PEBBLE_IMAGE}" -config /pebble/config.json
-for _ in $(seq 30); do
+for _ in $(seq 120); do
   curl -fsS --cacert "${pebble_dir}/ca.pem" "https://${gateway}:14000/dir" >/dev/null 2>&1 && break
-  sleep 1
+  sleep 0.25
 done
 curl -fsS --cacert "${pebble_dir}/ca.pem" "https://${gateway}:14000/dir" >/dev/null
 # Pebble's issuing root stands in for a public CA: the install's release smoke
@@ -113,9 +128,9 @@ grep -qxF "Quick install complete: https://${controller}" "${work}/run-first.log
 
 stage=certificates
 tls_ready() { curl -sS -o /dev/null --max-time 5 --cacert "${work}/acme-root.pem" "https://$1/" 2>/dev/null; }
-for _ in $(seq 90); do
+for _ in $(seq 360); do
   tls_ready "${controller}" && tls_ready "${relay}" && break
-  sleep 2
+  sleep 0.5
 done
 tls_ready "${controller}"
 tls_ready "${relay}"

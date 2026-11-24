@@ -135,4 +135,30 @@ printf 'gateway\tunknown\t%s\n' "$work/image.tar" >"$archives"
 expect_failure
 printf 'bad name\tamd64\t%s\n' "$work/image.tar" >"$archives"
 expect_failure
+# Prefetched Grype DB flow: update once, verify status, then scan archives without re-updating.
+printf 'gateway\tamd64\t%s\nedge\tarm64\t%s\n' "$work/image.tar" "$work/image.tar" >"$archives"
+: >"$trace"
+mkdir -p "$work/grype-db"
+GRYPE_DB_CACHE_DIR="$work/grype-db" bash scripts/scan-release-images.sh --update-db-only >"$work/scan.log" 2>&1
+[[ "$(grep -c '^update$' "$trace")" == 1 ]]
+[[ "$(grep -c '^scan|' "$trace")" == 0 ]]
+REPORT='' GRYPE_DB_CACHE_DIR="$work/grype-db" bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1
+[[ "$(grep -c '^update$' "$trace")" == 1 ]]
+[[ "$(grep -c '^scan|false$' "$trace")" == 2 ]]
+if REPORT='' GRYPE_DB_CACHE_DIR='' bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1; then
+  echo 'expected --use-prefetched-db without GRYPE_DB_CACHE_DIR to fail' >&2
+  exit 1
+fi
+if REPORT='' GRYPE_DB_CACHE_DIR="$work/missing-db" bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1; then
+  echo 'expected --use-prefetched-db with missing dir to fail' >&2
+  exit 1
+fi
+if REPORT='' DB_STATUS_FAIL=true GRYPE_DB_CACHE_DIR="$work/grype-db" bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1; then
+  echo 'expected --use-prefetched-db with invalid DB status to fail' >&2
+  exit 1
+fi
+if REPORT='' DB_BUILT='' GRYPE_DB_CACHE_DIR="$work/grype-db" bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1; then
+  echo 'expected --use-prefetched-db with empty DB built timestamp to fail' >&2
+  exit 1
+fi
 echo 'CI image vulnerability gate tests passed'

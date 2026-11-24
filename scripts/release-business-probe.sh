@@ -20,7 +20,7 @@ relay_ipv4_rule=false
 relay_ipv6_rule=false
 
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted && "$EUID" == 0 ]]
-[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" && "$(ps -p 1 -o comm=)" == systemd ]]
 [[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia && ! -e /etc/ocservia ]]
 if getent passwd ocserv-agent >/dev/null; then
@@ -33,9 +33,11 @@ fi
 
 umask 077
 mkdir -m 700 "${ARTIFACT_DIR}"
+: >"${ARTIFACT_DIR}/scenario-timings.jsonl"
 export OCSERVIA_BUSINESS_TEST_WORK_DIR
 OCSERVIA_BUSINESS_TEST_WORK_DIR="$(mktemp -d "${HOME}/.ocservia-business-test-XXXXXX")"
 work="${OCSERVIA_BUSINESS_TEST_WORK_DIR}"
+prefetch_pids=()
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
@@ -112,10 +114,12 @@ cleanup() {
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
+    --slurpfile scenario_timings "${ARTIFACT_DIR}/scenario-timings.jsonl" \
     '{source_commit:$source,version:$version,run_id:$run,run_attempt:$attempt,profile:"smoke",terminal:"revocation",
       ocserv_fixture:"distribution",execution_environment:"GitHub-hosted runner",
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
-      timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
+      timings:$timings[0],scenario_timings:$scenario_timings,
+      passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:"business-smoke",resilience_requested:true,
       resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
@@ -125,6 +129,11 @@ cleanup() {
       limitations:[],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
+  for pid in "${prefetch_pids[@]:-}"; do
+    [[ -n "${pid}" ]] || continue
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+  done
   if [[ "$relay_ipv4_rule" == true ]]; then
     sudo iptables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
   fi
@@ -148,6 +157,33 @@ mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup
 release_verify_native_runner "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
 
+pw_version="$(jq -r '.devDependencies["@playwright/test"]' "${ROOT}/web/package.json")"
+pw_version="${pw_version#^}"
+[[ "${pw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+pw_image="mcr.microsoft.com/playwright:v${pw_version}-noble"
+
+# Overlap image pulls and web npm ci with product loading, apt-get, and Controller setup.
+(
+  docker pull -q registry:2 >/dev/null
+  docker pull -q "${OCSERV_POSTGRES_IMAGE}" >/dev/null
+) >"${work}/prefetch-infra.log" 2>&1 &
+prefetch_infra_pid=$!
+(
+  pw_pulled=false
+  for attempt in 1 2 3; do
+    if docker pull -q "${pw_image}"; then
+      pw_pulled=true
+      break
+    fi
+    if ((attempt < 3)); then sleep $((attempt * 2)); fi
+  done
+  [[ "${pw_pulled}" == true ]]
+) >"${work}/prefetch-playwright.log" 2>&1 &
+prefetch_pw_pid=$!
+npm --prefix "${ROOT}/web" ci --ignore-scripts >"${work}/prefetch-npm.log" 2>&1 &
+prefetch_npm_pid=$!
+prefetch_pids=("${prefetch_infra_pid}" "${prefetch_pw_pid}" "${prefetch_npm_pid}")
+
 next_stage product_consumption
 cp "$PRODUCTS_DIR/product-identity.json" "$ARTIFACT_DIR/agent-product-identity.json"
 cp "$IMAGES_DIR/product-identity.json" "$ARTIFACT_DIR/controller-product-identity.json"
@@ -158,8 +194,8 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay \
 record products_ready
 
 next_stage dependency_install
-sudo apt-get -o Acquire::Retries=3 update -qq
-sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
+sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 update -qq
+sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
 
@@ -216,6 +252,11 @@ openssl x509 -req -days 1 -in "$work/relay.csr" -CA "$work/ca.crt" -CAkey "$work
 install -m 444 "$work/private/relay-tls.key" "$OCSERV_RELAY_SECRET_DIR/tls.key"
 chmod 444 "$OCSERV_RELAY_SECRET_DIR/tls.crt"
 scenario signer_prepare
+
+infra_status=0
+wait "${prefetch_infra_pid}" || infra_status=$?
+cat "${work}/prefetch-infra.log"
+((infra_status == 0))
 
 docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest="${DEPLOYMENT_CONFIG_DIR}/controller-release-${CONTROLLER_ARCH}.json"
@@ -367,23 +408,14 @@ scenario check_enrolled_identity
 record native_node_services
 
 next_stage browser
-npm --prefix "${ROOT}/web" ci --ignore-scripts
+npm_status=0; pw_status=0
+wait "${prefetch_npm_pid}" || npm_status=$?
+wait "${prefetch_pw_pid}" || pw_status=$?
+cat "${work}/prefetch-npm.log" "${work}/prefetch-playwright.log"
+((npm_status == 0 && pw_status == 0))
 mkdir -p "${HOME}/.pki/nssdb"
 if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
 certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
-pw_version="$(jq -r '.devDependencies["@playwright/test"]' "${ROOT}/web/package.json")"
-pw_version="${pw_version#^}"
-[[ "${pw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-pw_image="mcr.microsoft.com/playwright:v${pw_version}-noble"
-pw_pulled=false
-for attempt in 1 2 3; do
-  if docker pull -q "${pw_image}"; then
-    pw_pulled=true
-    break
-  fi
-  if ((attempt < 3)); then sleep $((attempt * 2)); fi
-done
-[[ "${pw_pulled}" == true ]]
 scenario browser_prepare
 docker run --rm --init --ipc=host --network=host \
   --security-opt seccomp=unconfined \

@@ -2,24 +2,51 @@
 # CI-only OS vulnerability gate; temporary scan data is never a Release asset.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image_archives_tsv="${IMAGE_ARCHIVES_TSV:?IMAGE_ARCHIVES_TSV is required}"
-[[ $# == 0 && -f "$image_archives_tsv" && ! -L "$image_archives_tsv" && -s "$image_archives_tsv" ]] || exit 2
+mode=scan
+if (($# > 1)); then
+  exit 2
+elif (($# == 1)); then
+  case "$1" in
+    --update-db-only) mode=update-db-only ;;
+    --use-prefetched-db) mode=use-prefetched-db ;;
+    *) exit 2 ;;
+  esac
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT INT TERM
 export GRYPE_DB_AUTO_UPDATE=false
-db_updated=false
-for attempt in 1 2 3; do
-  if grype db update >/dev/null; then
-    db_updated=true
-    break
-  fi
-  if ((attempt < 3)); then
-    sleep "${IMAGE_SCAN_DB_RETRY_DELAY:-2}"
-  fi
-done
-[[ "${db_updated}" == true ]] || exit 1
-# Missing or invalid vulnerability data cannot report PASS.
-grype db status -o json | jq -e '(.built | type == "string" and length > 0)' >/dev/null
+
+update_and_verify_db() {
+  local db_started="${SECONDS}" db_updated=false attempt
+  for attempt in 1 2 3; do
+    if grype db update >/dev/null; then
+      db_updated=true
+      break
+    fi
+    if ((attempt < 3)); then
+      sleep "${IMAGE_SCAN_DB_RETRY_DELAY:-2}"
+    fi
+  done
+  [[ "${db_updated}" == true ]] || exit 1
+  # Missing or invalid vulnerability data cannot report PASS.
+  grype db status -o json | jq -e '(.built | type == "string" and length > 0)' >/dev/null
+  printf 'controller-scan-timing stage=database seconds=%s\n' "$((SECONDS - db_started))"
+}
+
+if [[ "${mode}" == update-db-only ]]; then
+  update_and_verify_db
+  exit 0
+fi
+
+image_archives_tsv="${IMAGE_ARCHIVES_TSV:?IMAGE_ARCHIVES_TSV is required}"
+[[ -f "$image_archives_tsv" && ! -L "$image_archives_tsv" && -s "$image_archives_tsv" ]] || exit 2
+if [[ "${mode}" == use-prefetched-db ]]; then
+  [[ -n "${GRYPE_DB_CACHE_DIR:-}" && -d "${GRYPE_DB_CACHE_DIR}" && ! -L "${GRYPE_DB_CACHE_DIR}" ]] || exit 2
+  grype db status -o json | jq -e '(.built | type == "string" and length > 0)' >/dev/null
+else
+  update_and_verify_db
+fi
 exemptions_file="${IMAGE_SCAN_EXEMPTIONS:-${ROOT}/deploy/production/image-scan-exemptions.json}"
 [[ -f "${exemptions_file}" && ! -L "${exemptions_file}" && -s "${exemptions_file}" ]] || {
   echo "image scan exemptions file is missing or empty: ${exemptions_file}" >&2
@@ -90,7 +117,7 @@ scan_one_archive() {
   local scan_file="$work/row-${idx}.scan.json"
   local out_file="$work/row-${idx}.out"
   local fail_file="$work/row-${idx}.fail"
-  local findings fixable_count
+  local findings fixable_count started="${SECONDS}"
   syft "docker-archive:$archive" \
     --override-default-catalogers 'apk-db-cataloger,dpkg-db-cataloger,rpm-db-cataloger' \
     -o spdx-json --file "$os_sbom_file" -q
@@ -122,6 +149,7 @@ scan_one_archive() {
   ' "${scan_file}")"
   fixable_count="$(jq -r '.fixable_high_critical' <<<"$findings")"
   echo "$name linux/$arch: $findings" >>"$out_file"
+  printf 'controller-scan-timing image=%s arch=%s seconds=%s\n' "$name" "$arch" "$((SECONDS - started))" >>"$out_file"
   if ((fixable_count > 0)); then
     printf '%s\n' "$name linux/$arch: $fixable_count fixable High/Critical OS findings" >"$fail_file"
   fi

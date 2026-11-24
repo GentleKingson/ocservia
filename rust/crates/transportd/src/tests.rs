@@ -6,6 +6,7 @@
 )]
 
 use std::net::SocketAddr;
+use std::sync::Mutex as StdMutex;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use iroh::{RelayMap, Watcher as _, tls::CaTlsConfig};
@@ -56,6 +57,7 @@ struct TestTrustService {
     override_session_ttl: Option<i64>,
     override_epoch: Option<u64>,
     next_epoch: AtomicU64,
+    authorized_connection: StdMutex<Option<Uuid>>,
 }
 
 #[tonic::async_trait]
@@ -78,6 +80,13 @@ impl TrustService for TestTrustService {
                     && node == &request.node_id)
         );
         assert!(request.session_epoch > 0 && request.connection_id.len() == 16);
+        assert_eq!(
+            *self
+                .authorized_connection
+                .lock()
+                .expect("connection ID lock"),
+            Some(Uuid::from_slice(&request.connection_id).expect("audit connection ID"))
+        );
         Ok(Response::new(
             ocservia_contracts::generated::ocserv::platform::agent::v1::VpnAuditReceipt {
                 event_ids: request
@@ -116,6 +125,14 @@ impl TrustService for TestTrustService {
         request: Request<AuthorizeSessionRequest>,
     ) -> Result<Response<SessionHandshakeResponse>, Status> {
         let req = request.into_inner();
+        let connection_id = Uuid::from_slice(&req.connection_id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .ok_or_else(|| Status::invalid_argument("connection_id invalid"))?;
+        *self
+            .authorized_connection
+            .lock()
+            .expect("connection ID lock") = Some(connection_id);
         let hs = req
             .handshake
             .ok_or_else(|| Status::invalid_argument("handshake missing"))?;
@@ -219,6 +236,7 @@ async fn test_trust_with_options(
         override_session_ttl,
         override_epoch,
         next_epoch: AtomicU64::new(1),
+        authorized_connection: StdMutex::new(None),
     });
     tokio::spawn(
         tonic::transport::Server::builder()

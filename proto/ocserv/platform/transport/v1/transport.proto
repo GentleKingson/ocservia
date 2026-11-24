@@ -184,6 +184,8 @@ message ValidateEnrollmentResponse {
 message AuthorizeSessionRequest {
   bytes remote_endpoint_id = 1;
   ocserv.platform.agent.v1.SessionHandshake handshake = 2;
+  // UUIDv7 assigned by transportd and used for the exact owner term.
+  bytes connection_id = 3;
 }
 
 message WatchEventsRequest {

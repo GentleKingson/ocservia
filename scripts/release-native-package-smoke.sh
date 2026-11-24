@@ -5,11 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 tag="ocservia-native-smoke-${work##*.}"
 tag="${tag,,}"
-container=""
+containers=()
 images=()
 cleanup() {
-  if [[ -n "${container}" ]]; then docker rm -fv "${container}" >/dev/null; fi
-  if ((${#images[@]})); then docker image rm "${images[@]}" >/dev/null; fi
+  local container
+  for container in "${containers[@]:-}"; do
+    [[ -n "${container}" ]] || continue
+    docker rm -fv "${container}" >/dev/null 2>&1 || true
+  done
+  if ((${#images[@]})); then docker image rm "${images[@]}" >/dev/null 2>&1 || true; fi
   rm -rf -- "${work}"
 }
 trap cleanup EXIT
@@ -35,29 +39,42 @@ fi
 
 rocky_image="$(awk 'NR == 1 && $1 == "FROM" {print $2}' "${ROOT}/rust/agent-build.Dockerfile")"
 [[ "${rocky_image}" =~ ^rockylinux:9@sha256:[0-9a-f]{64}$ ]]
-docker build --build-arg "ROCKY_IMAGE=${rocky_image}" -t "${tag}:rpm" - <<'DOCKERFILE'
+images+=("${tag}:rpm" "${tag}:deb")
+docker build --build-arg "ROCKY_IMAGE=${rocky_image}" -t "${tag}:rpm" - <<'DOCKERFILE' >"${work}/build-rpm.log" 2>&1 &
 ARG ROCKY_IMAGE
 FROM ${ROCKY_IMAGE}
 RUN dnf install -y systemd python3 openssl diffutils && dnf clean all
 DOCKERFILE
-images+=("${tag}:rpm")
-docker build -t "${tag}:deb" - <<'DOCKERFILE'
+rpm_build_pid=$!
+
+docker build -t "${tag}:deb" - <<'DOCKERFILE' >"${work}/build-deb.log" 2>&1 &
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 RUN apt-get update && apt-get install -y --no-install-recommends systemd-sysv python3 openssl curl && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
-images+=("${tag}:deb")
-for family in deb rpm; do
+deb_build_pid=$!
+
+rpm_build_status=0
+deb_build_status=0
+wait "${rpm_build_pid}" || rpm_build_status=$?
+wait "${deb_build_pid}" || deb_build_status=$?
+cat "${work}/build-rpm.log" "${work}/build-deb.log"
+if ((rpm_build_status != 0 || deb_build_status != 0)); then
+  exit 1
+fi
+
+run_family_lifecycle() {
+  local family="$1" container="${tag}-${1}" status=""
   # Package scriptlets run against the distro's real systemd and package database.
-  container="$(docker run -d --privileged --cgroupns=private --tmpfs /run --tmpfs /tmp \
-    -v "${packages}:/packages:ro" "${tag}:${family}" /sbin/init)"
-  for _ in {1..40}; do
+  docker run -d --name "${container}" --privileged --cgroupns=private --tmpfs /run --tmpfs /tmp \
+    -v "${packages}:/packages:ro" "${tag}:${family}" /sbin/init >/dev/null
+  for _ in {1..80}; do
     status="$(docker exec "${container}" systemctl is-system-running 2>/dev/null || true)"
     case "${status}" in running|degraded) break ;; esac
-    sleep 1
+    sleep 0.5
   done
   [[ "${status}" == running || "${status}" == degraded ]]
   docker exec -i "${container}" bash -s -- "${family}" "${arch}" "${rpm_arch}" "${versions[@]}" \
-    <<'LIFECYCLE' | tee "${ARTIFACT_DIR}/${family}-lifecycle.log"
+    <<'LIFECYCLE' >"${ARTIFACT_DIR}/${family}-lifecycle.log"
 set -euo pipefail
 family="$1"; arch="$2"; rpm_arch="$3"; shift 3
 first="$1"
@@ -100,6 +117,25 @@ cmp /tmp/original-agent.env /etc/ocservia-agent/agent.env
 grep -Fxq node-identity /var/lib/ocservia-agent/identity/probe
 LIFECYCLE
   docker rm -fv "${container}" >/dev/null
-  container=""
+}
+
+containers=("${tag}-deb" "${tag}-rpm")
+run_family_lifecycle deb >"${work}/deb-runner.log" 2>&1 &
+deb_pid=$!
+run_family_lifecycle rpm >"${work}/rpm-runner.log" 2>&1 &
+rpm_pid=$!
+
+deb_status=0
+rpm_status=0
+wait "${deb_pid}" || deb_status=$?
+wait "${rpm_pid}" || rpm_status=$?
+cat "${work}/deb-runner.log" "${work}/rpm-runner.log"
+for family in deb rpm; do
+  if [[ -f "${ARTIFACT_DIR}/${family}-lifecycle.log" ]]; then
+    cat "${ARTIFACT_DIR}/${family}-lifecycle.log"
+  fi
 done
+if ((deb_status != 0 || rpm_status != 0)); then
+  exit 1
+fi
 printf 'arch=%s\nversions=%s\ndeb=pass\nrpm=pass\n' "${arch}" "${versions[*]}" >"${ARTIFACT_DIR}/native-package-summary.txt"

@@ -1,0 +1,121 @@
+name: Build and Smoke Release Controller Images
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Plain SemVer release version without a leading v
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+    outputs:
+      artifact_id:
+        value: ${{ jobs.build-controller-images.outputs.artifact_id }}
+      manifest_sha256:
+        value: ${{ jobs.build-controller-images.outputs.manifest_sha256 }}
+permissions:
+  contents: read
+jobs:
+  build-controller-images:
+    name: Build Controller Images (${{ inputs.arch }})
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.identity.outputs.sha256 }}
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      BUILDX_BUILDER: controller-release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.arch }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Validate release identity
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
+            echo "version must be plain SemVer without a leading v, got ${INPUT_VERSION}" >&2
+            exit 1
+          fi
+          source_commit="$(git rev-parse HEAD)"
+          {
+            echo "version=${INPUT_VERSION}"
+            echo "source_commit=${source_commit}"
+          } >>"${GITHUB_ENV}"
+      - name: Relay optional BuildKit cache credentials
+        uses: ./.github/actions/build-cache-credentials
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: image-security
+      # Each leg builds natively (no QEMU) and exports one Docker image
+      # archive per image. Nothing is written to GHCR here: the legs hold
+      # only source read, and every production registry write happens inside
+      # the single reviewer-gated publish job.
+      - name: Build Controller images and prefetch fresh vulnerability DB
+        id: build-images
+        run: |
+          grype_db="$RUNNER_TEMP/grype-db"
+          mkdir -p "$grype_db"
+          echo "GRYPE_DB_CACHE_DIR=$grype_db" >>"$GITHUB_ENV"
+          (
+            source scripts/env.sh
+            GRYPE_DB_CACHE_DIR="$grype_db" bash scripts/scan-release-images.sh --update-db-only
+          ) >"$RUNNER_TEMP/grype-db-update.log" 2>&1 &
+          db_pid=$!
+          VERSION="${version}" SOURCE_COMMIT="${source_commit}" \
+            CONTROLLER_ARCH="${{ inputs.arch }}" OUTPUT_DIR="${RUNNER_TEMP}/controller-images" \
+            bash scripts/build-release-controller.sh &
+          build_pid=$!
+          db_status=0; build_status=0
+          wait "$build_pid" || build_status=$?
+          wait "$db_pid" || db_status=$?
+          cat "$RUNNER_TEMP/grype-db-update.log"
+          ((build_status == 0 && db_status == 0))
+      - name: Scan exact Controller image archives
+        id: scan-images
+        env:
+          CONTROLLER_ARCH: ${{ inputs.arch }}
+        run: |
+          source scripts/env.sh
+          scan_table="${RUNNER_TEMP}/controller-images.tsv"
+          : >"$scan_table"
+          for name in gateway control transport backup edge relay signer; do
+            printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
+          done
+          IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh --use-prefetched-db
+      - name: Smoke Controller images on the native runner
+        id: smoke-images
+        env:
+          IMAGES_DIR: ${{ runner.temp }}/controller-images
+          CONTROLLER_ARCH: ${{ inputs.arch }}
+          VERSION: ${{ env.version }}
+        run: scripts/release-controller-image-smoke.sh
+      - name: Bind controller product identity and digests
+        id: identity
+        env:
+          PRODUCT_VERSION: ${{ env.version }}
+          PRODUCT_ARCH: ${{ inputs.arch }}
+        run: |
+          sha256="$(python3 scripts/release-product-identity.py create --kind controller \
+            --directory "$RUNNER_TEMP/controller-images" --source "$GITHUB_SHA" \
+            --version "$PRODUCT_VERSION" --arch "$PRODUCT_ARCH")"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+      - name: Upload Controller image archives
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: controller-images-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/controller-images/*.tar
+            ${{ runner.temp }}/controller-images/product-identity.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove Controller BuildKit builder
+        if: always()
+        run: |
+          docker rm -fv "buildx_buildkit_${BUILDX_BUILDER}0" >/dev/null 2>&1 || true
+          docker buildx rm --force "${BUILDX_BUILDER}" >/dev/null 2>&1 || true

@@ -25,9 +25,18 @@ release_verify_native_runner() {
 
 release_load_controller_images() {
   local images_dir="${1:?}" version="${2:?}" arch="${3:?}" name source
+  local -a pids=()
+  local load_errors=0 pid
+  for name in "${RELEASE_CONTROLLER_ROLES[@]}"; do
+    docker load -i "${images_dir}/${name}-linux-${arch}.tar" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || load_errors=1
+  done
+  ((load_errors == 0)) || return 1
   for name in "${RELEASE_CONTROLLER_ROLES[@]}"; do
     source="ghcr.io/gentlekingson/ocservia/${name}:${version}-linux-${arch}"
-    docker load -i "${images_dir}/${name}-linux-${arch}.tar"
     # Unrelated binfmt handlers could otherwise run a foreign image emulated.
     [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")" == "linux/${arch}" ]]
   done
@@ -36,15 +45,26 @@ release_load_controller_images() {
 release_publish_local_manifest() {
   local root="${1:?}" registry_prefix="${2:?}" repo_prefix="${3}" version="${4:?}" arch="${5:?}" source_commit="${6:?}" output="${7:?}"
   local name source target ref
-  local -a manifest_args=(
+  local -a pids=() manifest_args=(
     --image "postgres=${OCSERV_POSTGRES_IMAGE}"
     --image "otel=${OCSERV_OTEL_IMAGE}"
   )
+  local push_errors=0 pid
   for name in "${RELEASE_CONTROLLER_ROLES[@]}"; do
     source="ghcr.io/gentlekingson/ocservia/${name}:${version}-linux-${arch}"
     target="${registry_prefix}/${repo_prefix}${name}:v${version}"
-    docker tag "${source}" "${target}"
-    docker push "${target}"
+    (
+      docker tag "${source}" "${target}"
+      docker push "${target}"
+    ) &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || push_errors=1
+  done
+  ((push_errors == 0)) || return 1
+  for name in "${RELEASE_CONTROLLER_ROLES[@]}"; do
+    target="${registry_prefix}/${repo_prefix}${name}:v${version}"
     ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${target}" |
       grep "^${registry_prefix}/${repo_prefix}${name}@sha256:")"
     manifest_args+=(--image "${name}=${ref}")

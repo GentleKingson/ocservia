@@ -1,0 +1,96 @@
+name: Build Native Release Agent Packages
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Plain SemVer release version without a leading v
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+    outputs:
+      artifact_id:
+        value: ${{ jobs.build-agent-packages.outputs.artifact_id }}
+      manifest_sha256:
+        value: ${{ jobs.build-agent-packages.outputs.manifest_sha256 }}
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: "0"
+jobs:
+  build-agent-packages:
+    name: Build Agent Packages (${{ inputs.arch }})
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.identity.outputs.sha256 }}
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: native-packages
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
+      - name: Restore Rocky Agent compilation cache
+        id: agent-target-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target/agent-${{ inputs.arch }}-*
+          key: release-agent-target-v3-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v3-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
+      - name: Validate package version & source epoch
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]; then
+            echo "version must be plain SemVer without a leading v, got ${INPUT_VERSION}" >&2
+            exit 1
+          fi
+          {
+            echo "version=${INPUT_VERSION}"
+            echo "source_date_epoch=$(git log -1 --format=%ct)"
+          } >>"${GITHUB_ENV}"
+      - name: Build native Agent / privd / upgrader and packages
+        id: build-packages
+        run: |
+          VERSION="${version}" PACKAGE_ARCH="${{ inputs.arch }}" \
+            OUTPUT_DIR="${RUNNER_TEMP}/packages" \
+            SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
+      - name: Prune stale Rocky Agent cache directories (main only)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+        run: |
+          active="$(cat "rust/target/.active-agent-${{ inputs.arch }}")"
+          for dir in "rust/target/agent-${{ inputs.arch }}-"*; do
+            [[ -d "${dir}" ]] || continue
+            if [[ "$(basename "${dir}")" != "${active}" ]]; then
+              rm -rf -- "${dir}"
+            fi
+          done
+      - name: Save Rocky Agent compilation cache (main only)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target/agent-${{ inputs.arch }}-*
+          key: ${{ steps.agent-target-cache.outputs.cache-primary-key }}
+      - name: Bind agent product identity and digests
+        id: identity
+        env:
+          PRODUCT_VERSION: ${{ env.version }}
+          PRODUCT_ARCH: ${{ inputs.arch }}
+        run: |
+          sha256="$(python3 scripts/release-product-identity.py create --kind agent \
+            --directory "$RUNNER_TEMP/packages" --source "$GITHUB_SHA" \
+            --version "$PRODUCT_VERSION" --arch "$PRODUCT_ARCH")"
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+      - name: Upload package set
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: agent-packages-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/packages/*
+          retention-days: 7
+          if-no-files-found: error

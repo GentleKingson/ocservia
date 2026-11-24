@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
@@ -136,7 +137,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	t.Run("legacy-capability-policy", func(t *testing.T) {
 		t.Run("grantless-1.0-rejected", func(t *testing.T) {
 			handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: 0, AgentVersion: "compatibility-fixture", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
-			response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+			connectionID := uuid.Must(uuid.NewV7())
+			response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: connectionID[:]})
 			if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL || len(response.GetNegotiatedCapabilities()) != 0 || response.GetSessionGrant() != nil {
 				t.Fatalf("protocol 1.0 authorization = %v, %v; want INCOMPATIBLE_PROTOCOL", response, err)
 			}
@@ -154,7 +156,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 				if test.sealing {
 					handshake.SealingKeys = enrollmentSealingKeys()
 				}
-				response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+				connectionID := uuid.Must(uuid.NewV7())
+				response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: connectionID[:]})
 				if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !slices.Equal(response.GetNegotiatedCapabilities(), test.want) || response.GetSessionGrant() == nil {
 					t.Fatalf("compatibility authorization = %v, %v; want capabilities %v", response, err, test.want)
 				}
@@ -166,7 +169,15 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	testutil.NoError(t, err)
 	s.ownerSessions = manager
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
-	authorize := &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake}
+	v4 := uuid.New()
+	for _, invalid := range [][]byte{nil, v4[:]} {
+		response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: invalid})
+		if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED || response.GetSessionGrant() != nil {
+			t.Fatalf("invalid connection ID authorization = %v, %v; want REVOKED", response, err)
+		}
+	}
+	connectionID := uuid.Must(uuid.NewV7())
+	authorize := &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: connectionID[:]}
 	response, err := s.AuthorizeSession(ctx, authorize)
 	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetSessionGrant() == nil || response.GetSessionGrant().GetSessionEpoch() == 0 || !slices.Equal(response.NegotiatedCapabilities, normalizedCapabilities(capabilities)) {
 		t.Fatal("fenced session", response, err)
@@ -174,7 +185,16 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	firstEpoch := response.GetSessionGrant().GetSessionEpoch()
 	successor, err := ownersession.NewManagerBackend(b, logger)
 	testutil.NoError(t, err)
+	// A restarted Controller must release the term using transportd's identity.
+	testutil.NoError(t, successor.CloseSession(ctx, node, connectionID, firstEpoch))
+	state, err := connectionowner.ReadStateBackend(ctx, b, node)
+	testutil.NoError(t, err)
+	if state.ConnectionID != connectionID || uint64(state.Epoch) != firstEpoch || state.Active {
+		t.Fatalf("transportd disconnect did not release its exact owner term: %+v", state)
+	}
 	s.ownerSessions = successor
+	nextConnectionID := uuid.Must(uuid.NewV7())
+	authorize.ConnectionId = nextConnectionID[:]
 	response, err = s.AuthorizeSession(ctx, authorize)
 	if err != nil || response.GetSessionGrant() == nil || response.GetSessionGrant().GetSessionEpoch() <= firstEpoch {
 		t.Fatal("reopened session did not advance session_epoch", response, err)

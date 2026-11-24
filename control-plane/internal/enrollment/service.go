@@ -436,6 +436,11 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
+	connectionID, err := uuid.FromBytes(request.GetConnectionId())
+	if err != nil || connectionID.Version() != 7 {
+		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+		return response, nil
+	}
 	// Phase 1: short read-only validation transaction. Releasing this DB
 	// connection before OpenSession prevents a two-connection pool deadlock
 	// when concurrent agent handshakes acquire owner leases and call transportd.
@@ -529,7 +534,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	var sessionEpoch uint64 = 1
 	var openedSession *ownersession.Session
 	if s.ownerSessions != nil {
-		opened, openErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint)
+		opened, openErr := s.ownerSessions.OpenSession(ctx, fixedNode, connectionID, fixedEndpoint)
 		if openErr != nil {
 			return nil, fmt.Errorf("open owner session: %w", openErr)
 		}
@@ -542,7 +547,6 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		}()
 	}
 	now := s.now().UTC()
-	var err error
 	response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, sessionEpoch, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
 	if err != nil {
 		return nil, fmt.Errorf("issue session grant: %w", err)
