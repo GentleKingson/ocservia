@@ -22,7 +22,7 @@ MANIFEST_DIGEST = 'd' * 64
 
 
 def run(run_id, title, **fields):
-    return {'id': run_id, 'run_number': run_id, 'run_attempt': 1, 'head_sha': SHA, 'head_branch': 'main',
+    return {'id': run_id, 'run_number': run_id, 'run_attempt': 1, 'head_sha': SHA, 'head_branch': 'codex/release-dag-MkmqHg',
             'head_repository': {'full_name': REPO}, 'display_title': title, 'event': 'workflow_dispatch',
             'status': 'completed', 'conclusion': 'success', 'html_url': f'https://example.invalid/{run_id}', **fields}
 
@@ -84,7 +84,7 @@ class Dispatch(unittest.TestCase):
                                                  {}, float('inf'))
         self.assertEqual(selected, completed)
         dispatch = api.call_args_list[1]
-        self.assertEqual(json.loads(dispatch.kwargs['data']), {'ref': 'main', 'inputs': {'expected_sha': SHA}})
+        self.assertEqual(json.loads(dispatch.kwargs['data']), {'ref': 'codex/release-dag-MkmqHg', 'inputs': {'expected_sha': SHA}})
         self.assertIn('--method', dispatch.args)
         self.assertEqual([call.args[1] for call in api.call_args_list[2:]], ['actions/runs/1'] * 2)
 
@@ -101,7 +101,7 @@ class Dispatch(unittest.TestCase):
         with patch.object(evidence, 'api', return_value={'object': {'sha': BASE}}) as api:
             with self.assertRaisesRegex(RuntimeError, 'main moved'):
                 evidence.dispatch(REPO, 'security.yml', SHA, {})
-        api.assert_called_once_with(REPO, 'git/ref/heads/main')
+        api.assert_called_once_with(REPO, 'git/ref/heads/codex/release-dag-MkmqHg')
 
 
 class Publication(unittest.TestCase):

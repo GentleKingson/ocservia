@@ -9,6 +9,9 @@ on:
       arch:
         type: string
         required: true
+      cache_state:
+        type: string
+        required: true
     outputs:
       artifact_id:
         value: ${{ jobs.build-agent-packages.outputs.artifact_id }}
@@ -40,7 +43,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/agent-${{ inputs.arch }}-*
-          key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          key: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}-${{ inputs.cache_state }}
           restore-keys: release-agent-target-v2-${{ runner.os }}-${{ inputs.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Validate package version & source epoch
         env:
@@ -61,7 +64,7 @@ jobs:
             OUTPUT_DIR="${RUNNER_TEMP}/packages" \
             SOURCE_DATE_EPOCH="${source_date_epoch}" bash scripts/build-release-agent.sh
       - name: Save Rocky Agent compilation cache (main only)
-        if: ${{ success() && github.ref == 'refs/heads/main' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && github.ref == 'refs/heads/codex/release-dag-MkmqHg' && steps.agent-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/agent-${{ inputs.arch }}-*

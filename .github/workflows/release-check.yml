@@ -1,11 +1,16 @@
 name: Release Check
-run-name: Release Check v${{ inputs.version }}
+run-name: Release Check v${{ inputs.version }} (${{ inputs.cache_state }})
 on:
   workflow_dispatch:
     inputs:
       version:
         description: Intended release version without v (X.Y.Z or X.Y.Z-rc.N)
         type: string
+        required: true
+      cache_state:
+        description: Whether to restore Controller BuildKit scopes
+        type: choice
+        options: [cold, warm]
         required: true
       contract_base_ref:
         description: Optional prior commit or tag; defaults to the latest release tag before HEAD (or HEAD~1)
@@ -15,7 +20,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-check-${{ github.sha }}
+  group: release-check-${{ github.sha }}-${{ inputs.cache_state }}
   cancel-in-progress: false
 env:
   VERSION: ${{ inputs.version }}
@@ -29,7 +34,7 @@ jobs:
     steps:
       - name: Require main branch and a release version
         run: |
-          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REF" = refs/heads/codex/release-dag-MkmqHg
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "$VERSION" != 0.0.0 ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -106,6 +111,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       arch: amd64
+      cache_state: ${{ inputs.cache_state }}
 
   agent-arm64:
     needs: prepare
@@ -113,6 +119,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       arch: arm64
+      cache_state: ${{ inputs.cache_state }}
 
   controller-amd64:
     needs: prepare
@@ -120,6 +127,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       arch: amd64
+      cache_state: ${{ inputs.cache_state }}
 
   controller-arm64:
     needs: prepare
@@ -127,6 +135,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       arch: arm64
+      cache_state: ${{ inputs.cache_state }}
 
   smoke-agent-packages:
     name: Smoke Agent Packages (${{ matrix.arch }})
@@ -198,7 +207,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: rust/target/agent-${{ matrix.arch }}-*
-          key: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          key: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}-${{ inputs.cache_state }}
           restore-keys: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
       - name: Validate RC to final package lifecycle (${{ matrix.arch }})
         env:

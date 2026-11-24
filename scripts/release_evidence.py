@@ -48,22 +48,22 @@ def list_items(repo, path, key, **params):
 
 def matches(run, repo, sha, events, title=None):
     head_repository = run['head_repository']
-    return (run['event'] in events and run['head_sha'] == sha and run['head_branch'] == 'main'
+    return (run['event'] in events and run['head_sha'] == sha and run['head_branch'] == 'codex/release-dag-MkmqHg'
             and head_repository is not None and head_repository['full_name'].lower() == repo.lower()
             and (title is None or run['display_title'] == title))
 
 
 def latest(repo, workflow, sha, predicate):
     runs = list_items(repo, f'actions/workflows/{workflow}/runs', 'workflow_runs',
-                      branch='main', head_sha=sha)
+                      branch='codex/release-dag-MkmqHg', head_sha=sha)
     return max((run for run in runs if predicate(run)),
                key=lambda run: run['run_number'], default=None)
 
 
 def dispatch(repo, workflow, sha, inputs):
-    require(api(repo, 'git/ref/heads/main')['object']['sha'] == sha,
+    require(api(repo, 'git/ref/heads/codex/release-dag-MkmqHg')['object']['sha'] == sha,
             f'main moved before {workflow} could be dispatched for {sha}')
-    data = json.dumps({'ref': 'main', 'inputs': {'expected_sha': sha, **inputs}}).encode()
+    data = json.dumps({'ref': 'codex/release-dag-MkmqHg', 'inputs': {'expected_sha': sha, **inputs}}).encode()
     run = api(repo, f'actions/workflows/{workflow}/dispatches', '--method', 'POST',
               '-H', 'X-GitHub-Api-Version: 2026-03-10', '--input', '-', data=data)
     run_id = run['workflow_run_id']
