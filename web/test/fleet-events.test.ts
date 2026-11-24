@@ -118,7 +118,7 @@ describe("fleet event stream", () => {
     store.$dispose();
   });
 
-  it("keeps heartbeat and other nodes' command results off the fleet rebuild path", async () => {
+  it("keeps heartbeat and other nodes' command results off the node detail refresh path", async () => {
     vi.useFakeTimers();
     vi.mocked(getNode).mockResolvedValue({ id: "node" } as never);
     vi.mocked(listNodeSessions).mockResolvedValue({
@@ -128,11 +128,13 @@ describe("fleet event stream", () => {
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
     vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
     const store = useFleetStore();
-    store.start();
+    store.start("detail");
     await vi.advanceTimersByTimeAsync(0);
     const stream = FakeEventSource.instances.at(-1);
     stream?.onopen?.();
     await store.select("node");
+    stream?.dispatchEvent(platformEvent("connected", "other-node"));
+    stream?.dispatchEvent(platformEvent("path_changed", "other-node"));
 
     for (let i = 0; i < 40; i += 1) {
       stream?.dispatchEvent(platformEvent("heartbeat", "node"));
@@ -140,15 +142,90 @@ describe("fleet event stream", () => {
       stream?.dispatchEvent(platformEvent("command_result", "other-node"));
       await vi.advanceTimersByTimeAsync(150);
     }
-    expect(listNodes).toHaveBeenCalledTimes(1);
+    expect(listNodes).not.toHaveBeenCalled();
     expect(getNode).toHaveBeenCalledTimes(1);
 
     stream?.dispatchEvent(platformEvent("command_result"));
     await vi.advanceTimersByTimeAsync(4_999);
-    expect(listNodes).toHaveBeenCalledTimes(1);
+    expect(listNodes).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    expect(listNodes).toHaveBeenCalledTimes(2);
+    expect(listNodes).not.toHaveBeenCalled();
     expect(getNode).toHaveBeenCalledTimes(2);
+    store.$dispose();
+  });
+
+  it("publishes the node before secondary reads and keeps only same-node results", async () => {
+    const store = useFleetStore();
+    const previous =
+      Promise.withResolvers<Awaited<ReturnType<typeof listNodeIpBans>>>();
+    vi.mocked(getNode).mockImplementation((id) =>
+      Promise.resolve({ id } as never),
+    );
+    vi.mocked(listNodeSessions).mockResolvedValue({
+      items: [],
+      page: { hasMore: false },
+    });
+    vi.mocked(listNodeIpBans)
+      .mockImplementationOnce(() => previous.promise)
+      .mockResolvedValueOnce({ items: [{ ip: "192.0.2.1" }] })
+      .mockRejectedValueOnce(new Error("IP ban refresh failed"));
+    vi.mocked(listNodeUserGroupState)
+      .mockRejectedValueOnce(new Error("User state unavailable"))
+      .mockResolvedValue({ items: [] });
+
+    const first = store.select("first");
+    await vi.waitFor(() => {
+      expect(store.userGroupReadState).toBe("unavailable");
+    });
+    expect(store.selected?.id).toBe("first");
+    expect(store.sessionsState).toBe("ready");
+    expect(store.ipBansState).toBe("loading");
+    expect(store.selectionError).toBe("");
+
+    await store.select("next");
+    previous.resolve({ items: [{ ip: "192.0.2.2" }] });
+    await first;
+    expect(store.selected?.id).toBe("next");
+    expect(store.ipBans.map(({ ip }) => ip)).toEqual(["192.0.2.1"]);
+
+    await store.select("next");
+    expect(store.ipBans.map(({ ip }) => ip)).toEqual(["192.0.2.1"]);
+    expect(store.ipBansState).toBe("stale");
+    expect(store.userGroupReadState).toBe("ready");
+    store.$dispose();
+  });
+
+  it("reconnects detail updates while a section request is pending", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getNode).mockResolvedValue({ id: "node" } as never);
+    const sessions =
+      Promise.withResolvers<Awaited<ReturnType<typeof listNodeSessions>>>();
+    vi.mocked(listNodeSessions).mockReturnValueOnce(sessions.promise);
+    vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
+    vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
+    const store = useFleetStore();
+    await store.select("node");
+    store.start("detail");
+    await vi.advanceTimersByTimeAsync(0);
+    FakeEventSource.instances.at(-1)?.onopen?.();
+    FakeEventSource.instances.at(-1)?.onerror?.();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(listNodeSessions).toHaveBeenCalledTimes(1);
+    expect(store.sessionsState).toBe("loading");
+    expect(store.userGroupReadState).toBe("ready");
+    FakeEventSource.instances.at(-1)?.onopen?.();
+
+    const reads = vi.mocked(getNode).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(getNode).toHaveBeenCalledTimes(reads);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(getNode).toHaveBeenCalledTimes(reads + 1);
+    expect(listNodes).not.toHaveBeenCalled();
+    sessions.resolve({ items: [], page: { hasMore: false } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.sessionsState).toBe("ready");
     store.$dispose();
   });
 

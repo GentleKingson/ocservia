@@ -500,20 +500,19 @@ describe("controlled fleet operations", () => {
     );
 
     const store = useFleetStore();
-    const pending = store.select(node.id);
-    await vi.waitFor(() => {
-      expect(listNodeSessions).toHaveBeenCalledTimes(1);
-      expect(listNodeIpBans).toHaveBeenCalledTimes(1);
-      expect(listNodeUserGroupState).toHaveBeenCalledTimes(1);
-    });
+    await store.select(node.id);
+    expect(store.selected?.id).toBe(node.id);
+    expect(store.sessionsState).toBe("loading");
+    expect(listNodeSessions).toHaveBeenCalledTimes(1);
+    expect(listNodeIpBans).toHaveBeenCalledTimes(1);
+    expect(listNodeUserGroupState).toHaveBeenCalledTimes(1);
 
     sessionsDeferred.resolve({ items: [session], page: { hasMore: false } });
     bansDeferred.resolve({ items: [] });
     usersDeferred.resolve({ items: [] });
-    await pending;
-
-    expect(store.selected?.id).toBe(node.id);
-    expect(store.sessions).toEqual([session]);
+    await vi.waitFor(() => {
+      expect(store.sessions).toEqual([session]);
+    });
     store.$dispose();
   });
 });

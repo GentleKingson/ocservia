@@ -110,7 +110,9 @@ require(re.findall(r'^  ([\w-]+):$', release.split('\njobs:\n', 1)[1], re.MULTIL
 require(not (root / '.github/workflows/release-business-diagnostic.yml').exists(),
         'redundant release-business-diagnostic.yml workflow must stay retired')
 require('needs: [agent-amd64, controller-amd64, security]' in rc_business_job and
-        'needs: [controller-amd64, security]' in rc_quick_job and
+        'needs: [agent-amd64, controller-amd64, security]' in rc_quick_job and
+        'needs.agent-amd64.outputs.artifact_id' in rc_quick_job and
+        'needs.controller-amd64.outputs.artifact_id' in rc_quick_job and
         all('needs.controller-amd64.outputs.artifact_id' in entry and 'run-id:' not in entry
             for entry in (rc_business_job, rc_quick_job)),
         'amd64 acceptance must use the original same-run artifacts while arm64 and RC checks continue')

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 iroh = { workspace = true, features = ["unstable-net-report"] }
 iroh-relay.workspace = true
+noq = { version = "=1.4.0", default-features = false }
 rustls-pki-types.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

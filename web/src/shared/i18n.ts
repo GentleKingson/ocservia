@@ -251,6 +251,8 @@ export const i18n = createI18n({
       loading: "Loading",
       nodeLoading: "Loading node state...",
       nodeUnavailable: "Node state is unavailable",
+      nodeSectionUnavailable: "This section could not be loaded",
+      nodeSectionStale: "Refresh failed. Showing the last available data.",
       nodeNotFound: "Node not found in this workspace",
       staleNode: "This node has stale observed state",
       nodeId: "Node ID",

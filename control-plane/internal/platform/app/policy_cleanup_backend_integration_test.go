@@ -170,7 +170,7 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var steps []string
-	completed := make(chan struct{}, 1)
+	completed := make(chan []string, 1)
 	step := func(name string) func(context.Context) error {
 		return func(context.Context) error { steps = append(steps, name); return nil }
 	}
@@ -181,7 +181,8 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 		certificates: step("certificates"),
 		audit: func(context.Context) error {
 			steps = append(steps, "audit")
-			completed <- struct{}{}
+			completed <- steps
+			steps = nil
 			return nil
 		},
 	}
@@ -214,13 +215,22 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 				}
 				return true
 			})
-			if cleanup == nil || !errors.Is(cleanup, database.ErrPermission) || len(steps) != 0 {
-				t.Fatal("wrong failure or later maintenance executed", record, steps)
+			if cleanup == nil || !errors.Is(cleanup, database.ErrPermission) {
+				t.Fatal("wrong failure", record)
 			}
 		case <-time.After(30 * time.Second):
 			t.Fatal("real cleanup failure not observed")
 		}
 		break
+	}
+	wantSteps := []string{"rollouts", "telemetry", "certificates", "audit"}
+	select {
+	case pass := <-completed:
+		if !reflect.DeepEqual(pass, wantSteps) {
+			t.Fatal("maintenance did not continue after policy cleanup failure", pass)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("policy cleanup prevented independent maintenance")
 	}
 	for i := 0; i < 2; i++ {
 		if err := migrate(); err != nil {
@@ -237,9 +247,9 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 		t.Fatal("scheduler exited rather than waiting for next tick")
 	}
 	select {
-	case <-completed:
-		if !reflect.DeepEqual(steps, []string{"rollouts", "telemetry", "certificates", "audit"}) {
-			t.Fatal("maintenance recovery order", steps)
+	case pass := <-completed:
+		if !reflect.DeepEqual(pass, wantSteps) {
+			t.Fatal("maintenance recovery order", pass)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("maintenance did not recover")

@@ -1,4 +1,4 @@
-import type { Page, Request } from "@playwright/test";
+import type { Page, Request, Route } from "@playwright/test";
 import { expect, test } from "./csp";
 import { installConsoleMocks } from "./fixtures";
 
@@ -34,6 +34,8 @@ async function openNode(
   page: Page,
   effectiveActions: Record<string, unknown>,
   userGroupState: unknown[] = [alice],
+  readSessions = (route: Route) =>
+    route.fulfill({ json: { items: [], page: { has_more: false } } }),
 ): Promise<Request[]> {
   const node = {
     id: nodeId,
@@ -57,9 +59,7 @@ async function openNode(
   await page.route(`**/api/v1/nodes/${nodeId}`, (route) =>
     route.fulfill({ json: node }),
   );
-  await page.route(`**/api/v1/nodes/${nodeId}/sessions?**`, (route) =>
-    route.fulfill({ json: { items: [], page: { has_more: false } } }),
-  );
+  await page.route(`**/api/v1/nodes/${nodeId}/sessions?**`, readSessions);
   await page.route(`**/api/v1/nodes/${nodeId}/ip-bans`, (route) =>
     route.fulfill({ json: { items: [] } }),
   );
@@ -97,6 +97,37 @@ test("explains denied and unknown permissions on disabled controls", async ({
     "Action availability has not been read. Refresh the node details.",
   );
   expect(writes).toHaveLength(0);
+});
+
+test("shows the node and healthy sections when session reads fail", async ({
+  page,
+}) => {
+  const release = Promise.withResolvers<undefined>();
+  const allowed = { allowed: true, reason: "available" };
+  await openNode(
+    page,
+    { "service.reload": allowed, "user.manage": allowed },
+    [alice],
+    async (route) => {
+      await release.promise;
+      await route.fulfill({ status: 503, json: {} });
+    },
+  );
+  const sessions = page.locator("#node-sessions");
+  try {
+    await expect(page.locator("#node-overview")).toBeVisible();
+    await expect(sessions.getByText("Loading", { exact: true })).toBeVisible();
+    await expect(page.getByText("alice", { exact: true })).toBeVisible();
+  } finally {
+    release.resolve(undefined);
+  }
+  await expect(sessions.getByRole("alert")).toHaveText(
+    "This section could not be loaded",
+  );
+  await expect(sessions.getByText("No active sessions")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Reload", exact: true }),
+  ).toBeEnabled();
 });
 
 test("keeps node sections and certificate input stable during refresh", async ({

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -14,9 +15,7 @@ import (
 
 const defaultSchedulerStepTimeout = 25 * time.Second
 
-// Fixed maintenance steps: only users cleanup/DB-unavailable skips the rest of
-// the pass, rollouts/telemetry/certificates/retention isolate per-step errors
-// and timeouts, and audit failures remain fatal.
+// Maintenance steps execute in a fixed order and share the Controller lifecycle.
 type maintenanceWork struct {
 	users, rollouts, telemetry, certificates, audit func(context.Context) error
 	retention                                       func(context.Context) error
@@ -31,89 +30,83 @@ func (w maintenanceWork) stepContext(ctx context.Context) (context.Context, cont
 	return context.WithTimeout(ctx, timeout)
 }
 
-func (w maintenanceWork) runIsolated(ctx context.Context, name string, logger *slog.Logger, fn func(context.Context) error) error {
-	if fn == nil {
-		return nil
+func (w maintenanceWork) run(ctx context.Context, concurrency int, logger *slog.Logger, lastSuccess map[string]time.Time) error {
+	steps := [...]struct {
+		name     string
+		fn       func(context.Context) error
+		isolated bool
+		tracer   string
+		span     string
+	}{
+		{name: "users", fn: w.users, tracer: "ocservia.useroperations", span: "user_operations.scheduler.run"},
+		{name: "rollouts", fn: w.rollouts, isolated: true},
+		{name: "telemetry", fn: w.telemetry, isolated: true},
+		{name: "certificates", fn: w.certificates, isolated: true, tracer: "ocservia.certificates", span: "certificates.maintenance.run"},
+		{name: "audit", fn: w.audit},
+		{name: "retention", fn: w.retention, isolated: true},
 	}
-	stepCtx, cancel := w.stepContext(ctx)
-	defer cancel()
-	err := fn(stepCtx)
-	if err == nil {
-		return nil
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if errors.Is(err, database.ErrUnavailable) {
-		return err
-	}
-	logger.ErrorContext(ctx, "background maintenance step failed", "step", name, "error", err)
-	return nil
-}
-
-func (w maintenanceWork) run(ctx context.Context, started time.Time, concurrency int, logger *slog.Logger) error {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	usersCtx, usersCancel := w.stepContext(ctx)
-	runCtx, span := otel.Tracer("ocservia.useroperations").Start(usersCtx, "user_operations.scheduler.run")
-	err := w.users(runCtx)
-	usersCancel()
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "scheduler run failed")
-		span.End()
-		return err
-	}
-	span.End()
-	logger.InfoContext(ctx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", concurrency)
-	if err := w.runIsolated(ctx, "rollouts", logger, w.rollouts); err != nil {
-		return err
-	}
-	if err := w.runIsolated(ctx, "telemetry", logger, w.telemetry); err != nil {
-		return err
-	}
-	if err := w.runIsolated(ctx, "certificates", logger, func(stepCtx context.Context) error {
-		certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(stepCtx, "certificates.maintenance.run")
-		err := w.certificates(certificateCtx)
-		if err != nil {
-			certificateSpan.RecordError(err)
-			certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
-		}
-		certificateSpan.End()
-		return err
-	}); err != nil {
-		return err
-	}
-	auditCtx, auditCancel := w.stepContext(ctx)
-	err = w.audit(auditCtx)
-	auditCancel()
-	if err != nil {
-		return err
-	}
-	return w.runIsolated(ctx, "retention", logger, w.retention)
-}
-
-func runScheduler(ctx context.Context, ticks <-chan time.Time, work maintenanceWork, concurrency int, logger *slog.Logger) error {
-	for {
+	for _, step := range steps {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if step.fn == nil {
+			continue
+		}
 		started := time.Now()
-		if err := work.run(ctx, started, concurrency, logger); err != nil {
-			var cleanup *useroperations.EnforcementCleanupError
-			cleanupFailed := errors.As(err, &cleanup)
-			if cleanupFailed && ctx.Err() != nil {
-				return ctx.Err()
+		stepCtx, cancel := w.stepContext(ctx)
+		err := runMaintenanceStep(stepCtx, step.fn, step.tracer, step.span)
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		duration := time.Since(started).Milliseconds()
+		if err == nil {
+			lastSuccess[step.name] = time.Now().UTC()
+			if step.name == "users" {
+				logger.InfoContext(ctx, "user operations scheduler completed", "duration_ms", duration, "submission_limit", concurrency)
 			}
-			if cleanupFailed {
-				logger.ErrorContext(ctx, "policy enforcement cleanup failed; remaining maintenance skipped; retry on next tick", "alert_kind", "user_operations.cleanup_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
-			} else if errors.Is(err, database.ErrUnavailable) && ctx.Err() == nil {
-				logger.ErrorContext(ctx, "maintenance database unavailable; remaining maintenance skipped; retry on next tick", "alert_kind", "scheduler.database_unavailable", "error", err, "duration_ms", time.Since(started).Milliseconds())
-			} else {
-				logger.ErrorContext(ctx, "user operations scheduler failed", "alert_kind", "user_operations.scheduler_failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
-				return err
-			}
+			continue
+		}
+		var cleanup *useroperations.EnforcementCleanupError
+		isolate := step.isolated || errors.Is(err, database.ErrDeadlock) || errors.Is(err, database.ErrSerialization)
+		alert := "scheduler.step_failed"
+		switch {
+		case errors.Is(err, database.ErrCommitUnknown):
+			alert, isolate = "scheduler.commit_unknown", false
+		case errors.Is(err, database.ErrUnavailable):
+			alert, isolate = "scheduler.database_unavailable", false
+		case step.name == "users" && errors.As(err, &cleanup) && errors.Is(cleanup, database.ErrPermission):
+			alert, isolate = "user_operations.cleanup_failed", true
+		}
+		logger.ErrorContext(ctx, "background maintenance step failed", "alert_kind", alert, "step", step.name, "error", err,
+			"duration_ms", duration, "last_success_at", lastSuccess[step.name])
+		if !isolate {
+			return fmt.Errorf("maintenance %s: %w", step.name, err)
+		}
+	}
+	return nil
+}
+
+func runMaintenanceStep(ctx context.Context, fn func(context.Context) error, tracer, name string) error {
+	if name == "" {
+		return fn(ctx)
+	}
+	ctx, span := otel.Tracer(tracer).Start(ctx, name)
+	defer span.End()
+	if err := fn(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "maintenance step failed")
+		return err
+	}
+	return nil
+}
+
+func runScheduler(ctx context.Context, ticks <-chan time.Time, work maintenanceWork, concurrency int, logger *slog.Logger) error {
+	lastSuccess := make(map[string]time.Time)
+	for {
+		if err := work.run(ctx, concurrency, logger, lastSuccess); err != nil &&
+			!errors.Is(err, database.ErrUnavailable) && !errors.Is(err, database.ErrCommitUnknown) {
+			return err
 		}
 		select {
 		case <-ctx.Done():

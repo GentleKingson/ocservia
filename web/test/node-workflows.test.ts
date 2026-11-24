@@ -214,6 +214,7 @@ beforeEach(() => {
     initialized: true,
     selecting: false,
     selectionError: "",
+    userGroupReadState: "ready",
     userGroupState: [],
     select: vi.fn().mockResolvedValue(undefined),
     start: vi.fn(),

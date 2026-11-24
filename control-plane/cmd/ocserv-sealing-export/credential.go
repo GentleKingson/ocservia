@@ -2,11 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"strings"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/protectedfile"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,44 +24,14 @@ func readCredentialFile(path string) ([]byte, error) {
 	return raw, nil
 }
 
-// Walk verified directory descriptors rather than checking and reopening paths.
-// This follows the Controller's strict command-signing key ancestry contract.
 func openCredentialFile(path string) (*os.File, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
-		return nil, errors.New("credential path must be absolute and canonical")
-	}
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	uid := uint32(os.Geteuid())
-	directory, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	file, err := protectedfile.Open(path, uid)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open credential: %w", err)
 	}
-	defer func() { _ = unix.Close(directory) }()
-	for i := 0; ; i++ {
-		var stat unix.Stat_t
-		if err := unix.Fstat(directory, &stat); err != nil {
-			return nil, err
-		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFDIR || (stat.Uid != 0 && stat.Uid != uid) || stat.Mode&0022 != 0 {
-			return nil, errors.New("credential ancestry must be root- or process-owned and not group/world writable")
-		}
-		if i == len(parts)-1 {
-			break
-		}
-		next, err := unix.Openat(directory, parts[i], unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return nil, err
-		}
-		_ = unix.Close(directory)
-		directory = next
-	}
-	fd, err := unix.Openat(directory, parts[len(parts)-1], unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), path)
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		file.Close()
 		return nil, err
 	}

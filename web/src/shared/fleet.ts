@@ -91,12 +91,59 @@ async function waitForVisiblePage(signal: AbortSignal): Promise<void> {
   });
 }
 
+export type DetailReadState = "loading" | "ready" | "unavailable" | "stale";
+
+function createDetailSection<T>(empty: T, onSettled: () => void) {
+  const data = shallowRef<T>(empty);
+  const state = ref<DetailReadState>("loading");
+  const reads = createReadRequest();
+
+  async function load(
+    read: (signal: AbortSignal) => Promise<T>,
+  ): Promise<void> {
+    if (reads.pending) return;
+    const request = reads.begin();
+    try {
+      const result = await read(request.signal);
+      if (!request.current()) return;
+      data.value = result;
+      state.value = "ready";
+    } catch {
+      if (!request.current()) return;
+      state.value =
+        state.value === "ready" || state.value === "stale"
+          ? "stale"
+          : "unavailable";
+    } finally {
+      if (request.finish()) onSettled();
+    }
+  }
+
+  function reset(): void {
+    reads.cancel();
+    data.value = empty;
+    state.value = "loading";
+  }
+
+  return { data, state, load, reset, cancel: reads.cancel };
+}
+
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = shallowRef<NodeObservedState[]>([]);
   const selected = shallowRef<NodeObservedState>();
-  const sessions = shallowRef<NodeSession[]>([]);
-  const ipBans = shallowRef<NodeIpBan[]>([]);
-  const userGroupState = shallowRef<UserGroupResourceState[]>([]);
+  function rescheduleDetail(): void {
+    foregroundRefresh.reschedule();
+  }
+  const sessionSection = createDetailSection<NodeSession[]>(
+    [],
+    rescheduleDetail,
+  );
+  const ipBanSection = createDetailSection<NodeIpBan[]>([], rescheduleDetail);
+  const userGroupSection = createDetailSection<UserGroupResourceState[]>(
+    [],
+    rescheduleDetail,
+  );
+  const detailSections = [sessionSection, ipBanSection, userGroupSection];
   const latestOperation = ref<Operation>();
   const operationNodeId = ref<string>();
   const operationTracking = ref(false);
@@ -115,6 +162,7 @@ export const useFleetStore = defineStore("fleet", () => {
   let eventCursor: string | undefined;
   const streamConnected = ref(false);
   let selectionTarget: string | undefined;
+  let detailMode = false;
   let connectSequence = 0;
   const rebuildReads = createReadRequest();
   const selectReads = createReadRequest();
@@ -183,7 +231,6 @@ export const useFleetStore = defineStore("fleet", () => {
   async function rebuild(): Promise<void> {
     if (!isPageActive()) return;
     const request = rebuildReads.begin();
-    const selectSequenceAtStart = selectReads.revision;
     loading.value = true;
     try {
       // Read the cursor before the nodes so events racing the snapshot are
@@ -208,9 +255,6 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!source && snapshotEvents) eventCursor = snapshotEvents.items[0]?.id;
       snapshotAt.value = new Date();
       initialized.value = true;
-      if (selectionTarget && selectReads.revision === selectSequenceAtStart)
-        await select(selectionTarget);
-      if (!request.current()) return;
       unavailable.value = false;
     } catch {
       if (!request.current()) return;
@@ -223,58 +267,53 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function select(nodeId: string): Promise<void> {
-    if (selectionTarget !== nodeId) clearOperation();
-    selectionTarget = nodeId;
-    if (selected.value && selected.value.id !== nodeId) {
+    if (selectionTarget !== nodeId) {
+      clearOperation();
       selected.value = undefined;
-      sessions.value = [];
-      ipBans.value = [];
-      userGroupState.value = [];
+      for (const section of detailSections) section.reset();
     }
+    selectionTarget = nodeId;
     const request = selectReads.begin();
     selecting.value = true;
     selectionError.value = "";
     try {
       const node = await getNode(nodeId, request.signal);
       if (!request.current()) return;
-      const loadNodeSessions = async (): Promise<NodeSession[]> => {
-        const rebuiltSessions: NodeSession[] = [];
-        let cursor: string | undefined;
-        do {
-          const page = await listNodeSessions(nodeId, cursor, request.signal);
-          if (!request.current()) return rebuiltSessions;
-          rebuiltSessions.push(...page.items);
-          cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-        } while (cursor);
-        return rebuiltSessions;
-      };
-      const [rebuiltSessions, ipBansPage, userGroupStatePage] =
-        await Promise.all([
-          loadNodeSessions(),
-          listNodeIpBans(nodeId, request.signal),
-          listNodeUserGroupState(nodeId, request.signal),
-        ]);
-      if (!request.current()) return;
       selected.value = node;
-      sessions.value = rebuiltSessions;
-      ipBans.value = ipBansPage.items;
-      userGroupState.value = userGroupStatePage.items;
-      selectionError.value = "";
-      unavailable.value = false;
     } catch (error) {
       if (!request.current()) return;
       if (error instanceof ResponseError && error.response.status === 404) {
+        selected.value = undefined;
+        for (const section of detailSections) section.reset();
         selectionError.value = "notFound";
       } else {
-        unavailable.value = true;
         selectionError.value = "unavailable";
       }
+      return;
     } finally {
       if (request.finish()) {
         selecting.value = false;
         foregroundRefresh.reschedule();
       }
     }
+
+    void sessionSection.load(async (signal) => {
+      const items: NodeSession[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await listNodeSessions(nodeId, cursor, signal);
+        signal.throwIfAborted();
+        items.push(...page.items);
+        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+      } while (cursor);
+      return items;
+    });
+    void ipBanSection.load(
+      async (signal) => (await listNodeIpBans(nodeId, signal)).items,
+    );
+    void userGroupSection.load(
+      async (signal) => (await listNodeUserGroupState(nodeId, signal)).items,
+    );
   }
 
   async function runOperation(
@@ -345,6 +384,14 @@ export const useFleetStore = defineStore("fleet", () => {
     }
   }
 
+  async function runSectionOperation(
+    section: { state: { value: DetailReadState } },
+    create: Parameters<typeof runOperation>[0],
+  ): Promise<void> {
+    if (section.state.value === "ready" && !selectionError.value)
+      await runOperation(create);
+  }
+
   function detachOperation(): void {
     operationController?.abort();
     operationController = undefined;
@@ -366,6 +413,7 @@ export const useFleetStore = defineStore("fleet", () => {
     // Suspend snapshot reads only; accepted operations keep their own tracking.
     rebuildReads.cancel();
     selectReads.cancel();
+    for (const section of detailSections) section.cancel();
     // Cancellation fences old finalizers; the read owner settles its UI state.
     loading.value = false;
     selecting.value = false;
@@ -374,14 +422,24 @@ export const useFleetStore = defineStore("fleet", () => {
   const foregroundRefresh = createForegroundRefresh(
     async () => {
       const sequence = connectSequence;
-      if (!loading.value || !rebuildReads.pending) await rebuild();
+      if (detailMode) {
+        if (selectionTarget && !selectReads.pending)
+          await select(selectionTarget);
+      } else if (!rebuildReads.pending) {
+        await rebuild();
+      }
       if (sequence === connectSequence && isPageActive() && !source)
         await connect();
     },
     () =>
       streamConnected.value &&
-      !unavailable.value &&
-      selectionError.value !== "unavailable"
+      (detailMode
+        ? selectionError.value !== "unavailable" &&
+          detailSections.every(
+            ({ state }) =>
+              state.value !== "stale" && state.value !== "unavailable",
+          )
+        : !unavailable.value)
         ? 60_000
         : 15_000,
     pauseRefresh,
@@ -394,9 +452,7 @@ export const useFleetStore = defineStore("fleet", () => {
     selectReads.cancel();
     selectionTarget = undefined;
     selected.value = undefined;
-    sessions.value = [];
-    ipBans.value = [];
-    userGroupState.value = [];
+    for (const section of detailSections) section.reset();
     selecting.value = false;
     selectionError.value = "";
   }
@@ -409,6 +465,13 @@ export const useFleetStore = defineStore("fleet", () => {
     source = undefined;
     streamConnected.value = false;
     try {
+      if (detailMode && !eventCursor) {
+        const page = await listEvents(undefined, undefined, "desc", 1).catch(
+          () => undefined,
+        );
+        if (sequence !== connectSequence || !isPageActive()) return;
+        eventCursor = page?.items[0]?.id;
+      }
       const path = await eventStreamPath(eventCursor);
       if (sequence !== connectSequence || !isPageActive()) return;
       const stream = new EventSource(path);
@@ -416,7 +479,7 @@ export const useFleetStore = defineStore("fleet", () => {
       stream.onopen = () => {
         if (sequence !== connectSequence || source !== stream) return;
         streamConnected.value = true;
-        if (unavailable.value) foregroundRefresh.request();
+        if (!detailMode && unavailable.value) foregroundRefresh.request();
         else foregroundRefresh.reschedule();
       };
       stream.addEventListener("platform", (message) => {
@@ -443,13 +506,16 @@ export const useFleetStore = defineStore("fleet", () => {
         )
           return;
         // Routine observations are picked up by the periodic snapshot.
-        if (
+        const connectionChanged =
           event.type === "connected" ||
           event.type === "disconnected" ||
-          event.type === "path_changed" ||
-          ((event.type === "command_result" ||
-            event.type === "simulation_result") &&
-            event.node_id === selectionTarget)
+          event.type === "path_changed";
+        const commandFinished =
+          event.type === "command_result" || event.type === "simulation_result";
+        const selectedEvent = event.node_id === selectionTarget;
+        if (
+          (connectionChanged && (!detailMode || selectedEvent)) ||
+          (detailMode && commandFinished && selectedEvent)
         )
           foregroundRefresh.request(fleetEventRefreshDelay);
         if (typeof window !== "undefined")
@@ -463,12 +529,12 @@ export const useFleetStore = defineStore("fleet", () => {
         stream.close();
         source = undefined;
         streamConnected.value = false;
-        unavailable.value = true;
+        if (!detailMode) unavailable.value = true;
         foregroundRefresh.reschedule();
         void probeAuthentication().catch(() => undefined);
       };
     } catch {
-      if (sequence === connectSequence) unavailable.value = true;
+      if (sequence === connectSequence && !detailMode) unavailable.value = true;
     }
   }
 
@@ -480,9 +546,12 @@ export const useFleetStore = defineStore("fleet", () => {
   return {
     nodes,
     selected,
-    sessions,
-    ipBans,
-    userGroupState,
+    sessions: sessionSection.data,
+    sessionsState: sessionSection.state,
+    ipBans: ipBanSection.data,
+    ipBansState: ipBanSection.state,
+    userGroupState: userGroupSection.data,
+    userGroupReadState: userGroupSection.state,
     latestOperation,
     operationNodeId,
     operationTracking,
@@ -503,7 +572,8 @@ export const useFleetStore = defineStore("fleet", () => {
     agentAhead,
     agentUnknown,
     rebuild,
-    start: () => {
+    start: (mode: "fleet" | "detail" = "fleet") => {
+      detailMode = mode === "detail";
       foregroundRefresh.start();
     },
     stop,
@@ -512,15 +582,17 @@ export const useFleetStore = defineStore("fleet", () => {
     connect,
     disconnect,
     disconnectSession: (sessionId: string, reason: string) =>
-      runOperation((node, signal) =>
+      runSectionOperation(sessionSection, (node, signal) =>
         disconnectSession(node, sessionId, reason, signal),
       ),
     terminateSession: (sessionId: string, reason: string) =>
-      runOperation((node, signal) =>
+      runSectionOperation(sessionSection, (node, signal) =>
         terminateSession(node, sessionId, reason, signal),
       ),
     removeIpBan: (ip: string, reason: string) =>
-      runOperation((node, signal) => removeIpBan(node, ip, reason, signal)),
+      runSectionOperation(ipBanSection, (node, signal) =>
+        removeIpBan(node, ip, reason, signal),
+      ),
     reloadService: (reason: string) =>
       runOperation((node, signal) => reloadService(node, reason, signal)),
     upgradeAgent: (targetVersion: string, reason: string) =>
@@ -535,7 +607,7 @@ export const useFleetStore = defineStore("fleet", () => {
       secretKeyId: string,
       reason: string,
     ) =>
-      runOperation((node, signal) =>
+      runSectionOperation(userGroupSection, (node, signal) =>
         createUser(
           node.id,
           name,
@@ -547,11 +619,11 @@ export const useFleetStore = defineStore("fleet", () => {
         ),
       ),
     disableUser: (username: string, version: number, reason: string) =>
-      runOperation((node, signal) =>
+      runSectionOperation(userGroupSection, (node, signal) =>
         disableUser(node.id, username, version, reason, signal),
       ),
     enableUser: (username: string, version: number, reason: string) =>
-      runOperation((node, signal) =>
+      runSectionOperation(userGroupSection, (node, signal) =>
         enableUser(node.id, username, version, reason, signal),
       ),
     rotateUserPassword: (
@@ -561,7 +633,7 @@ export const useFleetStore = defineStore("fleet", () => {
       secretKeyId: string,
       reason: string,
     ) =>
-      runOperation((node, signal) =>
+      runSectionOperation(userGroupSection, (node, signal) =>
         rotateUserPassword(
           node.id,
           username,
@@ -578,7 +650,7 @@ export const useFleetStore = defineStore("fleet", () => {
       members: string[],
       reason: string,
     ) =>
-      runOperation((node, signal) =>
+      runSectionOperation(userGroupSection, (node, signal) =>
         applyGroup(node.id, groupName, version, members, reason, signal),
       ),
     trackOperation: (operationId: string) =>

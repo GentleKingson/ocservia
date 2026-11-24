@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import FormField from "@/components/common/FormField.vue";
@@ -13,6 +13,20 @@ const pendingAction = ref<{
   target: string;
   label: string;
 }>();
+const actionReady = computed(() => {
+  if (!fleet.selected || fleet.selecting || fleet.selectionError) return false;
+  switch (pendingAction.value?.kind) {
+    case "disconnect":
+    case "terminate":
+      return fleet.sessionsState === "ready";
+    case "unban":
+      return fleet.ipBansState === "ready";
+    case "reload":
+    case "upgradeAgent":
+      return true;
+  }
+  return false;
+});
 const reason = ref("");
 function openAction(
   kind: "disconnect" | "terminate" | "unban" | "reload" | "upgradeAgent",
@@ -26,7 +40,7 @@ function openAction(
 async function submitAction(): Promise<void> {
   const action = pendingAction.value;
   const explanation = reason.value.trim();
-  if (!action || !explanation) return;
+  if (!action || !explanation || !actionReady.value) return;
   pendingAction.value = undefined;
   if (action.kind === "disconnect")
     await fleet.disconnectSession(action.target, explanation);
@@ -76,7 +90,7 @@ defineExpose({ open: openAction, close });
         :variant="
           pendingAction.kind === 'terminate' ? 'destructive' : 'default'
         "
-        :disabled="!reason.trim()"
+        :disabled="!reason.trim() || !actionReady"
       >
         {{ $t("confirm") }}
       </Button>

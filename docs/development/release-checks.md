@@ -980,6 +980,14 @@ and Quick Install start alongside the other jobs. Consumers verify the exact
 artifact ID, source, version, architecture, inventory and file digests. The
 final gate waits for these jobs and records the artifacts and upstream results
 in a single qualification record.
+
+Quick Install uses the same candidate's Agent package and Controller images. It checks
+the default shared hostname, verifies the node's execution receipts after a reload
+over Relay, and waits for Gateway to obtain a new certificate from Pebble. After a
+controlled Relay restart, the probe verifies the CA and hostname on UDP 7842 and
+compares the presented leaf with Gateway's renewed leaf. Dual-domain operation
+continues to be covered by Business Smoke.
+
 Image scans apply approved entries in
 [`deploy/production/image-scan-exemptions.json`](../../deploy/production/image-scan-exemptions.json),
 each with a review deadline; an entry past its deadline fails the gate again.
@@ -1195,7 +1203,7 @@ exact release’s DEB, RPM and managed-node bootstrap over HTTPS. The smoke chec
 | Native `oit1_` -> `obt2_` bootstrap installation and online node, browser Admin login/Workspace/user creation/reload/ConfigPlan apply, production Signer sealing, real VPN and internal TLS | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Controller/transport, Agent/privd, bundled PostgreSQL and UDP-isolated sole-Relay offline-queue/exactly-once/idempotent-replay recovery (external PostgreSQL has no Business-level recovery) | Integrated Business Smoke (`release-check.yml`, `amd64`) |
 | Terminal real-node revocation: rejected unauthorized requests, direct Admin revoke with synchronous trust update and close, disconnect and no new privd effect from old authority | Integrated Business Smoke (`release-check.yml`, `amd64`) |
-| Pebble ACME Quick Install, credential and root-CA custody, idempotent rerun, bootstrap resume, and `controller.sh` upgrade/rollback/upgrade | Quick Install (`release-check.yml`, `amd64`) |
+| Default shared-domain Quick Install with Pebble, credential and root-CA custody, rerun, bootstrap resume, upgrade and rollback, real Agent reload over Relay, and renewed QUIC certificate after a controlled Relay restart | Quick Install (`release-check.yml`, `amd64`) |
 | DEB/RPM file ownership, install/removal and state preservation on `amd64`/`arm64` | Native package smoke in Release Check |
 | Native Controller execution and exact archive OS vulnerability scans before smoke/upload, both architectures | Controller build jobs in Release Check |
 | Source/dependency vulnerabilities and repository secrets, within the [tool scope](#security-checks) | Security |

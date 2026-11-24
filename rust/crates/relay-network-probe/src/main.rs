@@ -1,10 +1,15 @@
 //! Bounded test of authenticated TCP and QUIC address discovery through one Relay.
-use std::{path::Path, time::Duration};
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    path::Path,
+    time::Duration,
+};
 
 use iroh::{
     Endpoint, NetReportConfig, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher, endpoint::presets,
 };
-use rustls_pki_types::pem::PemObject;
+use iroh_relay::quic::{QUIC_ADDR_DISC_CLOSE_CODE, QUIC_ADDR_DISC_CLOSE_REASON, QuicClient};
+use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,11 +17,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("warn,iroh::net_report=debug")
         .init();
     let args: Vec<_> = std::env::args().collect();
-    let tcp_only = args.len() == 5 && args[4] == "--tcp-only";
-    assert!(
-        args.len() == 4 || tcp_only,
-        "relay-network URL CA_FILE TOKEN_FILE [--tcp-only]"
-    );
+    let (tcp_only, expected_quic_leaf) = match args.get(4..) {
+        Some([]) => (false, None),
+        Some([mode]) if mode == "--tcp-only" => (true, None),
+        Some([mode, path]) if mode == "--expect-quic-leaf" => (false, Some(path)),
+        _ => {
+            return Err(
+                "relay-network URL CA_FILE TOKEN_FILE [--tcp-only | --expect-quic-leaf PEM]".into(),
+            );
+        }
+    };
     let url: RelayUrl = args[1].parse()?;
     let roots = rustls_pki_types::CertificateDer::pem_file_iter(Path::new(&args[2]))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -56,6 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if tcp_only {
         return Ok(());
     }
+    if let Some(path) = expected_quic_leaf {
+        let cert = CertificateDer::from_pem_file(path)?;
+        verify_quic_leaf(&url, &ca, &cert).await?;
+    }
     let endpoint = Endpoint::builder(presets::N0)
         .relay_mode(RelayMode::Custom(
             RelayMap::from_iter([url]).with_auth_token(token),
@@ -81,5 +95,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("quic_global_v4={}", report.global_v4.unwrap());
     endpoint.close().await;
     println!("quic_address_discovery=PASS");
+    Ok(())
+}
+
+async fn verify_quic_leaf(
+    url: &RelayUrl,
+    ca: &iroh::tls::CaTlsConfig,
+    expected: &CertificateDer<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host = url.host_str().ok_or("Relay URL requires a hostname")?;
+    let addr = (host, iroh_relay::defaults::DEFAULT_RELAY_QUIC_PORT)
+        .to_socket_addrs()?
+        .find(SocketAddr::is_ipv4)
+        .ok_or("Relay hostname has no IPv4 address")?;
+    let endpoint = noq::Endpoint::client("0.0.0.0:0".parse()?)?;
+    let client = QuicClient::new(
+        endpoint,
+        ca.client_config(iroh_relay::tls::default_provider())?,
+    );
+    let connection =
+        tokio::time::timeout(Duration::from_secs(20), client.create_conn(addr, host)).await??;
+    let peer = connection
+        .peer_identity()
+        .and_then(|identity| identity.downcast::<Vec<CertificateDer<'static>>>().ok())
+        .ok_or("Relay QUIC peer certificate unavailable")?;
+    connection.close(QUIC_ADDR_DISC_CLOSE_CODE, QUIC_ADDR_DISC_CLOSE_REASON);
+    if peer.first() != Some(expected) {
+        return Err("Relay QUIC peer leaf differs from the HTTPS leaf".into());
+    }
+    println!("quic_leaf_matches=PASS");
     Ok(())
 }

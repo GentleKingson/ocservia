@@ -775,7 +775,7 @@ using distinct domains. When Controller and Relay share a domain, Gateway
 obtains and renews the single certificate via TLS-ALPN-01, proxies `/relay`,
 `/ping`, and `/generate_204` to Relay internally, and mounts `gateway-acme`
 read-only into Relay so Relay can reload that certificate for UDP 7842 QUIC
-Address Discovery. HTTP-01 is never used. Edge already routes the validation connection by SNI, so
+Address Discovery. The pinned Relay reads the certificate at startup and checks for updates every 24 hours. HTTP-01 is never used. Edge already routes the validation connection by SNI, so
 port 443 stays the only TCP port; nothing listens on port 80. The configured name(s) must
 resolve to this host before installation. `tls.crt` and `tls.key` are then
 neither required in `OCSERV_SECRET_DIR` nor in `OCSERV_RELAY_SECRET_DIR`; the
@@ -1109,11 +1109,10 @@ records. Other table or DDL privileges remain unchanged. Replacing binaries
 without running the migration step will not repair missing grants.
 
 After the upgrade completes, confirm that migrations and background maintenance
-run without logging `user_operations.cleanup_failed`. If that error occurs,
-the maintenance worker halts the remaining steps for that pass. The Controller
-process stays alive and retries on its normal tick. Fix any persistent
-permission or storage failures. This maintenance pass does not perform a full
-historical cleanup of the table.
+run without logging `user_operations.cleanup_failed`. If the runtime role lacks
+`DELETE`, the user policy step reports the failure and the remaining maintenance
+steps continue. Restore the grant by rerunning the owner migration entry point.
+The user policy step retries on its normal tick.
 
 #### Database cutover
 
