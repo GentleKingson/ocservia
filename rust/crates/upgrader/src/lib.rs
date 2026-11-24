@@ -1576,6 +1576,7 @@ fn cleanup_stale_temporaries(
             "result",
             "previous-version",
             "rollback-reason",
+            "download-attempts",
         ]
         .iter()
         .any(|record| {
@@ -1624,9 +1625,22 @@ fn sha256_reader(file: &mut File) -> Result<[u8; 32], UpgradeStoreError> {
 #[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex, PoisonError};
 
     use super::*;
+
+    // Serialize tests that spawn child processes (`Command::new`) while holding
+    // non-blocking `flock` execution locks: concurrent threads calling `fork()`
+    // transiently inherit parent file descriptors prior to `execve()`/`O_CLOEXEC`,
+    // which otherwise causes false `EWOULDBLOCK` (`ActiveConflict`) on immediate
+    // lock re-acquisition in a sibling test.
+    static RUNNER_PROCESS_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_runner_tests() -> std::sync::MutexGuard<'static, ()> {
+        RUNNER_PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     struct TempRoot(PathBuf);
     impl TempRoot {
@@ -1982,6 +1996,7 @@ mod tests {
 
     #[test]
     fn runner_input_validation_terminal_replay_and_spool_failure_recovery() {
+        let _guard = lock_runner_tests();
         let sys_runner = UpgradeRunner::new(PathBuf::from("/"));
         for bad in [
             "../etc/shadow",
@@ -2031,6 +2046,7 @@ mod tests {
 
     #[test]
     fn native_install_replays_preserve_rollback_package_and_probe_each_service() {
+        let _guard = lock_runner_tests();
         let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("architecture");
         let root = TempRoot::new("native");
         let runner = root.runner();
@@ -2221,6 +2237,7 @@ mod tests {
 
     #[test]
     fn transient_download_retries_before_terminal_and_cleans_orphan_downloads() {
+        let _guard = lock_runner_tests();
         let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("architecture");
         let root = TempRoot::new("dl-retry");
         let runner = root
@@ -2265,15 +2282,24 @@ mod tests {
         let op_dir = root.ops().join(&op_str);
 
         // Attempt 1 & 2 stay non-terminal (accepted) so systemd Restart=on-failure retries.
-        assert!(runner.run(&op_str).is_err());
+        assert!(matches!(
+            runner.run(&op_str),
+            Err(UpgradeStoreError::Lifecycle(_))
+        ));
         assert!(!stale_dl.exists(), "orphan .download-* must be cleaned");
         assert_eq!(load_state(&op_dir).expect("s1"), OperationState::Accepted);
 
-        assert!(runner.run(&op_str).is_err());
+        assert!(matches!(
+            runner.run(&op_str),
+            Err(UpgradeStoreError::Lifecycle(_))
+        ));
         assert_eq!(load_state(&op_dir).expect("s2"), OperationState::Accepted);
 
         // Attempt 3 exhausts retry budget and writes terminal failed.
-        assert!(runner.run(&op_str).is_err());
+        assert!(matches!(
+            runner.run(&op_str),
+            Err(UpgradeStoreError::Lifecycle(_))
+        ));
         assert_eq!(load_state(&op_dir).expect("s3"), OperationState::Failed);
 
         // Bad digest after download is immediate terminal failed (no retries).
@@ -2289,7 +2315,10 @@ mod tests {
             .schedule_and_trigger(&digest_intent)
             .expect("sched2");
         let digest_dir = root.ops().join(digest_intent.operation_id.to_string());
-        assert!(runner.run(&digest_intent.operation_id.to_string()).is_err());
+        assert!(matches!(
+            runner.run(&digest_intent.operation_id.to_string()),
+            Err(UpgradeStoreError::Package(_))
+        ));
         assert_eq!(
             load_state(&digest_dir).expect("digest terminal"),
             OperationState::Failed
@@ -2298,6 +2327,7 @@ mod tests {
 
     #[test]
     fn install_and_probe_verifies_socket_and_enabled_network_audit() {
+        let _guard = lock_runner_tests();
         let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("architecture");
         let root = TempRoot::new("probe-extra");
         let sock_path = root.path().join("privd.sock");
