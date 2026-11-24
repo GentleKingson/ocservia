@@ -40,8 +40,8 @@ const auditEventColumns = `id,occurred_at,actor_type,actor_id,action,resource_ty
 func (s auditStore) Events(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
 	return s.Query(ctx, `SELECT `+auditEventColumns+` FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at,id`, workspace)
 }
-func (s auditStore) EventsAfter(ctx context.Context, workspace uuid.UUID, afterAt value.Timestamp, afterID uuid.UUID) (database.Rows, error) {
-	return s.Query(ctx, `SELECT `+auditEventColumns+` FROM audit_events WHERE workspace_id=$1 AND (occurred_at,id)>($2,$3) ORDER BY occurred_at,id`, workspace, afterAt, afterID)
+func (s auditStore) EventsFrom(ctx context.Context, workspace uuid.UUID, afterAt value.Timestamp, afterID uuid.UUID) (database.Rows, error) {
+	return s.Query(ctx, `SELECT `+auditEventColumns+` FROM audit_events WHERE workspace_id=$1 AND (occurred_at,id)>=($2,$3) ORDER BY occurred_at,id`, workspace, afterAt, afterID)
 }
 func (s auditStore) LatestEvent(ctx context.Context, workspace uuid.UUID) (id uuid.UUID, hash []byte, err error) {
 	err = s.QueryRow(ctx, `SELECT id,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, workspace).Scan(&id, &hash)
@@ -88,13 +88,12 @@ func (s auditStore) VpnAuditRecords(ctx context.Context, q auditstore.VpnAuditFi
 func (s auditStore) RecentEvents(ctx context.Context, workspace uuid.UUID, limit int) (database.Rows, error) {
 	return s.Query(ctx, `SELECT id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,result,reason,error_type,previous_event_hash,event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT $2`, workspace, limit)
 }
-func (s auditStore) Checkpoints(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
-	return s.Query(ctx, `SELECT through_event_id,through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 ORDER BY created_at,id`, workspace)
-}
 func (s auditStore) LatestCheckpoint(ctx context.Context, workspace uuid.UUID) (eventID uuid.UUID, hash, signature []byte, occurredAt value.Timestamp, authVersion int16, err error) {
-	err = s.QueryRow(ctx, `SELECT c.through_event_id,c.through_event_hash,c.signature,e.occurred_at,e.auth_version
-		FROM audit_checkpoints c JOIN audit_events e ON e.id=c.through_event_id AND e.workspace_id=c.workspace_id AND e.event_hash=c.through_event_hash
-		WHERE c.workspace_id=$1 ORDER BY c.created_at DESC,c.id DESC LIMIT 1`, workspace).Scan(&eventID, &hash, &signature, &occurredAt, &authVersion)
+	err = s.QueryRow(ctx, `WITH latest AS (
+		SELECT workspace_id,through_event_id,through_event_hash,signature FROM audit_checkpoints
+		WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1
+	) SELECT c.through_event_id,c.through_event_hash,c.signature,e.occurred_at,COALESCE(e.auth_version,0)
+		FROM latest c LEFT JOIN audit_events e ON e.id=c.through_event_id AND e.workspace_id=c.workspace_id AND e.event_hash=c.through_event_hash`, workspace).Scan(&eventID, &hash, &signature, &occurredAt, &authVersion)
 	return
 }
 func (s auditStore) AddCheckpoint(ctx context.Context, id, workspace, event uuid.UUID, hash, signature []byte) error {
@@ -105,10 +104,9 @@ func (s auditStore) Workspaces(ctx context.Context) (database.Rows, error) {
 	return s.Query(ctx, `SELECT w.id FROM workspaces w WHERE EXISTS (SELECT 1 FROM audit_events e WHERE e.workspace_id=w.id) ORDER BY w.id`)
 }
 
-func (s auditStore) CheckpointHash(ctx context.Context, workspace, event uuid.UUID) ([]byte, error) {
-	var hash []byte
-	err := s.QueryRow(ctx, `SELECT through_event_hash FROM audit_checkpoints WHERE workspace_id=$1 AND through_event_id=$2`, workspace, event).Scan(&hash)
-	return hash, err
+func (s auditStore) CheckpointProof(ctx context.Context, workspace, event uuid.UUID) (hash, signature []byte, err error) {
+	err = s.QueryRow(ctx, `SELECT through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 AND through_event_id=$2`, workspace, event).Scan(&hash, &signature)
+	return
 }
 
 func (s auditStore) ExpiredDetails(ctx context.Context, cutoff value.Timestamp) (database.Rows, error) {

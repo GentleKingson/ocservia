@@ -28,10 +28,12 @@ pub(crate) fn build_result_proof(
     let completed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
-    let completed_at = prost_types::Timestamp {
-        seconds: i64::try_from(completed.as_secs()).map_err(|_| ())?,
-        nanos: i32::try_from(completed.subsec_nanos()).map_err(|_| ())?,
-    };
+    let (seconds, nanos) = (
+        i64::try_from(completed.as_secs()).map_err(|_| ())?,
+        i32::try_from(completed.subsec_nanos()).map_err(|_| ())?,
+    )
+        .max((accepted_at.seconds, accepted_at.nanos));
+    let completed_at = prost_types::Timestamp { seconds, nanos };
     let result_bytes = exact_result_bytes(result).ok_or(())?;
     let mut effect = Sha256::new();
     effect.update(b"ocservia/privd-root-effect-record/v1\0");

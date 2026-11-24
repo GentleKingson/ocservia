@@ -284,7 +284,7 @@ systemctl status ocservia-network-audit.service
 
 From a connected VPN client, open and close a connection to a known destination routed through the tunnel. Search **Network connections** for the destination IP after conntrack emits its destroy event. Kernel flow expiry can follow application closure. Byte counts cover the original and reply directions and can be unavailable. Flows already open when the collector starts, flows missing a lifecycle event, ambiguous VPN address mappings and flows beyond the 65,536-entry tracking limit can leave gaps. To turn off network collection, run `sudo systemctl disable --now ocservia-network-audit.service`.
 
-Systemd creates the private directory `/var/lib/ocservia-vpn-audit` when either service starts. The collector initializes `events.sqlite` there. During a Controller outage, the Agent retains pending events for retry. A full 64 MiB queue or a failed hook can leave gaps while VPN service continues. For missing events, check free space on that filesystem and inspect the node logs:
+Systemd creates the private directory `/var/lib/ocservia-vpn-audit` when either service starts. The collector initializes `events.sqlite` there in WAL mode. During a Controller outage, the Agent retains up to 16,384 pending events for retry. At capacity the collector discards the oldest pending events and continues tracking active flows. Eviction or a failed hook can leave gaps while VPN service continues. For missing events, check free space on that filesystem and inspect the node logs:
 
 ```bash
 sudo journalctl -u ocservia-agent.service -u ocservia-network-audit.service --since "30 minutes ago"

@@ -46,7 +46,6 @@ const (
 	// Reconciliation is observation-only, so advancing it cannot replay an
 	// effect whose immediate result was lost.
 	commandResultResponseTimeout = 20 * time.Second
-	reconciliationAttemptLimit   = 64
 	reconciliationBatchLimit     = 64
 	// The configured active-command ceiling is 500. Decode that full bounded
 	// candidate set before applying the reconcile-only batch limit so unrelated
@@ -217,20 +216,15 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		return Operation{}, false, fmt.Errorf("lock operation node: %w", err)
 	}
 	workspaceID, nodeVersion, authorizationRevision, nodeStatus := node.WorkspaceID, node.Version, node.AuthorizationRevision, node.Status
-	if nodeStatus != "active" && nodeStatus != "offline" {
-		return Operation{}, false, ErrNodeUnavailable
-	}
-	if upgrade.RolloutID != uuid.Nil {
-		observation, err := s.lockRolloutObservation(ctx, intentStore, request, upgrade, workspaceID, nodeStatus, now, created)
-		if err != nil {
-			return Operation{}, false, err
-		}
-		fromVersion = observation.AgentVersion
-	}
 	if upgrade.RolloutID == uuid.Nil {
+		if nodeStatus != "active" && nodeStatus != "offline" {
+			return Operation{}, false, ErrNodeUnavailable
+		}
 		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, workspaceID); err != nil {
 			return Operation{}, false, err
 		}
+	} else if err := lockRolloutDispatch(ctx, intentStore, request, upgrade, workspaceID, created); err != nil {
+		return Operation{}, false, err
 	}
 	if existing, same, err := findIdempotent(ctx, tx, workspaceID, request.IdempotencyKey, hash[:]); err != nil {
 		return Operation{}, false, err
@@ -242,6 +236,13 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 			return Operation{}, false, fmt.Errorf("commit idempotent lookup: %w", err)
 		}
 		return existing, true, nil
+	}
+	if upgrade.RolloutID != uuid.Nil {
+		observation, err := s.lockRolloutObservation(ctx, intentStore, request, upgrade, nodeStatus, now)
+		if err != nil {
+			return Operation{}, false, err
+		}
+		fromVersion = observation.AgentVersion
 	}
 	if nodeVersion != request.ExpectedVersion {
 		return Operation{}, false, ErrStaleRevision

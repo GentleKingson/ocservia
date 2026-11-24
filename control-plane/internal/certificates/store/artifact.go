@@ -46,6 +46,7 @@ type ArtifactStore interface {
 	State(context.Context, uuid.UUID, uuid.UUID) (string, error)
 	Abort(context.Context, uuid.UUID, uuid.UUID) error
 	PendingConsumptions(context.Context) ([]PendingConsumption, error)
+	FailConsumption(context.Context, uuid.UUID, uuid.UUID, []byte) error
 	ResetConsumption(context.Context, uuid.UUID, uuid.UUID, bool) error
 }
 

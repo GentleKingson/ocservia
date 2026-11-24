@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -228,17 +229,33 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	values := make([]pendingArtifactConsumption, 0, 20)
 	for _, record := range records {
-		value := pendingArtifactConsumption{id: record.ID, grantID: record.GrantID, grant: &agentv1.ArtifactGrantV1{}, digest: record.Digest, size: record.Size, actorID: record.ActorID, expiresAt: record.ExpiresAt}
-		if err := proto.Unmarshal(record.Grant, value.grant); err != nil || !bytes.Equal(value.grant.GetArtifactId(), value.id[:]) || !bytes.Equal(value.grant.GetGrantId(), value.grantID[:]) || value.grant.GetAuthorizedSubject() != value.actorID.String() || value.grant.GetMaxBytes() != uint64(value.size) {
-			return ErrArtifactDenied
+		item := pendingArtifactConsumption{id: record.ID, grantID: record.GrantID, grant: &agentv1.ArtifactGrantV1{}, digest: record.Digest, size: record.Size, actorID: record.ActorID, expiresAt: record.ExpiresAt}
+		err := proto.Unmarshal(record.Grant, item.grant)
+		nodeID, nodeErr := uuid.FromBytes(item.grant.GetNodeId())
+		if err != nil || nodeErr != nil || nodeID == uuid.Nil || item.grantID == uuid.Nil || item.actorID == uuid.Nil ||
+			item.size <= 0 || item.grant.GetExpiresAt().CheckValid() != nil ||
+			!bytes.Equal(item.grant.GetArtifactId(), item.id[:]) || !bytes.Equal(item.grant.GetGrantId(), item.grantID[:]) ||
+			item.grant.GetAuthorizedSubject() != item.actorID.String() || item.grant.GetMaxBytes() != uint64(item.size) {
+			slog.ErrorContext(ctx, "invalid pending artifact consumption", "artifact_id", record.ID)
+			err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+				store, err := certificatestore.ArtifactFromTransaction(tx)
+				if err != nil {
+					return err
+				}
+				if err := store.FailConsumption(ctx, record.ID, record.GrantID, record.Grant); err != nil {
+					return err
+				}
+				return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+			})
+		} else {
+			err = s.reconcileArtifactConsumption(ctx, item)
 		}
-		values = append(values, value)
-	}
-	for _, item := range values {
-		if err := s.reconcileArtifactConsumption(ctx, item); err != nil {
-			return err
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			slog.WarnContext(ctx, "artifact consumption reconciliation failed", "artifact_id", record.ID, "error", err)
 		}
 	}
 	return nil

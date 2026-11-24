@@ -67,6 +67,24 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 	}
 }
 
+func TestRecoveryEnvelopeExtendsOnlyTheFirstObservationWindow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	_, sent := recoveryTestDispatch(t, now, time.Minute)
+	var envelope agentv1.CommandEnvelope
+	testutil.NoError(t, proto.Unmarshal(sent, &envelope))
+	signer := testCommandSigner(t)
+	_, first, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now.Add(time.Minute), signer)
+	testutil.NoError(t, err)
+	if !first.Equal(now.Add(time.Minute + recoveryCommandTTL)) {
+		t.Fatalf("first reconciliation deadline=%v", first)
+	}
+	_, next, err := PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now.Add(2*time.Minute), signer)
+	testutil.NoError(t, err)
+	if !next.Equal(now.Add(time.Minute)) {
+		t.Fatalf("follow-up attempted to renew expiry, got %v", next)
+	}
+}
+
 func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	dispatch, sent := recoveryTestDispatch(t, now, 10*time.Minute)

@@ -87,8 +87,8 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 		}, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "semantic digest", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.PayloadSha256[0] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "receipt before command issuance", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) {
-			envelope.IssuedAt = timestamppb.New(time.Unix(1_700_000_002, 0))
-			envelope.ExpiresAt = timestamppb.New(time.Unix(1_700_000_062, 0))
+			envelope.IssuedAt = timestamppb.New(time.Unix(1_700_000_301, 0))
+			envelope.ExpiresAt = timestamppb.New(time.Unix(1_700_000_361, 0))
 		}, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "terminal state", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
 			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
@@ -184,6 +184,26 @@ func TestRejectedPrivilegedResultNeverVerifiesAsTerminalEvidence(t *testing.T) {
 	envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "x"}}
 	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, rejected()); verification.Status != "not_required" {
 		t.Fatalf("non-privileged rejection = %+v", verification)
+	}
+}
+
+func TestUnknownPrivilegedReceiptErrorClassification(t *testing.T) {
+	nodeID, envelope, _, _ := receiptVerificationFixture(t)
+	tests := []struct {
+		code, status, reason string
+	}{
+		{"receipt_missing", "missing", "receipt_missing"},
+		{"receipt_invalid", "invalid", "receipt_malformed"},
+		{"privd_receipt_missing_or_malformed", "invalid", "receipt_malformed"},
+		{"privd_outcome_unknown", "not_required", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			result := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, ErrorCode: tt.code}
+			if got := verifyResult(t.Context(), nil, nodeID, envelope, result); got.Status != tt.status || got.FailureReason != tt.reason {
+				t.Fatalf("receipt verification = %+v", got)
+			}
+		})
 	}
 }
 
@@ -314,5 +334,39 @@ func TestAgentUpgradeReceiptMapsToScheduledIntentKind(t *testing.T) {
 	failed := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED}
 	if resultKind(envelope, failed) != agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR {
 		t.Fatal("failed upgrade result must attest an error outcome")
+	}
+}
+
+func TestReceiptWindowAllowsSkewAndSettlementGrace(t *testing.T) {
+	issued := time.Unix(1700000000, 0).UTC()
+	expires := issued.Add(time.Minute)
+	envelope := &agentv1.CommandEnvelope{IssuedAt: timestamppb.New(issued), ExpiresAt: timestamppb.New(expires)}
+	tests := []struct {
+		name                string
+		accepted, completed time.Time
+		valid               bool
+	}{
+		{"inclusive bounds", issued.Add(-5 * time.Minute), expires.Add(5 * time.Minute), true},
+		{"accepted too early", issued.Add(-5*time.Minute - time.Second), issued, false},
+		{"accepted too late", expires.Add(5*time.Minute + time.Nanosecond), expires.Add(5*time.Minute + time.Nanosecond), false},
+		{"completed too late", issued, expires.Add(5*time.Minute + time.Nanosecond), false},
+		{"completed before acceptance", issued, issued.Add(-time.Nanosecond), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			receipt := &agentv1.PrivdResultReceiptV1{AcceptedAt: timestamppb.New(tt.accepted), CompletedAt: timestamppb.New(tt.completed)}
+			if got := receiptWithinCommandWindow(envelope, receipt); got != tt.valid {
+				t.Fatalf("valid=%v want %v", got, tt.valid)
+			}
+		})
+	}
+	nodeID, envelope, result, key := receiptVerificationFixture(t)
+	completed := result.GetCompletedAt().AsTime()
+	public := key.Public().(ed25519.PublicKey)
+	if v := verifyResult(t.Context(), lookupFor(public, "active", completed.Add(5*time.Minute), nil), nodeID, envelope, result); !v.Verified() {
+		t.Fatalf("activation skew rejected: %+v", v)
+	}
+	if v := verifyResult(t.Context(), lookupFor(public, "active", completed.Add(5*time.Minute+time.Nanosecond), nil), nodeID, envelope, result); v.Verified() {
+		t.Fatalf("activation outside skew accepted: %+v", v)
 	}
 }

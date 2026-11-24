@@ -3,12 +3,14 @@ package certificates
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,11 +18,15 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
+	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 )
 
 func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate, error) {
@@ -179,16 +185,7 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 	if certificateVersion != request.CertificateVersion && !existingRequest {
 		return operations.Operation{}, false, ErrNotReady
 	}
-	if state == "revoked" {
-		exists, err := s.operationExists(ctx, workspaceID, request.IdempotencyKey)
-		if err != nil {
-			return operations.Operation{}, false, err
-		}
-		if !exists {
-			return operations.Operation{}, false, ErrNotReady
-		}
-	}
-	if state != "issued" && state != "expiring" && state != "expired" && state != "revoking" && state != "revocation_unknown" && state != "revoked" || serialNumber == "" {
+	if serialNumber == "" || (!existingRequest && state == "revoked") {
 		return operations.Operation{}, false, ErrNotReady
 	}
 	op, replay, err := s.operations.Create(ctx, operations.CreateRequest{
@@ -210,26 +207,24 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 			HoldDispatch:       true,
 		},
 	})
+	if errors.Is(err, operations.ErrStaleRevision) {
+		return operations.Operation{}, false, ErrNotReady
+	}
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
 	if replay && op.State == "expired" {
 		return op, true, ErrNotReady
 	}
-	if replay && state == "revoked" {
-		return op, true, nil
-	}
-	if err := s.revokeAtSigner(ctx, request, serialNumber); err != nil {
+	operationID, err := uuid.Parse(op.ID)
+	if err != nil {
 		return op, replay, err
 	}
-	operationID, parseErr := uuid.Parse(op.ID)
-	if parseErr != nil {
-		return op, replay, parseErr
-	}
-	if err := s.releaseOperation(ctx, operationID); err != nil {
+	pending, err := s.pendingRevocations(ctx, &operationID)
+	if err != nil || len(pending) == 0 {
 		return op, replay, err
 	}
-	return op, replay, nil
+	return op, replay, s.revokeAtSigner(ctx, pending[0])
 }
 
 func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid.UUID, csrDER, requestHash []byte) (certificatestore.IssueReceipt, error) {
@@ -249,25 +244,160 @@ func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid
 	return approved, nil
 }
 
-func (s *Service) revokeAtSigner(ctx context.Context, request RevokeRequest, serialNumber string) error {
-	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+func (s *Service) pendingRevocations(ctx context.Context, operationID *uuid.UUID) ([]certificatestore.PendingRevocation, error) {
+	var pending []certificatestore.PendingRevocation
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		return store.BeginRevocation(ctx, request.CertificateID, s.now())
-	}); err != nil {
+		pending, err = store.PendingRevocations(ctx, operationID)
+		return err
+	})
+	return pending, err
+}
+
+func (s *Service) reconcileRevocations(ctx context.Context) error {
+	if s.signer == nil {
+		return nil
+	}
+	pending, err := s.pendingRevocations(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if err := s.signer.Revoke(ctx, RevokeSignerRequest{CertificateID: request.CertificateID, SerialNumber: serialNumber, Reason: request.Reason}); err != nil {
-		_ = database.Within(context.WithoutCancel(ctx), s.backend, database.ReadCommitted, func(tx database.Tx) error {
+	for _, item := range pending {
+		if err := s.revokeAtSigner(ctx, item); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			slog.WarnContext(ctx, "certificate revocation reconciliation failed", "operation_id", item.OperationID, "error", err)
+		}
+	}
+	return s.reconcileExpiredRevocations(ctx)
+}
+
+func (s *Service) reconcileExpiredRevocations(ctx context.Context) error {
+	var pending []certificatestore.PendingRevocation
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		pending, err = store.ExpiredRevocations(ctx)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, item := range pending {
+		envelope, certificateID, err := s.authorizedRevocation(item)
+		var version uint64
+		if err != nil {
+			slog.WarnContext(ctx, "invalid expired certificate revocation", "operation_id", item.OperationID)
+		} else {
+			version = envelope.GetCertificateRevoke().GetCertificateVersion()
+		}
+		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+			store, err := certificatestore.FromTransaction(tx)
+			if err != nil {
+				return err
+			}
+			if err := store.ExpireRevocation(ctx, item.CommandID, certificateID, version, item.Envelope, s.now()); err != nil {
+				return err
+			}
+			return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		}); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			slog.WarnContext(ctx, "record expired certificate revocation", "operation_id", item.OperationID, "error", err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) authorizedRevocation(item certificatestore.PendingRevocation) (*agentv1.CommandEnvelope, uuid.UUID, error) {
+	var envelope agentv1.CommandEnvelope
+	if err := proto.Unmarshal(item.Envelope, &envelope); err != nil {
+		return nil, uuid.Nil, ErrInvalid
+	}
+	revoke := envelope.GetCertificateRevoke()
+	if revoke == nil || envelope.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY ||
+		!bytes.Equal(envelope.GetNodeId(), item.NodeID[:]) ||
+		!bytes.Equal(envelope.GetOperationId(), item.OperationID[:]) ||
+		!bytes.Equal(envelope.GetCommandId(), item.CommandID[:]) ||
+		s.grantSigner == nil || envelope.GetAuthorization().GetKeyId() != s.grantSigner.KeyID() {
+		return nil, uuid.Nil, ErrInvalid
+	}
+	certificateID, err := uuid.FromBytes(revoke.GetCertificateId())
+	if err != nil || certificateID.Version() != 7 {
+		return nil, uuid.Nil, ErrInvalid
+	}
+	claims, err := commandauth.ClaimsFromEnvelopeV1(&envelope)
+	if err != nil {
+		return nil, uuid.Nil, ErrInvalid
+	}
+	hashPayload := semanticpayload.HashV2
+	if envelope.GetSemanticPayloadHashVersion() == agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1 {
+		hashPayload = semanticpayload.HashV1
+	}
+	digest, err := hashPayload(&envelope)
+	if err != nil || digest != claims.SemanticPayloadSHA256 {
+		return nil, uuid.Nil, ErrInvalid
+	}
+	proof, err := commandauth.CanonicalV1(claims)
+	if err != nil || !ed25519.Verify(s.grantSigner.PublicKey(), proof, envelope.GetAuthorization().GetSignature()) {
+		return nil, uuid.Nil, ErrInvalid
+	}
+	return &envelope, certificateID, nil
+}
+
+func (s *Service) revokeAtSigner(ctx context.Context, item certificatestore.PendingRevocation) error {
+	envelope, certificateID, err := s.authorizedRevocation(item)
+	if err != nil {
+		return err
+	}
+	revoke := envelope.GetCertificateRevoke()
+	callCtx, stopCall := context.WithDeadline(ctx, envelope.GetExpiresAt().AsTime())
+	defer stopCall()
+	var serialNumber string
+	if err := database.Within(callCtx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.FromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		at, err := value.FromTime(s.now())
+		if err != nil {
+			return err
+		}
+		serialNumber, err = store.RevocationSerial(callCtx, certificateID, item.WorkspaceID, item.NodeID, revoke.GetCertificateVersion(), at)
+		if err != nil {
+			return err
+		}
+		return coordination.AssertFenceTx(callCtx, tx, coordination.FenceFromContext(callCtx))
+	}); err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return ErrNotReady
+		}
+		return err
+	}
+	err = s.signer.Revoke(callCtx, RevokeSignerRequest{CertificateID: certificateID, SerialNumber: serialNumber, Reason: revoke.GetReason()})
+	settle, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err != nil {
+		if updateErr := database.Within(settle, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 			store, storeErr := certificatestore.FromTransaction(tx)
 			if storeErr != nil {
 				return storeErr
 			}
-			return store.RevocationUnknown(context.WithoutCancel(ctx), request.CertificateID, s.now())
-		})
+			if storeErr := store.RevocationUnknown(settle, item.OperationID, certificateID, s.now()); storeErr != nil {
+				return storeErr
+			}
+			return coordination.AssertFenceTx(settle, tx, coordination.FenceFromContext(settle))
+		}); updateErr != nil {
+			slog.WarnContext(ctx, "record failed Signer revocation", "operation_id", item.OperationID, "error", updateErr)
+		}
 		return fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
-	return nil
+	return s.releaseOperation(settle, item.OperationID, certificateID)
 }

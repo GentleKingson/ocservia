@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install -d -o postgres -g postgres -m 0700 /var/lib/ocservia-backup/wal /var/lib/ocservia-backup/base
 password="$(cat /run/secrets/postgres_app_password)"
 backup_password="$(cat /run/secrets/postgres_backup_password)"
 if [[ -z "${password}" || "${password}" == *$'\n'* || -z "${backup_password}" || "${backup_password}" == *$'\n'* ]]; then

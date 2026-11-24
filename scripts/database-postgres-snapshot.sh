@@ -22,10 +22,12 @@ psql() { docker exec -i "$name" psql -X -v ON_ERROR_STOP=1 -U ocservia_owner -d 
 checkpoint_tag=v1.2.0
 checkpoint_sha=169102557cd610847c9f6ac2083336cdcf82c483
 checkpoint_receipt=d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172
-if ! git -C "$ROOT" rev-parse --verify "${checkpoint_tag}^{commit}" >/dev/null 2>&1; then
- git -C "$ROOT" fetch origin "refs/tags/${checkpoint_tag}:refs/tags/${checkpoint_tag}"
+if checkpoint_local="$(git -C "$ROOT" rev-parse --verify "${checkpoint_tag}^{commit}" 2>/dev/null)"; then
+ [[ "$checkpoint_local" == "$checkpoint_sha" ]] || { echo 'designated checkpoint tag moved' >&2; exit 1; }
+elif ! git -C "$ROOT" cat-file -e "${checkpoint_sha}^{commit}"; then
+ git -C "$ROOT" fetch --no-tags origin "refs/tags/${checkpoint_tag}"
+ [[ "$(git -C "$ROOT" rev-parse 'FETCH_HEAD^{commit}')" == "$checkpoint_sha" ]] || { echo 'designated checkpoint tag moved' >&2; exit 1; }
 fi
-[[ "$(git -C "$ROOT" rev-parse "${checkpoint_tag}^{commit}")" == "$checkpoint_sha" ]] || { echo 'designated checkpoint tag moved' >&2; exit 1; }
 git -C "$ROOT" show "$checkpoint_sha:control-plane/migrations/schema.sql" > "$tmp/checkpoint.sql"
 [[ "$(sha256sum "$tmp/checkpoint.sql" | cut -d' ' -f1)" == "$checkpoint_receipt" ]] || { echo 'published checkpoint receipt changed' >&2; exit 1; }
 psql -c 'CREATE ROLE ocservia_app' >/dev/null

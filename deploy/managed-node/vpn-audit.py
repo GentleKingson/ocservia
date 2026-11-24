@@ -15,6 +15,7 @@ import uuid
 
 DATABASE = "/var/lib/ocservia-vpn-audit/events.sqlite"
 BOOT_ID = "/proc/sys/kernel/random/boot_id"
+MAX_PENDING = 16384
 
 
 def counter(env, name):
@@ -27,7 +28,8 @@ def counter(env, name):
 
 
 def database(path):
-    db = sqlite3.connect(path, timeout=0.1)
+    db = sqlite3.connect(path, timeout=1.0)
+    db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA max_page_count=16384")
     db.execute("CREATE TABLE IF NOT EXISTS pending (event_id TEXT PRIMARY KEY, body TEXT NOT NULL)")
     db.execute("""CREATE TABLE IF NOT EXISTS leases (
@@ -40,6 +42,10 @@ def database(path):
 
 def enqueue(db, record):
     event_id = str(uuid.uuid4())
+    # Producers hold the SQLite writer lock from eviction through insertion.
+    # ROWID follows queue order and keeps the cutoff indexed even during outages.
+    db.execute("DELETE FROM pending WHERE rowid <= (SELECT max(rowid) FROM pending) - ? + 1",
+               (MAX_PENDING,))
     db.execute("INSERT INTO pending VALUES(?,?)", (event_id, json.dumps(record, separators=(",", ":"))))
 
 

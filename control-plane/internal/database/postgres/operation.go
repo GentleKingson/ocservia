@@ -65,16 +65,25 @@ func (s operationStore) QueueMetrics(ctx context.Context, workspaceID uuid.UUID,
 func (s operationStore) ExpireQueued(ctx context.Context) error {
 	// A leased command has an uncertain dispatch outcome. Only reconciliation
 	// may resolve it, even when its execution deadline has already elapsed.
+	commands, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id FROM commands c
+		JOIN outbox_events o ON o.command_id=c.id
+		WHERE c.state='queued' AND c.expires_at<=now()
+		AND NOT EXISTS(SELECT 1 FROM node_command_leases lease WHERE lease.command_id=c.id)
+		ORDER BY o.id FOR UPDATE OF o SKIP LOCKED`))
+	if err != nil || len(commands) == 0 {
+		return err
+	}
+	// Recheck under the outbox locks in a fresh READ COMMITTED snapshot.
 	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `WITH expired AS (
 		UPDATE commands SET state='expired',updated_at=now()
-		WHERE state='queued' AND expires_at<=now()
+		WHERE id=ANY($1::uuid[]) AND state='queued' AND expires_at<=now()
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases lease WHERE lease.command_id=commands.id)
 		RETURNING id,operation_id
 	), stopped AS (
 		UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error='command expired before dispatch'
 		FROM expired WHERE outbox_events.command_id=expired.id RETURNING expired.operation_id
 	) UPDATE operations SET state='expired',version=version+1,updated_at=now(),completed_at=now()
-	FROM stopped WHERE operations.id=stopped.operation_id AND operations.state='queued' RETURNING operations.id`))
+	FROM stopped WHERE operations.id=stopped.operation_id AND operations.state='queued' RETURNING operations.id`, commands))
 	if err != nil || len(ids) == 0 {
 		return err
 	}

@@ -79,6 +79,10 @@ func protectedParent(path string) error {
 }
 
 func openStore(path string, ca *authority, initialize bool) (*service, error) {
+	return openLedger(path, ca, initialize, false)
+}
+
+func openLedger(path string, ca *authority, initialize, readOnly bool) (*service, error) {
 	if err := protectedParent(path); err != nil {
 		return nil, err
 	}
@@ -104,7 +108,7 @@ func openStore(path string, ca *authority, initialize bool) (*service, error) {
 			return nil, invalidState
 		}
 	}
-	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second})
+	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second, ReadOnly: readOnly})
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +138,7 @@ func openStore(path string, ca *authority, initialize bool) (*service, error) {
 		}
 	}
 	if err == nil {
-		err = s.check()
+		err = db.View(s.checkMetadata)
 	}
 	if err != nil {
 		db.Close()
@@ -143,7 +147,29 @@ func openStore(path string, ca *authority, initialize bool) (*service, error) {
 	return s, nil
 }
 
-func (s *service) check() error {
+func (s *service) checkMetadata(tx *bolt.Tx) error {
+	for _, name := range buckets {
+		if tx.Bucket([]byte(name)) == nil {
+			return invalidState
+		}
+	}
+	m := tx.Bucket([]byte("meta"))
+	if string(m.Get([]byte("version"))) != "1" || string(m.Get([]byte("issuer"))) != s.ca.id || string(m.Get([]byte("policy"))) != policy {
+		return invalidState
+	}
+	audit := tx.Bucket([]byte("audit"))
+	last, _ := audit.Cursor().Last()
+	if audit.Sequence() == 0 {
+		if last != nil {
+			return invalidState
+		}
+	} else if string(last) != fmt.Sprintf("%020d", audit.Sequence()) {
+		return invalidState
+	}
+	return nil
+}
+
+func (s *service) verify() error {
 	return s.db.View(func(tx *bolt.Tx) error {
 		var corrupt bool
 		for err := range tx.Check() {
@@ -154,18 +180,13 @@ func (s *service) check() error {
 		if corrupt {
 			return invalidState
 		}
-		for _, name := range buckets {
-			if tx.Bucket([]byte(name)) == nil {
-				return invalidState
-			}
+		if err := s.checkMetadata(tx); err != nil {
+			return err
 		}
 		if b := tx.Bucket([]byte("audit")); b.Sequence() != uint64(b.Stats().KeyN) {
 			return invalidState
 		}
 		m := tx.Bucket([]byte("meta"))
-		if string(m.Get([]byte("version"))) != "1" || string(m.Get([]byte("issuer"))) != s.ca.id || string(m.Get([]byte("policy"))) != policy {
-			return invalidState
-		}
 		for _, name := range buckets[1:] {
 			if err := tx.Bucket([]byte(name)).ForEach(func(k, v []byte) error {
 				if v == nil || string(m.Get([]byte("sha256:"+name+":"+string(k)))) != digest(v) {
@@ -245,6 +266,18 @@ func audit(tx *bolt.Tx, action, id string) error {
 	return putRecord(tx, "audit", []byte(fmt.Sprintf("%020d", n)), data)
 }
 
+func getRecord(tx *bolt.Tx, bucket string, key []byte) ([]byte, error) {
+	data := tx.Bucket([]byte(bucket)).Get(key)
+	checksum := tx.Bucket([]byte("meta")).Get([]byte("sha256:" + bucket + ":" + string(key)))
+	if data == nil && checksum == nil {
+		return nil, nil
+	}
+	if data == nil || string(checksum) != digest(data) {
+		return nil, invalidState
+	}
+	return data, nil
+}
+
 func putRecord(tx *bolt.Tx, bucket string, key, data []byte) error {
 	if err := tx.Bucket([]byte(bucket)).Put(key, data); err != nil {
 		return err
@@ -259,7 +292,10 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 
 	var result issuance
 	readExisting := func(tx *bolt.Tx) error {
-		old := tx.Bucket([]byte("issued")).Get(key)
+		old, err := getRecord(tx, "issued", key)
+		if err != nil {
+			return err
+		}
 		if old == nil {
 			return nil
 		}
@@ -319,8 +355,10 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 
 func (s *service) revoke(id, serial, reason string) error {
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("issued"))
-		old := b.Get([]byte(id))
+		old, err := getRecord(tx, "issued", []byte(id))
+		if err != nil {
+			return err
+		}
 		if old == nil {
 			return statusError(404)
 		}
@@ -357,6 +395,9 @@ func (s *service) revoke(id, serial, reason string) error {
 }
 
 func (s *service) backup(path string) error {
+	if err := s.verify(); err != nil {
+		return err
+	}
 	if err := protectedParent(path); err != nil {
 		return err
 	}
@@ -402,7 +443,10 @@ func (s *service) crl(w io.Writer) error {
 			return err
 		}
 		revision = tx.Bucket([]byte("audit")).Sequence()
-		return tx.Bucket([]byte("issued")).ForEach(func(_, v []byte) error {
+		return tx.Bucket([]byte("issued")).ForEach(func(k, v []byte) error {
+			if _, err := getRecord(tx, "issued", k); err != nil {
+				return err
+			}
 			var r issuance
 			if json.Unmarshal(v, &r) != nil {
 				return invalidState

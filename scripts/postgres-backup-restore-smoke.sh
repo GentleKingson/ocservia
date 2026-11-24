@@ -105,7 +105,6 @@ docker run --name "${backup_container}" --network "${network}" \
   >"${ARTIFACT_DIR}/backup.log"
 
 docker rm "${backup_container}" >/dev/null
-touch "${work}/backup/wal/000000010000000000000000"
 rm "${work}/backup/.backup.lock"
 mkdir "${work}/backup/.backup.lock"
 sleep 1
@@ -117,7 +116,6 @@ docker run --name "${backup_container}" --network "${network}" \
   -v "${work}/backup:/backup" \
   "${backup_image}" --once \
   >"${ARTIFACT_DIR}/backup-after-stale-lock.log"
-test ! -e "${work}/backup/wal/000000010000000000000000"
 
 docker rm "${backup_container}" >/dev/null
 docker run -d --name "${backup_container}" --user "$(id -u):$(id -g)" \
@@ -137,9 +135,9 @@ docker run --name "${backup_container}" --network "${network}" \
   >"${ARTIFACT_DIR}/backup-after-killed-lock-holder.log"
 
 backup_id="$(cat "${work}/backup/LATEST")"
-test -f "${work}/backup/base/${backup_id}/backup_manifest"
+test -f "${work}/backup/base/${backup_id}/base.tar.gz"
 docker stop "${source_container}" >/dev/null
-cp -a "${work}/backup/base/${backup_id}/." "${work}/restore/"
+tar -xzf "${work}/backup/base/${backup_id}/base.tar.gz" -C "${work}/restore"
 rm -f "${work}/restore/standby.signal"
 docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
   bash -ceu 'chown -R postgres:postgres /restore && chmod 0700 /restore'

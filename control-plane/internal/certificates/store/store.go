@@ -53,6 +53,11 @@ type Issued struct {
 	NotBefore, NotAfter, At time.Time
 }
 
+type PendingRevocation struct {
+	OperationID, CommandID, WorkspaceID, NodeID uuid.UUID
+	Envelope                                    []byte
+}
+
 type ActionBinding struct {
 	WorkspaceID, NodeID uuid.UUID
 	Version             int64
@@ -104,9 +109,13 @@ type Store interface {
 	SignerUnavailable(context.Context, uuid.UUID, []byte, time.Time) error
 	CompleteIssue(context.Context, Issued) (bool, error)
 	OperationExists(context.Context, uuid.UUID, string) (bool, error)
-	BeginRevocation(context.Context, uuid.UUID, time.Time) error
-	RevocationUnknown(context.Context, uuid.UUID, time.Time) error
-	ReleaseOperation(context.Context, uuid.UUID) error
+	ReserveRevocation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uint64, value.Timestamp) (bool, error)
+	PendingRevocations(context.Context, *uuid.UUID) ([]PendingRevocation, error)
+	ExpiredRevocations(context.Context) ([]PendingRevocation, error)
+	ExpireRevocation(context.Context, uuid.UUID, uuid.UUID, uint64, []byte, time.Time) error
+	RevocationSerial(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uint64, value.Timestamp) (string, error)
+	RevocationUnknown(context.Context, uuid.UUID, uuid.UUID, time.Time) error
+	ReleaseOperation(context.Context, uuid.UUID, uuid.UUID) error
 	P12Eligible(context.Context, uuid.UUID) (ActionBinding, error)
 	ArtifactByRequest(context.Context, uuid.UUID, string, []byte) (Artifact, error)
 	ArtifactByOperation(context.Context, uuid.UUID) (Artifact, error)

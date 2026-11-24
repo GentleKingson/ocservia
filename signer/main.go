@@ -27,7 +27,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("expected serve, init, import, disable, backup, restore, inspect, crl or health")
+		return errors.New("expected serve, init, import, disable, backup, restore, verify, inspect, crl or health")
 	}
 	command := os.Args[1]
 	f := flag.NewFlagSet("ocserv-signer", flag.ContinueOnError)
@@ -38,6 +38,11 @@ func run() error {
 	tlsKey := f.String("tls-key", "/run/secrets/tls-key.pem", "HTTPS private key")
 	token := f.String("token-file", "/run/secrets/api-token", "Bearer token file")
 	listen := f.String("listen", ":9443", "HTTPS listener")
+	certTTLSetting, ok := os.LookupEnv("OCSERV_SIGNER_CERT_TTL")
+	if !ok {
+		certTTLSetting = defaultCertTTL.String()
+	}
+	f.StringVar(&certTTLSetting, "cert-ttl", certTTLSetting, "client certificate lifetime (24h to 8760h)")
 	approved := f.String("approved", "", "protected Controller export")
 	public := f.String("public", "", "node public-key export")
 	node := f.String("node", "", "expected node UUID")
@@ -74,15 +79,19 @@ func run() error {
 		return nil
 	}
 	switch command {
-	case "serve", "init", "import", "disable", "backup", "restore", "inspect", "crl":
+	case "serve", "init", "import", "disable", "backup", "restore", "verify", "inspect", "crl":
 	default:
 		return errors.New("unknown command")
 	}
-	ca, err := loadAuthority(*chain, *key)
+	certTTL, err := parseCertTTL(certTTLSetting)
+	if err != nil {
+		return err
+	}
+	ca, err := loadAuthority(*chain, *key, certTTL)
 	if err != nil {
 		return errors.New("CA configuration rejected")
 	}
-	s, err := openStore(*state, ca, command == "init")
+	s, err := openLedger(*state, ca, command == "init", command == "verify")
 	if err != nil {
 		return err
 	}
@@ -90,6 +99,8 @@ func run() error {
 	switch command {
 	case "init":
 		return nil
+	case "verify":
+		return s.verify()
 	case "inspect":
 		return s.db.View(func(tx *bolt.Tx) error {
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{"state_version": 1, "issuer_sha256": ca.id, "policy": policy, "revision": tx.Bucket([]byte("audit")).Sequence()})
@@ -164,4 +175,12 @@ func run() error {
 		<-done
 	}
 	return nil
+}
+
+func parseCertTTL(setting string) (time.Duration, error) {
+	ttl, err := time.ParseDuration(setting)
+	if err != nil || ttl < minCertTTL || ttl > maxCertTTL {
+		return 0, errors.New("certificate lifetime must be between 24h and 8760h")
+	}
+	return ttl, nil
 }

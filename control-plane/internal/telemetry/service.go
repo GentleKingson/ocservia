@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
@@ -188,6 +189,8 @@ type Service struct {
 	now                     func() time.Time
 	recommendedAgentVersion string
 	agentUpgradeCatalog     *releasecatalog.Catalog
+	maintenanceMu           sync.Mutex
+	partitionsEnsuredAt     time.Time
 }
 
 // NewBackend enables ingestion, read models and maintenance through domain stores.
@@ -412,11 +415,19 @@ func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, res
 }
 
 func (s *Service) Maintain(ctx context.Context) error {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
 	now := s.now().UTC()
-	return telemetrystore.Maintain(ctx, s.backend, now, func(ctx context.Context, tx database.Tx) error {
+	ensurePartitions := s.partitionsEnsuredAt.IsZero() || now.Sub(s.partitionsEnsuredAt) >= time.Hour || now.Before(s.partitionsEnsuredAt)
+	err := telemetrystore.Maintain(ctx, s.backend, now, func(ctx context.Context, tx database.Tx) error {
 		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
+		}
+		if ensurer, ok := store.(telemetrystore.PartitionEnsurer); ensurePartitions && ok {
+			if err := ensurer.EnsureUpcomingPartitions(ctx); err != nil {
+				return err
+			}
 		}
 		offline, err := store.LockOfflineCandidates(ctx, now.Add(-OfflineAfter))
 		if err != nil {
@@ -431,6 +442,10 @@ func (s *Service) Maintain(ctx context.Context) error {
 	}, func(ctx context.Context, tx database.Tx) error {
 		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
 	})
+	if err == nil && ensurePartitions {
+		s.partitionsEnsuredAt = now
+	}
+	return err
 }
 
 func newTraceparent() string {

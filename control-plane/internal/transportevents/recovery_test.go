@@ -19,7 +19,7 @@ type recoveryResultStore struct {
 	payload []byte
 }
 
-func (s *recoveryResultStore) ScheduleRecovery(_ context.Context, _ uuid.UUID, payload []byte, _, _ value.Timestamp) error {
+func (s *recoveryResultStore) ScheduleRecovery(_ context.Context, _ uuid.UUID, payload []byte, _, _ value.Timestamp, _ bool) error {
 	s.payload = payload
 	return nil
 }
@@ -31,7 +31,7 @@ func TestEffectAbsenceCannotRenewExecutionAuthority(t *testing.T) {
 			id := uuid.Must(uuid.NewV7())
 			command := &agentv1.CommandEnvelope{ProtocolVersion: protocol, CommandId: id[:], IdempotencyKey: id[:], NodeId: id[:], OperationId: id[:], IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), ExpectedRevision: 1, ActorId: "test", Action: "operation.create", RequiredCapability: "synthetic.echo", SemanticPayloadHashVersion: 2, SemanticPayloadSha256: make([]byte, 32), DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, Payload: &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "recovery"}}}
 			store := &recoveryResultStore{}
-			if err := scheduleCommandRecovery(t.Context(), store, id, command, "effect_absent", now.Add(elapsed), commandauth.NewSignerFromSeed([32]byte{1})); err != nil {
+			if err := scheduleCommandRecovery(t.Context(), store, id, resultstore.ResultCommand{}, command, "effect_absent", false, now.Add(elapsed), commandauth.NewSignerFromSeed([32]byte{1})); err != nil {
 				t.Fatal(err)
 			}
 			allowed := protocol == commandauth.ProtocolVersion && elapsed < time.Minute

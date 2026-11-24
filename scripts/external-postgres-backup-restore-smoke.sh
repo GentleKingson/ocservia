@@ -161,7 +161,7 @@ docker rm "${backup_container}" >/dev/null
 # Use the existing root/sudo helper for host-side inspection and restore copies.
 backup_id="$("${owner[@]}" cat "${work}/backup/LATEST")"
 backup_dir="${work}/backup/base/${backup_id}"
-"${owner[@]}" cp -a "${backup_dir}/." "${work}/restore/"
+"${owner[@]}" tar -xzf "${backup_dir}/base.tar.gz" -C "${work}/restore"
 printf 'corrupt\n' | "${owner[@]}" tee -a "${work}/restore/PG_VERSION" >/dev/null
 if docker run --rm -v "${work}/restore:/restore:ro" --entrypoint pg_verifybackup \
   "${POSTGRES_IMAGE}" /restore >"${ARTIFACT_DIR}/corrupt-rejection.log" 2>&1; then
@@ -170,7 +170,7 @@ if docker run --rm -v "${work}/restore:/restore:ro" --entrypoint pg_verifybackup
 fi
 "${owner[@]}" rm -rf -- "${work}/restore"
 mkdir -m 0700 "${work}/restore"
-"${owner[@]}" cp -a "${backup_dir}/." "${work}/restore/"
+"${owner[@]}" tar -xzf "${backup_dir}/base.tar.gz" -C "${work}/restore"
 "${owner[@]}" rm -f "${work}/restore/standby.signal"
 docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
   bash -ceu 'chown -R postgres:postgres /restore && chmod 0700 /restore'

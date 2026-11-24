@@ -203,9 +203,9 @@ are still caught.
 ### SQL artifact acceptance
 
 `scripts/database-artifact-policy.sh all` verifies that `control-plane/migrations`
-contains only `schema.sql` and `upgrade.sql`, that no legacy migration manifests
-remain, and that the shared marker parser and PostgreSQL 18 metadata checks
-pass. The prior release checkpoint stays pinned to v1.2.0 regardless of newer
+contains the baseline `schema.sql`, forward upgrade `upgrade.sql`, and
+`sql/0003_telemetry_partition_maintenance.sql`. It also checks that the parser,
+artifact checksums, and PostgreSQL 18 metadata agree. The prior release checkpoint stays pinned to v1.2.0 regardless of newer
 commits on main.
 
 In `scripts/required-go-tests.txt`, the `postgres-snapshot` inventory requires

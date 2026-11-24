@@ -294,7 +294,7 @@ func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, 
 				at := v.ObservedAt
 				item.ObservedAt = &at
 			}
-			item.RecoveryRequired, item.RecoveryMutationKind = recoveryMetadata(v.CommandState, v.PayloadType, v.SafeRejected)
+			item.RecoveryRequired, item.RecoveryMutationKind = recoveryMetadata(v.CommandState, v.PayloadType)
 			item.Convergence = convergence(item, v.NodeStatus)
 			result = append(result, item)
 		}
@@ -367,17 +367,12 @@ func revisionReplacement(ctx context.Context, users userstore.Store, nodeID uuid
 	if err != nil {
 		return false, err
 	}
-	state, priorKind, safeRejected := previous.State, MutationKind(previous.Kind), previous.SafeRejected
+	state, priorKind := previous.State, MutationKind(previous.Kind)
 	switch state {
 	case "succeeded":
 		return false, nil
 	case "failed", "expired", "rolled_back":
 		if priorKind != kind {
-			return false, ErrRevisionRecovery
-		}
-		return true, nil
-	case "rejected":
-		if !safeRejected || priorKind != kind {
 			return false, ErrRevisionRecovery
 		}
 		return true, nil
@@ -393,12 +388,12 @@ func revisionReplacement(ctx context.Context, users userstore.Store, nodeID uuid
 	}
 }
 
-func recoveryMetadata(commandState, payloadType *string, safeRejected *bool) (bool, *MutationKind) {
+func recoveryMetadata(commandState, payloadType *string) (bool, *MutationKind) {
 	if commandState == nil || payloadType == nil {
 		return false, nil
 	}
-	required := *commandState == "failed" || *commandState == "expired" || *commandState == "rolled_back" || *commandState == "rejected"
-	replaceable := *commandState == "failed" || *commandState == "expired" || *commandState == "rolled_back" || (*commandState == "rejected" && safeRejected != nil && *safeRejected)
+	replaceable := *commandState == "failed" || *commandState == "expired" || *commandState == "rolled_back"
+	required := replaceable || *commandState == "rejected"
 	if !replaceable {
 		return required, nil
 	}

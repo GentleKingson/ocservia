@@ -1,13 +1,17 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"time"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 )
 
 type certificateStore struct{ database.Tx }
@@ -17,12 +21,17 @@ func (t *transaction) CertificateStore() certificatestore.Store { return certifi
 func (s certificateStore) Maintain(ctx context.Context, at time.Time) error {
 	for _, state := range []string{"expired", "expiring"} {
 		predicate := `state IN ('issued','expiring') AND not_after<=now()`
+		versionUpdate := ",version=version+1"
 		if state == "expiring" {
-			predicate = `state='issued' AND not_after>now() AND not_after<=now()+interval '30 days'`
+			predicate = `state='issued' AND not_after>now() AND not_after<=now()+CASE
+				WHEN NOT COALESCE(isfinite(not_before) AND isfinite(not_after), false) THEN interval '30 days'
+				WHEN not_after-not_before>=interval '60 days' THEN interval '30 days'
+				ELSE (not_after-not_before)*0.25 END`
+			versionUpdate = ""
 		}
 		rows, err := s.Query(ctx, `WITH due AS (
 			SELECT id FROM certificates WHERE `+predicate+` ORDER BY not_after,id LIMIT 100 FOR UPDATE SKIP LOCKED
-		) UPDATE certificates c SET state=$1,version=version+1,updated_at=now() FROM due WHERE c.id=due.id RETURNING c.id,c.workspace_id,c.node_id`, state)
+		) UPDATE certificates c SET state=$1,updated_at=now()`+versionUpdate+` FROM due WHERE c.id=due.id RETURNING c.id,c.workspace_id,c.node_id`, state)
 		if err != nil {
 			return err
 		}
@@ -175,21 +184,150 @@ func (s certificateStore) OperationExists(ctx context.Context, workspace uuid.UU
 	return
 }
 
-func (s certificateStore) BeginRevocation(ctx context.Context, id uuid.UUID, at time.Time) error {
-	if _, err := s.Exec(ctx, `UPDATE certificates SET state='revoking',version=version+1,updated_at=$2 WHERE id=$1 AND state IN ('issued','expiring','expired','revocation_unknown')`, id, at); err != nil {
+func (s certificateStore) ReserveRevocation(ctx context.Context, id, workspace, node uuid.UUID, version uint64, at value.Timestamp) (bool, error) {
+	var state string
+	err := s.QueryRow(ctx, `SELECT state FROM certificates WHERE id=$1 AND workspace_id=$2 AND node_id=$3 AND version=$4 AND serial_number<>'' FOR NO KEY UPDATE`, id, workspace, node, version).Scan(&state)
+	if errors.Is(err, database.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch state {
+	case "issued", "expiring", "expired", "revoking", "revocation_unknown", "unknown":
+	default:
+		return false, nil
+	}
+	// An uncertain or in-flight cleanup must keep its original command ID.
+	envelopes, err := database.CollectColumn[[]byte](s.Query(ctx, `SELECT envelope FROM commands
+		WHERE node_id=$1 AND payload_type='certificate_revoke'
+		  AND (state IN ('dispatched','accepted','running','unknown') OR (state='queued' AND expires_at>now()))`, node))
+	if err != nil {
+		return false, err
+	}
+	for _, data := range envelopes {
+		var envelope agentv1.CommandEnvelope
+		if err := proto.Unmarshal(data, &envelope); err != nil || envelope.GetCertificateRevoke() == nil {
+			return false, errors.New("invalid active certificate revocation")
+		}
+		if bytes.Equal(envelope.GetCertificateRevoke().GetCertificateId(), id[:]) {
+			return false, nil
+		}
+	}
+	if err := s.beginRevocation(ctx, id, at); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s certificateStore) beginRevocation(ctx context.Context, id uuid.UUID, at value.Timestamp) error {
+	if _, err := s.Exec(ctx, `UPDATE certificates SET state='revoking',version=version+1,updated_at=$2 WHERE id=$1`, id, at); err != nil {
 		return err
 	}
 	_, err := s.Exec(ctx, `UPDATE artifact_operations SET state='revoked',lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE certificate_id=$1 AND state IN ('pending','ready','leased','consuming')`, id)
 	return err
 }
 
-func (s certificateStore) RevocationUnknown(ctx context.Context, id uuid.UUID, at time.Time) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state='revocation_unknown',version=version+1,updated_at=$2 WHERE id=$1 AND state='revoking'`, id, at)
+// The held outbox row starts at the Command's execution deadline. A later
+// ordinary dispatch retry has an attempt and can never be picked up here.
+const heldRevocation = `c.payload_type='certificate_revoke' AND c.state='queued' AND c.expires_at>clock_timestamp()
+	AND o.published_at IS NULL AND o.attempts=0 AND o.available_at>=c.expires_at`
+
+const expiredHeldRevocation = `c.payload_type='certificate_revoke' AND c.state='expired' AND c.details_compacted_at IS NULL
+	AND o.published_at IS NOT NULL AND o.attempts=0 AND o.available_at>=c.expires_at
+	AND o.last_error='command expired before dispatch'`
+
+func (s certificateStore) PendingRevocations(ctx context.Context, operationID *uuid.UUID) ([]certificatestore.PendingRevocation, error) {
+	return collectPendingRevocations(s.Query(ctx, `SELECT c.operation_id,c.id,c.workspace_id,c.node_id,c.envelope
+		FROM commands c JOIN outbox_events o ON o.command_id=c.id
+		WHERE `+heldRevocation+` AND ($1::uuid IS NULL OR c.operation_id=$1)
+		ORDER BY c.expires_at,c.id LIMIT 20`, operationID))
+}
+
+func (s certificateStore) ExpiredRevocations(ctx context.Context) ([]certificatestore.PendingRevocation, error) {
+	return collectPendingRevocations(s.Query(ctx, `SELECT c.operation_id,c.id,c.workspace_id,c.node_id,c.envelope
+		FROM commands c JOIN outbox_events o ON o.command_id=c.id
+		WHERE `+expiredHeldRevocation+` ORDER BY o.published_at,o.id LIMIT 20`))
+}
+
+func collectPendingRevocations(rows database.Rows, err error) ([]certificatestore.PendingRevocation, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []certificatestore.PendingRevocation
+	for rows.Next() {
+		var v certificatestore.PendingRevocation
+		if err := rows.Scan(&v.OperationID, &v.CommandID, &v.WorkspaceID, &v.NodeID, &v.Envelope); err != nil {
+			return nil, err
+		}
+		pending = append(pending, v)
+	}
+	return pending, rows.Err()
+}
+
+func (s certificateStore) ExpireRevocation(ctx context.Context, commandID, certificateID uuid.UUID, version uint64, envelope []byte, at time.Time) error {
+	// A held command never reached the node. Preserve its terminal expiry,
+	// and record its unknown Signer outcome only if it still owns the certificate.
+	alertID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	_, err = s.Exec(ctx, `WITH expired AS (
+		UPDATE outbox_events o SET last_error=CASE WHEN $3::bigint=0
+		  THEN 'certificate revocation expired with invalid authorization'
+		  ELSE 'certificate revocation expired with unknown signer outcome' END
+		FROM commands c WHERE c.id=o.command_id AND c.id=$1 AND c.envelope=$4 AND `+expiredHeldRevocation+`
+		RETURNING c.workspace_id,c.node_id
+	), changed AS (
+		UPDATE certificates t SET state='revocation_unknown',
+		  version=t.version+CASE WHEN t.state='revoking' THEN 1 ELSE 0 END,updated_at=$5
+		FROM expired e WHERE t.id=$2 AND t.workspace_id=e.workspace_id AND t.node_id=e.node_id
+		AND ((t.state='revoking' AND t.version-1=$3) OR (t.state='revocation_unknown' AND t.version-2=$3))
+		RETURNING t.id,t.workspace_id,t.node_id
+	) INSERT INTO security_alerts(id,workspace_id,severity,kind,node_id,resource_type,resource_id,created_at)
+	SELECT $6,workspace_id,'high','certificate.revocation_expired',node_id,'certificate',id,$5 FROM changed`, commandID, certificateID, version, envelope, at, alertID)
 	return err
 }
 
-func (s certificateStore) ReleaseOperation(ctx context.Context, id uuid.UUID) error {
-	_, err := s.Exec(ctx, `UPDATE outbox_events SET available_at=now() WHERE command_id=(SELECT command_id FROM operations WHERE id=$1) AND published_at IS NULL`, id)
+func (s certificateStore) RevocationSerial(ctx context.Context, id, workspace, node uuid.UUID, version uint64, at value.Timestamp) (string, error) {
+	var state, serial string
+	var current uint64
+	err := s.QueryRow(ctx, `SELECT state,serial_number,version FROM certificates
+		WHERE id=$1 AND workspace_id=$2 AND node_id=$3 AND serial_number<>'' FOR NO KEY UPDATE`, id, workspace, node).Scan(&state, &serial, &current)
+	if err != nil {
+		return "", err
+	}
+	switch state {
+	case "revoking", "revocation_unknown":
+		if current > version {
+			return serial, nil
+		}
+	case "issued", "expiring", "expired":
+		// Recover an intent committed before the certificate transition under
+		// older Controllers.
+		if current == version {
+			return serial, s.beginRevocation(ctx, id, at)
+		}
+	}
+	return "", database.ErrNotFound
+}
+
+func (s certificateStore) RevocationUnknown(ctx context.Context, operationID, certificateID uuid.UUID, at time.Time) error {
+	_, err := s.Exec(ctx, `WITH held AS (
+		SELECT o.id FROM outbox_events o JOIN commands c ON c.id=o.command_id
+		WHERE c.operation_id=$1 AND `+heldRevocation+` FOR UPDATE OF o
+	) UPDATE certificates SET state='revocation_unknown',version=version+1,updated_at=$3
+	WHERE id=$2 AND state='revoking' AND EXISTS(SELECT 1 FROM held)`, operationID, certificateID, at)
+	return err
+}
+
+func (s certificateStore) ReleaseOperation(ctx context.Context, operationID, certificateID uuid.UUID) error {
+	_, err := s.Exec(ctx, `WITH released AS (
+		UPDATE outbox_events o SET available_at=now() FROM commands c
+		WHERE c.id=o.command_id AND c.operation_id=$1 AND `+heldRevocation+` RETURNING o.id
+	) UPDATE certificates SET state='revoking',version=version+1,updated_at=now()
+	WHERE id=$2 AND state='revocation_unknown' AND EXISTS(SELECT 1 FROM released)`, operationID, certificateID)
 	return err
 }
 
@@ -259,7 +397,7 @@ func (s artifactStore) Abort(ctx context.Context, id, grant uuid.UUID) error {
 }
 
 func (s artifactStore) PendingConsumptions(ctx context.Context) ([]certificatestore.PendingConsumption, error) {
-	rows, err := s.Query(ctx, `SELECT id,active_grant_id,consume_grant,consume_sha256,consume_size,consume_actor_id,expires_at FROM artifact_operations WHERE state='consuming' ORDER BY updated_at,id LIMIT 20`)
+	rows, err := s.Query(ctx, `SELECT id,COALESCE(active_grant_id,'00000000-0000-0000-0000-000000000000'::uuid),consume_grant,consume_sha256,COALESCE(consume_size,0),consume_actor_id,expires_at FROM artifact_operations WHERE state='consuming' ORDER BY updated_at,id LIMIT 20`)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +411,12 @@ func (s artifactStore) PendingConsumptions(ctx context.Context) ([]certificatest
 		values = append(values, v)
 	}
 	return values, rows.Err()
+}
+
+func (s artifactStore) FailConsumption(ctx context.Context, id, grant uuid.UUID, evidence []byte) error {
+	_, err := s.Exec(ctx, `UPDATE artifact_operations SET state='failed',lease_until=NULL,active_grant_expires_at=now(),updated_at=now()
+		WHERE id=$1 AND state='consuming' AND COALESCE(active_grant_id,'00000000-0000-0000-0000-000000000000'::uuid)=$2 AND consume_grant=$3`, id, grant, evidence)
+	return err
 }
 
 func (s artifactStore) ResetConsumption(ctx context.Context, id, grant uuid.UUID, expired bool) error {

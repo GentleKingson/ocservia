@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func newBenchAuthorityAndCSR(tb testing.TB) (*authority, *x509.CertificateRequest) {
+func newTestAuthorityAndCSR(tb testing.TB) (*authority, *x509.CertificateRequest) {
 	tb.Helper()
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -67,6 +67,7 @@ func newBenchAuthorityAndCSR(tb testing.TB) (*authority, *x509.CertificateReques
 	roots.AddCert(rootCert)
 	intermediates.AddCert(caCert)
 	auth := &authority{
+		certTTL:       defaultCertTTL,
 		cert:          caCert,
 		key:           caKey,
 		chain:         chainPEM,
@@ -94,7 +95,7 @@ func newBenchAuthorityAndCSR(tb testing.TB) (*authority, *x509.CertificateReques
 }
 
 func BenchmarkAuthorityIssue(b *testing.B) {
-	auth, csr := newBenchAuthorityAndCSR(b)
+	auth, csr := newTestAuthorityAndCSR(b)
 	b.ReportAllocs()
 	serial := int64(100)
 	b.ResetTimer()

@@ -126,6 +126,10 @@ type Store interface {
 	InsertSecurity(context.Context, uuid.UUID, []SecurityEvent) error
 }
 
+type PartitionEnsurer interface {
+	EnsureUpcomingPartitions(context.Context) error
+}
+
 type BatchMaintainer interface {
 	MaintainBatch(context.Context, time.Time) (done bool, err error)
 }

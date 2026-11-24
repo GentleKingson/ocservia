@@ -72,18 +72,18 @@ func (s operationStore) PendingUpgrades(ctx context.Context, limit int) ([]opera
 // preceding projection writes, rather than committing a partial transition.
 func (s operationStore) UpgradeTerminal(ctx context.Context, v operationstore.UpgradeTransition) error {
 	if !v.GenericTerminal && v.State != v.OperationState {
+		if _, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, v.CommandID, v.At); err != nil {
+			return err
+		}
+		if _, err := s.Exec(ctx, `UPDATE commands SET state=$2,updated_at=$3 WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, v.CommandID, v.CommandState, v.At); err != nil {
+			return err
+		}
 		count, err := s.Exec(ctx, `UPDATE operations SET state=$2,version=version+1,updated_at=$3,completed_at=GREATEST(COALESCE(completed_at,$3),$3) WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, v.OperationID, v.State, v.At)
 		if err != nil {
 			return err
 		}
 		if count == 0 {
 			return database.ErrNotFound
-		}
-		if _, err := s.Exec(ctx, `UPDATE commands SET state=$2,updated_at=$3 WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, v.CommandID, v.CommandState, v.At); err != nil {
-			return err
-		}
-		if _, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, v.CommandID, v.At); err != nil {
-			return err
 		}
 	}
 	count, err := s.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,completed_at=$3,updated_at=$3 WHERE operation_id=$1 AND completed_at IS NULL AND state IN ('queued','accepted','running','unknown')`, v.OperationID, v.State, v.At)

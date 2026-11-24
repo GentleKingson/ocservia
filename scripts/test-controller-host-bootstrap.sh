@@ -505,29 +505,27 @@ EOF
 cat >"${writer_bin}/pg_basebackup" <<'EOF'
 #!/usr/bin/env bash
 echo pg_basebackup >>"${WRITER_LOG}"
-pgdata=""
+pgdata="" checkpoint=""
 for arg in "$@"; do
   case "${arg}" in
     --pgdata=*) pgdata="${arg#--pgdata=}" ;;
+    --checkpoint=*) checkpoint="${arg#--checkpoint=}" ;;
   esac
 done
+[[ "${checkpoint}" == spread ]] || exit 1
 mkdir -m 0700 -- "${pgdata}"
 printf 'START WAL LOCATION: 0/01000028 (file 000000010000000000000001)\n' >"${pgdata}/backup_label"
 printf '{"PostgreSQL-Backup-Manifest-Version":1}\n' >"${pgdata}/backup_manifest"
 EOF
 cat >"${writer_bin}/pg_verifybackup" <<'EOF'
 #!/usr/bin/env bash
-exit 0
-EOF
-cat >"${writer_bin}/pg_archivecleanup" <<'EOF'
-#!/usr/bin/env bash
-exit 0
+exit "${WRITER_VERIFY_STATUS:-0}"
 EOF
 cat >"${writer_bin}/date" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "-u +%Y%m%dT%H%M%SZ" ]]; then echo 20260101T000000Z; else exec "${WRITER_REAL_DATE}" "$@"; fi
 EOF
-chmod 0755 -- "${writer_bin}/psql" "${writer_bin}/pg_basebackup" "${writer_bin}/pg_verifybackup" "${writer_bin}/pg_archivecleanup" "${writer_bin}/date"
+chmod 0755 -- "${writer_bin}/psql" "${writer_bin}/pg_basebackup" "${writer_bin}/pg_verifybackup" "${writer_bin}/date"
 run_writer() {
   RUN_STATUS=0
   : >"${writer_log}"
@@ -597,12 +595,35 @@ install -d -m 0700 -- "${wroot}/ok"
 run_writer "${wroot}/ok"
 assert_status 0 "a protected writer root must back up"
 assert_output "backup completed id=20260101T000000Z"
-[[ "$(stat -c '%a' "${wroot}/ok/base")" == 700 && "$(stat -c '%a' "${wroot}/ok/wal")" == 700 ]] || die "the base and wal directories must be created with mode 0700"
+[[ "$(stat -c '%a' "${wroot}/ok/base")" == 700 && ! -e "${wroot}/ok/wal" ]] || die "the writer must protect the base directory"
 [[ "$(cat -- "${wroot}/ok/LATEST")" == 20260101T000000Z ]] || die "the LATEST marker was not published"
-[[ -s "${wroot}/ok/base/20260101T000000Z/backup_manifest" && "$(cat -- "${wroot}/ok/base/20260101T000000Z/OCSERVIA_BACKUP_ID")" == 20260101T000000Z ]] ||
+[[ "$(tar -xOzf "${wroot}/ok/base/20260101T000000Z/base.tar.gz" ./backup_manifest)" == '{"PostgreSQL-Backup-Manifest-Version":1}' &&
+  "$(cat -- "${wroot}/ok/base/20260101T000000Z/OCSERVIA_BACKUP_ID")" == 20260101T000000Z ]] ||
   die "the backup files were not published"
 [[ -z "$(find "${wroot}/ok" -name '.LATEST*' -o -name '*.tmp')" ]] || die "the writer left temporary objects"
 echo "the backup writer backs up under a protected path"
+
+install -d -m 0700 -- "${wroot}/failed-verification"
+export WRITER_VERIFY_STATUS=1
+run_writer "${wroot}/failed-verification"
+assert_status 1 "one-shot verification failures must fail"
+[[ ! -e "${wroot}/failed-verification/LATEST" && -z "$(ls -A "${wroot}/failed-verification/base")" ]] ||
+  die "an unverified backup was published or left behind"
+# A controlled sleep proves the loop reaches its retry delay rather than
+# exiting immediately or attempting to publish a failed backup.
+cat >"${writer_bin}/sleep" <<'EOF'
+#!/usr/bin/env bash
+printf 'backup worker sleep=%s\n' "$1"
+exit 42
+EOF
+chmod 0755 "${writer_bin}/sleep"
+RUN_STATUS=0
+RUN_OUTPUT="$(env PATH="${writer_bin}:${PATH}" WRITER_LOG="${writer_log}" WRITER_REAL_DATE="$(command -v date)" \
+  BACKUP_ROOT="${wroot}/failed-verification" RUN_ID=writer-test "${writer}" 2>&1)" || RUN_STATUS=$?
+assert_status 42 "verification failure in the loop must reach the retry delay"
+assert_output "backup attempt failed; retrying in 900 seconds"
+assert_output "backup worker sleep=900"
+unset WRITER_VERIFY_STATUS
 
 # 11. install refuses to run without root.
 if (( EUID != 0 )); then

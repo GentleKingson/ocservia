@@ -124,12 +124,28 @@ func transactionKeyLookup(tx database.Tx) keyLookup {
 
 func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) (verification Verification) {
 	defer func() { recordVerificationMetric(verification) }()
-	commandKind := commandKind(envelope)
-	// A Rejected result of a root-executed command has no receipt form, so it is
-	// never trusted evidence that no effect happened. It is verified like a
-	// terminal result and therefore fails closed instead of becoming terminal.
-	if commandKind == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED ||
-		(result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED && result.GetState() != agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED) {
+	if commandKind(envelope) == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED {
+		return Verification{Status: "not_required"}
+	}
+	switch result.GetState() {
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED:
+		// Privd signs these terminal results.
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED:
+		// Rejection is only an Agent assertion. It cannot settle a privileged command.
+		if result.GetPrivilegedResultProof() == nil {
+			return Verification{Status: "missing", FailureReason: "receipt_missing"}
+		}
+		return Verification{Status: "invalid", FailureReason: "receipt_claim_mismatch"}
+	case agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN:
+		// Agent and transport can normalize malformed terminal frames to Unknown.
+		switch result.GetErrorCode() {
+		case "receipt_missing":
+			return Verification{Status: "missing", FailureReason: "receipt_missing"}
+		case "receipt_invalid", "privd_receipt_missing_or_malformed":
+			return Verification{Status: "invalid", FailureReason: "receipt_malformed"}
+		}
+		return Verification{Status: "not_required"}
+	default:
 		return Verification{Status: "not_required"}
 	}
 	proof := result.GetPrivilegedResultProof()
@@ -174,7 +190,7 @@ func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envel
 		verification.Status, verification.FailureReason = "revoked_key", "receipt_key_revoked"
 		return verification
 	}
-	if completedAt.Before(record.ActivatedAt) || record.ValidUntil != nil && completedAt.After(*record.ValidUntil) {
+	if completedAt.Before(record.ActivatedAt.Add(-receiptClockSkew)) || record.ValidUntil != nil && completedAt.After(*record.ValidUntil) {
 		verification.FailureReason = "receipt_key_outside_validity"
 		return verification
 	}
@@ -397,15 +413,19 @@ func receiptClaimsMatch(nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, res
 	return certificateClaimsMatch(envelope, result, receipt)
 }
 
+const receiptClockSkew = 5 * time.Minute
+
 func receiptWithinCommandWindow(envelope *agentv1.CommandEnvelope, receipt *agentv1.PrivdResultReceiptV1) bool {
 	issued, expires := envelope.GetIssuedAt(), envelope.GetExpiresAt()
-	if !validTimestamp(issued) || !validTimestamp(expires) || issued.AsTime().After(expires.AsTime()) {
+	accepted, completed := receipt.GetAcceptedAt(), receipt.GetCompletedAt()
+	if !validTimestamp(issued) || !validTimestamp(expires) || !validTimestamp(accepted) || !validTimestamp(completed) || issued.AsTime().After(expires.AsTime()) {
 		return false
 	}
-	// Agent journal timestamps have whole-second precision. Privd independently
-	// enforces the same lower bound before execution; the expiry bound remains
-	// nanosecond-exact so a retired overlap key cannot backdate a new receipt.
-	return receipt.GetAcceptedAt().GetSeconds() >= issued.GetSeconds() && !receipt.GetCompletedAt().AsTime().After(expires.AsTime())
+	// Match the second-precision lower bound enforced by Privd. Completion
+	// and expiry comparisons preserve the full timestamp precision.
+	deadline := expires.AsTime().Add(receiptClockSkew)
+	return accepted.GetSeconds() >= issued.GetSeconds()-int64(receiptClockSkew/time.Second) &&
+		!accepted.AsTime().After(deadline) && !completed.AsTime().Before(accepted.AsTime()) && !completed.AsTime().After(deadline)
 }
 
 func certificateClaimsMatch(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, receipt *agentv1.PrivdResultReceiptV1) bool {

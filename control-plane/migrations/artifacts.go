@@ -21,6 +21,11 @@ var schemaSQL string
 //go:embed upgrade.sql
 var upgradeSQL []byte
 
+//go:embed sql/0003_telemetry_partition_maintenance.sql
+var telemetryPartitionMaintenanceSQL []byte
+
+const telemetryPartitionMaintenanceRevision = 6
+
 const checkpointRef = "v1.2.0@169102557cd610847c9f6ac2083336cdcf82c483"
 const checkpointChecksum = "d837335f22c70858f4e2a5277332e478ecd6032e7b55f57d6512484bfab6f172"
 
@@ -60,6 +65,12 @@ func parsePostgresArtifacts(schema, upgrade []byte) (postgresArtifacts, error) {
 	}
 	if a.schema.Kind != "schema" || a.upgrade.Kind != "upgrade" || a.schema.Epoch != a.upgrade.Epoch || a.schema.Baseline.Number != int64(len(a.upgrade.Revisions)) || a.upgrade.Base == nil || (a.schema.Epoch > 1 && a.upgrade.Previous == nil) {
 		return a, errors.New("PostgreSQL artifact window mismatch")
+	}
+	if len(a.upgrade.Revisions) >= telemetryPartitionMaintenanceRevision {
+		steps := a.upgrade.Revisions[telemetryPartitionMaintenanceRevision-1].Steps
+		if len(steps) != 1 || !bytes.Equal(steps[0].SQL, telemetryPartitionMaintenanceSQL) {
+			return a, errors.New("PostgreSQL telemetry partition maintenance artifact mismatch")
+		}
 	}
 	if a.schema.Epoch > 1 && a.schema.Baseline.Number == 0 && a.schema.HistoryChecksum != fmt.Sprintf("%x", a.upgrade.Transition.Checksum) {
 		return a, errors.New("PostgreSQL transition checksum mismatch")

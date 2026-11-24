@@ -445,6 +445,39 @@ async fn rebound_authority_denies_old_node_key_and_quarantines_uncertain_effects
 }
 
 #[tokio::test]
+async fn journal_acceptance_allows_five_minute_skew_and_receipts_survive_clock_rollback() {
+    let signing = SigningKey::from_bytes(&[8; 32]);
+    let keys = keyring(&signing);
+    let node_id = *Uuid::now_v7().as_bytes();
+    let now = unix_seconds();
+    let fixture = PrivdFixture::new();
+    for (accepted_at, allowed) in [
+        (ts(now - 301, 0), false),
+        (ts(now - 300, 0), true),
+        (ts(now + 30, 900_000_000), true),
+        (ts(now + 600, 0), false),
+    ] {
+        let mut request = command_request(signed_service_reload(&signing, node_id, now, now + 60));
+        request.accepted_at = Some(accepted_at);
+        let result = dispatch(request, &node_id, &keys, &fixture.adapter).await;
+        assert_eq!(result.privileged_result_proof.is_some(), allowed);
+        if let Some(proof) = result.privileged_result_proof {
+            ocservia_privd_attestation::verify_receipt(
+                &proof,
+                &SigningKey::from_bytes(&[41; 32]).verifying_key(),
+            )
+            .expect("valid receipt");
+            let receipt = proof.receipt_v1.expect("receipt");
+            assert_eq!(receipt.accepted_at, Some(accepted_at));
+            if accepted_at.seconds > now {
+                assert_eq!(receipt.completed_at, Some(accepted_at));
+            }
+        }
+    }
+    assert_eq!(fs::read(&fixture.counter).expect("executed twice"), b"xx");
+}
+
+#[tokio::test]
 async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_fault() {
     let signing = SigningKey::from_bytes(&[8; 32]);
     let keys = keyring(&signing);

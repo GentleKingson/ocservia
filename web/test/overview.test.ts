@@ -233,12 +233,12 @@ describe("operational overview", () => {
     overview.stop();
   });
 
-  it("appends only new events on an incremental refresh", async () => {
+  it("replaces the history with one newest-first page on every refresh", async () => {
     vi.mocked(listEvents)
       .mockResolvedValueOnce(
         eventPage([platformEvent("event-2", 2), platformEvent("event-1", 1)]),
       )
-      .mockResolvedValueOnce(eventPage([platformEvent("event-3", 3)]));
+      .mockResolvedValueOnce(eventPage([platformEvent("event-3", 3)], true));
     const overview = useOverviewStore();
     overview.start();
     await vi.advanceTimersByTimeAsync(0);
@@ -250,14 +250,13 @@ describe("operational overview", () => {
     overview.refresh();
     await vi.advanceTimersByTimeAsync(0);
     expect(listEvents).toHaveBeenLastCalledWith(
-      "event-2",
+      undefined,
       expect.any(AbortSignal),
+      "desc",
+      50,
     );
-    expect(overview.events.map((event) => event.id)).toEqual([
-      "event-1",
-      "event-2",
-      "event-3",
-    ]);
+    expect(listEvents).toHaveBeenCalledTimes(2);
+    expect(overview.events.map((event) => event.id)).toEqual(["event-3"]);
     overview.stop();
   });
 
@@ -382,7 +381,7 @@ describe("operational overview", () => {
 
     window.dispatchEvent(new Event(platformEventsEvent));
     expect(listOperations).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(listOperations).toHaveBeenCalledTimes(2);
     expect(listEvents).toHaveBeenCalledTimes(2);
     overview.stop();
@@ -396,15 +395,13 @@ describe("operational overview", () => {
 
     // Events every 150ms forever postpone a trailing debounce; the fixed
     // refresh window must still fire mid-burst.
-    for (let elapsed = 0; elapsed < 1_400; elapsed += 150) {
+    for (let elapsed = 0; elapsed < 12_000; elapsed += 150) {
       window.dispatchEvent(new Event(platformEventsEvent));
       await vi.advanceTimersByTimeAsync(150);
     }
 
-    expect(vi.mocked(listOperations).mock.calls.length).toBeGreaterThanOrEqual(
-      3,
-    );
-    expect(vi.mocked(listEvents).mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(listOperations).toHaveBeenCalledTimes(3);
+    expect(listEvents).toHaveBeenCalledTimes(3);
     overview.stop();
   });
 

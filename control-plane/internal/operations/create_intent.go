@@ -169,6 +169,20 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, RequestHash: payload.ArtifactMetadata.RequestHash, ExpiresAt: artifactExpiry, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
+	case CertificateRevokePayload:
+		if payload.HoldDispatch {
+			store, err := certificatestore.FromTransaction(tx)
+			if err != nil {
+				return err
+			}
+			reserved, err := store.ReserveRevocation(ctx, payload.CertificateID, workspaceID, request.NodeID, payload.CertificateVersion, created)
+			if err != nil {
+				return err
+			}
+			if !reserved {
+				return ErrStaleRevision
+			}
+		}
 	case AgentUpgradePayload:
 		if err := intentStore.InsertUpgrade(ctx, operationstore.PendingUpgrade{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TargetVersion: payload.TargetVersion, PackageSHA256: payload.PackageSHA256, Architecture: payload.Architecture, FromVersion: fromVersion, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert agent upgrade operation: %w", err)
@@ -178,20 +192,31 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 	return nil
 }
 
-func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, workspaceID uuid.UUID, nodeStatus string, now time.Time, created value.Timestamp) (*rolloutNodeObservation, error) {
+func lockRolloutDispatch(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, workspaceID uuid.UUID, created value.Timestamp) error {
 	// Serialize generated operation intent, including idempotent replay,
 	// with rollout pause/resume. A cleared claim or non-running rollout
 	// must not create or recover an operation from an older memory claim.
 	claim, err := intentStore.LockRolloutClaim(ctx, upgrade.RolloutID, workspaceID, request.NodeID)
 	if errors.Is(err, database.ErrNotFound) {
-		return nil, ErrRolloutState
+		return ErrRolloutState
 	}
 	if err != nil {
-		return nil, fmt.Errorf("lock rollout dispatch claim: %w", err)
+		return fmt.Errorf("lock rollout dispatch claim: %w", err)
 	}
 	if claim.State != RolloutStateRunning || claim.NodeState != RolloutNodePending || !claim.DispatchLease.Valid || claim.DispatchLease.Micros <= created.Micros {
-		return nil, ErrRolloutState
+		return ErrRolloutState
 	}
+	rollout, err := intentStore.Rollout(ctx, upgrade.RolloutID, false)
+	if err != nil {
+		return err
+	}
+	if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion || !bytes.Equal(rollout.RequestHash, upgrade.RolloutRequestHash) {
+		return ErrRolloutState
+	}
+	return nil
+}
+
+func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, nodeStatus string, now time.Time) (*rolloutNodeObservation, error) {
 	if s.releaseCatalog == nil {
 		return nil, ErrRolloutState
 	}
@@ -229,13 +254,6 @@ func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operat
 	}
 	if observation.Architecture != upgrade.Architecture || !bytes.Equal(digest[:], upgrade.PackageSHA256) {
 		return nil, ErrStaleRevision
-	}
-	rollout, err := intentStore.Rollout(ctx, upgrade.RolloutID, false)
-	if err != nil {
-		return nil, err
-	}
-	if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion || !bytes.Equal(rollout.RequestHash, upgrade.RolloutRequestHash) {
-		return nil, ErrRolloutState
 	}
 
 	return &observation, nil

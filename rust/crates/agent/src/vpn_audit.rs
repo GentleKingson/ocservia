@@ -8,11 +8,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 type Error = Box<dyn std::error::Error + Send + Sync>;
 const DB: &str = "/var/lib/ocservia-vpn-audit/events.sqlite";
 
+fn open_spool(path: &str, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    let db = Connection::open_with_flags(path, flags)?;
+    db.busy_timeout(Duration::from_secs(1))?;
+    Ok(db)
+}
+
 fn pending(path: &str) -> Result<Vec<VpnAuditRecord>, Error> {
     if !std::path::Path::new(path).try_exists()? {
         return Ok(Vec::new());
     }
-    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let db = open_spool(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt=db.prepare("SELECT event_id,
       body->>'event_type',body->>'session_id',body->>'username',body->>'client_ip',body->>'vpn_ip',
       body->>'connected_ms',body->>'observed_ms',body->>'bytes_in',body->>'bytes_out',
@@ -66,8 +72,7 @@ fn reconcile_snapshot(
         return Ok(());
     }
     let at = i64::try_from(sampled.duration_since(UNIX_EPOCH)?.as_millis())?;
-    let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    db.busy_timeout(Duration::from_millis(100))?;
+    let mut db = open_spool(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction()?;
     for s in sessions {
         let Some(start) = s.connected_at else {
@@ -97,7 +102,7 @@ fn acknowledge(path: &str, ids: &[String], receipt: &VpnAuditReceipt) -> Result<
     if receipt.event_ids != ids {
         return Err("unexpected VPN audit receipt".into());
     }
-    let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let mut db = open_spool(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction()?;
     for id in ids {
         tx.execute("DELETE FROM pending WHERE event_id=?1", [id])?;
@@ -136,12 +141,45 @@ pub(super) async fn upload_loop(connection: iroh::endpoint::Connection) {
 mod tests {
     use super::*;
     #[test]
+    fn lease_reconciliation_waits_for_the_wal_writer() {
+        let path =
+            std::env::temp_dir().join(format!("ocservia-audit-{}.sqlite", uuid::Uuid::now_v7()));
+        let mut writer = Connection::open(&path).expect("open writer");
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE leases(boot TEXT, updated_ms INTEGER);",
+            )
+            .expect("WAL schema");
+        let tx = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("hold writer lock");
+        let (started, ready) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            started.send(()).expect("ready");
+            reconcile_snapshot(
+                worker_path.to_str().expect("path"),
+                "boot",
+                SystemTime::now(),
+                &[],
+            )
+        });
+        ready.recv().expect("worker ready");
+        std::thread::sleep(Duration::from_millis(200));
+        tx.commit().expect("release writer lock");
+        worker.join().expect("join worker").expect("reconcile");
+        drop(writer);
+        std::fs::remove_file(path).expect("cleanup database");
+    }
+
+    #[test]
     fn spool_survives_reopen_and_requires_exact_commit_receipt() {
         let path =
             std::env::temp_dir().join(format!("ocservia-audit-{}.sqlite", uuid::Uuid::now_v7()));
         let path = path.to_str().unwrap();
         let db = Connection::open(path).unwrap();
-        db.execute_batch(r#"CREATE TABLE pending(event_id TEXT PRIMARY KEY,body TEXT);
+        db.execute_batch(r#"PRAGMA journal_mode=WAL;
+            CREATE TABLE pending(event_id TEXT PRIMARY KEY,body TEXT);
             INSERT INTO pending VALUES('id-1','{"event_type":"connect","session_id":"42","username":"alice","client_ip":"192.0.2.1","vpn_ip":"10.1.0.1","connected_ms":10,"observed_ms":10}');"#).unwrap();
         drop(db);
         let saved = pending(path).unwrap();

@@ -74,8 +74,14 @@ when reconciliation proves that the effect never occurred may the Controller
 sign and send a `RETRY_IF_EFFECT_ABSENT` command.
 
 Command envelope protocol `1.2` keeps its signed `expires_at` as the immutable
-execution deadline. Recovery renews only the database's observation/outbox
-window; the signed command deadline never changes. An expired, signed
+execution deadline. The first transition from `EXECUTE_OR_REPLAY` to
+`RECONCILE_ONLY` reserves at least five minutes in the database's observation
+window. Additional observation attempts share that window and the 64-attempt
+budget. When a recoverable result schedules another attempt, the outbox waits
+5, 10, 20, 40, and then at most 60 seconds based on the accumulated dispatch
+count. Missing, invalid, unknown-key, or revoked-key receipts cap future
+automatic reconciliation at three attempts and raise a critical alert. A command
+that exhausts those attempts stays `unknown` for operator reconciliation. An expired, signed
 `RECONCILE_ONLY` command may read authenticated durable evidence under the
 current session, capability and owner fence, with a bounded transport timeout.
 Both Controller retry admission and privd execution still reject an expired
@@ -261,10 +267,14 @@ recovery evidence. Only an exact prepared record with a matching before-state
 proves that an effect is absent. Operators must keep the generated HMAC key and
 SQLite database together during backup, restore, and binary rollback.
 
-Every terminal privileged response includes a `PrivdResultReceiptV1` covering
-either a success or a terminal rejection with error code `privd_rejected` or
-`capacity_exceeded`. Transient errors such as an unavailable adapter omit the
-receipt and remain non-terminal. For `agent.upgrade`, the initial receipt
+Privd signs `SUCCEEDED` and `FAILED` terminal responses, including durable
+failures with error code `privd_rejected` or `capacity_exceeded`. An Agent
+`REJECTED` response to a privileged command leaves the outcome `unknown`.
+Transient errors such as an unavailable adapter omit the receipt and remain
+non-terminal. The Controller allows five minutes of clock skew at acceptance
+and key activation, and five minutes after execution expiry to settle an
+accepted command. Receipt completion must follow or equal acceptance. Revoked
+keys remain ineligible. For `agent.upgrade`, the initial receipt
 records only that the upgrade was "scheduled". The upgrader's final durable
 outcome is retrieved later through the attested upgrade-result read.
 
@@ -919,14 +929,19 @@ state transition separately.
   and client IP attributes belong only to the node session read model and are
   never attached as metric labels.
 - In PostgreSQL, raw telemetry samples land in monthly table partitions.
-- Background scheduler maintenance computes 5-minute and 1-hour rollups and
-  enforces the 14-day, 90-day, and 13-month retention windows idempotently.
-  Each rollup pass recomputes the full 14-day lateness window starting from the
-  resolution's complete UTC bucket. Each retention pass deletes up to 1,000
-  expired rows per rollup table and retires at most one expired month.
-  Retention cutoffs are evaluated against server time, cannot advance into the
-  future, and always aggregate the oldest retirement candidate before its raw
-  partition is retired.
+- Ingest transactions mark changed 5-minute buckets, including late samples.
+  The scheduler recomputes at most 4,096 dirty buckets per pass and derives
+  each affected hour from 5-minute buckets weighted by sample count. Rollup
+  retention is 90 days for 5-minute data and 13 months for hourly data, with
+  up to 1,000 expired rows deleted per table in each pass.
+- Runtime maintenance checks the current UTC month and its next two monthly
+  partitions once an hour using the server clock. The owner runs
+  `--telemetry-retention-only` to retire up to one month that fell outside
+  the 14-day ingestion window. It concurrently detaches the partition,
+  backfills any retained rollups, and drops the detached table. A durable
+  retirement marker lets the same command resume after interruption. Existing
+  data from the former default partition remains readable in a detached
+  historical table.
 - On ingress, the Controller accepts snapshot, metric, and
   security-observation timestamps ranging from 14 days in the past up to five
   minutes in the future. It rejects out-of-window events before selecting a
@@ -1072,6 +1087,11 @@ boundaries. Configuration revisions, exact command hashes, idempotency, node
 ownership fences, and root-signed receipts still protect execution.
 
 Audit intent records commit in the same transaction as the business write, and terminal Agent command results append a separate follow-up audit event. Every newly inserted audit row authenticates its canonical event hash with a domain-separated application HMAC, while signed checkpoints use a separate key. Audit identities, original hashes and MACs, and checkpoints are immutable, and ordinary UPDATE, DELETE, and TRUNCATE statements are denied at the database level. If an audit insert fails, the enclosing business transaction rolls back.
+
+At startup, the Controller checks the latest authenticated checkpoint and
+verifies the events appended since it. A workspace without an authenticated
+checkpoint is verified from its first event before anchoring the tail. The
+audit verification endpoint can still verify the entire history.
 
 A bounded retention job can clear aged reason strings and before/after detail summaries through a narrow database routine after verifying each row's original hash and MAC. Compaction re-authenticates the retained columns and original proof under the dedicated `ocservia/audit-detail-compaction/v1` MAC domain without altering hash-chain links or checkpoint digests. The audit verification endpoint validates both original and compaction MACs alongside the hash chain and latest checkpoint, reporting `compacted_events` so operators can distinguish verified compacted records from full-detail rows. Legacy unsigned rows and their transition anchor are never compacted. Chain hashing uses the persisted microsecond timestamp, and JSON summaries are parsed into their logical representation before canonicalization so writers and readers produce identical digests regardless of whitespace around a top-level JSON `null`. Historical v1 float64 numeric rounding stays intact instead of being re-signed. Appending an audit event acquires the per-workspace transaction lock, while verification reads run at repeatable-read isolation.
 
@@ -1246,7 +1266,19 @@ Database migrations run in a separate one-shot process invoked with `--migrate-o
 
 PostgreSQL coordinates migrations with an advisory lock and transactional SQL execution. Before touching the schema, the migrator rejects unknown epochs, revisions, checksums, schema drift, and nonempty databases that lack supported provenance. The Controller's migration command never performs automatic force-cleans or downgrades.
 
-PostgreSQL maintains two active SQL files: [`schema.sql`](../../control-plane/migrations/schema.sql) and [`upgrade.sql`](../../control-plane/migrations/upgrade.sql) in `control-plane/migrations/`. The `schema.sql` header carries the current epoch and revision, so read them there instead of from this document. Migration state is tracked only in `schema_revisions`, with no numbered SQL or JSON migration files and no snapshot descriptors. Schema identity is determined by the epoch, revision, and raw artifact checksums, independent of legacy filename counters or Controller compatibility ranges. The [version policy](../operations/production-deployment.md#version-policy) removed software-version admission gates, but schema-source admission remains mandatory in the migration run and continues to reject unknown epochs, revisions, and checksums.
+PostgreSQL uses [`schema.sql`](../../control-plane/migrations/schema.sql) for
+empty databases and [`upgrade.sql`](../../control-plane/migrations/upgrade.sql)
+to replay forward revisions. The
+[`0003_telemetry_partition_maintenance.sql`](../../control-plane/migrations/sql/0003_telemetry_partition_maintenance.sql)
+file contains the telemetry revision SQL, which the runner checks byte for
+byte against its `upgrade.sql` step. The numbered filename is independent of
+the schema epoch and revision. The `schema.sql` header carries the current
+identity. The `schema_revisions` journal records execution receipts and the
+raw artifact checksums. The
+[version policy](../operations/production-deployment.md#version-policy)
+permits independent software versions while the migration run still rejects
+unknown schema epochs, revisions, and checksums.
+
 
 Migration admission, meaning the full SQL checksum and receipt verification, runs only in the owner `--migrate-only` entry point. Normal Controller startup without `--migrate-only` verifies audit authenticity and checks required telemetry objects and runtime privileges. It does not check receipts, checksums, or schema drift. The `/readyz` endpoint executes a zero-row read against core tables (workspaces, nodes, operations) and checks event-stream health, without reading `schema_revisions`. A passing `/readyz` response therefore indicates runtime connectivity and is not evidence of schema identity.
 
@@ -1403,7 +1435,7 @@ The upstream service must treat signing and revocation as idempotent by certific
 
 When the signer is unreachable, certificate issuance transitions to `signer_unavailable` (which can be resumed by retrying the same persisted operation) and revocation transitions to `revocation_unknown` (which a retry may submit again). Both paths return a service-unavailable problem response without marking the operation successful.
 
-Thirty days before `not_after`, a certificate enters `expiring` and triggers a high-severity alert. Revocation calls the external signer idempotently first and, once that succeeds, releases the node operation to remove only the UUID-derived node-local key. In the control plane, secret provider records store only the provider name, opaque key path, version, and lifecycle state while the secret values themselves stay in the external provider. Rotating a secret records the new external version and appends an authenticated audit event without copying the secret value into the Controller.
+A certificate with a lifetime of at least 60 days enters `expiring` 30 days before `not_after`. Shorter lifetimes use the final quarter of the certificate's validity interval. Both paths trigger a high-severity alert and preserve the certificate version so in-flight downloads and revocation requests stay valid. Expiry and revocation still invalidate in-flight artifacts and leases. The Controller reserves each revocation and its held node cleanup command in one transaction. It releases that command after the Signer commits. While the command is live, maintenance verifies the persisted command signature and content before replaying the same idempotent Signer request and releasing cleanup. An expired held command keeps its execution deadline and terminal operation state. Maintenance records the unknown Signer outcome and raises a high-severity alert. An Admin can authorize a new operation with the original revocation reason. In the control plane, secret provider records store only the provider name, opaque key path, version, and lifecycle state while the secret values themselves stay in the external provider. Rotating a secret records the new external version and appends an authenticated audit event without copying the secret value into the Controller.
 
 ### P12 export and single-use download
 
@@ -1432,11 +1464,11 @@ Both writes are idempotent by certificate ID. Repeating `/sign` with the same CS
 
 The server exposes four POST endpoints: `/sign`, `/sign/revoke`, `/sign/seal`, and `/sign/public-key`. JSON request bodies are capped at 64 KiB, while raw sealing payloads are bounded to 512 bytes at ingress and further constrained by the RSA-OAEP payload limit (190 bytes for RSA-2048). Concurrency is limited to 32 in-flight business requests, with additional requests rejected as `503`. Header, read, write, and idle timeouts are fixed at 5, 10, 15, and 30 seconds, and error responses return fixed status messages without echoing request content. `GET /healthz` returns `204` while the ledger is readable, the issuer certificate has sufficient remaining lifetime, and no storage error has latched readiness off, without performing any signing operation. Recovery from a latched storage fault is in [Signer unavailable](../operations/incident-recovery.md#signer-unavailable).
 
-Normal `serve` startup refuses to run if the ledger is absent, empty, incompatible, corrupt, owned by another user, or bound to a different issuer, and never initializes a replacement automatically, so `init` is not a way to repair lost state. At startup, the service verifies that the intermediate-and-root chain matches the intermediate private key, carries CA certificate-signing and CRL-signing key usages, and has at least 24h of remaining validity; it never generates CA, node, or TLS keys of its own.
+Normal `serve` startup requires an initialized, compatible ledger owned by the runtime user and bound to the configured issuer. At startup, the service verifies the intermediate-and-root chain, the intermediate private key, and the CA certificate-signing and CRL-signing key usages. Readiness and issuance require the issuer's remaining validity to exceed the configured client certificate lifetime.
 
 ### Policy and durable effects
 
-The `rsa-client-v1-24h` signing policy accepts CSRs using RSA-2048, RSA-3072, or RSA-4096 keys with public exponent 65537, signed with SHA-256, SHA-384, or SHA-512 RSA or RSA-PSS, containing one CN and up to 32 DNS SANs. Both CN and DNS SAN values must be bounded printable ASCII strings free of whitespace and path separators; any non-DNS SAN or other X.509 extension is rejected. Issued certificates carry only digital-signature, key-encipherment, and `clientAuth` usages without CA privileges, are valid for 24h within the issuer's validity window, and are verified against the CA chain before being persisted. Subject authorization, operation binding, and privd receipt validation remain Controller responsibilities, as a CSR self-signature never establishes authorization.
+The `rsa-client-v1` signing policy accepts CSRs using RSA-2048, RSA-3072, or RSA-4096 keys with public exponent 65537, signed with SHA-256, SHA-384, or SHA-512 RSA or RSA-PSS, containing one CN and up to 32 DNS SANs. Both CN and DNS SAN values must be bounded printable ASCII strings free of whitespace and path separators; any non-DNS SAN or other X.509 extension is rejected. Issued certificates carry only digital-signature, key-encipherment, and `clientAuth` usages without CA privileges, expire at issuance time plus the configured lifetime, and are verified against the CA chain before persistence. The lifetime defaults to 90 days and accepts 24 hours through 365 days. The Signer backdates `not_before` by five minutes. The Controller allows up to five minutes of future skew in `not_before`, rejects certificates at or past `not_after`, and verifies the chain for client authentication. Subject authorization, operation binding, and privd receipt validation remain Controller responsibilities, as a CSR self-signature never establishes authorization.
 
 Each certificate's unsigned 128-bit UUID is used directly as its positive X.509 serial number, so a single certificate ID can never receive multiple serials. Before returning a response, a single-writer bbolt transaction binds the certificate UUID, exact CSR bytes and digest, issued certificate chain, serial number, and audit record. If the process crashes before that transaction commits, no certificate is exposed externally. If a response is lost after commit, replaying the identical CSR returns the stored certificate chain, while submitting a different CSR for the same ID conflicts even after revocation.
 
@@ -1444,7 +1476,7 @@ Revocation commits the timestamp and exact reason string and rejects any later a
 
 Running `crl` reads durable revocations from the ledger and writes a signed PEM CRL to stdout with a one-hour `nextUpdate` window and the current audit revision as the CRL number. The operator steps are in [CRL refresh](../operations/incident-recovery.md#crl-refresh). The X.509 CRL reason code extension is omitted because the ledger stores free-form reason text. Receiving a `204` from `/sign/revoke` confirms only that the ledger recorded the revocation. It does not clean up node files, terminate active VPN sessions, or distribute the updated CRL, and the system exposes no public CRL endpoint or OCSP responder.
 
-The ledger uses state format version 1 backed by bbolt (version pinned in [`signer/go.mod`](../../signer/go.mod)) with an exclusive process lock, transaction-consistent snapshots, and default synchronous commits enabled. The underlying local filesystem must honor `fsync`; network filesystems, multi-node replication, and high-availability clustering are unsupported. Four buckets organize state: `meta` (schema version, issuer SHA-256, policy name, and record checksums), `issued` (certificate records keyed by UUID), `bindings` (node key mappings), and `audit` (monotonic revision log). On startup, Signer runs bbolt's consistency check and validates all record checksums, certificate signatures, CSR bindings, and imported key descriptors. These checksums detect accidental storage corruption; they do not defend against deliberate rewriting by an authorized owner of the state volume. Never edit or downgrade the ledger file by hand. Backup, restore floors, and the audit high-water mark are in [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore).
+The ledger uses state format version 1 backed by bbolt (version pinned in [`signer/go.mod`](../../signer/go.mod)) with an exclusive process lock, transaction-consistent snapshots, and default synchronous commits enabled. The underlying local filesystem must honor `fsync`; network filesystems, multi-node replication, and high-availability clustering are unsupported. Four buckets organize state: `meta` (schema version, issuer SHA-256, policy name, and record checksums), `issued` (certificate records keyed by UUID), `bindings` (node key mappings), and `audit` (monotonic revision log). Startup checks the required buckets, schema and issuer metadata, and audit tail. The Signer checks record checksums as it reads them. Run `ocserv-signer verify` against an offline ledger or snapshot to check bbolt consistency, all record checksums, certificate signatures, CSR bindings, and imported key descriptors. These checksums detect accidental storage corruption; they do not defend against deliberate rewriting by an authorized owner of the state volume. Never edit or downgrade the ledger file by hand. Backup, restore floors, and the audit high-water mark are in [Signer backup and restore](../operations/incident-recovery.md#signer-backup-and-restore).
 
 ### Trusted public-key transfer
 

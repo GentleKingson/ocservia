@@ -87,9 +87,12 @@ func (s *service) importBinding(approved, exported binding) error {
 		return err
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("bindings"))
 		key := []byte(approved.NodeID)
-		if old := b.Get(key); old != nil {
+		old, err := getRecord(tx, "bindings", key)
+		if err != nil {
+			return err
+		}
+		if old != nil {
 			var previous binding
 			if json.Unmarshal(old, &previous) != nil || previous.Disabled {
 				return errors.New("disabled binding cannot be replaced")
@@ -114,16 +117,19 @@ func (s *service) importBinding(approved, exported binding) error {
 
 func (s *service) disable(node string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("bindings"))
+		data, err := getRecord(tx, "bindings", []byte(node))
+		if err != nil {
+			return err
+		}
 		var v binding
-		if json.Unmarshal(b.Get([]byte(node)), &v) != nil {
+		if json.Unmarshal(data, &v) != nil {
 			return errors.New("binding not found")
 		}
 		if v.Disabled {
 			return nil
 		}
 		v.Disabled = true
-		data, err := json.Marshal(v)
+		data, err = json.Marshal(v)
 		if err != nil {
 			return err
 		}
@@ -138,7 +144,10 @@ func (s *service) seal(node, use string, plaintext []byte) (map[string]any, erro
 	var selected descriptor
 	err := s.db.View(func(tx *bolt.Tx) error {
 		var b binding
-		data := tx.Bucket([]byte("bindings")).Get([]byte(node))
+		data, err := getRecord(tx, "bindings", []byte(node))
+		if err != nil {
+			return err
+		}
 		if data == nil {
 			return statusError(403)
 		}
@@ -186,7 +195,10 @@ func (s *service) userPasswordPublicKey(node string) (map[string]any, error) {
 	var response map[string]any
 	err := s.db.View(func(tx *bolt.Tx) error {
 		var b binding
-		data := tx.Bucket([]byte("bindings")).Get([]byte(node))
+		data, err := getRecord(tx, "bindings", []byte(node))
+		if err != nil {
+			return err
+		}
 		if data == nil {
 			return statusError(403)
 		}

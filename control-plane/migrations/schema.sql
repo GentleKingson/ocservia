@@ -2,11 +2,11 @@
 -- ocservia:format=1
 -- ocservia:engine=postgresql
 -- ocservia:epoch=2
--- ocservia:revision=5
--- ocservia:history-sha256=0eda454c3f6703a02f08161d06f442334eba8e730940a5b4448bcdecadcc1162
+-- ocservia:revision=6
+-- ocservia:history-sha256=c699710e270e0b1958b6908b64f73e3edd8989170d59cca3100c76f1475b8a3c
 
 -- ocservia:step=001:baseline
--- ocservia:metadata={"catalog_sha256":"02236adc015c56f8c8cd7e79d687565ea941736cce80e33e21d3f3ee25ca6614"}
+-- ocservia:metadata={"catalog_sha256":"84e4ca0586c9c1647e193af7430649b9d058e323f8044dfda56c3092451b6221"}
 SET LOCAL statement_timeout = 0;
 SET LOCAL lock_timeout = 0;
 SET LOCAL idle_in_transaction_session_timeout = 0;
@@ -107,42 +107,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION public.telemetry_drop_expired_partitions(cutoff timestamp with time zone) RETURNS integer
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    SET "TimeZone" TO 'UTC'
-    AS $_$
-DECLARE
-    partition record;
-BEGIN
-    IF cutoff IS NULL OR NOT isfinite(cutoff)
-       OR cutoff > clock_timestamp() - interval '14 days' + interval '5 minutes' THEN
-        RAISE EXCEPTION 'telemetry retention cutoff outside permitted window';
-    END IF;
-    cutoff := least(cutoff,clock_timestamp() - interval '14 days');
-    FOR partition IN
-        SELECT child.relname FROM pg_catalog.pg_inherits
-        JOIN pg_catalog.pg_class parent ON parent.oid=inhparent
-        JOIN pg_catalog.pg_namespace parent_namespace ON parent_namespace.oid=parent.relnamespace
-        JOIN pg_catalog.pg_class child ON child.oid=inhrelid
-        JOIN pg_catalog.pg_namespace child_namespace ON child_namespace.oid=child.relnamespace
-        WHERE parent_namespace.nspname='public' AND parent.relname='telemetry_samples'
-          AND child_namespace.nspname='public'
-          AND child.relname ~ '^telemetry_samples_[0-9]{6}$'
-          AND to_timestamp(substring(child.relname from '[0-9]{6}$'),'YYYYMM') + interval '1 month' <= cutoff
-        ORDER BY child.relname LIMIT 1
-    LOOP
-        -- Backfill a whole expired month before dropping it, including when
-        -- maintenance was offline longer than the ingestion lateness window.
-        EXECUTE format('INSERT INTO public.telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin(''5 minutes'',sampled_at,''2000-01-01 00:00:00+00''::timestamptz),count(*),min(value),max(value),avg(value) FROM public.%I WHERE sampled_at >= date_bin(''5 minutes'',clock_timestamp()-interval ''90 days'',''2000-01-01 00:00:00+00''::timestamptz) GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value',partition.relname);
-        EXECUTE format('INSERT INTO public.telemetry_rollups_1h(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin(''1 hour'',sampled_at,''2000-01-01 00:00:00+00''::timestamptz),count(*),min(value),max(value),avg(value) FROM public.%I WHERE sampled_at >= date_bin(''1 hour'',clock_timestamp()-interval ''13 months'',''2000-01-01 00:00:00+00''::timestamptz) GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value',partition.relname);
-        EXECUTE format('DROP TABLE public.%I',partition.relname);
-        RETURN 1;
-    END LOOP;
-    RETURN 0;
-END;
-$_$;
-
 CREATE FUNCTION public.telemetry_ensure_month_partition(sample_time timestamp with time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -159,6 +123,31 @@ BEGIN
     END IF;
     EXECUTE format('CREATE TABLE IF NOT EXISTS public.%I PARTITION OF public.telemetry_samples FOR VALUES FROM (%L) TO (%L)', partition_name, start_at, end_at);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON public.%I (node_id, metric, sampled_at DESC)', partition_name || '_query_idx', partition_name);
+END;
+$$;
+
+CREATE FUNCTION public.telemetry_ensure_upcoming_partitions() RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    SET "TimeZone" TO 'UTC'
+    AS $$
+DECLARE
+    month_start timestamptz := date_trunc('month', now());
+    sample_month timestamptz;
+    partition_name text;
+BEGIN
+    FOR month_offset IN 0..2 LOOP
+        sample_month := month_start + make_interval(months => month_offset);
+        partition_name := 'telemetry_samples_' || to_char(sample_month, 'YYYYMM');
+        IF to_regclass('public.' || partition_name || '_query_idx') IS NULL OR NOT EXISTS (
+            SELECT 1 FROM pg_inherits
+            WHERE inhparent='public.telemetry_samples'::regclass
+            AND inhrelid=to_regclass('public.' || partition_name)
+            AND NOT inhdetachpending
+        ) THEN
+            PERFORM public.telemetry_ensure_month_partition(sample_month);
+        END IF;
+    END LOOP;
 END;
 $$;
 
@@ -186,6 +175,20 @@ BEGIN
         ORDER BY bucket_at,node_id,metric LIMIT 1000 FOR UPDATE SKIP LOCKED
     ) DELETE FROM public.telemetry_rollups_1h r USING expired e
       WHERE (r.node_id,r.metric,r.bucket_at)=(e.node_id,e.metric,e.bucket_at);
+END;
+$$;
+
+CREATE FUNCTION public.telemetry_queue_rollups() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    INSERT INTO public.telemetry_rollup_queue(bucket_at,node_id,metric)
+    SELECT DISTINCT date_bin(interval '5 minutes',sampled_at,'2000-01-01 00:00:00+00'::timestamptz),node_id,metric
+    FROM inserted_samples WHERE sampled_at > '-infinity'::timestamptz
+    ORDER BY 1,2,3
+    ON CONFLICT (bucket_at,node_id,metric) DO UPDATE SET metric=EXCLUDED.metric;
+    RETURN NULL;
 END;
 $$;
 
@@ -1039,11 +1042,13 @@ CREATE TABLE public.outbox_events (
     attempts integer DEFAULT 0 CONSTRAINT "outbox_events_attempts_not_null" NOT NULL,
     last_error text,
     created_at timestamp with time zone CONSTRAINT "outbox_events_created_at_not_null" NOT NULL,
+    receipt_recovery_attempt_limit integer,
     CONSTRAINT outbox_events_attempts_check CHECK ((attempts >= 0)),
     CONSTRAINT outbox_events_check CHECK (((locked_by IS NULL) = (locked_until IS NULL))),
     CONSTRAINT outbox_events_check1 CHECK (((published_at IS NULL) OR (locked_by IS NULL))),
     CONSTRAINT outbox_events_event_type_check CHECK ((event_type = 'command.dispatch'::text)),
-    CONSTRAINT outbox_events_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1048576)))
+    CONSTRAINT outbox_events_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1048576))),
+    CONSTRAINT outbox_events_receipt_recovery_attempt_limit_check CHECK ((receipt_recovery_attempt_limit > 0))
 );
 
 COMMENT ON TABLE public.outbox_events IS 'Transactional outbox; delivery correctness never depends on LISTEN/NOTIFY.';
@@ -1121,6 +1126,18 @@ CREATE TABLE public.telemetry_ingest_batches (
     CONSTRAINT telemetry_ingest_batches_kind_check CHECK ((kind = ANY (ARRAY['security'::text, 'current_health'::text, 'aggregate'::text, 'raw_history'::text]))),
     CONSTRAINT telemetry_ingest_batches_payload_bytes_check CHECK (((payload_bytes >= 0) AND (payload_bytes <= 524288))),
     CONSTRAINT telemetry_ingest_batches_sequence_check CHECK ((sequence >= 0))
+);
+
+CREATE TABLE public.telemetry_partition_retirements (
+    partition_name text CONSTRAINT "telemetry_partition_retirements_partition_name_not_null" NOT NULL,
+    relation_oid regclass CONSTRAINT "telemetry_partition_retirements_relation_oid_not_null" NOT NULL,
+    CONSTRAINT telemetry_partition_retirements_partition_name_check CHECK ((partition_name ~ '^telemetry_samples_[1-9][0-9]{3}(0[1-9]|1[0-2])$'::text))
+);
+
+CREATE TABLE public.telemetry_rollup_queue (
+    bucket_at timestamp with time zone CONSTRAINT "telemetry_rollup_queue_bucket_at_not_null" NOT NULL,
+    node_id uuid CONSTRAINT "telemetry_rollup_queue_node_id_not_null" NOT NULL,
+    metric text CONSTRAINT "telemetry_rollup_queue_metric_not_null" NOT NULL
 );
 
 CREATE TABLE public.telemetry_rollups_1h (
@@ -1348,8 +1365,6 @@ CREATE TABLE public.workspaces (
     CONSTRAINT workspaces_version_check CHECK ((version > 0))
 );
 
-ALTER TABLE ONLY public.telemetry_samples ATTACH PARTITION public.telemetry_samples_default DEFAULT;
-
 ALTER TABLE ONLY public.agent_command_results
     ADD CONSTRAINT agent_command_results_pkey PRIMARY KEY (event_id);
 
@@ -1569,17 +1584,26 @@ ALTER TABLE ONLY public.security_alerts
 ALTER TABLE ONLY public.telemetry_ingest_batches
     ADD CONSTRAINT telemetry_ingest_batches_pkey PRIMARY KEY (batch_id);
 
+ALTER TABLE ONLY public.telemetry_partition_retirements
+    ADD CONSTRAINT telemetry_partition_retirements_pkey PRIMARY KEY (partition_name);
+
+ALTER TABLE ONLY public.telemetry_partition_retirements
+    ADD CONSTRAINT telemetry_partition_retirements_relation_oid_key UNIQUE (relation_oid);
+
+ALTER TABLE ONLY public.telemetry_rollup_queue
+    ADD CONSTRAINT telemetry_rollup_queue_pkey PRIMARY KEY (bucket_at, node_id, metric);
+
 ALTER TABLE ONLY public.telemetry_rollups_1h
     ADD CONSTRAINT telemetry_rollups_1h_pkey PRIMARY KEY (node_id, metric, bucket_at);
 
 ALTER TABLE ONLY public.telemetry_rollups_5m
     ADD CONSTRAINT telemetry_rollups_5m_pkey PRIMARY KEY (node_id, metric, bucket_at);
 
-ALTER TABLE ONLY public.telemetry_samples
-    ADD CONSTRAINT telemetry_samples_pkey PRIMARY KEY (sampled_at, node_id, batch_id, metric);
-
 ALTER TABLE ONLY public.telemetry_samples_default
     ADD CONSTRAINT telemetry_samples_default_pkey PRIMARY KEY (sampled_at, node_id, batch_id, metric);
+
+ALTER TABLE ONLY public.telemetry_samples
+    ADD CONSTRAINT telemetry_samples_pkey PRIMARY KEY (sampled_at, node_id, batch_id, metric);
 
 ALTER TABLE ONLY public.telemetry_security_events
     ADD CONSTRAINT telemetry_security_events_pkey PRIMARY KEY (event_id);
@@ -1649,6 +1673,8 @@ CREATE UNIQUE INDEX artifact_operations_active_grant_idx ON public.artifact_oper
 CREATE INDEX artifact_operations_expiry_idx ON public.artifact_operations USING btree (expires_at) WHERE (state = ANY (ARRAY['pending'::text, 'ready'::text, 'leased'::text]));
 
 CREATE UNIQUE INDEX artifact_operations_one_live_certificate_idx ON public.artifact_operations USING btree (certificate_id) WHERE (state = ANY (ARRAY['pending'::text, 'ready'::text, 'leased'::text, 'consuming'::text]));
+
+CREATE INDEX audit_checkpoints_latest_idx ON public.audit_checkpoints USING btree (workspace_id, created_at DESC, id DESC);
 
 CREATE INDEX audit_detail_retention_idx ON public.audit_events USING btree (occurred_at, id) WHERE (details_compacted_at IS NULL);
 
@@ -1740,8 +1766,6 @@ CREATE INDEX vpn_session_history_open_idx ON public.vpn_session_history USING bt
 
 CREATE INDEX vpn_session_history_user_time_idx ON public.vpn_session_history USING btree (username, connected_at DESC);
 
-ALTER INDEX public.telemetry_samples_pkey ATTACH PARTITION public.telemetry_samples_default_pkey;
-
 CREATE TRIGGER audit_checkpoints_append_only BEFORE DELETE OR UPDATE OR TRUNCATE ON public.audit_checkpoints FOR EACH STATEMENT EXECUTE FUNCTION public.reject_audit_checkpoint_mutation();
 
 CREATE TRIGGER audit_events_append_only BEFORE DELETE OR UPDATE ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.check_audit_compaction();
@@ -1749,6 +1773,10 @@ CREATE TRIGGER audit_events_append_only BEFORE DELETE OR UPDATE ON public.audit_
 CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON public.audit_events FOR EACH STATEMENT EXECUTE FUNCTION public.reject_audit_event_mutation();
 
 CREATE TRIGGER telemetry_default_owner_only BEFORE INSERT OR UPDATE ON public.telemetry_samples_default FOR EACH ROW EXECUTE FUNCTION public.telemetry_reject_runtime_default();
+
+CREATE TRIGGER telemetry_queue_rollups AFTER INSERT ON public.telemetry_samples REFERENCING NEW TABLE AS inserted_samples FOR EACH STATEMENT EXECUTE FUNCTION public.telemetry_queue_rollups();
+
+CREATE TRIGGER telemetry_queue_rollups AFTER INSERT ON public.telemetry_samples_default REFERENCING NEW TABLE AS inserted_samples FOR EACH STATEMENT EXECUTE FUNCTION public.telemetry_queue_rollups();
 
 ALTER TABLE ONLY public.agent_command_results
     ADD CONSTRAINT agent_command_results_command_id_fkey FOREIGN KEY (command_id) REFERENCES public.commands(id) ON DELETE RESTRICT;
@@ -1975,7 +2003,13 @@ ALTER TABLE ONLY public.telemetry_rollups_5m
 ALTER TABLE public.telemetry_samples
     ADD CONSTRAINT telemetry_samples_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES public.telemetry_ingest_batches(batch_id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.telemetry_samples_default
+    ADD CONSTRAINT telemetry_samples_batch_id_fkey FOREIGN KEY (batch_id) REFERENCES public.telemetry_ingest_batches(batch_id) ON DELETE CASCADE;
+
 ALTER TABLE public.telemetry_samples
+    ADD CONSTRAINT telemetry_samples_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.telemetry_samples_default
     ADD CONSTRAINT telemetry_samples_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.telemetry_security_events
@@ -2026,9 +2060,10 @@ REVOKE ALL ON FUNCTION public.reject_audit_event_mutation() FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.security_compact_details(p_cutoff timestamp with time zone) FROM PUBLIC;
 
-REVOKE ALL ON FUNCTION public.telemetry_drop_expired_partitions(cutoff timestamp with time zone) FROM PUBLIC;
-
 REVOKE ALL ON FUNCTION public.telemetry_ensure_month_partition(sample_time timestamp with time zone) FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION public.telemetry_ensure_upcoming_partitions() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.telemetry_ensure_upcoming_partitions() TO ocservia_app;
 
 REVOKE ALL ON FUNCTION public.telemetry_prune_rollups(maintenance_time timestamp with time zone) FROM PUBLIC;
 
@@ -2041,6 +2076,10 @@ GRANT SELECT,INSERT,UPDATE ON TABLE public.certificates TO ocservia_app;
 GRANT SELECT,INSERT ON TABLE public.node_sealing_keys TO ocservia_app;
 
 GRANT SELECT,INSERT,UPDATE ON TABLE public.secret_provider_refs TO ocservia_app;
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.telemetry_rollup_queue TO ocservia_app;
+
+GRANT SELECT ON TABLE public.telemetry_samples_default TO ocservia_app;
 
 GRANT SELECT,INSERT ON TABLE public.workspace_admins TO ocservia_app;
 

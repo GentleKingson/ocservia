@@ -200,7 +200,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	}
 	operationID, workspaceID := operation.ID, operation.WorkspaceID
 	operationRequestID, operationTraceID := operation.RequestID, operation.TraceID
-	if terminal {
+	if terminal || effectiveState == "accepted" || dispatchInFlight {
 		if err := store.CompleteOutbox(ctx, commandID, at); err != nil {
 			return fmt.Errorf("complete command reconciliation outbox: %w", err)
 		}
@@ -227,14 +227,14 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		}
 	}
 	if effectiveState == "unknown" {
-		if err := scheduleCommandRecovery(ctx, store, commandID, &envelope, recoveryReason, observedAt, signer); err != nil {
+		if err := scheduleCommandRecovery(ctx, store, commandID, stored, &envelope, recoveryReason, receiptFailed, observedAt, signer); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore, commandID uuid.UUID, envelope *agentv1.CommandEnvelope, reason string, observedAt time.Time, signer *commandauth.Signer) error {
+func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore, commandID uuid.UUID, command resultstore.ResultCommand, envelope *agentv1.CommandEnvelope, reason string, receiptFailed bool, observedAt time.Time, signer *commandauth.Signer) error {
 	var mode agentv1.CommandDeliveryMode
 	switch reason {
 	case "effect_absent":
@@ -244,7 +244,7 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 		// The Agent's effect_absent is unsigned. These fixed host actions cannot
 		// prove absence cryptographically, so the Unknown outcome stays for
 		// manual reconciliation; only a signed completed result can settle it.
-		if fixedHostEffect(envelope) {
+		if fixedHostEffect(envelope) || command.ReceiptRecovery {
 			return nil
 		}
 		mode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT
@@ -266,6 +266,18 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 	if err != nil {
 		return err
 	}
+	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && command.ExpiresAt.Valid {
+		deadline, err := command.ExpiresAt.Time()
+		if err != nil {
+			return err
+		}
+		if deadline.After(expiresAt) {
+			expiresAt = deadline
+		}
+	}
+	if !expiresAt.After(observedAt) {
+		payload = nil
+	}
 	expiry, err := value.FromTime(expiresAt)
 	if err != nil {
 		return err
@@ -274,7 +286,7 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 	if err != nil {
 		return err
 	}
-	return store.ScheduleRecovery(ctx, commandID, payload, expiry, at)
+	return store.ScheduleRecovery(ctx, commandID, payload, expiry, at, receiptFailed)
 }
 
 func fixedHostEffect(envelope *agentv1.CommandEnvelope) bool {

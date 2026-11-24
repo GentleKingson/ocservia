@@ -61,8 +61,16 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger, access
 func runController(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger, accessLogger *slog.Logger, shutdownDeadline func() time.Time) (runErr error) {
 	life := newLifecycle(ctx, shutdownDeadline, logger)
 	stopPprof := startPprof(cfg.PprofAddress, logger)
+	var closeWorkerTransport func()
+	var controlTransport *transportclient.Client
 	defer func() {
 		runErr = life.close(runErr)
+		if controlTransport != nil {
+			_ = controlTransport.Close()
+		}
+		if closeWorkerTransport != nil {
+			closeWorkerTransport()
+		}
 		stopPprof()
 		if errors.Is(runErr, context.Canceled) {
 			logger.Info("control plane stopped")
@@ -99,18 +107,15 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	if err != nil {
 		return err
 	}
-	defer closeWorkerTransport()
 	telemetryService := telemetry.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
 	userStateService := userstate.NewWithSignerBackend(backend, commandSigner)
 	userOperationsService := useroperations.NewWithConcurrencyBackend(backend, userStateService, cfg.UserOperationConcurrency)
-	var controlTransport *transportclient.Client
 	if cfg.ControllerEndpointID != "" {
 		controlTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
 		if err != nil {
 			return fmt.Errorf("configure API transport: %w", err)
 		}
-		defer func() { _ = controlTransport.Close() }()
 	}
 	var certificateService *certificates.Service
 	var publicKeySigner *certificates.HTTPSigner

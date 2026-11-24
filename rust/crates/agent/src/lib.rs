@@ -353,18 +353,18 @@ impl CommandExecutor {
         }
     }
 
-    /// Moves an Unknown command back to Running only after privd returned an
-    /// exact cached root receipt. The caller must atomically persist that proof
-    /// with the terminal result next; a crash remains Unknown on replay.
+    /// Replays a settled command or resumes an unfinished command after privd
+    /// returns its cached root receipt. For a resumed command the caller must
+    /// atomically persist that proof with the terminal result.
     ///
     /// # Errors
     ///
-    /// Rejects non-privileged, mismatched, or non-Unknown commands.
+    /// Rejects non-privileged or mismatched commands and propagates journal failures.
     pub fn begin_attested_recovery(
         &mut self,
         envelope: &CommandEnvelope,
         context: &CommandContext,
-    ) -> Result<ExternalCommand, CommandError> {
+    ) -> Result<ExternalPreparation, CommandError> {
         let validated = validate_command(envelope, context)?;
         if !validated.external {
             return Err(CommandError::Rejected("external_command_required"));
@@ -392,25 +392,30 @@ impl CommandExecutor {
             }
             Err(error) => return Err(error),
         };
-        if !matches!(record.state, CommandState::Accepted | CommandState::Unknown) {
-            return Err(CommandError::Rejected("reconciliation_state_invalid"));
+        if matches!(record.state, CommandState::Succeeded | CommandState::Failed)
+            && record.privileged_result_proof.is_some()
+        {
+            return Ok(ExternalPreparation::Replay(CommandOutcome {
+                record,
+                replayed: true,
+            }));
         }
         let record = self
             .journal
             .transition_command(
                 &validated.key,
-                &[CommandState::Accepted, CommandState::Unknown],
+                &[record.state],
                 CommandState::Running,
                 None,
                 None,
                 context.now_unix_seconds,
             )
             .map_err(pre_effect_failure)?;
-        Ok(ExternalCommand {
+        Ok(ExternalPreparation::Execute(ExternalCommand {
             key: validated.key,
             command_id: validated.command_id,
             accepted_at: record.accepted_at,
-        })
+        }))
     }
 
     /// Persists a privd result and its opaque root-signed proof in one journal write.

@@ -439,9 +439,12 @@ fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
     let mut ctx = context(node, 100);
     ctx.capabilities = capabilities(&[config_profile::APPLY_CAPABILITY]);
     let mut executor = journal.open();
-    let recovered = executor
+    let ExternalPreparation::Execute(recovered) = executor
         .begin_attested_recovery(&env, &ctx)
-        .expect("recover");
+        .expect("recover")
+    else {
+        panic!("restore configuration command");
+    };
     let res_bytes = observed_result(&env);
     let outcome = executor
         .complete_external_applied_attested(
@@ -712,7 +715,11 @@ fn external_command_replay_and_password_reconcile_recovery() {
     }
     ctx.now_unix_seconds = 102;
     let mut ex2 = j2.open();
-    let rec_cmd = ex2.begin_attested_recovery(&rot2, &ctx).expect("attested");
+    let ExternalPreparation::Execute(rec_cmd) =
+        ex2.begin_attested_recovery(&rot2, &ctx).expect("attested")
+    else {
+        panic!("resume password rotation");
+    };
     let rec = ex2
         .complete_external_applied_attested(
             &rec_cmd,
@@ -754,6 +761,52 @@ fn external_command_replay_and_password_reconcile_recovery() {
 }
 
 #[test]
+fn reconcile_only_restores_receipt_from_a_running_command_after_restart() {
+    let journal = TempJournal::new("reconcile-running");
+    let node = *Uuid::now_v7().as_bytes();
+    let mut ctx = desired_context(node, 100);
+    let mut cmd = desired_command(node, DesiredMutation::Create, "alice", 1, 100);
+    {
+        let mut executor = journal.open();
+        assert!(matches!(
+            executor.prepare_external(&cmd, &ctx).expect("execute"),
+            ExternalPreparation::Execute(_)
+        ));
+    }
+    ctx.now_unix_seconds += 1;
+    cmd.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+    authorize_test_command(&mut cmd);
+    let mut executor = journal.open();
+    let ExternalPreparation::Execute(command) = executor
+        .begin_attested_recovery(&cmd, &ctx)
+        .expect("running recovery")
+    else {
+        panic!("resume running command");
+    };
+    let outcome = executor
+        .complete_external_applied_attested(
+            &command,
+            "user",
+            "alice",
+            1,
+            b"applied",
+            b"root-receipt",
+            101,
+        )
+        .expect("recovered terminal proof");
+    assert_eq!(outcome.record.state, CommandState::Succeeded);
+    assert_eq!(outcome.record.accepted_at, 100);
+    let ExternalPreparation::Replay(replay) = executor
+        .begin_attested_recovery(&cmd, &ctx)
+        .expect("Controller lost the result")
+    else {
+        panic!("replay the settled command");
+    };
+    assert!(replay.replayed);
+    assert_eq!(replay.record, outcome.record);
+}
+
+#[test]
 fn password_revision_supersession_and_stale_retry_block() {
     use DesiredMutation::{Create, Rotate};
 
@@ -781,7 +834,11 @@ fn password_revision_supersession_and_stale_retry_block() {
         ex.prepare_external(&newer, &ctx),
         Err(CommandError::Rejected("revision_gap"))
     ));
-    let rec_old = ex.begin_attested_recovery(&old, &ctx).expect("rec old");
+    let ExternalPreparation::Execute(rec_old) =
+        ex.begin_attested_recovery(&old, &ctx).expect("rec old")
+    else {
+        panic!("resume old password rotation");
+    };
     ex.complete_external_applied_attested(
         &rec_old,
         "user",

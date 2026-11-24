@@ -227,7 +227,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 
 func preserveResultEnvelope(ctx context.Context, store operationstore.Store, d Dispatch, state string, encoded []byte) error {
 	switch state {
-	case "succeeded", "failed", "rejected", "rolled_back":
+	case "accepted", "succeeded", "failed", "rejected", "rolled_back":
 		return store.SaveTerminalEnvelope(ctx, d.CommandID, encoded)
 	case "unknown":
 		// Result ingestion may have already scheduled a reconcile-only envelope.

@@ -94,18 +94,13 @@ func TestConvergenceRequiresAppliedRevisionAndPendingWins(t *testing.T) {
 
 func TestRecoveryMetadataExposesOnlyReplaceableMutationKinds(t *testing.T) {
 	failed, rotate := "failed", string(UserPasswordRotate)
-	required, kind := recoveryMetadata(&failed, &rotate, nil)
+	required, kind := recoveryMetadata(&failed, &rotate)
 	if !required || kind == nil || *kind != UserPasswordRotate {
 		t.Fatalf("failed recovery required=%v kind=%v", required, kind)
 	}
-	rejected, safe := "rejected", true
-	required, kind = recoveryMetadata(&rejected, &rotate, &safe)
-	if !required || kind == nil || *kind != UserPasswordRotate {
-		t.Fatalf("safe rejection required=%v kind=%v", required, kind)
-	}
-	unsafe := false
-	required, kind = recoveryMetadata(&rejected, &rotate, &unsafe)
+	rejected := "rejected"
+	required, kind = recoveryMetadata(&rejected, &rotate)
 	if !required || kind != nil {
-		t.Fatalf("ambiguous rejection required=%v kind=%v", required, kind)
+		t.Fatalf("unattested rejection required=%v kind=%v", required, kind)
 	}
 }

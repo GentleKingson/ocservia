@@ -229,6 +229,15 @@ if [[ "${deployment_mode}" == integrated ]]; then
 fi
 
 prepare_transport_runtime=false
+recreate_database_clients=false
+if [[ "${1:-}" == recreate-database-clients ]]; then
+  if [[ $# -ne 2 || ! "${2:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "recreate-database-clients requires a positive wait timeout in seconds" >&2
+    exit 2
+  fi
+  recreate_database_clients=true
+  set -- up -d --force-recreate --no-deps --wait --wait-timeout "$2" control-plane backup
+fi
 teardown=false
 for argument in "$@"; do
   case "${argument}" in
@@ -269,7 +278,7 @@ for argument in "$@"; do
         [[ "${ancestor}" == / ]] && break
         ancestor="$(dirname -- "${ancestor}")"
       done
-      if [[ "${argument}" == "up" ]]; then
+      if [[ "${argument}" == "up" && "${recreate_database_clients}" == false ]]; then
         prepare_transport_runtime=true
       fi
       break

@@ -91,7 +91,7 @@ pub(crate) fn validate_request<'a>(
                         "journal acceptance timestamp required",
                     )
                 })?;
-                if accepted.seconds < claims.issued_at_seconds
+                if accepted.seconds < claims.issued_at_seconds.saturating_sub(300)
                     || accepted.seconds > now_seconds.saturating_add(300)
                     || !(0..1_000_000_000).contains(&accepted.nanos)
                 {

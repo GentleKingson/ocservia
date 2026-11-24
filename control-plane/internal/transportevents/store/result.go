@@ -13,7 +13,8 @@ type ResultCommand struct {
 	Compacted             bool
 	Envelope              []byte
 	State                 string
-	CreatedAt             value.Timestamp
+	CreatedAt, ExpiresAt  value.Timestamp
+	ReceiptRecovery       bool
 	DispatchInFlight      bool
 	AttemptID, LeaseToken uuid.UUID
 }
@@ -84,7 +85,7 @@ type ResultStore interface {
 	ArtifactOutcome(context.Context, ArtifactOutcome) error
 	UpgradeOutcome(context.Context, uuid.UUID, string, value.Timestamp, value.Timestamp) error
 	AppendEvent(context.Context, uuid.UUID, uuid.UUID, string, value.Timestamp) error
-	ScheduleRecovery(context.Context, uuid.UUID, []byte, value.Timestamp, value.Timestamp) error
+	ScheduleRecovery(context.Context, uuid.UUID, []byte, value.Timestamp, value.Timestamp, bool) error
 }
 
 func Results(tx database.Tx) (ResultStore, error) {

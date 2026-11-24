@@ -149,26 +149,21 @@ impl Adapter {
             Ok::<ConfigFingerprint, AdapterError>(observed)
         }
         .await;
+        // Neither a successful rollback nor a critically failed one confirms an
+        // applied revision. Settle the prepared effect before reporting the result.
+        effect_store.mark_absent("config_apply", "ocserv.conf", desired_revision, effect)?;
         match rollback {
-            Ok(observed) => {
-                effect_store.mark_absent(
-                    "config_apply",
-                    "ocserv.conf",
-                    desired_revision,
-                    effect,
-                )?;
-                Ok(ConfigApplyResult {
-                    candidate_hash: candidate_hash.to_vec(),
-                    previous_hash,
-                    observed_hash: hex::decode(observed.sha256)
-                        .map_err(|_| AdapterError::MalformedOutput)?,
-                    applied_revision: 0,
-                    healthy: true,
-                    rolled_back: true,
-                    failed_critical: false,
-                    failure_code: "health_check_failed".to_owned(),
-                })
-            }
+            Ok(observed) => Ok(ConfigApplyResult {
+                candidate_hash: candidate_hash.to_vec(),
+                previous_hash,
+                observed_hash: hex::decode(observed.sha256)
+                    .map_err(|_| AdapterError::MalformedOutput)?,
+                applied_revision: 0,
+                healthy: true,
+                rolled_back: true,
+                failed_critical: false,
+                failure_code: "health_check_failed".to_owned(),
+            }),
             Err(_) => Ok(ConfigApplyResult {
                 candidate_hash: candidate_hash.to_vec(),
                 previous_hash,
@@ -280,7 +275,10 @@ impl Adapter {
         if let Some(path) = backup
             && atomic_replace(&path, &self.resources.config).await.is_ok()
             && self.config_health().await.is_ok()
-            && self.config_fingerprint().await?.sha256 == hex::encode(expected_current_hash)
+            && self
+                .config_fingerprint()
+                .await
+                .is_ok_and(|observed| observed.sha256 == hex::encode(expected_current_hash))
         {
             effect_store.mark_absent("config_apply", "ocserv.conf", desired_revision, effect)?;
             return Ok(ConfigApplyResult {
@@ -294,6 +292,7 @@ impl Adapter {
                 failure_code: "recovered_health_check_failed".to_owned(),
             });
         }
+        effect_store.mark_absent("config_apply", "ocserv.conf", desired_revision, effect)?;
         Ok(ConfigApplyResult {
             candidate_hash: candidate_hash.to_vec(),
             previous_hash: expected_current_hash.to_vec(),

@@ -37,6 +37,13 @@ func validateSignedCertificate(csrDER, chainPEM []byte, now time.Time) (*x509.Ce
 		return nil, ErrInvalid
 	}
 	leaf := chain[0]
+	if leaf.NotBefore.After(now.Add(5*time.Minute)) || !now.Before(leaf.NotAfter) {
+		return nil, ErrInvalid
+	}
+	verifyAt := now
+	if leaf.NotBefore.After(verifyAt) {
+		verifyAt = leaf.NotBefore
+	}
 	root := chain[len(chain)-1]
 	if !root.IsCA || root.CheckSignature(root.SignatureAlgorithm, root.RawTBSCertificate, root.Signature) != nil {
 		return nil, ErrInvalid
@@ -50,10 +57,10 @@ func validateSignedCertificate(csrDER, chainPEM []byte, now time.Time) (*x509.Ce
 		}
 		intermediates.AddCert(intermediate)
 	}
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, CurrentTime: verifyAt, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return nil, ErrInvalid
 	}
-	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 || now.Before(leaf.NotBefore.Add(-5*time.Minute)) || !now.Before(leaf.NotAfter) || !bytes.Equal(csr.RawSubject, leaf.RawSubject) {
+	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 || !bytes.Equal(csr.RawSubject, leaf.RawSubject) {
 		return nil, ErrInvalid
 	}
 	if len(leaf.EmailAddresses) != 0 || len(leaf.IPAddresses) != 0 || len(leaf.URIs) != 0 {

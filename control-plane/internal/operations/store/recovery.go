@@ -15,6 +15,7 @@ type RecoveryAuthority struct {
 type AmbiguousDispatch struct {
 	OperationID uuid.UUID
 	Envelope    []byte
+	ExpiresAt   value.Timestamp
 }
 
 type RecoveryProjection struct {

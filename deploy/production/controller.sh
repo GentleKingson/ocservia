@@ -615,12 +615,22 @@ commit_install_state() {
   PENDING_ACTIVE=false
 }
 
-check_current_database_and_backup_health() {
+check_current_database_health() {
+  local include_backup="$1"
   local health_json required_json health_label="database backup" backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
-  local services=(backup)
+  local services=()
   if [[ "${backend}:${deployment}" == postgres:bundled ]]; then
-    services=(postgres backup)
-    health_label="PostgreSQL and backup"
+    services+=(postgres)
+    health_label="PostgreSQL"
+  fi
+  if [[ "${include_backup}" == true ]]; then
+    if (( ${#services[@]} > 0 )); then
+      health_label+=" and backup"
+    fi
+    services+=(backup)
+  elif (( ${#services[@]} == 0 )); then
+    # The target release smoke checks Controller readiness against external PostgreSQL.
+    return
   fi
   if ! health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")"; then
     fail "cannot inspect current ${health_label} health; current release remains unchanged"
@@ -782,7 +792,7 @@ upgrade_controller() {
   select_release_source "${CURRENT_RELEASE}"
   validate_prerequisites
   map_manifest_images "${CURRENT_RELEASE}"
-  check_current_database_and_backup_health
+  check_current_database_health true
 
   select_release_source
   validate_prerequisites
@@ -839,7 +849,7 @@ rollback_controller() {
   validate_prerequisites
   check_manifest_platform "${STAGED_RELEASE}"
   map_manifest_images "${CURRENT_RELEASE}"
-  check_current_database_and_backup_health
+  check_current_database_health false
   select_release_source
   validate_prerequisites
   map_manifest_images "${STAGED_RELEASE}"
@@ -851,13 +861,28 @@ rollback_controller() {
   fi
   checkpoint_signer
   mark_pending_phase rollback-activation "${CURRENT_RELEASE}"
-  if ! "${COMPOSE_LAUNCHER}" up -d --wait; then
+  local services=(gateway control-plane transportd)
+  if [[ "${OCSERV_DEPLOYMENT_MODE}" == integrated ]]; then
+    services+=(edge relay signer)
+  fi
+  if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
+    services+=(otel-collector)
+  fi
+  if ! "${COMPOSE_LAUNCHER}" up -d --wait "${services[@]}"; then
     fail "rollback activation started but was not confirmed successful; current release state remains unchanged" 1
   fi
 
   mark_pending_phase rollback-smoke "${CURRENT_RELEASE}"
-  run_release_smoke
+  # Older target releases may require backup health in their smoke script.
+  if ! OCSERV_CONTROLLER_COMPOSE_SH="${COMPOSE_LAUNCHER}" \
+    "${OCSERV_CONTROLLER_SMOKE_SH:-${ROOT}/deploy/production/controller-release-smoke.sh}" \
+    --release-file "${STAGED_RELEASE}" --skip-backup; then
+    fail "release smoke failed; confirmed release state remains unchanged" 1
+  fi
   commit_rollback_state
+  if ! "${COMPOSE_LAUNCHER}" create backup || ! "${COMPOSE_LAUNCHER}" start backup; then
+    echo "controller lifecycle: rollback completed but backup service could not be started" >&2
+  fi
   echo "Controller rolled back to ${target_version}"
 }
 

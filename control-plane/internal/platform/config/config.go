@@ -29,6 +29,7 @@ type Config struct {
 	InstallationRelayToken   string
 	HistoryRetention         historyretention.Policy
 	MigrateOnly              bool
+	TelemetryRetentionOnly   bool
 	ProvisionWorkspace       bool
 	BootstrapLocalAdmin      bool
 	LocalBootstrapUsername   string
@@ -325,6 +326,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
 	role := fs.String("role", "all", "legacy compatibility flag; only all is supported")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
+	telemetryRetentionOnly := fs.Bool("telemetry-retention-only", false, "prune expired telemetry partitions as the database owner, then exit")
 	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, errors.New("invalid command-line flags")
@@ -350,6 +352,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		return Config{}, fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", *role)
 	}
 	cfg.MigrateOnly = *migrateOnly
+	cfg.TelemetryRetentionOnly = *telemetryRetentionOnly
 	cfg.ProvisionWorkspace = *provisionWorkspace
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -364,6 +367,9 @@ func (c Config) Validate() error {
 	}
 	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin) {
 		return errors.New("workspace provisioning cannot be combined with other one-shot commands")
+	}
+	if c.TelemetryRetentionOnly && (c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin) {
+		return errors.New("telemetry retention cannot be combined with other one-shot commands")
 	}
 	if c.Environment != "development" && c.Environment != "test" && c.Environment != "production" {
 		return fmt.Errorf("invalid environment %q", c.Environment)
@@ -435,7 +441,7 @@ func (c Config) Validate() error {
 	if c.CommandSigningKeyFile != "" && !filepath.IsAbs(c.CommandSigningKeyFile) {
 		return errors.New("command signing key file path must be absolute")
 	}
-	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin
+	oneShotDatabaseCommand := c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.TelemetryRetentionOnly
 	if c.Environment == "production" && !oneShotDatabaseCommand && c.CommandSigningKeyFile == "" {
 		return errors.New("controller command signing key file is required in production")
 	}

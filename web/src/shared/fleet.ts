@@ -60,14 +60,41 @@ const terminalStates = new Set([
 // terminal there because no retry of the same upgrade may be inferred.
 const upgradeTerminalStates = new Set([...terminalStates, "unknown"]);
 const recoveryPollDelays = [1_500, 3_000, 5_000] as const;
+const fleetEventRefreshDelay = 5_000;
 
 function pollDelay(state: Operation["state"], recoveryAttempt: number): number {
+  if (state === "offline_pending")
+    return Math.min(5_000 * 2 ** Math.min(recoveryAttempt, 4), 60_000);
   if (state !== "unknown") return 750;
   return (
     recoveryPollDelays[
       Math.min(recoveryAttempt, recoveryPollDelays.length - 1)
     ] ?? 5_000
   );
+}
+
+async function waitForVisiblePage(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (typeof document === "undefined" || document.visibilityState !== "hidden")
+    return;
+  const page = document;
+  await new Promise<void>((resolve, reject) => {
+    function cleanup() {
+      page.removeEventListener("visibilitychange", onVisibility);
+      signal.removeEventListener("abort", onAbort);
+    }
+    function onVisibility() {
+      if (page.visibilityState === "hidden") return;
+      cleanup();
+      resolve();
+    }
+    function onAbort() {
+      cleanup();
+      reject(new DOMException("Operation polling aborted", "AbortError"));
+    }
+    page.addEventListener("visibilitychange", onVisibility);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export const useFleetStore = defineStore("fleet", () => {
@@ -77,6 +104,7 @@ export const useFleetStore = defineStore("fleet", () => {
   const ipBans = shallowRef<NodeIpBan[]>([]);
   const userGroupState = shallowRef<UserGroupResourceState[]>([]);
   const latestOperation = ref<Operation>();
+  const operationNodeId = ref<string>();
   const operationTracking = ref(false);
   const operationError = ref("");
   const loading = ref(false);
@@ -193,11 +221,10 @@ export const useFleetStore = defineStore("fleet", () => {
       if (!isLatestRebuild()) return;
       // Read the cursor before the nodes so events racing the snapshot are
       // still delivered. An open stream keeps the cursor current itself.
-      // A failed lookup falls back to a full replay rather than failing.
-      const snapshotCursor = source
+      // Retain the last known cursor when the lookup fails.
+      const snapshotEvents = source
         ? undefined
-        : await listEvents(undefined, request.signal, "desc", 1).then(
-            (page) => page.items[0]?.id,
+        : await listEvents(undefined, request.signal, "desc", 1).catch(
             () => undefined,
           );
       if (!isLatestRebuild()) return;
@@ -211,7 +238,7 @@ export const useFleetStore = defineStore("fleet", () => {
       } while (cursor);
       if (!isLatestRebuild()) return;
       nodes.value = rebuilt;
-      if (!source) eventCursor = snapshotCursor;
+      if (!source && snapshotEvents) eventCursor = snapshotEvents.items[0]?.id;
       snapshotAt.value = new Date();
       initialized.value = true;
       if (selectionTarget && selectReads.revision === selectSequenceAtStart)
@@ -229,9 +256,9 @@ export const useFleetStore = defineStore("fleet", () => {
   }
 
   async function select(nodeId: string): Promise<void> {
+    if (selectionTarget !== nodeId) clearOperation();
     selectionTarget = nodeId;
     if (selected.value && selected.value.id !== nodeId) {
-      detachOperation();
       selected.value = undefined;
       sessions.value = [];
       ipBans.value = [];
@@ -294,11 +321,15 @@ export const useFleetStore = defineStore("fleet", () => {
     ) => Promise<Operation>,
     terminal: Set<string> = terminalStates,
   ): Promise<void> {
-    if (!selected.value || operationTracking.value) return;
+    const node = selected.value;
+    if (!node || node.id !== selectionTarget || operationTracking.value) return;
+    const nodeId = node.id;
     operationController?.abort();
     const context = workspaceContext();
     const controller = new AbortController();
     operationController = controller;
+    latestOperation.value = undefined;
+    operationNodeId.value = nodeId;
     operationTracking.value = true;
     const sequence = ++operationSequence;
     const selectSequenceAtStart = selectReads.revision;
@@ -306,36 +337,45 @@ export const useFleetStore = defineStore("fleet", () => {
       operationController === controller &&
       sequence === operationSequence &&
       isCurrent(context, controller);
-    const node = selected.value;
+    function observeOperation(operation: Operation): void {
+      if (operation.nodeId !== nodeId)
+        throw new Error("Operation does not belong to the selected node");
+      latestOperation.value = operation;
+    }
     operationError.value = "";
     try {
       let currentOperation = await create(node, controller.signal);
       if (!isLatestOperation()) return;
-      latestOperation.value = currentOperation;
+      observeOperation(currentOperation);
       let recoveryAttempt = 0;
       while (!terminal.has(currentOperation.state)) {
-        const recovering = currentOperation.state === "unknown";
         await abortableDelay(
           pollDelay(currentOperation.state, recoveryAttempt),
           controller.signal,
           "Operation polling aborted",
         );
+        if (currentOperation.state === "offline_pending")
+          await waitForVisiblePage(controller.signal);
         if (!isLatestOperation()) return;
-        currentOperation = await getOperation(
+        const nextOperation = await getOperation(
           currentOperation.id,
           controller.signal,
         );
         if (!isLatestOperation()) return;
-        latestOperation.value = currentOperation;
-        recoveryAttempt = recovering ? recoveryAttempt + 1 : 0;
+        observeOperation(nextOperation);
+        recoveryAttempt =
+          nextOperation.state === currentOperation.state
+            ? recoveryAttempt + 1
+            : 0;
+        currentOperation = nextOperation;
       }
       if (
         isLatestOperation() &&
         currentOperation.state === "succeeded" &&
         selectReads.revision === selectSequenceAtStart &&
-        selected.value.id === node.id
+        selected.value?.id === nodeId
       ) {
-        await select(node.id);
+        await select(nodeId);
       }
     } catch (error) {
       if (!isLatestOperation() || controller.signal.aborted) return;
@@ -354,6 +394,13 @@ export const useFleetStore = defineStore("fleet", () => {
     operationController = undefined;
     operationTracking.value = false;
     operationSequence += 1;
+  }
+
+  function clearOperation(): void {
+    detachOperation();
+    latestOperation.value = undefined;
+    operationNodeId.value = undefined;
+    operationError.value = "";
   }
 
   function pauseRefresh(): void {
@@ -385,9 +432,10 @@ export const useFleetStore = defineStore("fleet", () => {
     pauseRefresh,
   );
 
-  // Leaving a view stops its reads, but does not cancel accepted mutations.
+  // Polling belongs to the view. The Controller owns accepted mutations.
   function stop(): void {
     foregroundRefresh.stop();
+    clearOperation();
     selectReads.cancel();
     selectionTarget = undefined;
     selected.value = undefined;
@@ -441,9 +489,34 @@ export const useFleetStore = defineStore("fleet", () => {
           stream.close();
           return;
         }
-        if (message instanceof MessageEvent && message.lastEventId)
-          eventCursor = message.lastEventId;
-        foregroundRefresh.request(150);
+        if (!(message instanceof MessageEvent)) return;
+        if (message.lastEventId) eventCursor = message.lastEventId;
+        let event: unknown;
+        try {
+          event = JSON.parse(
+            typeof message.data === "string" ? message.data : "",
+          );
+        } catch {
+          return;
+        }
+        if (
+          typeof event !== "object" ||
+          event === null ||
+          !("type" in event) ||
+          !("node_id" in event) ||
+          typeof event.node_id !== "string"
+        )
+          return;
+        // Routine observations are picked up by the periodic snapshot.
+        if (
+          event.type === "connected" ||
+          event.type === "disconnected" ||
+          event.type === "path_changed" ||
+          ((event.type === "command_result" ||
+            event.type === "simulation_result") &&
+            event.node_id === selectionTarget)
+        )
+          foregroundRefresh.request(fleetEventRefreshDelay);
         if (typeof window !== "undefined")
           window.dispatchEvent(new Event(platformEventsEvent));
       });
@@ -471,7 +544,6 @@ export const useFleetStore = defineStore("fleet", () => {
   function disconnect(): void {
     stop();
     eventCursor = undefined;
-    detachOperation();
   }
   onScopeDispose(disconnect);
   return {
@@ -481,6 +553,7 @@ export const useFleetStore = defineStore("fleet", () => {
     ipBans,
     userGroupState,
     latestOperation,
+    operationNodeId,
     operationTracking,
     operationError,
     loading,

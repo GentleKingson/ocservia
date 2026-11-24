@@ -97,11 +97,12 @@ pub(crate) async fn read_agent_events(
             .await;
             return;
         }
-        if !valid_privileged_result_proof(&command, &result) {
-            publish_command_unknown(
+        if let Some(code) = privileged_result_proof_error(&command, &result) {
+            publish_command_unknown_with_code(
                 event_context,
                 &command,
                 "privd result receipt missing or malformed",
+                code,
             )
             .await;
             return;
@@ -131,9 +132,19 @@ pub(crate) async fn read_agent_events(
 }
 
 async fn publish_command_unknown(
+    context: (&Shared, &[u8], &str, &Connection),
+    command: &CommandEnvelope,
+    message: &'static str,
+) {
+    publish_command_unknown_with_code(context, command, message, "outcome_requires_reconciliation")
+        .await;
+}
+
+async fn publish_command_unknown_with_code(
     (shared, node_id, traceparent, connection): (&Shared, &[u8], &str, &Connection),
     command: &CommandEnvelope,
     message: &'static str,
+    code: &'static str,
 ) {
     tracing::warn!(
         event_type = "command_response_unknown",
@@ -151,7 +162,7 @@ async fn publish_command_unknown(
         payload_sha256: command.semantic_payload_sha256.clone(),
         state: CommandResultState::Unknown.into(),
         result: Vec::new(),
-        error_code: "outcome_requires_reconciliation".to_owned(),
+        error_code: code.to_owned(),
         accepted_at: Some(now),
         completed_at: Some(now),
         replayed: false,
@@ -171,12 +182,13 @@ async fn publish_command_unknown(
     .await;
 }
 
-pub(crate) fn valid_privileged_result_proof(
+pub(crate) fn privileged_result_proof_error(
     command: &CommandEnvelope,
     result: &CommandResult,
-) -> bool {
+) -> Option<&'static str> {
+    let state = CommandResultState::try_from(result.state);
     let terminal = matches!(
-        CommandResultState::try_from(result.state),
+        state,
         Ok(CommandResultState::Succeeded
             | CommandResultState::Failed
             | CommandResultState::Rejected)
@@ -190,15 +202,16 @@ pub(crate) fn valid_privileged_result_proof(
         ) | None
     );
     if !terminal || !privileged {
-        return true;
+        return None;
     }
     let Some(proof) = result.privileged_result_proof.as_ref() else {
-        return false;
+        return Some("receipt_missing");
     };
     let Some(receipt) = proof.receipt_v1.as_ref() else {
-        return false;
+        return Some("receipt_invalid");
     };
-    proof.version == 1
+    let valid = state != Ok(CommandResultState::Rejected)
+        && proof.version == 1
         && receipt.receipt_version == 1
         && proof.signature.len() == 64
         && proof.encoded_len() <= 65_536
@@ -212,7 +225,8 @@ pub(crate) fn valid_privileged_result_proof(
         && (16..=32).contains(&receipt.effect_record_id.len())
         && receipt.effect_sequence > 0
         && receipt.completed_at.is_some()
-        && receipt.accepted_at.is_some()
+        && receipt.accepted_at.is_some();
+    (!valid).then_some("receipt_invalid")
 }
 
 pub(crate) fn command_response_deadline(

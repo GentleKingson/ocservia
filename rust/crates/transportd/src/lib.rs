@@ -22,7 +22,7 @@ use admission::{AttemptRejection, record_attempt, record_global_attempt};
 use artifacts::{artifact_stream_deadline, finalize_artifact_consumption, relay_artifact_stream};
 use command_stream::{command_response_deadline, read_agent_events, validate_traceparent};
 #[cfg(test)]
-use command_stream::{event, new_traceparent, now_timestamp, valid_privileged_result_proof};
+use command_stream::{event, new_traceparent, now_timestamp, privileged_result_proof_error};
 use events::EventState;
 #[cfg(test)]
 use fence::{FenceRegistration, fence_registration_decision, unix_now};
@@ -116,6 +116,10 @@ const TELEMETRY_BURST_EVENTS: u64 = 40;
 const TELEMETRY_REFILL_EVENTS_PER_SECOND: u64 = 2;
 const TELEMETRY_BURST_BYTES: u64 = 32 * 512 * 1024;
 const TELEMETRY_REFILL_BYTES_PER_MILLI: u64 = 1024;
+// An audit upload contains at most 32 records and the Agent waits at least
+// 100 ms after each successful upload. Frame size is capped independently.
+const AUDIT_BURST_BATCHES: u64 = 20;
+const AUDIT_REFILL_BATCHES_PER_SECOND: u64 = 10;
 // Security priority is claimed by the Agent itself and lets a frame use the
 // subscriber capacity kept for control events (overflow then evicts the slow
 // subscriber, which recovers by replaying retained events). Each node may claim
@@ -146,6 +150,7 @@ struct Inner {
     keyring: Arc<ControllerCommandKeyring>,
     events: Mutex<EventState>,
     telemetry_budgets: Mutex<HashMap<Vec<u8>, TelemetryBudget>>,
+    audit_budgets: Mutex<HashMap<Vec<u8>, AuditBudget>>,
     event_capacity: usize,
     agent_connection_permits: Arc<Semaphore>,
     enrollment_connection_permits: Arc<Semaphore>,
@@ -171,6 +176,11 @@ struct TelemetryBudget {
     updated: tokio::time::Instant,
 }
 
+struct AuditBudget {
+    milli_batches: u64,
+    updated: tokio::time::Instant,
+}
+
 impl Shared {
     fn new(event_capacity: usize, keyring: Arc<ControllerCommandKeyring>) -> Self {
         let capacity = event_capacity.clamp(1, MAX_CONNECTIONS);
@@ -183,6 +193,7 @@ impl Shared {
                 keyring,
                 events: Mutex::new(EventState::new(capacity)),
                 telemetry_budgets: Mutex::new(HashMap::new()),
+                audit_budgets: Mutex::new(HashMap::new()),
                 event_capacity: capacity,
                 agent_connection_permits: Arc::new(Semaphore::new(MAX_AGENT_CONNECTIONS)),
                 enrollment_connection_permits: Arc::new(Semaphore::new(MAX_ENROLLMENT_CONNECTIONS)),
@@ -229,6 +240,35 @@ impl Shared {
         }
         budget.milli_events -= 1000;
         budget.bytes -= bytes;
+        true
+    }
+
+    /// Charges one VPN audit batch independently of the telemetry stream.
+    async fn admit_audit(&self, node_id: &[u8]) -> bool {
+        let now = tokio::time::Instant::now();
+        let mut budgets = self.inner.audit_budgets.lock().await;
+        if budgets.len() >= MAX_CONNECTIONS && !budgets.contains_key(node_id) {
+            budgets.retain(|_, budget| now.duration_since(budget.updated) < Duration::from_secs(2));
+            if budgets.len() >= MAX_CONNECTIONS {
+                return false;
+            }
+        }
+        let capacity = AUDIT_BURST_BATCHES * 1000;
+        let budget = budgets.entry(node_id.to_vec()).or_insert(AuditBudget {
+            milli_batches: capacity,
+            updated: now,
+        });
+        let elapsed =
+            u64::try_from(now.duration_since(budget.updated).as_millis()).unwrap_or(u64::MAX);
+        budget.updated = now;
+        budget.milli_batches = budget
+            .milli_batches
+            .saturating_add(elapsed.saturating_mul(AUDIT_REFILL_BATCHES_PER_SECOND))
+            .min(capacity);
+        if budget.milli_batches < 1000 {
+            return false;
+        }
+        budget.milli_batches -= 1000;
         true
     }
 

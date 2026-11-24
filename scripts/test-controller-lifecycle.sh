@@ -52,6 +52,7 @@ case "${1:-}" in
   up)
     exit "${MOCK_UP_EXIT:-0}"
     ;;
+  create|start) [[ "$2" == backup ]] ;;
   down)
     [[ "${COMPOSE_PROJECT_NAME:-}" == ocservia-production ]]
     exit "${MOCK_DOWN_EXIT:-0}"
@@ -72,7 +73,7 @@ case "${1:-}" in
         init) exit "${MOCK_SIGNER_INIT_EXIT:-0}" ;;
         inspect)
           [[ "${MOCK_SIGNER_INSPECT_EXIT:-0}" == 0 ]] || exit 1
-          printf '{"state_version":1,"issuer_sha256":"%064d","policy":"rsa-client-v1-24h","revision":%s}\n' 1 "${MOCK_SIGNER_REVISION:-4}"
+          printf '{"state_version":1,"issuer_sha256":"%064d","policy":"rsa-client-v1","revision":%s}\n' 1 "${MOCK_SIGNER_REVISION:-4}"
           exit 0
           ;;
         *) exit 97 ;;
@@ -353,20 +354,31 @@ test "$(wc -l <"${upgrade_success_state}/compose-env.log")" -eq 4
 [[ "$(sed -n '4p' "${upgrade_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 rollback_success_state="${fixture}/rollback-success"
 seed_rollback_state "${rollback_success_state}"
-run_controller_rollback "${rollback_success_state}" env
+run_controller_rollback "${rollback_success_state}" env MOCK_PS_JSON='{"Service":"postgres","State":"running","Health":"healthy"}
+{"Service":"backup","State":"running","Health":"unhealthy"}'
 cmp -s "${release_file}" "${rollback_success_state}/current-release.json"
 cmp -s "${next_release_file}" "${rollback_success_state}/previous-release.json"
 test ! -e "${rollback_success_state}/pending-release.json"
-test "$(sed -n '1p' "${rollback_success_state}/compose.log")" = "ps --format json postgres backup"
+test "$(sed -n '1p' "${rollback_success_state}/compose.log")" = "ps --format json postgres"
 test "$(sed -n '2p' "${rollback_success_state}/compose.log")" = "config --quiet"
 test "$(sed -n '3p' "${rollback_success_state}/compose.log")" = "pull"
-test "$(sed -n '4p' "${rollback_success_state}/compose.log")" = "up -d --wait"
+test "$(sed -n '4p' "${rollback_success_state}/compose.log")" = "up -d --wait gateway control-plane transportd"
+test "$(sed -n '5p' "${rollback_success_state}/compose.log")" = "create backup"
+test "$(sed -n '6p' "${rollback_success_state}/compose.log")" = "start backup"
 test "$(wc -l <"${rollback_success_state}/smoke.log")" -eq 1
+grep -Fq -- ' --skip-backup' "${rollback_success_state}/smoke.log"
 [[ "$(sed -n '1p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${next_digest}"$'\t'* ]]
 [[ "$(sed -n '2p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
 [[ "$(sed -n '3p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
 [[ "$(sed -n '4p' "${rollback_success_state}/compose-env.log")" == "ghcr.io/gentlekingson/ocservia/gateway@${digest}"$'\t'* ]]
-test "$(wc -l <"${rollback_success_state}/compose-env.log")" -eq 4
+test "$(wc -l <"${rollback_success_state}/compose-env.log")" -eq 6
+
+rollback_unhealthy_database_state="${fixture}/rollback-unhealthy-database"
+seed_rollback_state "${rollback_unhealthy_database_state}"
+expect_rejection "${rollback_unhealthy_database_state}/output.log" 'current PostgreSQL services are not healthy' \
+  run_controller_rollback "${rollback_unhealthy_database_state}" env \
+  MOCK_PS_JSON='{"Service":"postgres","State":"running","Health":"unhealthy"}'
+cmp -s "${next_release_file}" "${rollback_unhealthy_database_state}/current-release.json"
 
 missing_previous_state="${fixture}/rollback-missing-previous"
 seed_upgrade_state "${missing_previous_state}"
@@ -418,8 +430,8 @@ for schema in 1 100; do
   chmod 600 "${schema_state}/current-release.json" "${schema_state}/previous-release.json"
   run_controller_rollback "${schema_state}" env
   test "$(jq -r '.database_migration' "${schema_state}/current-release.json")" = "${schema}"
-  test "$(sed -n '4p' "${schema_state}/compose.log")" = 'up -d --wait'
-  test "$(wc -l <"${schema_state}/compose.log")" -eq 4
+  test "$(sed -n '4p' "${schema_state}/compose.log")" = 'up -d --wait gateway control-plane transportd'
+  test "$(wc -l <"${schema_state}/compose.log")" -eq 6
 done
 incompatible_pending_state="${fixture}/rollback-incompatible-pending"
 seed_rollback_state "${incompatible_pending_state}"
@@ -459,7 +471,7 @@ CONTROLLER="${source_repo}/deploy/production/controller.sh"
 source_env=(env OCSERV_CONTROLLER_COMPOSE_SH= OCSERV_CONTROLLER_SMOKE_SH=
   "CONTROLLER_TEST_SOURCE_LOG=${source_state}/sources.log" "SOURCE_TEST_COMPOSE=${bin}/compose.sh")
 run_controller_rollback "${source_state}" "${source_env[@]}"
-test "$(cat "${source_state}/sources.log")" = "$(printf 'current\ntarget\ntarget\ntarget')"
+test "$(cat "${source_state}/sources.log")" = "$(printf 'current\ntarget\ntarget\ntarget\ntarget\ntarget')"
 test "$(git -C "${source_state}/source-${source_target}" rev-parse HEAD)" = "${source_target}"
 test "$(jq -r .source_commit "${source_state}/current-release.json")" = "${source_target}"
 : >"${source_state}/sources.log"
