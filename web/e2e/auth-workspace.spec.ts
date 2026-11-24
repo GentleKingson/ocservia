@@ -230,18 +230,34 @@ test("changes the Local password from Settings and requires sign-in again", asyn
   await current.fill("fixture-old-password");
   await next.fill("fixture-new-password");
   await confirm.fill("fixture-new-password");
-  await submit.click();
-  await expect(
-    page.getByRole("button", { name: "Changing password…" }),
-  ).toBeDisabled();
-  await expect.poll(() => requests).toBe(2);
-  await page
-    .getByRole("form", { name: "Change password" })
-    .dispatchEvent("submit");
-  expect(requests).toBe(2);
-  reply.resolve(undefined);
+  try {
+    await submit.click();
+    await expect(
+      page.getByRole("button", { name: "Changing password…" }),
+    ).toBeDisabled();
+    await expect.poll(() => requests).toBe(2);
+    // Exercise the submit handler while the button is disabled.
+    const submitted = await page
+      .locator("form")
+      .evaluate((form: HTMLFormElement) => {
+        let dispatched = false;
+        form.addEventListener(
+          "submit",
+          () => {
+            dispatched = true;
+          },
+          { once: true },
+        );
+        form.requestSubmit();
+        return dispatched;
+      });
+    expect(submitted).toBe(true);
+  } finally {
+    reply.resolve(undefined);
+  }
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  expect(requests).toBe(2);
 });
 
 test("redirects Settings to login when the password change session is expired", async ({
