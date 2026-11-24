@@ -84,9 +84,10 @@ impl SessionHandler {
         let handshake: SessionHandshake = read_message(recv, "handshake").await?;
         validate_handshake(&handshake, connection.remote_id())?;
         validate_protocol_version(&handshake)?;
+        let connection_id = *Uuid::now_v7().as_bytes();
         let response = self
             .trust
-            .authorize(connection.remote_id(), handshake.clone())
+            .authorize(connection.remote_id(), handshake.clone(), connection_id)
             .await?;
         write_message(send, &response).await?;
         let result =
@@ -131,7 +132,7 @@ impl SessionHandler {
             negotiated_capabilities,
             authorization_revision: verified.authorization_revision,
             session_epoch: verified.session_epoch,
-            connection_id: *Uuid::now_v7().as_bytes(),
+            connection_id,
             session_expires_at,
         }))
     }

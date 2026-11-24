@@ -1,7 +1,12 @@
 name: Release Check
+run-name: Release Check v${{ inputs.version }}
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: Intended release version without v (X.Y.Z or X.Y.Z-rc.N)
+        type: string
+        required: true
       contract_base_ref:
         description: Optional prior commit or tag; defaults to the latest release tag before HEAD (or HEAD~1)
         type: string
@@ -10,18 +15,22 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-check-${{ github.run_id }}
+  group: release-check-${{ github.sha }}
   cancel-in-progress: false
+env:
+  VERSION: ${{ inputs.version }}
 jobs:
   prepare:
     name: Prepare Release Check
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      contract_base_ref: ${{ steps.resolve.outputs.contract_base_ref }}
+      contract_base_sha: ${{ steps.resolve.outputs.contract_base_sha }}
     steps:
-      - name: Require main branch
-        run: test "$GITHUB_REF" = refs/heads/main
+      - name: Require main branch and a release version
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "$VERSION" != 0.0.0 ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -42,41 +51,290 @@ jobs:
             echo "contract_base_ref (${base}) must differ from HEAD (${head_sha})" >&2
             exit 1
           fi
-          echo "contract_base_ref=${base}" >>"$GITHUB_OUTPUT"
+          echo "contract_base_sha=${base_sha}" >>"$GITHUB_OUTPUT"
           printf 'Contract baseline: %s (%s)\n' "$base" "$base_sha" >>"$GITHUB_STEP_SUMMARY"
 
-  full-ci:
+  ci:
+    name: Resolve Basic CI evidence
     needs: prepare
-    uses: ./.github/workflows/ci.yml
-    with:
-      profile: full
-      contract_base_ref: ${{ needs.prepare.outputs.contract_base_ref }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      quick_url: ${{ steps.evidence.outputs.quick_url }}
+      full_url: ${{ steps.evidence.outputs.full_url }}
+      contract_done: ${{ steps.evidence.outputs.contract_done }}
+      database_done: ${{ steps.evidence.outputs.database_done }}
+      database_smoke_done: ${{ steps.evidence.outputs.database_smoke_done }}
+      recovery_done: ${{ steps.evidence.outputs.recovery_done }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
+        run: python3 scripts/release_evidence.py ci
 
   security:
+    name: Resolve security evidence
     needs: prepare
-    uses: ./.github/workflows/security.yml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      security_url: ${{ steps.evidence.outputs.security_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/release_evidence.py security
 
-  products-amd64:
+  agent-amd64:
     needs: prepare
-    uses: ./.github/workflows/release-products.yml
+    uses: ./.github/workflows/release-agent.yml
     with:
-      version: '0.0.0'
+      version: ${{ inputs.version }}
       arch: amd64
 
-  products-arm64:
+  agent-arm64:
     needs: prepare
-    uses: ./.github/workflows/release-products.yml
+    uses: ./.github/workflows/release-agent.yml
     with:
-      version: '0.0.0'
+      version: ${{ inputs.version }}
       arch: arm64
+
+  controller-amd64:
+    needs: prepare
+    uses: ./.github/workflows/release-controller.yml
+    with:
+      version: ${{ inputs.version }}
+      arch: amd64
+
+  controller-arm64:
+    needs: prepare
+    uses: ./.github/workflows/release-controller.yml
+    with:
+      version: ${{ inputs.version }}
+      arch: arm64
+
+  smoke-agent-packages:
+    name: Smoke Agent Packages (${{ matrix.arch }})
+    needs: [agent-amd64, agent-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Download and verify immutable package set for smoke
+        uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs[format('agent-{0}', matrix.arch)].outputs.artifact_id }}
+          manifest-sha256: ${{ needs[format('agent-{0}', matrix.arch)].outputs.manifest_sha256 }}
+          kind: agent
+          version: ${{ inputs.version }}
+          arch: ${{ matrix.arch }}
+          path: ${{ runner.temp }}/packages
+      - name: Validate native package lifecycle (${{ matrix.arch }})
+        id: smoke-packages
+        env:
+          RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
+          PRODUCTS_DIR: ${{ runner.temp }}/packages
+          VERSION: ${{ inputs.version }}
+        run: scripts/release-native-package-smoke.sh
+      - name: Upload native smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-smoke-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/native-smoke
+          retention-days: 7
+          if-no-files-found: warn
+
+  smoke-rc-lifecycle:
+    name: Smoke Synthetic RC Lifecycle (${{ matrix.arch }})
+    if: contains(inputs.version, '-rc.')
+    # Restore the compilation cache saved by this run's package build.
+    needs: [agent-amd64, agent-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: native-packages
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
+      - name: Restore Rocky Agent compilation cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: rust/target/agent-${{ matrix.arch }}-*
+          key: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: release-agent-target-v2-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
+      - name: Validate RC to final package lifecycle (${{ matrix.arch }})
+        env:
+          RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
+          RC_LIFECYCLE: 'true'
+        run: scripts/release-native-package-smoke.sh
+      - name: Upload synthetic RC lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rc-lifecycle-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/artifacts/rc-lifecycle
+          retention-days: 7
+          if-no-files-found: warn
+
+  assets:
+    name: Assemble release assets
+    needs: [agent-amd64, agent-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Download and verify amd64 Agent packages
+        uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.agent-amd64.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
+          kind: agent
+          version: ${{ inputs.version }}
+          arch: amd64
+          path: ${{ runner.temp }}/agent-amd64
+      - name: Download and verify arm64 Agent packages
+        uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.agent-arm64.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.agent-arm64.outputs.manifest_sha256 }}
+          kind: agent
+          version: ${{ inputs.version }}
+          arch: arm64
+          path: ${{ runner.temp }}/agent-arm64
+      - name: Prepare bootstrap and package assets
+        env:
+          ASSET_DIR: ${{ runner.temp }}/assets
+        run: |
+          mkdir -p "$ASSET_DIR"
+          for arch in amd64 arm64; do
+            find "$RUNNER_TEMP/agent-$arch" -maxdepth 1 -type f ! -name 'product-identity.json' -exec mv -t "$ASSET_DIR" -- {} +
+          done
+          scripts/prepare-bootstrap-release-assets.sh "$ASSET_DIR" "v$VERSION"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends rpm
+          scripts/validate-release-packages.sh
+      - name: Check pre-publication asset inventory
+        run: python3 scripts/publish-release.py check-assets
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        id: upload
+        with:
+          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/assets
+          if-no-files-found: error
+          retention-days: 7
+
+  contracts:
+    name: Release contract compatibility
+    needs: [prepare, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.ci.outputs.contract_done != 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        if: needs.ci.outputs.contract_done != 'true'
+        with:
+          profiles: contracts
+          cache-npm: 'true'
+      - if: needs.ci.outputs.contract_done != 'true'
+        env:
+          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
+        run: bash scripts/check-breaking.sh "$CONTRACT_BASE_SHA"
+      - if: needs.ci.outputs.contract_done == 'true'
+        run: echo 'Reused the successful comparison against the release baseline.'
+
+  database:
+    name: Release database acceptance
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-tools
+        if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
+        with:
+          profiles: go-test
+      - if: needs.ci.outputs.database_done != 'true'
+        env:
+          PG_MAJOR: '18'
+          DATABASE_TEST_SCOPE: full
+        run: scripts/database-integration.sh
+      - if: needs.ci.outputs.database_done != 'true' && needs.ci.outputs.database_smoke_done != 'true'
+        run: bash scripts/test-postgres-volume-layout.sh
+      - if: needs.ci.outputs.recovery_done != 'true'
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/database-recovery-postgres
+        run: |
+          RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres-bundled" \
+            ARTIFACT_DIR="$ARTIFACT_DIR/bundled" bash scripts/postgres-backup-restore-smoke.sh
+          RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres" \
+            bash scripts/external-postgres-backup-restore-smoke.sh
+      - if: always() && needs.ci.outputs.recovery_done != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: database-recovery-postgres-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/database-recovery-postgres
+          retention-days: 7
+      - if: needs.ci.outputs.database_done == 'true' && needs.ci.outputs.recovery_done == 'true'
+        run: echo 'Reused successful Full CI database acceptance and recovery.'
 
   business:
     name: Business Smoke (amd64)
-    needs: products-amd64
+    needs: [agent-amd64, controller-amd64, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      VERSION: '0.0.0'
       CONTROLLER_ARCH: amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -84,18 +342,18 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/download-release-product
         with:
-          artifact-id: ${{ needs.products-amd64.outputs.agent_packages_artifact_id }}
-          manifest-sha256: ${{ needs.products-amd64.outputs.agent_packages_manifest_sha256 }}
+          artifact-id: ${{ needs.agent-amd64.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
           kind: agent
-          version: '0.0.0'
+          version: ${{ inputs.version }}
           arch: amd64
           path: ${{ runner.temp }}/business-packages
       - uses: ./.github/actions/download-release-product
         with:
-          artifact-id: ${{ needs.products-amd64.outputs.controller_images_artifact_id }}
-          manifest-sha256: ${{ needs.products-amd64.outputs.controller_images_manifest_sha256 }}
+          artifact-id: ${{ needs.controller-amd64.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.controller-amd64.outputs.manifest_sha256 }}
           kind: controller
-          version: '0.0.0'
+          version: ${{ inputs.version }}
           arch: amd64
           path: ${{ runner.temp }}/business-controller-images
       - uses: ./.github/actions/setup-tools
@@ -124,7 +382,7 @@ jobs:
           DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
         run: |
           if [[ -f "$DIAGNOSTICS/result.json" ]]; then
-            jq '{probe_status,last_stage,exit_code,timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
+            jq '{probe_status,last_stage,exit_code,timings,scenario_timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
           fi
           if [[ -f "$DIAGNOSTICS/api-checkpoints.jsonl" ]]; then
             jq -c 'select(.name == "real_vpn_relay_recovery" or .name == "resilience_relay") | {name,time,status}' "$DIAGNOSTICS/api-checkpoints.jsonl"
@@ -178,7 +436,7 @@ jobs:
 
   quick:
     name: Quick Install (Pebble ACME, amd64)
-    needs: products-amd64
+    needs: [controller-amd64, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -187,15 +445,14 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/download-release-product
         with:
-          artifact-id: ${{ needs.products-amd64.outputs.controller_images_artifact_id }}
-          manifest-sha256: ${{ needs.products-amd64.outputs.controller_images_manifest_sha256 }}
+          artifact-id: ${{ needs.controller-amd64.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.controller-amd64.outputs.manifest_sha256 }}
           kind: controller
-          version: '0.0.0'
+          version: ${{ inputs.version }}
           arch: amd64
           path: ${{ runner.temp }}/quick-controller-images
       - name: Quick install, rerun, upgrade and rollback against Pebble
         env:
-          VERSION: '0.0.0'
           IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
           CONTROLLER_ARCH: amd64
         run: |
@@ -204,17 +461,54 @@ jobs:
 
   result:
     name: Release Check Result
-    needs: [prepare, full-ci, security, products-amd64, products-arm64, business, quick]
+    needs: [prepare, ci, contracts, database, security, agent-amd64, agent-arm64,
+            controller-amd64, controller-arm64, smoke-agent-packages, smoke-rc-lifecycle, assets, business, quick]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
+          IS_PRERELEASE: ${{ contains(inputs.version, '-rc.') }}
         run: |
-          if jq -e 'keys == ["business","full-ci","prepare","products-amd64","products-arm64","quick","security"] and all(.[]; .result == "success")' <<<"$RESULTS" >/dev/null; then
-            echo PASS >>"$GITHUB_STEP_SUMMARY"
-          else
+          if ! jq -e --arg rc "$IS_PRERELEASE" '
+            all(to_entries[];
+              .value.result == (if .key == "smoke-rc-lifecycle" and $rc == "false"
+                                then "skipped" else "success" end))
+          ' <<<"$RESULTS" >/dev/null; then
             echo FAIL >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Record the accepted artifacts and checks
+        env:
+          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
+          QUICK_URL: ${{ needs.ci.outputs.quick_url }}
+          FULL_URL: ${{ needs.ci.outputs.full_url }}
+          SECURITY_URL: ${{ needs.security.outputs.security_url }}
+          AGENT_AMD64_ID: ${{ needs.agent-amd64.outputs.artifact_id }}
+          AGENT_AMD64_SHA256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
+          AGENT_ARM64_ID: ${{ needs.agent-arm64.outputs.artifact_id }}
+          AGENT_ARM64_SHA256: ${{ needs.agent-arm64.outputs.manifest_sha256 }}
+          CONTROLLER_AMD64_ID: ${{ needs.controller-amd64.outputs.artifact_id }}
+          CONTROLLER_AMD64_SHA256: ${{ needs.controller-amd64.outputs.manifest_sha256 }}
+          CONTROLLER_ARM64_ID: ${{ needs.controller-arm64.outputs.artifact_id }}
+          CONTROLLER_ARM64_SHA256: ${{ needs.controller-arm64.outputs.manifest_sha256 }}
+          ASSETS_ID: ${{ needs.assets.outputs.artifact_id }}
+          ASSETS_SHA256: ${{ needs.assets.outputs.digest }}
+        run: python3 scripts/release_evidence.py record-check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-check.json
+          if-no-files-found: error
+          retention-days: 7
+      - env:
+          QUICK_URL: ${{ needs.ci.outputs.quick_url }}
+          FULL_URL: ${{ needs.ci.outputs.full_url }}
+          SECURITY_URL: ${{ needs.security.outputs.security_url }}
+        run: |
+          printf 'PASS\n\n- Quick CI: %s\n- Security: %s\n' "$QUICK_URL" "$SECURITY_URL" >>"$GITHUB_STEP_SUMMARY"
+          if [[ -n "$FULL_URL" ]]; then printf -- '- Full CI: %s\n' "$FULL_URL" >>"$GITHUB_STEP_SUMMARY"; fi

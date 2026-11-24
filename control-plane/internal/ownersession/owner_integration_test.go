@@ -49,7 +49,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	}
 	nodeID, endpointID := testNodeAndEndpoint(t)
 
-	session, err := manager.OpenSession(context.Background(), nodeID, endpointID)
+	session, err := manager.OpenSession(context.Background(), nodeID, mustUUIDv7(t), endpointID)
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 		t.Fatal("manager accepted a different local session term")
 	}
 
-	next, err := manager.OpenSession(context.Background(), nodeID, endpointID)
+	next, err := manager.OpenSession(context.Background(), nodeID, mustUUIDv7(t), endpointID)
 	if err != nil {
 		t.Fatalf("reopen session: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	// Simulate a Controller restart where transportd keeps an existing session
 	// open across the restart boundary and later delivers its Disconnected event
 	// to a fresh Manager with an empty in-memory session map.
-	restarted, err := manager.OpenSession(context.Background(), nodeID, endpointID)
+	restarted, err := manager.OpenSession(context.Background(), nodeID, mustUUIDv7(t), endpointID)
 	if err != nil {
 		t.Fatalf("open session before restart: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 		t.Fatalf("new manager: %v", err)
 	}
 	nodeID, endpointID := testNodeAndEndpoint(t)
-	first, err := manager.OpenSession(context.Background(), nodeID, endpointID)
+	first, err := manager.OpenSession(context.Background(), nodeID, mustUUIDv7(t), endpointID)
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 		go func(index int) {
 			defer wg.Done()
 			<-start
-			session, err := manager.OpenSession(context.Background(), nodeID, endpointID)
+			session, err := manager.OpenSession(context.Background(), nodeID, mustUUIDv7(t), endpointID)
 			if err != nil {
 				t.Errorf("concurrent open %d: %v", index, err)
 				return

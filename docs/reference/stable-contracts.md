@@ -189,6 +189,8 @@ bounds, and SQLite read-only, disk-full, and corruption faults.
 
 ### Session and command matrix
 
+On the private Unix socket, `transportd` assigns a UUIDv7 `connection_id` before `AuthorizeSession`. The Controller stores that ID with the node and the allocated `session_epoch`. `transportd` uses the same ID in connection events and VPN audit requests, allowing an exact disconnect to release the persisted term even after a Controller restart.
+
 The table below summarizes runtime admission rules enforced by [`enrollment.Service.AuthorizeSession`](../../control-plane/internal/enrollment/service.go), [`transportd`](../../rust/crates/transportd/src/lib.rs), [`Agent`](../../rust/crates/agent/src/session.rs), and `privd`:
 
 | Offered state | Required behavior / upgrade path | Existing verification |

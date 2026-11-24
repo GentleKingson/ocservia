@@ -135,11 +135,12 @@ def check_web_e2e_coverage(errors):
 
 
 def check_specific_contracts(errors):
-    products_text = (ROOT / '.github/workflows/release-products.yml').read_text(encoding='utf-8')
-    if "hashFiles('rust/Cargo.lock')" not in products_text:
-        errors.append('release-products.yml: native-packages setup-tools must pass a rust/Cargo.lock key-suffix')
-    if "github.event_name == 'push' && github.ref_name" in products_text:
-        errors.append('release-products.yml: reusable workflow must not couple to caller github.event_name/ref_name')
+    builder = (ROOT / '.github/workflows/release-agent.yml').read_text(encoding='utf-8')
+    if "hashFiles('rust/Cargo.lock')" not in builder:
+        errors.append('release-agent.yml: native-packages setup-tools must pass a rust/Cargo.lock key-suffix')
+    for workflow in ('release-agent.yml', 'release-controller.yml'):
+        if "github.event_name == 'push' && github.ref_name" in (ROOT / '.github/workflows' / workflow).read_text(encoding='utf-8'):
+            errors.append(f'{workflow}: reusable workflow must not couple to caller github.event_name/ref_name')
 
     security_doc = load_yaml(ROOT / '.github/workflows/security.yml')
     includes = security_doc['jobs']['scan']['strategy']['matrix']['include']

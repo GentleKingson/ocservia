@@ -3,12 +3,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 - "${ROOT}" <<'PY'
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+from tempfile import TemporaryDirectory
+from textwrap import dedent
 
 root = Path(sys.argv[1])
-products = (root / '.github/workflows/release-products.yml').read_text()
+agent_builder = (root / '.github/workflows/release-agent.yml').read_text()
 release = (root / '.github/workflows/release.yml').read_text()
 release_check = (root / '.github/workflows/release-check.yml').read_text()
 smoke_script = (root / 'scripts/release-native-package-smoke.sh').read_text()
@@ -29,10 +34,11 @@ def job(document, name):
     return document[start:end]
 
 
-build_job = job(products, 'build-agent-packages')
-smoke_job = job(products, 'smoke-agent-packages')
+build_job = job(agent_builder, 'build-agent-packages')
+smoke_job = job(release_check, 'smoke-agent-packages')
+rc_smoke_job = job(release_check, 'smoke-rc-lifecycle')
 prepare_job = job(release, 'prepare')
-assets_job = job(release, 'assets')
+assets_job = job(release_check, 'assets')
 publish_job = job(release, 'publish')
 rc_business_job = job(release_check, 'business')
 rc_quick_job = job(release_check, 'quick')
@@ -43,47 +49,98 @@ require('scripts/release-native-package-smoke.sh' not in build_job,
 require('id: upload' in build_job and
         'artifact_id: ${{ steps.upload.outputs.artifact-id }}' in build_job,
         'the package builder must expose the immutable upload by exact artifact ID')
-require('needs: build-agent-packages' in smoke_job,
+agent_needs = 'needs: [agent-amd64, agent-arm64]'
+require(agent_needs in smoke_job and 'arch: [amd64, arm64]' in smoke_job,
         'the package smoke job must wait for the immutable package upload')
+agent_outputs = "needs[format('agent-{0}', matrix.arch)].outputs"
 require('uses: ./.github/actions/download-release-product' in smoke_job and
-        'artifact-id: ${{ needs.build-agent-packages.outputs.artifact_id }}' in smoke_job and
-        'manifest-sha256: ${{ needs.build-agent-packages.outputs.manifest_sha256 }}' in smoke_job,
+        f'artifact-id: ${{{{ {agent_outputs}.artifact_id }}}}' in smoke_job and
+        f'manifest-sha256: ${{{{ {agent_outputs}.manifest_sha256 }}}}' in smoke_job,
         'the package smoke job must download and verify the exact immutable build artifact')
 require(smoke_job.index('artifact-id:') < smoke_job.index('scripts/release-native-package-smoke.sh'),
         'the package smoke job must download its disposable copy before lifecycle smoke')
-require('version: ${{ steps.package-version.outputs.version }}' in build_job and
+require('INPUT_VERSION: ${{ inputs.version }}' in build_job and
         'PRODUCTS_DIR: ${{ runner.temp }}/packages' in smoke_job and
-        'VERSION: ${{ needs.build-agent-packages.outputs.version }}' in smoke_job,
+        'VERSION: ${{ inputs.version }}' in smoke_job,
         'candidate smoke must preserve the resolved version and downloaded package inputs')
-require(smoke_job.count('scripts/release-native-package-smoke.sh') == 2 and
-        "RC_LIFECYCLE: 'true'" in smoke_job and
-        'if: inputs.run_rc_lifecycle' in smoke_job,
-        'the isolated job must preserve candidate and explicit RC lifecycle coverage')
+require(smoke_job.count('scripts/release-native-package-smoke.sh') == 1 and
+        rc_smoke_job.count('scripts/release-native-package-smoke.sh') == 1 and
+        "RC_LIFECYCLE: 'true'" in rc_smoke_job and
+        "if: contains(inputs.version, '-rc.')" in rc_smoke_job and
+        agent_needs in rc_smoke_job and 'arch: [amd64, arm64]' in rc_smoke_job and
+        'PRODUCTS_DIR:' not in rc_smoke_job and 'Restore Rocky Agent compilation cache' in rc_smoke_job,
+        'synthetic RC smoke must reuse the package build cache and run in parallel with candidate smoke')
 require('python3 scripts/publish-release.py qualify' in prepare_job and
-        'python3 scripts/publish-release.py qualify' in publish_job,
+        'python3 scripts/publish-release.py qualify' in publish_job and
+        publish_job.index('python3 scripts/publish-release.py qualify') < publish_job.index('gh release create'),
         'release workflow must enforce Release Check qualification both fail-fast in prepare and before publish')
-require('needs: [prepare, build-amd64, build-arm64]' in assets_job and
+require(agent_needs in assets_job and
         'uses: ./.github/actions/download-release-product' in assets_job and
-        'needs.build-amd64.outputs.agent_packages_artifact_id' in assets_job and
-        'needs.build-arm64.outputs.agent_packages_artifact_id' in assets_job and
-        'needs.build-amd64.outputs.agent_packages_manifest_sha256' in assets_job and
-        'needs.build-arm64.outputs.agent_packages_manifest_sha256' in assets_job,
-        'release assets must download and verify exact agent artifacts only after both reusable workflows pass')
-require(re.search(r'-exec\s+[^\n]*\{\}\s+\S+[^\n]*\+', assets_job) is None and
-        '-exec mv -t "$ASSET_DIR" -- {} +' in assets_job,
-        'release assets must pass {} immediately before + in find -exec')
-require('needs: [prepare, build-amd64, build-arm64, assets]' in publish_job and
+        all(f'needs.agent-{arch}.outputs.{output}' in assets_job for arch in ('amd64', 'arm64')
+            for output in ('artifact_id', 'manifest_sha256')),
+        'asset assembly must start as soon as both immutable Agent packages are ready')
+
+move_packages = next(line.strip() for line in assets_job.splitlines()
+                     if line.strip().startswith('find "$RUNNER_TEMP/agent-$arch"'))
+with TemporaryDirectory() as work:
+    temp = Path(work)
+    (temp / 'assets').mkdir()
+    for arch in ('amd64', 'arm64'):
+        (temp / f'agent-{arch}').mkdir()
+        (temp / f'agent-{arch}' / f'package-{arch}').write_text(arch)
+        (temp / f'agent-{arch}' / 'product-identity.json').write_text('{}')
+    subprocess.run(['bash', '-ec', f'for arch in amd64 arm64; do\n{move_packages}\ndone'], check=True,
+                   env={**os.environ, 'RUNNER_TEMP': work, 'ASSET_DIR': str(temp / 'assets')})
+    require({file.name for file in (temp / 'assets').iterdir()} == {'package-amd64', 'package-arm64'} and
+            all((temp / f'agent-{arch}' / 'product-identity.json').is_file() for arch in ('amd64', 'arm64')),
+            'asset assembly must move both package sets and leave the identity manifests behind')
+
+require(re.findall(r'^  ([\w-]+):$', release.split('\njobs:\n', 1)[1], re.MULTILINE) == ['prepare', 'publish'] and
+        'workflow_dispatch:' not in release and 'needs: prepare' in publish_job and
         'uses: ./.github/actions/download-release-product' in publish_job and
-        'needs.build-amd64.outputs.controller_images_manifest_sha256' in publish_job and
-        'needs.build-arm64.outputs.controller_images_manifest_sha256' in publish_job,
-        'publication must verify controller image identities and require successful package smoke and asset assembly')
+        'needs.prepare.outputs.qualification_run_id' in publish_job and
+        'needs.prepare.outputs.controller_amd64_sha256' in publish_job and
+        'needs.prepare.outputs.controller_arm64_sha256' in publish_job and
+        'needs.prepare.outputs.assets_id' in publish_job,
+        'tag publication must use the qualified build artifacts without any build dependency')
 
 require(not (root / '.github/workflows/release-business-diagnostic.yml').exists(),
         'redundant release-business-diagnostic.yml workflow must stay retired')
-require('needs: products-amd64' in rc_business_job and 'needs: products-amd64' in rc_quick_job,
-        'Release Check amd64 acceptance jobs must depend only on products-amd64')
-require('needs: [prepare, full-ci, security, products-amd64, products-arm64, business, quick]' in rc_result_job,
-        'Release Check Result must gate on every required job')
+require('needs: [agent-amd64, controller-amd64, security]' in rc_business_job and
+        'needs: [controller-amd64, security]' in rc_quick_job and
+        all('needs.controller-amd64.outputs.artifact_id' in entry and 'run-id:' not in entry
+            for entry in (rc_business_job, rc_quick_job)),
+        'amd64 acceptance must use the original same-run artifacts while arm64 and RC checks continue')
+require('needs.agent-amd64.outputs.artifact_id' in rc_business_job,
+        'Business Smoke must use the original amd64 package artifact')
+for kind in ('agent', 'controller'):
+    for arch in ('amd64', 'arm64'):
+        builder_job = job(release_check, f'{kind}-{arch}')
+        require(f'uses: ./.github/workflows/release-{kind}.yml' in builder_job and f'arch: {arch}' in builder_job,
+                f'Release Check must build and qualify the {kind} {arch} artifact')
+gates = re.search(r'needs: \[([^]]+)\]', rc_result_job)[1]
+gates = {name.strip() for name in gates.split(',')}
+all_check_jobs = set(re.findall(r'^  ([\w-]+):$', release_check.split('\njobs:\n', 1)[1], re.MULTILINE))
+require(gates == all_check_jobs - {'result'} and 'python3 scripts/release_evidence.py record-check' in rc_result_job,
+        'Release Check must gate its single qualification record on all jobs')
+require('ASSETS_ID: ${{ needs.assets.outputs.artifact_id }}' in rc_result_job and
+        all(f'needs.{kind}-{arch}.outputs.artifact_id' in rc_result_job
+            for kind in ('agent', 'controller') for arch in ('amd64', 'arm64')),
+        'qualification must bind all exact artifacts from the successful attempt')
+
+gate_script = dedent(rc_result_job.split('        run: |\n', 1)[1].split('      - uses:', 1)[0])
+with TemporaryDirectory() as work:
+    for is_rc in ('true', 'false'):
+        results = {name: {'result': 'success'} for name in gates}
+        if is_rc == 'false':
+            results['smoke-rc-lifecycle']['result'] = 'skipped'
+        env = {**os.environ, 'IS_PRERELEASE': is_rc, 'GITHUB_STEP_SUMMARY': f'{work}/summary'}
+        subprocess.run(['bash', '-ec', gate_script], check=True, env={**env, 'RESULTS': json.dumps(results)})
+        for name, result in results.items():
+            incomplete = {**results, name: {'result': 'skipped' if result['result'] == 'success' else 'failure'}}
+            require(subprocess.run(['bash', '-ec', gate_script],
+                                   env={**env, 'RESULTS': json.dumps(incomplete)}).returncode != 0,
+                    f'qualification accepted an incomplete {name} gate (RC={is_rc})')
 
 base = builder.splitlines()[0]
 require(re.fullmatch(r'FROM rockylinux:9@sha256:[0-9a-f]{64}', base) is not None,
@@ -97,56 +154,37 @@ require('"${ROOT}/rust/agent-build.Dockerfile"' in smoke_script and
         'the RPM smoke helper must validate and reuse the shared immutable Rocky base')
 PY
 
-# Behavioral checks for publish-release.py qualify gate (mocking gh CLI).
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-evidence.py"
+
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
-mkdir -p "$work/bin"
-cat >"$work/bin/gh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-case "$*" in
-  *"commits/refs/tags/"*) printf '{"sha":"%s"}\n' "$MOCK_TAG_SHA" ;;
-  *"workflows/release-check.yml/runs"*) printf '%s\n' "$MOCK_RUNS_JSON" ;;
-  *) echo "unexpected gh call: $*" >&2; exit 1 ;;
-esac
-EOF
-chmod 0755 "$work/bin/gh"
-head_sha="$(git -C "$ROOT" rev-parse HEAD)"
-run_qualify() {
-  PATH="$work/bin:$PATH" GH_REPO="GentleKingson/ocservia" VERSION="2.0.0" \
-    GITHUB_SHA="$1" MOCK_TAG_SHA="$2" MOCK_RUNS_JSON="$3" \
-    GITHUB_STEP_SUMMARY="$work/summary.md" \
-    python3 "$ROOT/scripts/publish-release.py" qualify >/dev/null 2>&1
-}
-
-# 1. Passes when the latest main workflow_dispatch Release Check succeeded for HEAD.
-: >"$work/summary.md"
-run_qualify "$head_sha" "$head_sha" "[{\"workflow_runs\":[{\"run_number\":10,\"head_sha\":\"${head_sha}\",\"head_branch\":\"main\",\"event\":\"workflow_dispatch\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://example.invalid/10\"},{\"run_number\":11,\"head_sha\":\"${head_sha}\",\"head_branch\":\"main\",\"event\":\"workflow_dispatch\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://example.invalid/11\"}]}]"
-grep -Fq "Release Check: https://example.invalid/11 (SHA: ${head_sha})" "$work/summary.md"
-
-# 2. Fails when a newer Release Check failed even if an older run passed.
-if run_qualify "$head_sha" "$head_sha" "[{\"workflow_runs\":[{\"run_number\":11,\"head_sha\":\"${head_sha}\",\"head_branch\":\"main\",\"event\":\"workflow_dispatch\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://example.invalid/11\"},{\"run_number\":12,\"head_sha\":\"${head_sha}\",\"head_branch\":\"main\",\"event\":\"workflow_dispatch\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://example.invalid/12\"}]}]"; then
-  echo 'expected newer failed Release Check to block qualification' >&2
-  exit 1
-fi
-
-# 3. Fails when tag SHA mismatches HEAD or when no runs exist.
-if run_qualify "$head_sha" "0000000000000000000000000000000000000000" '[{"workflow_runs":[]}]'; then
-  echo 'expected tag mismatch to block qualification' >&2
-  exit 1
-fi
-if run_qualify "$head_sha" "$head_sha" '[{"workflow_runs":[]}]'; then
-  echo 'expected missing Release Check runs to block qualification' >&2
-  exit 1
-fi
 
 # Pre-workspace phases (e.g. signer_prepare, integrated_entry) must not require workspace ID.
 env -u OCSERVIA_BUSINESS_TEST_WORKSPACE_ID \
   OCSERVIA_BUSINESS_TEST_WORK_DIR="$work" ARTIFACT_DIR="$work" \
   PYTHONPATH="$ROOT/scripts" python3 -c '
+import json
+from unittest.mock import patch
+
 import release_business_runtime as rt
 env = rt.environment()
 assert env.work.is_dir() and env.evidence.is_dir()
+
+with patch.object(rt.time, "monotonic_ns", side_effect=[0, 2_000_000, 10_000_000, 13_000_000]):
+    with rt.timed("recovery"):
+        assert rt.environment() is env
+    try:
+        with rt.timed("revocation"):
+            raise ValueError("scenario failed")
+    except ValueError as error:
+        assert str(error) == "scenario failed"
+    else:
+        raise AssertionError("the timer suppressed the scenario failure")
+
+assert [json.loads(line) for line in (env.evidence / "scenario-timings.jsonl").read_text().splitlines()] == [
+    {"name": "recovery", "elapsed_ms": 2, "status": "PASS"},
+    {"name": "revocation", "elapsed_ms": 3, "status": "FAIL"},
+]
 '
 
 # smoke_relay_recovery must enforce offline zero-side-effects, exactly-once recovery, and idempotent replay.
