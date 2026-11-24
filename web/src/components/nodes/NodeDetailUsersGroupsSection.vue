@@ -10,6 +10,8 @@ import {
 import type { UserGroupResourceState } from "@/api/models";
 import { ref } from "vue";
 
+import DataState from "@/components/common/DataState.vue";
+import type { DetailReadState } from "@/shared/fleet";
 import SectionCard from "@/components/common/SectionCard.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +31,7 @@ defineProps<{
   users: UserGroupResourceState[];
   groups: UserGroupResourceState[];
   busy: boolean;
+  readState: DetailReadState;
   userAction: ActionState;
   groupAction: ActionState;
 }>();
@@ -105,7 +108,24 @@ function convergenceTone(key: string): string {
     >
       {{ (stateTab === "users" ? userAction : groupAction).explanation }}
     </p>
-    <template v-if="stateTab === 'users'">
+    <DataState
+      v-if="readState !== 'ready'"
+      :kind="readState === 'loading' ? 'loading' : 'error'"
+      :message="
+        $t(
+          readState === 'loading'
+            ? 'loading'
+            : readState === 'stale'
+              ? 'nodeSectionStale'
+              : 'nodeSectionUnavailable',
+        )
+      "
+    />
+    <template
+      v-if="
+        (readState === 'ready' || readState === 'stale') && stateTab === 'users'
+      "
+    >
       <ul v-if="users.length" class="m-0 grid list-none p-0">
         <li
           v-for="item in users"
@@ -242,11 +262,14 @@ function convergenceTone(key: string): string {
           </span>
         </li>
       </ul>
-      <p v-else class="text-muted-foreground m-0 text-sm">
+      <p
+        v-else-if="readState === 'ready'"
+        class="text-muted-foreground m-0 text-sm"
+      >
         {{ $t("noUsers") }}
       </p>
     </template>
-    <template v-else>
+    <template v-else-if="readState === 'ready' || readState === 'stale'">
       <ul v-if="groups.length" class="m-0 grid list-none p-0">
         <li
           v-for="item in groups"
@@ -297,7 +320,10 @@ function convergenceTone(key: string): string {
           </Button>
         </li>
       </ul>
-      <p v-else class="text-muted-foreground m-0 text-sm">
+      <p
+        v-else-if="readState === 'ready'"
+        class="text-muted-foreground m-0 text-sm"
+      >
         {{ $t("noGroups") }}
       </p>
     </template>

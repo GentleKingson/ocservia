@@ -22,6 +22,8 @@ const props = defineProps<{
 const { currentNode } = props.context;
 const fleet = useFleetStore();
 const { t } = useI18n();
+const readReady = () =>
+  fleet.userGroupReadState === "ready" && !fleet.selectionError;
 const desiredDialog = ref<{
   kind: DesiredDialogKind;
   name: string;
@@ -72,7 +74,14 @@ async function submitDesired(): Promise<void> {
   const dialog = desiredDialog.value;
   const explanation = desiredReason.value.trim();
   const nodeId = currentNode.value?.id;
-  if (!dialog || !explanation || !nodeId || desiredLoading.value) return;
+  if (
+    !dialog ||
+    !explanation ||
+    !nodeId ||
+    desiredLoading.value ||
+    !readReady()
+  )
+    return;
   const name = desiredName.value.trim();
   const context = desiredWorkflow.begin(nodeId);
   desiredLoading.value = true;
@@ -91,6 +100,10 @@ async function submitDesired(): Promise<void> {
         nodeId,
       );
       if (!desiredWorkflow.isCurrent(context)) return;
+      if (!readReady()) {
+        desiredError.value = t("nodeSectionStale");
+        return;
+      }
       desiredDialog.value = undefined;
       if (dialog.kind === "create")
         await fleet.createUser(
@@ -225,6 +238,7 @@ defineExpose({ open: openDesired, close });
         :variant="desiredDialog.kind === 'disable' ? 'destructive' : 'default'"
         :disabled="
           desiredLoading ||
+          !readReady() ||
           !desiredReason.trim() ||
           ((desiredDialog.kind === 'create' ||
             desiredDialog.kind === 'rotate') &&

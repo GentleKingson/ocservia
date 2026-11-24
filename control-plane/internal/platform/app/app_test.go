@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 )
@@ -74,10 +76,14 @@ func TestSchedulerIsolatesNonFatalStepErrorsAndTimeouts(t *testing.T) {
 		users: func(context.Context) error {
 			pass++
 			ran = append(ran, "users")
-			if pass == 2 {
-				return &useroperations.EnforcementCleanupError{Err: errors.New("cleanup permission denied")}
+			switch pass {
+			case 2:
+				return &useroperations.EnforcementCleanupError{Err: database.ErrPermission}
+			case 3:
+				return database.ErrCommitUnknown
+			default:
+				return nil
 			}
-			return nil
 		},
 		rollouts: func(context.Context) error {
 			ran = append(ran, "rollouts")
@@ -94,7 +100,7 @@ func TestSchedulerIsolatesNonFatalStepErrorsAndTimeouts(t *testing.T) {
 		},
 		audit: func(context.Context) error {
 			ran = append(ran, "audit")
-			if pass >= 3 {
+			if pass >= 4 {
 				return auditErr
 			}
 			return nil
@@ -110,7 +116,8 @@ func TestSchedulerIsolatesNonFatalStepErrorsAndTimeouts(t *testing.T) {
 		done <- runScheduler(ctx, ticks, work, 1, logger)
 	}()
 
-	// Pass 1 ran immediately on entry; send tick for Pass 2 (users cleanup skips rest of pass) and Pass 3 (audit fatal).
+	// After the initial pass, exercise isolated cleanup, uncertain commit, and fatal audit.
+	ticks <- time.Now()
 	ticks <- time.Now()
 	ticks <- time.Now()
 
@@ -120,15 +127,47 @@ func TestSchedulerIsolatesNonFatalStepErrorsAndTimeouts(t *testing.T) {
 	}
 	want := []string{
 		"users", "rollouts", "telemetry", "certificates", "audit", "retention",
+		"users", "rollouts", "telemetry", "certificates", "audit", "retention",
 		"users",
 		"users", "rollouts", "telemetry", "certificates", "audit",
 	}
-	if len(ran) != len(want) {
+	if !slices.Equal(ran, want) {
 		t.Fatalf("executed steps = %v, want %v", ran, want)
 	}
-	for i := range want {
-		if ran[i] != want[i] {
-			t.Fatalf("executed steps = %v, want %v", ran, want)
-		}
+}
+
+func TestSchedulerDistinguishesRetryableAndUncertainDatabaseErrors(t *testing.T) {
+	cases := []struct {
+		name      string
+		fail      error
+		continues bool
+	}{
+		{name: "deadlock", fail: database.ErrDeadlock, continues: true},
+		{name: "serialization", fail: database.ErrSerialization, continues: true},
+		{name: "database unavailable", fail: database.ErrUnavailable},
+		{name: "uncertain commit", fail: errors.Join(database.ErrCommitUnknown, database.ErrDeadlock)},
+		{name: "unknown user error", fail: errors.New("invalid user state")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ranAudit := false
+			work := maintenanceWork{
+				users: func(context.Context) error { return tc.fail },
+				audit: func(context.Context) error { ranAudit = true; return nil },
+			}
+			lastSuccess := make(map[string]time.Time)
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			err := work.run(t.Context(), 1, logger, lastSuccess)
+			if tc.continues {
+				if err != nil || !ranAudit || lastSuccess["audit"].IsZero() {
+					t.Fatalf("isolated step error = %v, audit ran = %t, last success = %v", err, ranAudit, lastSuccess)
+				}
+			} else if !errors.Is(err, tc.fail) || ranAudit {
+				t.Fatalf("step error = %v, want %v; audit ran = %t", err, tc.fail, ranAudit)
+			}
+			if !lastSuccess["users"].IsZero() {
+				t.Fatal("failed users step was recorded as successful")
+			}
+		})
 	}
 }

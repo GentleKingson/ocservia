@@ -20,6 +20,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/historyretention"
+	"github.com/GentleKingson/ocservia/control-plane/internal/protectedfile"
 	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
 )
@@ -600,37 +601,7 @@ func readSecretValue(file *os.File, max int64) (string, error) {
 }
 
 func readStrictHexKeyFile(path string, expectedUID uint32) ([]byte, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errors.New("key path must be absolute and clean")
-	}
-	components := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
-	if len(components) == 0 || components[len(components)-1] == "" {
-		return nil, errors.New("key path is invalid")
-	}
-	directoryFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open key root: %w", err)
-	}
-	defer func() { _ = unix.Close(directoryFD) }()
-	if err := validateKeyDirectoryFD(directoryFD, expectedUID); err != nil {
-		return nil, err
-	}
-	for _, component := range components[:len(components)-1] {
-		if component == "" || component == "." || component == ".." {
-			return nil, errors.New("key ancestry is invalid")
-		}
-		nextFD, openErr := unix.Openat(directoryFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if openErr != nil {
-			return nil, fmt.Errorf("open key ancestor: %w", openErr)
-		}
-		if err := validateKeyDirectoryFD(nextFD, expectedUID); err != nil {
-			_ = unix.Close(nextFD)
-			return nil, err
-		}
-		_ = unix.Close(directoryFD)
-		directoryFD = nextFD
-	}
-	file, err := openSecretAt(directoryFD, components[len(components)-1])
+	file, err := protectedfile.Open(path, expectedUID)
 	if err != nil {
 		return nil, fmt.Errorf("open key file: %w", err)
 	}
@@ -662,17 +633,6 @@ func decode32ByteKey(value string) ([]byte, error) {
 		return nil, errors.New("key must contain exactly 32 bytes as lowercase hex")
 	}
 	return decoded, nil
-}
-
-func validateKeyDirectoryFD(fd int, expectedUID uint32) error {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("stat key ancestry: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || (stat.Uid != 0 && stat.Uid != expectedUID) || stat.Mode&0o022 != 0 {
-		return errors.New("key ancestry must be root- or process-owned and not group/world writable")
-	}
-	return nil
 }
 
 func validKeyID(value string) bool {

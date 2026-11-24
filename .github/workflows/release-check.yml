@@ -460,10 +460,10 @@ jobs:
           retention-days: 7
 
   quick:
-    name: Quick Install (Pebble ACME, amd64)
-    needs: [controller-amd64, security]
+    name: Shared-domain Quick Install (Pebble ACME, amd64)
+    needs: [agent-amd64, controller-amd64, security]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -476,12 +476,30 @@ jobs:
           version: ${{ inputs.version }}
           arch: amd64
           path: ${{ runner.temp }}/quick-controller-images
-      - name: Quick install, rerun, upgrade and rollback against Pebble
+      - uses: ./.github/actions/download-release-product
+        with:
+          artifact-id: ${{ needs.agent-amd64.outputs.artifact_id }}
+          manifest-sha256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
+          kind: agent
+          version: ${{ inputs.version }}
+          arch: amd64
+          path: ${{ runner.temp }}/quick-agent-packages
+      - uses: ./.github/actions/setup-tools
+        with:
+          profiles: rust-basic
+          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
+      - name: Build the Relay network probe
+        run: |
+          source scripts/env.sh
+          cargo build --locked --manifest-path rust/Cargo.toml --package ocservia-relay-network-probe
+      - name: Verify shared-domain lifecycle, Agent and certificate renewal
         env:
           IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
+          PRODUCTS_DIR: ${{ runner.temp }}/quick-agent-packages
+          RELAY_NETWORK_PROBE: ${{ github.workspace }}/rust/target/debug/ocservia-relay-network-probe
           CONTROLLER_ARCH: amd64
         run: |
-          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR \
+          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR,PRODUCTS_DIR,RELAY_NETWORK_PROBE \
             bash scripts/release-quick-acceptance.sh
 
   result:

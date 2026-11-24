@@ -2579,6 +2579,7 @@ version = "0.1.0"
 dependencies = [
  "iroh",
  "iroh-relay",
+ "noq",
  "rustls-pki-types",
  "tokio",
  "tracing-subscriber",

@@ -14,13 +14,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
+	"github.com/GentleKingson/ocservia/control-plane/internal/protectedfile"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -561,48 +561,13 @@ func fixed32(value []byte, name string) ([32]byte, error) {
 }
 
 func readPrivateKeyFile(path string, expectedUID uint32) ([]byte, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errors.New("command signing key path must be absolute and clean")
-	}
-	components := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
-	if len(components) < 1 || components[len(components)-1] == "" {
-		return nil, errors.New("command signing key path is invalid")
-	}
-	directoryFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open command signing key root: %w", err)
-	}
-	defer func() { _ = unix.Close(directoryFD) }()
-	if err := validateDirectoryFD(directoryFD, expectedUID); err != nil {
-		return nil, err
-	}
-	for _, component := range components[:len(components)-1] {
-		if component == "" || component == "." || component == ".." {
-			return nil, errors.New("command signing key ancestry is invalid")
-		}
-		nextFD, openErr := unix.Openat(directoryFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if openErr != nil {
-			return nil, fmt.Errorf("open command signing key ancestor: %w", openErr)
-		}
-		if err := validateDirectoryFD(nextFD, expectedUID); err != nil {
-			unix.Close(nextFD)
-			return nil, err
-		}
-		unix.Close(directoryFD)
-		directoryFD = nextFD
-	}
-	fileFD, err := unix.Openat(directoryFD, components[len(components)-1], unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	file, err := protectedfile.Open(path, expectedUID)
 	if err != nil {
 		return nil, fmt.Errorf("open command signing key: %w", err)
 	}
-	file := os.NewFile(uintptr(fileFD), path)
-	if file == nil {
-		unix.Close(fileFD)
-		return nil, errors.New("open command signing key file descriptor")
-	}
 	defer file.Close()
 	var stat unix.Stat_t
-	if err := unix.Fstat(fileFD, &stat); err != nil {
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return nil, fmt.Errorf("stat command signing key: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != expectedUID || stat.Nlink != 1 {
@@ -620,15 +585,4 @@ func readPrivateKeyFile(path string, expectedUID uint32) ([]byte, error) {
 		return nil, errors.New("command signing key must contain 1..4096 bytes")
 	}
 	return raw, nil
-}
-
-func validateDirectoryFD(fd int, expectedUID uint32) error {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("stat command signing key ancestry: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || (stat.Uid != 0 && stat.Uid != expectedUID) || stat.Mode&0o022 != 0 {
-		return errors.New("command signing key ancestry must be root- or process-owned and not group/world writable")
-	}
-	return nil
 }

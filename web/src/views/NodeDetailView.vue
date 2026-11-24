@@ -49,13 +49,13 @@ const routeNodeId = computed(() => {
 const currentNode = computed<NodeObservedState | undefined>(() =>
   fleet.selected?.id === routeNodeId.value ? fleet.selected : undefined,
 );
-const detailLoading = ref(true);
-const detailState = ref<"loading" | "unavailable" | "not-found">("loading");
-let detailSequence = 0;
-watch(currentNode, (node) => {
-  // A foreground retry can recover the initial detail read without navigation.
-  if (node) detailState.value = "loading";
+const detailState = computed(() => {
+  if (!routeNodeId.value || fleet.selectionError === "notFound")
+    return "not-found";
+  if (currentNode.value) return "ready";
+  return fleet.selectionError === "unavailable" ? "unavailable" : "loading";
 });
+const detailLoading = computed(() => detailState.value === "loading");
 
 const configuration =
   useTemplateRef<InstanceType<typeof NodeConfigurationDialog>>("configuration");
@@ -69,7 +69,7 @@ const nodeAction =
   useTemplateRef<InstanceType<typeof NodeActionDialog>>("nodeAction");
 const policyDialog = ref<{ username: string }>();
 const readReady = computed(
-  () => !detailLoading.value && !fleet.selecting && !fleet.selectionError,
+  () => Boolean(currentNode.value) && !fleet.selecting && !fleet.selectionError,
 );
 const dialogContext = { currentNode, readReady };
 const usersState = computed(() =>
@@ -101,46 +101,28 @@ function closeNodeDialogs(): void {
   policyDialog.value = undefined;
 }
 
-async function selectRouteNode(): Promise<void> {
+function selectRouteNode(): void {
   closeNodeDialogs();
-  const sequence = ++detailSequence;
-  const nodeId = routeNodeId.value;
-  detailLoading.value = true;
-  detailState.value = "loading";
-  if (!nodeId) {
-    fleet.detachOperation();
-    detailLoading.value = false;
-    detailState.value = "not-found";
-    return;
-  }
-  await fleet.select(nodeId);
-  if (sequence !== detailSequence) return;
-  detailLoading.value = false;
-  if (currentNode.value) {
-    detailState.value = "loading";
-    return;
-  }
-  detailState.value =
-    fleet.selectionError === "notFound" ? "not-found" : "unavailable";
+  if (routeNodeId.value) void fleet.select(routeNodeId.value);
+  else fleet.detachOperation();
 }
 
 onMounted(() => {
-  fleet.start();
-  void selectRouteNode();
+  selectRouteNode();
+  fleet.start("detail");
 });
 onBeforeUnmount(() => {
   closeNodeDialogs();
-  detailSequence += 1;
   fleet.stop();
 });
-watch(routeNodeId, () => void selectRouteNode(), { flush: "sync" });
+watch(routeNodeId, selectRouteNode, { flush: "sync" });
 
 const detailStatus = computed<{
   key: string;
   tone: "ok" | "error" | "muted";
 }>(() => {
   if (detailLoading.value) return { key: "nodeLoading", tone: "muted" };
-  if (fleet.unavailable || detailState.value === "unavailable")
+  if (fleet.selectionError === "unavailable")
     return { key: "systemsUnavailable", tone: "error" };
   if (!currentNode.value) return { key: "notObserved", tone: "muted" };
   return currentNode.value.freshness === "fresh"
@@ -209,7 +191,7 @@ function openPolicy(username: string): void {
     <template v-else-if="currentNode">
       <NodeStatusSummary
         :node="currentNode"
-        :session-count="fleet.sessions.length"
+        :session-count="currentNode.sessionCount"
       />
       <NodeDetailNav />
       <NodeObservedDetails id="node-overview" :node="currentNode">
@@ -238,7 +220,7 @@ function openPolicy(username: string): void {
               variant="outline"
               size="sm"
               data-testid="upgrade-agent"
-              :disabled="operationBusy"
+              :disabled="operationBusy || !readReady"
               :title="$t('upgradeAgentTitle')"
               @click="
                 nodeAction?.open(
@@ -307,6 +289,19 @@ function openPolicy(username: string): void {
           <h3 class="m-0 text-sm font-semibold">
             {{ $t("currentSessions") }}
           </h3>
+          <DataState
+            v-if="fleet.sessionsState !== 'ready'"
+            :kind="fleet.sessionsState === 'loading' ? 'loading' : 'error'"
+            :message="
+              $t(
+                fleet.sessionsState === 'loading'
+                  ? 'loading'
+                  : fleet.sessionsState === 'stale'
+                    ? 'nodeSectionStale'
+                    : 'nodeSectionUnavailable',
+              )
+            "
+          />
           <ul v-if="fleet.sessions.length" class="m-0 grid list-none p-0">
             <li
               v-for="session in fleet.sessions"
@@ -324,7 +319,12 @@ function openPolicy(username: string): void {
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  :disabled="operationBusy || !currentNode.bootId"
+                  :disabled="
+                    operationBusy ||
+                    !readReady ||
+                    fleet.sessionsState !== 'ready' ||
+                    !currentNode.bootId
+                  "
                   :title="$t('disconnect')"
                   :aria-label="$t('disconnect')"
                   @click="
@@ -338,7 +338,12 @@ function openPolicy(username: string): void {
                   variant="ghost"
                   size="icon-sm"
                   class="text-destructive hover:text-destructive"
-                  :disabled="operationBusy || !currentNode.bootId"
+                  :disabled="
+                    operationBusy ||
+                    !readReady ||
+                    fleet.sessionsState !== 'ready' ||
+                    !currentNode.bootId
+                  "
                   :title="$t('terminate')"
                   :aria-label="$t('terminate')"
                   @click="
@@ -350,12 +355,28 @@ function openPolicy(username: string): void {
               </span>
             </li>
           </ul>
-          <p v-else class="text-muted-foreground m-0 text-sm">
+          <p
+            v-else-if="fleet.sessionsState === 'ready'"
+            class="text-muted-foreground m-0 text-sm"
+          >
             {{ $t("noSessions") }}
           </p>
         </div>
         <div class="grid gap-2">
           <h3 class="m-0 text-sm font-semibold">{{ $t("ipBans") }}</h3>
+          <DataState
+            v-if="fleet.ipBansState !== 'ready'"
+            :kind="fleet.ipBansState === 'loading' ? 'loading' : 'error'"
+            :message="
+              $t(
+                fleet.ipBansState === 'loading'
+                  ? 'loading'
+                  : fleet.ipBansState === 'stale'
+                    ? 'nodeSectionStale'
+                    : 'nodeSectionUnavailable',
+              )
+            "
+          />
           <ul v-if="fleet.ipBans.length" class="m-0 grid list-none p-0">
             <li
               v-for="ban in fleet.ipBans"
@@ -367,7 +388,9 @@ function openPolicy(username: string): void {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                :disabled="operationBusy"
+                :disabled="
+                  operationBusy || !readReady || fleet.ipBansState !== 'ready'
+                "
                 :title="$t('removeBan')"
                 :aria-label="$t('removeBan')"
                 @click="nodeAction?.open('unban', ban.ip, $t('removeBan'))"
@@ -376,7 +399,10 @@ function openPolicy(username: string): void {
               </Button>
             </li>
           </ul>
-          <p v-else class="text-muted-foreground m-0 text-sm">
+          <p
+            v-else-if="fleet.ipBansState === 'ready'"
+            class="text-muted-foreground m-0 text-sm"
+          >
             {{ $t("noIpBans") }}
           </p>
         </div>
@@ -385,7 +411,10 @@ function openPolicy(username: string): void {
       <NodeDetailUsersGroupsSection
         :users="usersState"
         :groups="groupsState"
-        :busy="operationBusy"
+        :busy="
+          operationBusy || !readReady || fleet.userGroupReadState !== 'ready'
+        "
+        :read-state="fleet.userGroupReadState"
         :user-action="actionState('user.manage')"
         :group-action="actionState('group.manage')"
         @desired="(kind, name, version) => userGroup?.open(kind, name, version)"

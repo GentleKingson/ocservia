@@ -2,22 +2,25 @@
 # Disposable hosted runner only: Quick install end to end with shared
 # release image artifacts and a Pebble ACME directory. Run as root through sudo.
 #
-# Checks: initial admin login, ACME certificates for both names, idempotent
-# reruns, resuming an unrecorded Local bootstrap, root CA custody, no
-# credentials in output, published ports, and upgrade/rollback/upgrade
-# keeping material and certificates.
+# Checks the default shared hostname, lifecycle, native Agent execution
+# through Relay, and QUIC after a real ACME renewal.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/release-common.sh disable=SC1091
 source "${ROOT}/scripts/release-common.sh"
 
-: "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${IMAGES_DIR:?}"
+: "${VERSION:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${IMAGES_DIR:?}" "${PRODUCTS_DIR:?}" "${RELAY_NETWORK_PROBE:?}"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD)"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:-amd64}"
 export SOURCE_COMMIT CONTROLLER_ARCH
 [[ "${EUID}" == 0 && -n "${SUDO_UID:-}" && "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" ]]
 [[ ! -e /etc/ocservia && ! -e /var/lib/ocservia-controller && ! -e /root/ocservia-initial-credentials ]]
+[[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia ]]
+if getent passwd ocserv-agent >/dev/null; then
+  echo 'Quick acceptance requires a runner without the ocserv-agent account' >&2
+  exit 1
+fi
 # As in install.sh --quick: the lifecycle belongs to root; SUDO_UID keeps git's
 # trust in the runner-owned checkout.
 unset SUDO_USER
@@ -31,9 +34,12 @@ work="$(mktemp -d /root/quick-acceptance.XXXXXX)"
 run_prefix="quick-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 registry="${run_prefix}-registry" pebble="${run_prefix}-pebble"
 gateway="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')"
-controller="controller.${gateway}.sslip.io" relay="relay.${gateway}.sslip.io"
+controller="controller.${gateway}.sslip.io"
+origin="https://${controller}"
 host_trust=/usr/local/share/ca-certificates/ocservia-quick-acceptance-pebble.crt
 stage=preflight
+native_services=false
+udp_filters=()
 
 cleanup() {
   local code=$?
@@ -41,17 +47,25 @@ cleanup() {
   set +e
   if ((code)); then
     echo "Quick acceptance failed at stage ${stage}" >&2
-    for log in "${work}"/run-*.log; do [[ ! -f "${log}" ]] || { echo "== ${log##*/}"; cat -- "${log}"; } >&2; done
-    for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production) "${pebble}"; do
+    local container
+    for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
       docker inspect --format '== {{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container}"
-      docker logs --tail 80 "${container}" 2>&1
     done >&2
   fi
+  if [[ "${native_services}" == true ]]; then
+    systemctl stop ocservia-agent ocservia-privd ocserv
+  fi
+  for filter in "${udp_filters[@]}"; do
+    "${filter}" -D OUTPUT -m owner --uid-owner ocserv-agent -p udp ! --dport 53 -j REJECT
+  done
+  docker rm -f "${registry}" "${pebble}" >/dev/null 2>&1
   rm -f -- "${host_trust}" && update-ca-certificates --fresh >/dev/null 2>&1
   rm -rf -- "${work}"
   exit "${code}"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 trap 'echo "Quick acceptance failed at line ${LINENO}" >&2' ERR
 pass() { echo "PASS: $1"; }
 # errexit ignores negated commands, so absence is asserted explicitly.
@@ -59,6 +73,17 @@ absent() { if grep -qF -- "$@"; then echo "unexpected: $1" >&2; return 1; fi; }
 
 release_verify_native_runner "${CONTROLLER_ARCH}" >/dev/null
 test -s "${IMAGES_DIR}/product-identity.json"
+test -s "${PRODUCTS_DIR}/product-identity.json"
+test -x "${RELAY_NETWORK_PROBE}"
+deb="${PRODUCTS_DIR}/ocservia-agent_${VERSION}-1_${CONTROLLER_ARCH}.deb"
+test -s "${deb}"
+
+stage=native_dependencies
+apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 update -qq >"${work}/native-dependencies.log" 2>&1
+apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 install -y --no-install-recommends \
+  ocserv sqlite3 >>"${work}/native-dependencies.log" 2>&1
+native_services=true
+systemctl stop ocserv
 
 stage=publish
 docker pull -q "${PEBBLE_IMAGE}" >/dev/null &
@@ -100,7 +125,8 @@ openssl x509 -req -days 1 -in "${work}/pebble.csr" -CA "${pebble_dir}/ca.pem" -C
   -CAcreateserial -extfile "${work}/pebble.ext" -out "${pebble_dir}/cert.pem" 2>/dev/null
 jq -n '{pebble: {listenAddress: "0.0.0.0:14000", managementListenAddress: "0.0.0.0:15000",
   certificate: "/pebble/cert.pem", privateKey: "/pebble/key.pem", httpPort: 5002, tlsPort: 443,
-  ocspResponderURL: "", externalAccountBindingRequired: false}}' >"${pebble_dir}/config.json"
+  ocspResponderURL: "", externalAccountBindingRequired: false,
+  profiles: {default: {description: "Quick renewal fixture", validityPeriod: 900}}}}' >"${pebble_dir}/config.json"
 chmod 0444 "${pebble_dir}"/*
 docker run -d --restart unless-stopped --name "${pebble}" --network host \
   -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -v "${pebble_dir}:/pebble:ro" \
@@ -119,7 +145,7 @@ update-ca-certificates >/dev/null
 stage=first_install
 passphrase="${work}/root-ca-passphrase" export_dir="${work}/root-ca-export"
 openssl rand -hex 24 >"${passphrase}"
-quick=("${ROOT}/deploy/production/install.sh" --quick --controller-domain "${controller}" --relay-domain "${relay}"
+quick=("${ROOT}/deploy/production/install.sh" --quick --controller-domain "${controller}"
   --acme-email quick-acceptance@ocservia.test --root-ca-passphrase-file "${passphrase}"
   --root-ca-export-dir "${export_dir}" --release-file "${manifest}")
 OCSERV_ACME_DIRECTORY_URL="https://${gateway}:14000/dir" OCSERV_ACME_CA_FILE="${pebble_dir}/ca.pem" \
@@ -127,22 +153,34 @@ OCSERV_ACME_DIRECTORY_URL="https://${gateway}:14000/dir" OCSERV_ACME_CA_FILE="${
 grep -qxF "Quick install complete: https://${controller}" "${work}/run-first.log"
 
 stage=certificates
-tls_ready() { curl -sS -o /dev/null --max-time 5 --cacert "${work}/acme-root.pem" "https://$1/" 2>/dev/null; }
-for _ in $(seq 360); do
-  tls_ready "${controller}" && tls_ready "${relay}" && break
-  sleep 0.5
-done
-tls_ready "${controller}"
-tls_ready "${relay}"
-served() {
-  local name
-  for name in "${controller}" "${relay}"; do
-    openssl s_client -connect "${gateway}:443" -servername "${name}" </dev/null 2>/dev/null |
-      openssl x509 -noout -subject -serial -fingerprint -sha256
-  done
+capture_leaf() {
+  timeout 10 openssl s_client -connect "${gateway}:443" -servername "${controller}" \
+    -CAfile "${work}/acme-root.pem" -verify_return_error -verify_hostname "${controller}" </dev/null 2>/dev/null |
+    openssl x509 -out "$1" 2>/dev/null
 }
-certificates="$(served)"
-pass "ACME certificates for both names verify against the directory root"
+serve_before=$((SECONDS + 180))
+until capture_leaf "${work}/first-leaf.pem"; do
+  ((SECONDS < serve_before))
+  sleep 1
+done
+# Fail early if Pebble ignored the short certificate profile.
+if openssl x509 -in "${work}/first-leaf.pem" -noout -checkend 1200 >/dev/null; then
+  echo 'Pebble issued a certificate outside the renewal test window' >&2
+  exit 1
+fi
+grep -qxF "OCSERV_RELAY_PUBLIC_HOST=${controller}" /etc/ocservia/install.env
+relay_http_ready() {
+  local status
+  status="$(curl -fsS --max-time 10 --cacert "${work}/acme-root.pem" \
+    --output /dev/null --write-out '%{http_code}' "${origin}/generate_204")" &&
+    [[ "${status}" == 204 ]]
+}
+relay_http_ready
+check_original_certificate() {
+  capture_leaf "${work}/current-leaf.pem"
+  cmp --silent "${work}/first-leaf.pem" "${work}/current-leaf.pem"
+}
+pass "Gateway and Relay respond on the shared HTTPS hostname"
 
 stage=accounts
 login() {
@@ -189,6 +227,9 @@ published="$(docker ps --filter label=com.docker.compose.project=ocservia-produc
 [[ "${published}" == "443/tcp 7842/udp" ]]
 pass "only 443/tcp and 7842/udp are published"
 
+# The candidate stack uses the usual private Relay CA override. The next
+# lifecycle activation mounts the test root for transportd.
+install -o root -g root -m 0444 "${work}/acme-root.pem" /etc/ocservia/secrets/relay-ca.pem
 stage=rerun
 cp -a -- /etc/ocservia "${work}/config.before"
 cp -a -- "${CREDENTIALS_DIR}" "${work}/credentials.before"
@@ -199,7 +240,7 @@ check_materials() {
 "${quick[@]}" >"${work}/run-rerun.log" 2>&1
 grep -qF "initial Local administrator already exists" "${work}/run-rerun.log"
 check_materials
-[[ "$(served)" == "${certificates}" ]]
+check_original_certificate
 accounts
 pass "a rerun keeps material and certificates"
 
@@ -228,7 +269,7 @@ lifecycle() {
   curl -fsS --cacert "${work}/acme-root.pem" "https://${controller}/api/v1/version" |
     jq -e --arg commit "${SOURCE_COMMIT}" --arg version "${VERSION}" '.commit == $commit and .version == $version' >/dev/null
   check_materials
-  [[ "$(served)" == "${certificates}" ]]
+  check_original_certificate
   accounts
 }
 lifecycle upgrade --release-file "${upgrade_manifest}"
@@ -237,6 +278,125 @@ lifecycle rollback
 pass "rollback keeps material, certificates and accounts"
 lifecycle upgrade --release-file "${upgrade_manifest}"
 pass "upgrade after rollback keeps material, certificates and accounts"
+
+stage=native_agent
+dpkg -i "${deb}" >"${work}/run-native-package.log" 2>&1
+install -o root -g root -m 0444 "${work}/acme-root.pem" /etc/ocservia-agent/relay-ca.pem
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=quick-test-node \
+  -keyout /etc/ocserv/quick-test.key -out /etc/ocserv/quick-test.crt 2>/dev/null
+install -m 0600 /dev/null /etc/ocserv/ocpasswd
+groupadd --system ocservia-vpn
+useradd --system --no-create-home --gid ocservia-vpn --shell /usr/sbin/nologin ocservia-vpn
+cat >"${work}/ocserv.conf" <<'NODE_CONFIG'
+auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+tcp-port = 44443
+udp-port = 0
+run-as-user = ocservia-vpn
+run-as-group = ocservia-vpn
+socket-file = /run/ocserv.socket
+server-cert = /etc/ocserv/quick-test.crt
+server-key = /etc/ocserv/quick-test.key
+max-clients = 4
+max-same-clients = 2
+cookie-timeout = 300
+device = vpns
+ipv4-network = 10.208.0.0/24
+dns = 1.1.1.1
+route = default
+use-occtl = true
+NODE_CONFIG
+install -o root -g root -m 0600 "${work}/ocserv.conf" /etc/ocserv/ocserv.conf
+ocserv --test-config -c /etc/ocserv/ocserv.conf
+systemctl restart ocserv
+# Apply the same transport isolation as Business Smoke. The separate QUIC
+# probe runs as the test runner, so the Agent's UDP restriction stays in force.
+iptables -I OUTPUT -m owner --uid-owner ocserv-agent -p udp ! --dport 53 -j REJECT
+udp_filters+=(iptables)
+if grep -q . /proc/net/if_inet6 2>/dev/null; then
+  ip6tables -I OUTPUT -m owner --uid-owner ocserv-agent -p udp ! --dport 53 -j REJECT
+  udp_filters+=(ip6tables)
+fi
+
+quick_api() {
+  local path="$1"
+  shift
+  curl -fsS --max-time 10 --cacert "${work}/acme-root.pem" -b "${work}/admin.cookies" \
+    -H "Origin: ${origin}" -H 'Content-Type: application/json' "$@" "${origin}/api/v1/${path}"
+}
+workspace="$(quick_api workspaces | jq -er '.items[0].id')"
+quick_api node-bootstrap-tokens -H "X-Workspace-ID: ${workspace}" \
+  --data-binary "$(jq -nc --arg workspace "${workspace}" '{installation:true,workspace_id:$workspace,
+    environment:"production",expected_node_name:"quick-test-agent",reason:"Quick shared Relay acceptance"}')" |
+  jq -er '.token | select(startswith("oit1_"))' >"${work}/join-token"
+bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --root-lifecycle \
+  --version "v${VERSION}" --join-token-file "${work}/join-token" >"${work}/run-native-enrollment.log" 2>&1
+[[ ! -e "${work}/join-token" && ! -e /etc/ocservia-agent/enrollment-token ]]
+grep -Fxq ONLINE "${work}/run-native-enrollment.log"
+node="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${work}/run-native-enrollment.log")"
+[[ "${node}" =~ ^[0-9a-f-]{36}$ ]]
+relay_node() {
+  quick_api "nodes/${node}" | jq -e 'select(.connection_state == "online" and .path.mode == "relay")'
+}
+connected_by=$((SECONDS + 120))
+until observed="$(relay_node)"; do
+  ((SECONDS < connected_by))
+  sleep 2
+done
+revision="$(jq -er '.version' <<<"${observed}")"
+operation="$(quick_api "nodes/${node}/service:reload" -H "If-Match: \"revision-${revision}\"" \
+  -H "Idempotency-Key: $(openssl rand -hex 16)" --data-binary '{"reason":"Quick shared Relay acceptance","ttl_seconds":300}')"
+operation_id="$(jq -er '.id' <<<"${operation}")"
+command="$(jq -er '.command_id | gsub("-";"")' <<<"${operation}")"
+[[ "${command}" =~ ^[0-9a-f]{32}$ ]]
+settled_by=$((SECONDS + 120))
+while :; do
+  state="$(quick_api "operations/${operation_id}" | jq -er '.state')"
+  case "${state}" in
+    succeeded) break ;;
+    failed|rejected|expired) echo "Reload settled as ${state}" >&2; exit 1 ;;
+  esac
+  ((SECONDS < settled_by))
+  sleep 2
+done
+[[ "$(sqlite3 -readonly /var/lib/ocservia-agent/agent.db \
+  "SELECT state,length(privileged_result_proof)>0 FROM command_journal WHERE hex(command_id)=upper('${command}');")" == 'succeeded|1' ]]
+[[ "$(sqlite3 -readonly /var/lib/ocservia-privd/desired-effects.sqlite3 \
+  "SELECT state,length(response)>0 FROM authorized_effects WHERE hex(command_id)=upper('${command}');")" == 'applied|1' ]]
+pass "native Agent executed reload through the shared Relay"
+
+stage=renewal
+renewed_by=$((SECONDS + 22 * 60))
+while ! capture_leaf "${work}/renewed-leaf.pem" ||
+      cmp --silent "${work}/first-leaf.pem" "${work}/renewed-leaf.pem"; do
+  ((SECONDS < renewed_by))
+  sleep 5
+done
+openssl x509 -in "${work}/renewed-leaf.pem" -noout -serial
+relay_container="$(docker ps -q --filter label=com.docker.compose.project=ocservia-production \
+  --filter label=com.docker.compose.service=relay-acme)"
+[[ "${relay_container}" =~ ^[0-9a-f]+$ ]]
+heartbeat="$(relay_node | jq -er '.last_heartbeat_at')"
+docker stop "${relay_container}" >/dev/null
+offline_by=$((SECONDS + 120))
+until quick_api "nodes/${node}" | jq -e '.connection_state == "offline"' >/dev/null; do
+  ((SECONDS < offline_by))
+  sleep 2
+done
+docker start "${relay_container}" >/dev/null
+relay_ready_by=$((SECONDS + 120))
+until relay_http_ready; do
+  ((SECONDS < relay_ready_by))
+  sleep 2
+done
+timeout 100 "${RELAY_NETWORK_PROBE}" "${origin}" "${work}/acme-root.pem" \
+  /etc/ocservia/secrets/relay-access-token --expect-quic-leaf "${work}/renewed-leaf.pem"
+connected_by=$((SECONDS + 120))
+while ! relay_node | jq -e --arg before "${heartbeat}" \
+  '.last_heartbeat_at | type == "string" and . != $before' >/dev/null; do
+  ((SECONDS < connected_by))
+  sleep 2
+done
+pass "Gateway renewed its certificate, QUIC serves the same leaf, and the Agent reconnected"
 
 stage=output
 password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/admin.txt")"
