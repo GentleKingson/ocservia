@@ -15,7 +15,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
-	"github.com/google/uuid"
 )
 
 const gapReconciliationConcurrency = 32
@@ -36,7 +35,7 @@ type Session struct {
 // SessionOpener allocates a monotonic session_epoch for a newly accepted
 // mutation-capable Agent session.
 type SessionOpener interface {
-	OpenSession(ctx context.Context, nodeID [16]byte, endpointID [32]byte) (Session, error)
+	OpenSession(ctx context.Context, nodeID, connectionID [16]byte, endpointID [32]byte) (Session, error)
 }
 
 // SessionCloser ends the session of exactly one (connectionID, epoch) term.
@@ -114,11 +113,7 @@ func (m *Manager) lockNode(nodeID [16]byte) func() {
 
 // OpenSession advances the node's monotonic session_epoch in PostgreSQL and
 // records the active session for disconnect and audit matching.
-func (m *Manager) OpenSession(ctx context.Context, nodeID [16]byte, endpointID [32]byte) (Session, error) {
-	connectionID, err := uuid.NewV7()
-	if err != nil {
-		return Session{}, err
-	}
+func (m *Manager) OpenSession(ctx context.Context, nodeID, connectionID [16]byte, endpointID [32]byte) (Session, error) {
 	unlock := m.lockNode(nodeID)
 	defer unlock()
 	term, err := connectionowner.AcquireBackend(ctx, m.backend, nodeID, connectionID)
