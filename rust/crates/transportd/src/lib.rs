@@ -333,7 +333,7 @@ impl IrohTransportService {
         let registry = self.shared.inner.connections.lock().await;
         let entry = registry
             .get(node_id)
-            .ok_or_else(|| Status::unavailable("node is not connected"))?;
+            .ok_or_else(|| Status::failed_precondition("node is not connected"))?;
         if !entry
             .negotiated_capabilities
             .contains(&command.required_capability)

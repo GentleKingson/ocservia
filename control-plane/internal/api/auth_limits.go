@@ -31,51 +31,56 @@ func newAuthAdmission(perSource, globalLimit, concurrent int) *authAdmission {
 	return &authAdmission{sources: make(map[netip.Addr]authWindow), perSource: perSource, globalLimit: globalLimit, active: make(chan struct{}, concurrent)}
 }
 
-func (a *authAdmission) admit(source netip.Addr, now time.Time, emergency bool) (func(), time.Duration) {
-	release, retry, _ := a.admitReason(source, now, emergency)
+func normalizeAuthLimitSource(source netip.Addr) netip.Addr {
+	source = source.Unmap()
+	if source.Is6() {
+		return netip.PrefixFrom(source, 64).Masked().Addr()
+	}
+	return source
+}
+
+func (a *authAdmission) admit(source netip.Addr, now time.Time) (func(), time.Duration) {
+	release, retry, _ := a.admitReason(source, now)
 	return release, retry
 }
 
-func (a *authAdmission) admitReason(source netip.Addr, now time.Time, emergency bool) (func(), time.Duration, authLogKind) {
+func (a *authAdmission) admitReason(source netip.Addr, now time.Time) (func(), time.Duration, authLogKind) {
+	source = normalizeAuthLimitSource(source)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !emergency {
-		if !now.Before(a.nextSweep) {
-			for key, window := range a.sources {
-				if !now.Before(window.until) {
-					delete(a.sources, key)
-				}
+	if !now.Before(a.nextSweep) {
+		for key, window := range a.sources {
+			if !now.Before(window.until) {
+				delete(a.sources, key)
 			}
-			a.nextSweep = now.Add(time.Minute)
 		}
-		window, exists := a.sources[source]
-		// Do not evict live windows: cycling source addresses must not reset limits.
-		if !exists && len(a.sources) >= authSourceCapacity {
-			return nil, time.Minute, localSourceCapacityLimited
-		}
-		if !now.Before(window.until) {
-			window = authWindow{until: now.Add(time.Minute)}
-		}
-		if window.count >= a.perSource {
-			return nil, window.until.Sub(now), localSourceLimited
-		}
-		if !now.Before(a.global.until) {
-			a.global = authWindow{until: now.Add(time.Minute)}
-		}
-		if a.globalLimit > 0 && a.global.count >= a.globalLimit {
-			return nil, a.global.until.Sub(now), localGlobalLimited
-		}
-		// A concurrency rejection does no authentication work, so it must not
-		// spend the source or global rate budget.
-		if !a.acquire() {
-			return nil, time.Second, localConcurrencyLimited
-		}
-		window.count++
-		a.sources[source] = window
-		a.global.count++
-	} else if !a.acquire() {
+		a.nextSweep = now.Add(time.Minute)
+	}
+	window, exists := a.sources[source]
+	// Do not evict live windows: cycling source addresses must not reset limits.
+	if !exists && len(a.sources) >= authSourceCapacity {
+		return nil, time.Minute, localSourceCapacityLimited
+	}
+	if !now.Before(window.until) {
+		window = authWindow{until: now.Add(time.Minute)}
+	}
+	if window.count >= a.perSource {
+		return nil, window.until.Sub(now), localSourceLimited
+	}
+	if !now.Before(a.global.until) {
+		a.global = authWindow{until: now.Add(time.Minute)}
+	}
+	if a.globalLimit > 0 && a.global.count >= a.globalLimit {
+		return nil, a.global.until.Sub(now), localGlobalLimited
+	}
+	// A concurrency rejection does no authentication work, so it must not
+	// spend the source or global rate budget.
+	if !a.acquire() {
 		return nil, time.Second, localConcurrencyLimited
 	}
+	window.count++
+	a.sources[source] = window
+	a.global.count++
 	return func() { <-a.active }, 0, 0
 }
 
@@ -110,8 +115,8 @@ func (s *Server) authSource(r *http.Request) netip.Addr {
 	return address
 }
 
-func (s *Server) admitAuthentication(w http.ResponseWriter, r *http.Request, budget *authAdmission, emergency bool) func() {
-	release, retry, kind := budget.admitReason(s.authSource(r), time.Now(), emergency)
+func (s *Server) admitAuthentication(w http.ResponseWriter, r *http.Request, budget *authAdmission) func() {
+	release, retry, kind := budget.admitReason(s.authSource(r), time.Now())
 	if release == nil {
 		if authResultRoute(r) {
 			s.logAuth(r, kind, uuid.Nil, "")

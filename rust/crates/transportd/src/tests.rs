@@ -1673,6 +1673,24 @@ async fn command_responses_are_published_with_negotiated_limits() {
 
     let (signing_key, _) = controller_keyring();
 
+    // Disconnected node returns FailedPrecondition before any stream opens.
+    let missing_node = Uuid::now_v7().as_bytes().to_vec();
+    assert_eq!(
+        service
+            .send_command(Request::new(SendCommandRequest {
+                node_id: missing_node.clone(),
+                command_envelope: command_envelope(
+                    &missing_node,
+                    &new_traceparent(),
+                    String::new()
+                ),
+            }))
+            .await
+            .expect_err("disconnected node")
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+
     // Unnegotiated capability, stale revision, expired session grant, oversized frame all rejected before transport.
     let mut unapproved = CommandEnvelope::decode(
         command_envelope(&hs.node_id, &new_traceparent(), String::new()).as_slice(),

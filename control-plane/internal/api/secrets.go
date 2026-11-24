@@ -19,6 +19,9 @@ type secretRotateRequest struct {
 }
 
 func (s *Server) createSecretRef(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCertificates(w, r) {
+		return
+	}
 	var body secretRefRequest
 	if !decodeStrictJSON(w, r, &body) {
 		return
@@ -33,6 +36,9 @@ func (s *Server) createSecretRef(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, value)
 }
 func (s *Server) getSecretRef(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCertificates(w, r) {
+		return
+	}
 	id, err := parseUUIDv7(r.PathValue("secret_ref_id"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "secret_ref_id must be UUIDv7")
@@ -46,6 +52,9 @@ func (s *Server) getSecretRef(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, value)
 }
 func (s *Server) rotateSecretRef(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCertificates(w, r) {
+		return
+	}
 	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("secret_ref_id"), ":rotate"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "secret_ref_id must be UUIDv7")

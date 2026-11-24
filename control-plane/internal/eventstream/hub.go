@@ -18,7 +18,10 @@ var (
 	ErrInvalidCursor   = errors.New("event stream cursor is not visible in this scope")
 )
 
-const watcherPageSize = 100
+const (
+	watcherPageSize            = 100
+	defaultWatcherFetchTimeout = 5 * time.Second
+)
 
 type Event struct {
 	ID       uuid.UUID
@@ -42,16 +45,24 @@ type HubSnapshot struct {
 }
 
 type Hub struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	config   Config
-	budget   *WatcherBudget
-	fetch    FetchFunc
-	resolve  ResolveFunc
-	mu       sync.Mutex
-	watchers map[string]*watcher
-	closed   bool
-	metrics  hubMetrics
+	ctx          context.Context
+	cancel       context.CancelFunc
+	config       Config
+	budget       *WatcherBudget
+	fetch        FetchFunc
+	resolve      ResolveFunc
+	fetchTimeout time.Duration
+	mu           sync.Mutex
+	watchers     map[string]*watcher
+	closed       bool
+	metrics      hubMetrics
+}
+
+func (h *Hub) queryTimeout() time.Duration {
+	if h.fetchTimeout > 0 {
+		return h.fetchTimeout
+	}
+	return defaultWatcherFetchTimeout
 }
 
 // WatcherBudget bounds polling watchers across every hub that shares it.
@@ -446,15 +457,25 @@ func (w *watcher) subscription(subscriber *subscriber) *Subscription {
 	}
 }
 
+func (w *watcher) fetchPage(cursor uuid.UUID) ([]Event, error) {
+	w.hub.metrics.queries.Add(1)
+	ctx, cancel := context.WithTimeout(w.ctx, w.hub.queryTimeout())
+	defer cancel()
+	events, err := w.hub.fetch(ctx, w.scope, cursor, watcherPageSize)
+	if err != nil {
+		w.hub.metrics.databaseErrors.Add(1)
+		return nil, err
+	}
+	return events, nil
+}
+
 func (w *watcher) poll() (bool, error) {
 	if !w.hasCursor {
 		return false, nil
 	}
 	if !w.liveTerminal {
-		w.hub.metrics.queries.Add(1)
-		events, err := w.hub.fetch(w.ctx, w.scope, w.cursor, watcherPageSize)
+		events, err := w.fetchPage(w.cursor)
 		if err != nil {
-			w.hub.metrics.databaseErrors.Add(1)
 			return false, err
 		}
 		for _, event := range events {
@@ -513,10 +534,8 @@ func (w *watcher) poll() (bool, error) {
 }
 
 func (w *watcher) pollCatchup(id uint64, subscriber *subscriber) error {
-	w.hub.metrics.queries.Add(1)
-	events, err := w.hub.fetch(w.ctx, w.scope, subscriber.catchupCursor, watcherPageSize)
+	events, err := w.fetchPage(subscriber.catchupCursor)
 	if err != nil {
-		w.hub.metrics.databaseErrors.Add(1)
 		return err
 	}
 	if len(events) == 0 {

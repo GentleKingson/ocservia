@@ -430,3 +430,37 @@ func TestLaggingReconnectDoesNotRewindOrStallLiveSubscribers(t *testing.T) {
 		t.Fatal("shared live watcher did not continue advancing from seq 5 after lagging reconnect")
 	}
 }
+
+func TestWatcherFetchTimeoutPreventsWedgedPollAndClose(t *testing.T) {
+	config := DefaultConfig()
+	config.PollInterval = 100 * time.Millisecond
+	config.DatabaseMaxBackoff = 200 * time.Millisecond
+
+	var attempts atomic.Int32
+	hub, err := NewHub(config, func(ctx context.Context, _ string, _ uuid.UUID, _ int) ([]Event, error) {
+		if attempts.Add(1) == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return []Event{{ID: uuid.New(), Sequence: 1, Name: "resumed"}}, nil
+	}, rejectNonNilCursor)
+	testutil.NoError(t, err)
+	hub.fetchTimeout = 50 * time.Millisecond
+	defer hub.Close()
+
+	sub, err := hub.Subscribe(context.Background(), "workspace-timeout", uuid.Nil)
+	testutil.NoError(t, err)
+	defer sub.Close()
+
+	select {
+	case ev := <-sub.Events:
+		if ev.Name != "resumed" {
+			t.Fatalf("unexpected event after timeout recovery: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watcher wedged after stalled fetch instead of recovering via query timeout")
+	}
+	if got := hub.Snapshot().DatabaseErrors; got == 0 {
+		t.Fatal("expected stalled fetch timeout to record database error")
+	}
+}

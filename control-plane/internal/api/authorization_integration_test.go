@@ -595,15 +595,28 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 			t.Fatalf("invalid emergency attempt=%d status=%d body=%s", attempt, invalid.Code, invalid.Body)
 		}
 	}
-	legitimate := do(http.MethodPost, "/api/v1/auth/break-glass",
+	// Even the valid break-glass token from the saturated source is rate-limited (zero token oracle).
+	limitedValid := do(http.MethodPost, "/api/v1/auth/break-glass",
 		"https://admin.example.test", "", "application/json", "", "", `{"token":"`+breakGlassToken+`"}`)
+	if limitedValid.Code != http.StatusTooManyRequests {
+		t.Fatalf("valid break-glass bypassed saturated source limit: %d body=%s", limitedValid.Code, limitedValid.Body)
+	}
+	doFrom := func(remoteAddr, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/break-glass", strings.NewReader(body))
+		request.RemoteAddr = remoteAddr
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "https://admin.example.test")
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, request)
+		return response
+	}
+	legitimate := doFrom("198.51.100.10:1234", `{"token":"`+breakGlassToken+`"}`)
 	if legitimate.Code != http.StatusNoContent {
 		t.Fatalf("same-origin break-glass status=%d body=%s", legitimate.Code, legitimate.Body.String())
 	}
-	reused := do(http.MethodPost, "/api/v1/auth/break-glass",
-		"https://admin.example.test", "", "application/json", "", "", `{"token":"`+breakGlassToken+`"}`)
+	reused := doFrom("198.51.100.10:1234", `{"token":"`+breakGlassToken+`"}`)
 	if reused.Code != http.StatusLocked {
-		t.Fatalf("emergency rate exemption bypassed rotation: %d", reused.Code)
+		t.Fatalf("break-glass rotation lock did not reject reuse: %d", reused.Code)
 	}
 	sessionCookie := ""
 	for _, entry := range legitimate.Result().Cookies() {

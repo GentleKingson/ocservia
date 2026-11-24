@@ -11,6 +11,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type Sender interface {
@@ -136,12 +138,36 @@ func (w *Worker) dispatchOne(ctx context.Context, job Dispatch) {
 			w.logger.ErrorContext(ctx, "record command dispatch success", "command_id", job.CommandID, "error", accepted.err)
 			return
 		}
+		if isAmbiguousDispatchError(err) {
+			w.logger.ErrorContext(ctx, "command dispatch outcome ambiguous; leaving sending lease for reconciliation", "command_id", job.CommandID, "error", err)
+			return
+		}
 		if markErr := w.service.MarkFailed(ctx, job, err); markErr != nil {
 			w.logger.ErrorContext(ctx, "record command dispatch failure", "command_id", job.CommandID, "error", markErr)
 		}
 		return
 	}
 	span.End()
+}
+
+func isAmbiguousDispatchError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var ambiguous interface{ AmbiguousDispatch() bool }
+	if errors.As(err, &ambiguous) && ambiguous.AmbiguousDispatch() {
+		return true
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.DeadlineExceeded, codes.Canceled, codes.Unavailable, codes.Unknown, codes.Internal, codes.Aborted, codes.DataLoss:
+		return true
+	default:
+		return false
+	}
 }
 
 type sentDispatchError struct{ err error }

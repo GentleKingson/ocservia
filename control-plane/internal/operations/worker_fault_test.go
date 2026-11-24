@@ -15,6 +15,8 @@ import (
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type faultDispatchRecord struct {
@@ -302,5 +304,46 @@ func TestWorkerDispatchBatchIsolatesStalledNodeAndBoundsConcurrency(t *testing.T
 		} else if !rec.sent || rec.failed {
 			t.Fatalf("healthy job %d state = sent:%v failed:%v", i, rec.sent, rec.failed)
 		}
+	}
+}
+
+type staticSender struct{ err error }
+
+func (s staticSender) SendCommand(context.Context, []byte, []byte) error { return s.err }
+
+func TestWorkerLeavesSendingLeaseOnAmbiguousErrorAndFailsPreSendRejection(t *testing.T) {
+	signer := testCommandSigner(t)
+	newJob := func() Dispatch {
+		nodeID := uuid.Must(uuid.NewV7())
+		opID := uuid.Must(uuid.NewV7())
+		cmdID := uuid.Must(uuid.NewV7())
+		return Dispatch{CommandID: cmdID, OperationID: opID, OutboxID: uuid.Must(uuid.NewV7()), NodeID: nodeID, Envelope: []byte("env"), Traceparent: testTraceparent}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	for _, tc := range []struct {
+		name       string
+		sendErr    error
+		wantFailed bool
+	}{
+		{"pre-send disconnected", status.Error(codes.FailedPrecondition, "node is not connected"), true},
+		{"ambiguous unavailable", status.Error(codes.Unavailable, "failed to write command"), false},
+		{"ambiguous deadline exceeded", context.DeadlineExceeded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := newJob()
+			backend := newFaultDispatchBackend([]Dispatch{job})
+			backend.records[job.CommandID].claimed = true
+			service := NewBackend(backend, 64, signer)
+			worker, err := NewWorker(service, staticSender{err: tc.sendErr}, logger)
+			testutil.NoError(t, err)
+			worker.dispatchOne(context.Background(), job)
+
+			rec := backend.records[job.CommandID]
+			if rec.failed != tc.wantFailed || rec.sent {
+				t.Fatalf("job state = failed:%v sent:%v, want failed:%v", rec.failed, rec.sent, tc.wantFailed)
+			}
+		})
 	}
 }

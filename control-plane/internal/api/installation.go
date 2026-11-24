@@ -16,7 +16,7 @@ func (s *Server) admitInstallation(w http.ResponseWriter, r *http.Request) func(
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "node installation is not enabled")
 		return nil
 	}
-	return s.admitAuthentication(w, r, s.privdRegisterBudget, false)
+	return s.admitAuthentication(w, r, s.privdRegisterBudget)
 }
 
 func (s *Server) installationConfig(w http.ResponseWriter, r *http.Request) {

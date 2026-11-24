@@ -12,16 +12,54 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// Fixed maintenance steps, not a registry: only rollout errors allow the
-// remaining steps in the same pass to continue.
+const defaultSchedulerStepTimeout = 25 * time.Second
+
+// Fixed maintenance steps: only users cleanup/DB-unavailable skips the rest of
+// the pass, rollouts/telemetry/certificates/retention isolate per-step errors
+// and timeouts, and audit failures remain fatal.
 type maintenanceWork struct {
 	users, rollouts, telemetry, certificates, audit func(context.Context) error
 	retention                                       func(context.Context) error
+	stepTimeout                                     time.Duration
+}
+
+func (w maintenanceWork) stepContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := w.stepTimeout
+	if timeout <= 0 {
+		timeout = defaultSchedulerStepTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func (w maintenanceWork) runIsolated(ctx context.Context, name string, logger *slog.Logger, fn func(context.Context) error) error {
+	if fn == nil {
+		return nil
+	}
+	stepCtx, cancel := w.stepContext(ctx)
+	defer cancel()
+	err := fn(stepCtx)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, database.ErrUnavailable) {
+		return err
+	}
+	logger.ErrorContext(ctx, "background maintenance step failed", "step", name, "error", err)
+	return nil
 }
 
 func (w maintenanceWork) run(ctx context.Context, started time.Time, concurrency int, logger *slog.Logger) error {
-	runCtx, span := otel.Tracer("ocservia.useroperations").Start(ctx, "user_operations.scheduler.run")
-	if err := w.users(runCtx); err != nil {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	usersCtx, usersCancel := w.stepContext(ctx)
+	runCtx, span := otel.Tracer("ocservia.useroperations").Start(usersCtx, "user_operations.scheduler.run")
+	err := w.users(runCtx)
+	usersCancel()
+	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "scheduler run failed")
 		span.End()
@@ -29,29 +67,31 @@ func (w maintenanceWork) run(ctx context.Context, started time.Time, concurrency
 	}
 	span.End()
 	logger.InfoContext(ctx, "user operations scheduler completed", "duration_ms", time.Since(started).Milliseconds(), "submission_limit", concurrency)
-	if err := w.rollouts(ctx); err != nil {
-		logger.ErrorContext(ctx, "advance agent rollouts", "error", err)
-	}
-	if err := w.telemetry(ctx); err != nil {
+	if err := w.runIsolated(ctx, "rollouts", logger, w.rollouts); err != nil {
 		return err
 	}
-	certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(ctx, "certificates.maintenance.run")
-	if err := w.certificates(certificateCtx); err != nil {
-		certificateSpan.RecordError(err)
-		certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
+	if err := w.runIsolated(ctx, "telemetry", logger, w.telemetry); err != nil {
+		return err
+	}
+	if err := w.runIsolated(ctx, "certificates", logger, func(stepCtx context.Context) error {
+		certificateCtx, certificateSpan := otel.Tracer("ocservia.certificates").Start(stepCtx, "certificates.maintenance.run")
+		err := w.certificates(certificateCtx)
+		if err != nil {
+			certificateSpan.RecordError(err)
+			certificateSpan.SetStatus(codes.Error, "certificate maintenance failed")
+		}
 		certificateSpan.End()
 		return err
-	}
-	certificateSpan.End()
-	if err := w.audit(ctx); err != nil {
+	}); err != nil {
 		return err
 	}
-	if w.retention != nil {
-		if err := w.retention(ctx); err != nil {
-			return err
-		}
+	auditCtx, auditCancel := w.stepContext(ctx)
+	err = w.audit(auditCtx)
+	auditCancel()
+	if err != nil {
+		return err
 	}
-	return nil
+	return w.runIsolated(ctx, "retention", logger, w.retention)
 }
 
 func runScheduler(ctx context.Context, ticks <-chan time.Time, work maintenanceWork, concurrency int, logger *slog.Logger) error {

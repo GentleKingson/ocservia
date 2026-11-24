@@ -501,4 +501,77 @@ func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample user
 	return err
 }
 
+func (s *UsageStore) LockCursors(ctx context.Context, nodeID uuid.UUID, keys []userstore.UsageKey) (map[userstore.UsageKey]userstore.UsageCursor, error) {
+	cursors := make(map[userstore.UsageKey]userstore.UsageCursor, len(keys))
+	if len(keys) == 0 {
+		return cursors, nil
+	}
+	sessionIDs := make([]string, len(keys))
+	connectedAts := make([]time.Time, len(keys))
+	for i, key := range keys {
+		sessionIDs[i] = key.SessionID
+		connectedAts[i] = key.Connected
+	}
+	rows, err := s.tx.Query(ctx, `SELECT c.session_id,c.connected_at,c.username,c.rx_bytes,c.tx_bytes,c.observed_at FROM unnest($2::text[],$3::timestamptz[]) AS k(session_id,connected_at) JOIN user_usage_cursors c ON c.node_id=$1 AND c.session_id=k.session_id AND c.connected_at=k.connected_at ORDER BY c.session_id,c.connected_at FOR UPDATE OF c`, nodeID, sessionIDs, connectedAts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cursor userstore.UsageCursor
+		if err := rows.Scan(&cursor.SessionID, &cursor.Connected, &cursor.Username, &cursor.RXBytes, &cursor.TXBytes, &cursor.ObservedAt); err != nil {
+			return nil, err
+		}
+		cursor.Connected = cursor.Connected.UTC().Truncate(time.Microsecond)
+		cursor.ObservedAt = cursor.ObservedAt.UTC().Truncate(time.Microsecond)
+		cursors[userstore.UsageKey{SessionID: cursor.SessionID, Connected: cursor.Connected}] = cursor
+	}
+	return cursors, rows.Err()
+}
+
+func (s *UsageStore) PutCursors(ctx context.Context, nodeID uuid.UUID, cursors []userstore.UsageCursor) error {
+	if len(cursors) == 0 {
+		return nil
+	}
+	sessionIDs := make([]string, len(cursors))
+	connectedAts := make([]time.Time, len(cursors))
+	usernames := make([]string, len(cursors))
+	rxBytes := make([]int64, len(cursors))
+	txBytes := make([]int64, len(cursors))
+	observedAts := make([]time.Time, len(cursors))
+	for i, cursor := range cursors {
+		sessionIDs[i] = cursor.SessionID
+		connectedAts[i] = cursor.Connected
+		usernames[i] = cursor.Username
+		rxBytes[i] = cursor.RXBytes
+		txBytes[i] = cursor.TXBytes
+		observedAts[i] = cursor.ObservedAt
+	}
+	_, err := s.tx.Exec(ctx, `INSERT INTO user_usage_cursors(node_id,session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) SELECT $1,u.session_id,u.connected_at,u.username,u.rx_bytes,u.tx_bytes,u.observed_at FROM unnest($2::text[],$3::timestamptz[],$4::text[],$5::bigint[],$6::bigint[],$7::timestamptz[]) AS u(session_id,connected_at,username,rx_bytes,tx_bytes,observed_at) ON CONFLICT(node_id,session_id,connected_at) DO UPDATE SET username=EXCLUDED.username,rx_bytes=EXCLUDED.rx_bytes,tx_bytes=EXCLUDED.tx_bytes,observed_at=EXCLUDED.observed_at WHERE EXCLUDED.observed_at>user_usage_cursors.observed_at`, nodeID, sessionIDs, connectedAts, usernames, rxBytes, txBytes, observedAts)
+	return err
+}
+
+func (s *UsageStore) AddUsageBatch(ctx context.Context, nodeID uuid.UUID, deltas []userstore.UsageDelta) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	usernames := make([]string, len(deltas))
+	periods := make([]string, len(deltas))
+	periodStarts := make([]time.Time, len(deltas))
+	rxBytes := make([]int64, len(deltas))
+	txBytes := make([]int64, len(deltas))
+	observedAts := make([]time.Time, len(deltas))
+	for i, delta := range deltas {
+		usernames[i] = delta.Username
+		periods[i] = delta.Period
+		periodStarts[i] = delta.PeriodStart
+		rxBytes[i] = delta.RXBytes
+		txBytes[i] = delta.TXBytes
+		observedAts[i] = delta.ObservedAt
+	}
+	_, err := s.tx.Exec(ctx, `INSERT INTO observed_user_usage(node_id,username,period,period_start,rx_bytes,tx_bytes,observed_at) SELECT $1,u.username,u.period,u.period_start,u.rx_bytes,u.tx_bytes,u.observed_at FROM unnest($2::text[],$3::text[],$4::timestamptz[],$5::bigint[],$6::bigint[],$7::timestamptz[]) AS u(username,period,period_start,rx_bytes,tx_bytes,observed_at) ON CONFLICT(node_id,username,period,period_start) DO UPDATE SET rx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.rx_bytes::numeric+EXCLUDED.rx_bytes::numeric)::bigint,tx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.tx_bytes::numeric+EXCLUDED.tx_bytes::numeric)::bigint,observed_at=GREATEST(observed_user_usage.observed_at,EXCLUDED.observed_at)`, nodeID, usernames, periods, periodStarts, rxBytes, txBytes, observedAts)
+	return err
+}
+
 var _ userstore.UsageStore = (*UsageStore)(nil)
+var _ userstore.BatchUsageStore = (*UsageStore)(nil)

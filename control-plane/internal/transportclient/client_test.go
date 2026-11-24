@@ -2,6 +2,7 @@ package transportclient
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type termAwareGapHandler struct {
@@ -100,5 +104,66 @@ func TestClientSelectsTermAwareAndPresenceGapReconcilers(t *testing.T) {
 	}
 	if !presence.called {
 		t.Fatal("legacy presence reconciliation did not receive the bool reader")
+	}
+}
+
+type stubCommandServer struct {
+	transportv1.UnimplementedTransportServiceServer
+	err error
+}
+
+func (s *stubCommandServer) SendCommand(context.Context, *transportv1.SendCommandRequest) (*transportv1.SendCommandResponse, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &transportv1.SendCommandResponse{Accepted: true}, nil
+}
+
+func TestSendCommandClassifiesAmbiguousVsPreSendErrors(t *testing.T) {
+	dir := testutil.PrivateTempDir(t)
+	sockPath := filepath.Join(dir, "transport.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.Chmod(sockPath, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	stub := &stubCommandServer{}
+	srv := grpc.NewServer()
+	transportv1.RegisterTransportServiceServer(srv, stub)
+	go func() { _ = srv.Serve(listener) }()
+	defer srv.Stop()
+
+	client, err := New(sockPath, time.Second, 1, uint32(os.Geteuid()), uint32(os.Getegid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	nodeID := make([]byte, 16)
+	envelope := []byte{1, 2, 3}
+
+	for _, tc := range []struct {
+		name      string
+		rpcErr    error
+		ambiguous bool
+	}{
+		{"disconnected pre-send", status.Error(codes.FailedPrecondition, "node is not connected"), false},
+		{"permission denied", status.Error(codes.PermissionDenied, "capability"), false},
+		{"unavailable mid-stream", status.Error(codes.Unavailable, "failed to write command"), true},
+		{"deadline exceeded", status.Error(codes.DeadlineExceeded, "command stream timed out"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub.err = tc.rpcErr
+			got := client.SendCommand(context.Background(), nodeID, envelope)
+			if got == nil {
+				t.Fatal("expected error")
+			}
+			if errors.Is(got, ErrDispatchAmbiguous) != tc.ambiguous {
+				t.Fatalf("errors.Is(ErrDispatchAmbiguous)=%v want=%v (err=%v)", errors.Is(got, ErrDispatchAmbiguous), tc.ambiguous, got)
+			}
+		})
 	}
 }

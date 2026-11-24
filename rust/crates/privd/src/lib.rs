@@ -42,7 +42,25 @@ use self::receipts::{build_result_proof, terminal_result_error_code};
 use self::validation::{ValidatedRequest, validate_request};
 
 const MAX_CONCURRENT_CLIENTS: usize = 4;
+const MAX_INGRESS_CONNECTIONS: usize = 16;
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
+const CONFIG_APPLY_LIFETIME: Duration = Duration::from_secs(75);
+
+pub(crate) fn request_lifetime(request: &PrivdRequest) -> Duration {
+    let is_config_apply = matches!(
+        request
+            .authorization_command
+            .as_ref()
+            .and_then(|command| command.payload.as_ref()),
+        Some(command_envelope::Payload::CompleteConfigApply(_))
+    );
+    if is_config_apply {
+        CONFIG_APPLY_LIFETIME
+    } else {
+        MAX_REQUEST_LIFETIME
+    }
+}
 
 /// Privd server configuration.
 #[derive(Clone)]
@@ -133,7 +151,8 @@ pub async fn serve(
     adapter: Adapter,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), io::Error> {
-    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let exec_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let ingress_permits = Arc::new(Semaphore::new(MAX_INGRESS_CONNECTIONS));
     let attestation_key_id: Arc<str> = Arc::from(key_id(&config.attestation_key.verifying_key()));
     tokio::pin!(shutdown);
     loop {
@@ -141,16 +160,22 @@ pub async fn serve(
             () = &mut shutdown => return Ok(()),
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                // Keep execution at the fixed concurrency cap, but queue at
-                // most this one already-accepted local client while a prior
-                // request releases its permit. Dropping it here races the
-                // Agent's four-request snapshot batches and can tear down an
-                // otherwise healthy authoritative Controller session.
-                let permit = tokio::select! {
-                    () = &mut shutdown => return Ok(()),
-                    permit = Arc::clone(&permits).acquire_owned() => permit
-                        .map_err(|_| io::Error::other("privd concurrency limiter closed"))?,
+                match stream.peer_cred() {
+                    Ok(credentials) if credentials.uid() == config.agent_uid => {}
+                    Ok(credentials) => {
+                        tracing::warn!(uid = credentials.uid(), expected = config.agent_uid, "privd peer UID refused");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "privd peer credentials unavailable");
+                        continue;
+                    }
+                }
+                let Ok(ingress_permit) = Arc::clone(&ingress_permits).try_acquire_owned() else {
+                    tracing::warn!("privd ingress connection limit reached");
+                    continue;
                 };
+                let exec_permits = Arc::clone(&exec_permits);
                 let adapter = adapter.clone();
                 let agent_uid = config.agent_uid;
                 let node_id = config.node_id;
@@ -160,9 +185,10 @@ pub async fn serve(
                 let attestation_key_id = Arc::clone(&attestation_key_id);
                 let upgrades = config.upgrades.clone();
                 tokio::spawn(async move {
-                    let _permit = permit;
+                    let _ingress_permit = ingress_permit;
                     if let Err(error) = handle_client(
                         stream,
+                        exec_permits,
                         agent_uid,
                         node_id,
                         endpoint_id,
@@ -185,6 +211,7 @@ pub async fn serve(
 #[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut stream: UnixStream,
+    exec_permits: Arc<Semaphore>,
     agent_uid: u32,
     node_id: [u8; 16],
     endpoint_id: [u8; 32],
@@ -201,9 +228,17 @@ async fn handle_client(
             "privd peer UID refused",
         ));
     }
-    let request: PrivdRequest = tokio::time::timeout(MAX_REQUEST_LIFETIME, read_frame(&mut stream))
+    let request: PrivdRequest = tokio::time::timeout(FRAME_READ_TIMEOUT, read_frame(&mut stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request read timed out"))??;
+    // Acquire execution permit only after reading a complete request frame so
+    // idle connections cannot starve active Agent snapshot/command work,
+    // while queuing valid requests up to the execution cap.
+    let _exec_permit = exec_permits
+        .acquire()
+        .await
+        .map_err(|_| io::Error::other("privd concurrency limiter closed"))?;
+    let lifetime = request_lifetime(&request);
     let response = dispatch_attested(
         &request,
         &node_id,
@@ -215,7 +250,7 @@ async fn handle_client(
         &adapter,
     )
     .await;
-    tokio::time::timeout(MAX_REQUEST_LIFETIME, write_frame(&mut stream, &response))
+    tokio::time::timeout(lifetime, write_frame(&mut stream, &response))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response write timed out"))??;
     Ok(())
@@ -428,7 +463,13 @@ fn read_attested_upgrade_results(
     attestation_key: &SigningKey,
     attestation_key_id: &str,
 ) -> Result<privd_response::Result, UpgradeStoreError> {
-    let results = ocservia_upgrader::read_recent_results(operations_root, 8)?;
+    let (results, skipped) = ocservia_upgrader::read_recent_results_resilient(operations_root, 8)?;
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            "skipped corrupt historical upgrade operation records while collecting attested upgrade results"
+        );
+    }
     let attested = results
         .into_iter()
         .map(|result| {
@@ -453,13 +494,15 @@ fn read_attested_upgrade_results(
             // The signature time, not the historical completion
             // time, carries key validity: a key rotated after
             // completion may still attest the older result.
-            let attested_unix_ms = u64::try_from(
+            // Clamp against NTP backward clock steps so attestation remains monotonic.
+            let now_ms = u64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|_| UpgradeStoreError::Unsafe("system clock precedes the unix epoch"))?
                     .as_millis(),
             )
             .map_err(|_| UpgradeStoreError::Unsafe("attestation time overflows milliseconds"))?;
+            let attested_unix_ms = now_ms.max(completed_unix_ms);
             let proof = sign_upgrade_result_with_key_id(
                 AgentUpgradeResultProof {
                     version: 1,

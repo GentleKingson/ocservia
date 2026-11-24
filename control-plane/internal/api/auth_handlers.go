@@ -32,7 +32,7 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
 		return
 	}
-	release := s.admitAuthentication(w, r, s.localLoginBudget, false)
+	release := s.admitAuthentication(w, r, s.localLoginBudget)
 	if release == nil {
 		return
 	}
@@ -117,6 +117,7 @@ func (s *Server) changeLocalPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if s.auth == nil {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "break-glass is not configured")
 		return
@@ -125,6 +126,11 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/cross-origin-request", "Cross-origin request", err.Error())
 		return
 	}
+	release := s.admitAuthentication(w, r, s.breakGlassBudget)
+	if release == nil {
+		return
+	}
+	defer release()
 	var body breakGlassRequest
 	if !decodeStrictJSON(w, r, &body) {
 		return
@@ -133,11 +139,6 @@ func (s *Server) breakGlass(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "token is required")
 		return
 	}
-	release := s.admitAuthentication(w, r, s.breakGlassBudget, s.auth.ValidBreakGlassToken(body.Token))
-	if release == nil {
-		return
-	}
-	defer release()
 	cookie, _, err := s.auth.BreakGlass(r.Context(), body.Token, requestID(r))
 	if err != nil {
 		status := http.StatusUnauthorized

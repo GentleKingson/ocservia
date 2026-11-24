@@ -109,10 +109,10 @@ func (s authenticationStore) ActiveLocalUsername(ctx context.Context, id uuid.UU
 }
 func (s authenticationStore) LockActiveSession(ctx context.Context, identity, session uuid.UUID, local bool) error {
 	var id uuid.UUID
-	if err := s.tx.QueryRow(ctx, `SELECT id FROM identities WHERE id=$1 AND disabled_at IS NULL AND (NOT $2 OR issuer='local') FOR UPDATE`, identity, local).Scan(&id); err != nil {
+	if err := s.tx.QueryRow(ctx, `SELECT id FROM identities WHERE id=$1 AND disabled_at IS NULL AND (NOT $2 OR issuer='local') FOR SHARE`, identity, local).Scan(&id); err != nil {
 		return err
 	}
-	return s.tx.QueryRow(ctx, `SELECT id FROM auth_sessions WHERE id=$1 AND identity_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() AND (NOT $3 OR NOT break_glass) FOR UPDATE`, session, identity, local).Scan(&id)
+	return s.tx.QueryRow(ctx, `SELECT id FROM auth_sessions WHERE id=$1 AND identity_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() AND (NOT $3 OR NOT break_glass) FOR SHARE`, session, identity, local).Scan(&id)
 }
 func (s authenticationStore) LockPassword(ctx context.Context, id uuid.UUID, username, hash string) error {
 	return s.tx.QueryRow(ctx, `SELECT identity_id FROM local_credentials WHERE identity_id=$1 AND username=$2 AND password_hash=$3 FOR UPDATE`, id, username, hash).Scan(&id)
