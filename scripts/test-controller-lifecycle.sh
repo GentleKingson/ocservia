@@ -76,7 +76,7 @@ jq -S . "${work}/2.0.1.json" >"${work}/reordered.json"
 "${ctl}" upgrade --release-file "${work}/reordered.json"
 docker compose exec -T backup touch /tmp/health-failure
 backup_id="$(docker compose ps -q backup)"
-for attempt in {1..20}; do
+for _ in {1..20}; do
   if [[ "$(docker inspect -f '{{.State.Health.Status}}' "${backup_id}")" == unhealthy ]]; then
     break
   fi

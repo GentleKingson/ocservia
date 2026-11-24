@@ -64,15 +64,14 @@ run_backup() (
   staging="${BACKUP_ROOT}/base/.${timestamp}-${RUN_ID}.tmp"
   final="${BACKUP_ROOT}/base/${timestamp}"
   latest_tmp="${BACKUP_ROOT}/.LATEST-${RUN_ID}.tmp"
-  cleanup_backup() {
+  trap '
     if [[ "${staging_created}" == true ]]; then
       rm -rf -- "${staging}"
     fi
     if [[ "${latest_created}" == true ]]; then
       rm -f -- "${latest_tmp}"
     fi
-  }
-  trap cleanup_backup EXIT
+  ' EXIT
 
   if [[ -e "${staging}" || -L "${staging}" ]]; then
     echo "backup staging path already exists: ${staging}" >&2
