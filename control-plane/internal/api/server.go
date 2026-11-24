@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -18,7 +19,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	platformconfig "github.com/GentleKingson/ocservia/control-plane/internal/platform/config"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
@@ -52,9 +52,7 @@ type Server struct {
 	operations          *operations.Service
 	enrollment          *enrollment.Service
 	transport           *transportclient.Client
-	fences              ownersession.FencedExecutor
 	nodes               NodeReader
-	registeredMethods   []routeMethodRule
 	releaseCatalog      *releasecatalog.Catalog
 	auth                *auth.Service
 	authProxies         []netip.Prefix
@@ -80,6 +78,7 @@ type Server struct {
 // HTTPConfig contains final HTTP values. EventStreams must be explicitly valid;
 // callers wanting defaults should supply eventstream.DefaultConfig().
 type HTTPConfig struct {
+	Context            context.Context
 	Address            string
 	BodyLimit          int64
 	RequestTimeout     time.Duration
@@ -103,7 +102,6 @@ type Modules struct {
 	UserState       *userstate.Service
 	Enrollment      *enrollment.Service
 	Transport       *transportclient.Client
-	OwnerFencing    ownersession.FencedExecutor
 	TransportEvents *transportevents.Service
 }
 
@@ -138,7 +136,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		nodes: modules.Nodes, configPlans: modules.ConfigPlans,
 		userOperations: modules.UserOperations, certificates: modules.Certificates,
 		operations: modules.Operations, releaseCatalog: modules.ReleaseCatalog, userstate: modules.UserState,
-		enrollment: modules.Enrollment, transport: modules.Transport, fences: modules.OwnerFencing,
+		enrollment: modules.Enrollment, transport: modules.Transport,
 		transportEvents: modules.TransportEvents, localSimulator: config.LocalSimulator,
 		authProxies: append([]netip.Prefix(nil), config.AuthTrustedProxies...),
 	}
@@ -157,10 +155,15 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
 	mux := http.NewServeMux()
-	s.registeredMethods = s.registerRoutes(mux)
-	handler := s.requestContext(s.limitBody(s.timeout(s.routeErrors(mux))))
+	routes := &methodRegistrar{mux: mux, paths: make(map[string]map[string]http.HandlerFunc)}
+	s.registerRoutes(routes)
+	routes.register()
+	handler := s.requestContext(s.limitBody(s.timeout(routePaths(mux))))
 	// Bound request reads without a global write deadline that would end SSE streams.
 	s.http = &http.Server{Addr: config.Address, Handler: otelhttp.NewHandler(handler, "http.server"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	if config.Context != nil {
+		s.http.BaseContext = func(net.Listener) context.Context { return config.Context }
+	}
 	return s, nil
 }
 

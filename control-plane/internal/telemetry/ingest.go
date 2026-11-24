@@ -3,18 +3,17 @@ package telemetry
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
@@ -158,13 +157,13 @@ func decodeWire(payload []byte) (Batch, error) {
 	if rawUsers := wire.GetUsers(); len(rawUsers) > 0 {
 		batch.Users = make([]User, 0, len(rawUsers))
 		for _, item := range rawUsers {
-			batch.Users = append(batch.Users, User{Username: item.GetUsername(), Enabled: item.GetEnabled(), Revision: item.GetRevision(), Fingerprint: item.GetFingerprintSha256()})
+			batch.Users = append(batch.Users, User{Username: item.GetUsername(), Enabled: item.GetEnabled(), Revision: item.GetRevision()})
 		}
 	}
 	if rawGroups := wire.GetGroups(); len(rawGroups) > 0 {
 		batch.Groups = make([]Group, 0, len(rawGroups))
 		for _, item := range rawGroups {
-			batch.Groups = append(batch.Groups, Group{Name: item.GetGroupName(), Members: item.GetMembers(), Revision: item.GetRevision(), Fingerprint: item.GetFingerprintSha256()})
+			batch.Groups = append(batch.Groups, Group{Name: item.GetGroupName(), Members: item.GetMembers(), Revision: item.GetRevision()})
 		}
 	}
 	if rawSamples := wire.GetSamples(); len(rawSamples) > 0 {
@@ -240,32 +239,24 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 	} else if err != nil {
 		return false, fmt.Errorf("lock telemetry node: %w", err)
 	}
-	documents := make([]json.RawMessage, 0, 3+len(batch.Security))
-	documents = append(documents, batch.Snapshot.Ocserv, batch.Snapshot.System, batch.Snapshot.Path)
+	events := make([]telemetrystore.SecurityEvent, 0, len(batch.Security))
 	for _, e := range batch.Security {
-		documents = append(documents, e.Detail)
-	}
-	if err := store.ValidateJSON(ctx, documents); err != nil {
-		if errors.Is(err, telemetrystore.ErrInvalidJSON) {
-			return false, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
-		}
-		return false, err
-	}
-	inserted, err := store.InsertBatch(ctx, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, batch.Snapshot.ObservedAt, payloadBytes)
-	if err != nil {
-		return false, fmt.Errorf("insert telemetry batch: %w", err)
-	}
-	if !inserted {
-		return false, nil
+		events = append(events, telemetrystore.SecurityEvent{ID: e.ID, ObservedAt: e.ObservedAt.UTC(), Severity: e.Severity, Type: e.Type, Detail: e.Detail})
 	}
 	snap := batch.Snapshot
-	updated, err := store.UpsertSnapshot(ctx, batch.NodeID, telemetrystore.Snapshot{
+	inserted, updated, err := store.InsertObservation(ctx, batch.ID, batch.NodeID, batch.Sequence, batch.Kind, payloadBytes, telemetrystore.Snapshot{
 		ObservedAt: snap.ObservedAt, BootID: snap.BootID, AgentInstance: snap.AgentInstance,
 		AgentVersion: snap.AgentVersion, OcservVersion: snap.OcservVersion, OSRelease: snap.OSRelease, Architecture: snap.Architecture,
 		Ocserv: snap.Ocserv, System: snap.System, Path: snap.Path, Security: snap.Dropped.Security, Health: snap.Dropped.Health, Aggregate: snap.Dropped.Aggregate, Raw: snap.Dropped.Raw,
-	})
+	}, events)
+	if errors.Is(err, telemetrystore.ErrInvalidJSON) {
+		return false, fmt.Errorf("%w: %v", ErrInvalidTelemetry, err)
+	}
 	if err != nil {
-		return false, fmt.Errorf("upsert observed snapshot: %w", err)
+		return false, fmt.Errorf("insert telemetry observation: %w", err)
+	}
+	if !inserted {
+		return false, nil
 	}
 	if updated {
 		usage := make([]userstore.UsageSample, 0, len(batch.Sessions))
@@ -295,12 +286,12 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		}
 		users := make([]telemetrystore.User, 0, len(batch.Users))
 		for _, v := range batch.Users {
-			users = append(users, telemetrystore.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision, Fingerprint: v.Fingerprint})
+			users = append(users, telemetrystore.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision})
 		}
 		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, users); err != nil {
 			return false, err
 		}
-		if err := replaceObservedGroups(ctx, tx, store, batch); err != nil {
+		if err := replaceObservedGroups(ctx, store, batch); err != nil {
 			return false, fmt.Errorf("replace observed groups: %w", err)
 		}
 
@@ -321,9 +312,6 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 		if err := store.InsertUpgrade(ctx, batch.NodeID, telemetrystore.Upgrade{OperationID: report.OperationID, State: report.State, TargetVersion: report.TargetVersion, Detail: report.Detail, CompletedAt: verification.CompletedAt, Proof: verification.EncodedProof, PackageSHA256: verification.PackageSHA256}); err != nil {
 			return false, err
 		}
-	}
-	if err := insertObservedSecurity(ctx, store, batch); err != nil {
-		return false, fmt.Errorf("insert security event: %w", err)
 	}
 	samples := make([]telemetrystore.Sample, 0, len(batch.Samples))
 	for _, sample := range batch.Samples {
@@ -365,11 +353,11 @@ func validateBatch(batch Batch, now time.Time) error {
 	}
 	earliest := now.Add(-MaxTelemetryAge)
 	latest := now.Add(MaxTelemetrySkew)
-	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !value.ValidText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
+	if batch.Snapshot.ObservedAt.IsZero() || batch.Snapshot.ObservedAt.Before(earliest) || batch.Snapshot.ObservedAt.After(latest) || !validText(batch.Snapshot.BootID, 128) || batch.Snapshot.AgentInstance == uuid.Nil {
 		return errors.New("observed snapshot identity or time is invalid")
 	}
 	for _, text := range [3]string{batch.Snapshot.AgentVersion, batch.Snapshot.OcservVersion, batch.Snapshot.OSRelease} {
-		if !value.ValidText(text, 128) {
+		if !validText(text, 128) {
 			return errors.New("observed version is invalid")
 		}
 	}
@@ -382,7 +370,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	if len(batch.Snapshot.UpgradeResults) > 0 {
 		seenUpgradeOperations := make(map[uuid.UUID]struct{}, len(batch.Snapshot.UpgradeResults))
 		for _, report := range batch.Snapshot.UpgradeResults {
-			if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !value.ValidText(report.Detail, 160) || report.Proof == nil {
+			if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !validText(report.Detail, 160) || report.Proof == nil {
 				return errors.New("upgrade result report is invalid")
 			}
 			if _, err := privdattestation.CanonicalAgentUpgradeResultProofV1(report.Proof); err != nil ||
@@ -414,7 +402,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	if len(batch.Users) > 0 {
 		usernames := make(map[string]struct{}, len(batch.Users))
 		for _, user := range batch.Users {
-			if !validObservedName(user.Username) || user.Revision > math.MaxInt64 || len(user.Fingerprint) != sha256.Size {
+			if !validObservedName(user.Username) || user.Revision > math.MaxInt64 {
 				return errors.New("user observation is invalid")
 			}
 			if !insertUnique(usernames, user.Username) {
@@ -427,7 +415,7 @@ func validateBatch(batch Batch, now time.Time) error {
 		groupNames := make(map[string]struct{}, len(batch.Groups))
 		for _, group := range batch.Groups {
 			totalMemberships += len(group.Members)
-			if !validObservedName(group.Name) || group.Revision > math.MaxInt64 || len(group.Fingerprint) != sha256.Size || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
+			if !validObservedName(group.Name) || group.Revision > math.MaxInt64 || len(group.Members) > MaxManagedResources || totalMemberships > MaxManagedResources {
 				return errors.New("group observation is invalid")
 			}
 			if !insertUnique(groupNames, group.Name) {
@@ -461,7 +449,7 @@ func validateBatch(batch Batch, now time.Time) error {
 	if len(batch.Sessions) > 0 {
 		sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 		for _, session := range batch.Sessions {
-			if !value.ValidText(session.ID, 256) || !validObservedName(session.Username) || net.ParseIP(session.ClientIP) == nil || (session.VPNIP != "" && net.ParseIP(session.VPNIP) == nil) || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
+			if !validText(session.ID, 256) || !validObservedName(session.Username) || net.ParseIP(session.ClientIP) == nil || (session.VPNIP != "" && net.ParseIP(session.VPNIP) == nil) || session.BytesIn < 0 || session.BytesOut < 0 || session.ConnectedAt.IsZero() {
 				return errors.New("session observation is invalid")
 			}
 			if !insertUnique(sessionIDs, session.ID) {
@@ -475,11 +463,15 @@ func validateBatch(batch Batch, now time.Time) error {
 		}
 	}
 	for _, event := range batch.Security {
-		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !value.ValidText(event.Type, 128) || !validObject(event.Detail) {
+		if event.ID == uuid.Nil || event.ID.Version() != 7 || event.ObservedAt.IsZero() || event.ObservedAt.Before(earliest) || event.ObservedAt.After(latest) || (event.Severity != "info" && event.Severity != "warning" && event.Severity != "critical") || !validText(event.Type, 128) || !validObject(event.Detail) {
 			return errors.New("security telemetry is invalid")
 		}
 	}
 	return nil
+}
+
+func validText(s string, maxBytes int) bool {
+	return s != "" && len(s) <= maxBytes && utf8.ValidString(s) && strings.IndexByte(s, 0) < 0
 }
 
 func insertUnique[T comparable](values map[T]struct{}, v T) bool {

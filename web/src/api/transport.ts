@@ -1,4 +1,6 @@
-import { Configuration } from "@ocservia/api-client";
+import createClient from "openapi-fetch";
+import type { paths } from "./generated/schema";
+import { fromWire } from "./models";
 import { redirectToLogin } from "../shared/session";
 
 export const devAuthToken = import.meta.env.DEV
@@ -15,22 +17,64 @@ export function newIdempotencyKey(): string {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
-export async function authenticatedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> {
-  const response = await fetch(input, init);
-  if (response.status === 401) redirectToLogin();
-  return response;
+export class ResponseError extends Error {
+  constructor(
+    readonly response: Response,
+    message = "",
+  ) {
+    super(message);
+  }
 }
 
-export const configuration = new Configuration({
-  basePath: "/api/v1",
-  fetchApi: authenticatedFetch,
+export const client = createClient<paths>({
+  baseUrl: "/api/v1",
   credentials: "same-origin",
-  ...(devAuthToken ? { accessToken: devAuthToken } : {}),
+  fetch: (request) => fetch(request),
 });
 
-export function requestInit(signal?: AbortSignal): RequestInit | undefined {
-  return signal ? { signal } : undefined;
+client.use({
+  onRequest({ request, schemaPath }) {
+    if (devAuthToken && schemaPath !== "/auth/login")
+      request.headers.set("Authorization", `Bearer ${devAuthToken}`);
+    return request;
+  },
+  async onResponse({ response, schemaPath }) {
+    if (schemaPath === "/auth/login") return;
+    if (response.status === 401) redirectToLogin();
+    // A failed audit verification is a structured result.
+    if (
+      !response.ok &&
+      !(schemaPath === "/audit:verify" && response.status === 409)
+    ) {
+      let detail = "";
+      if (
+        response.headers
+          .get("content-type")
+          ?.includes("application/problem+json")
+      ) {
+        try {
+          const problem: unknown = await response.clone().json();
+          if (
+            problem &&
+            typeof problem === "object" &&
+            "detail" in problem &&
+            typeof problem.detail === "string"
+          ) {
+            detail = problem.detail;
+          }
+        } catch {
+          // Keep the HTTP status available for caller-specific handling.
+        }
+      }
+      throw new ResponseError(response, detail);
+    }
+  },
+});
+
+export async function read<T>(
+  request: Promise<{ data?: T; response: Response }>,
+) {
+  const { data, response } = await request;
+  if (data === undefined) throw new ResponseError(response);
+  return fromWire(data);
 }

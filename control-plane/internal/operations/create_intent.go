@@ -13,7 +13,6 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/google/uuid"
@@ -21,7 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID uuid.UUID, created value.Timestamp) error {
+func validateConfigurationIntent(ctx context.Context, tx database.Tx, request CreateRequest, workspaceID uuid.UUID, created time.Time) error {
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
 		configStore, err := configurationstore.FromTransaction(tx)
@@ -32,20 +31,11 @@ func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStor
 		if err != nil {
 			return fmt.Errorf("read configuration revision: %w", err)
 		}
-		if state.Revision < 0 || uint64(state.Revision) != payload.PlanRevision {
+		if state.Revision < 0 || uint64(state.Revision) != payload.Candidate.Revision() {
 			return ErrStaleRevision
 		}
 		if state.OcservVersion != payload.OcservVersion {
 			return ErrStaleRevision
-		}
-		for _, required := range payload.PlanCapabilities {
-			approved, err := intentStore.HasCapability(ctx, request.NodeID, required)
-			if err != nil {
-				return fmt.Errorf("recheck configuration capability: %w", err)
-			}
-			if !approved {
-				return ErrCapabilityMissing
-			}
 		}
 	case ConfigApplyPayload:
 		configStore, err := configurationstore.FromTransaction(tx)
@@ -57,16 +47,11 @@ func validateConfigurationIntent(ctx context.Context, tx database.Tx, intentStor
 			return fmt.Errorf("lock configuration plan: %w", err)
 		}
 		var validation agentv1.ConfigPlanResult
-		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.PlanRevision || !bytes.Equal(plan.CandidateHash, payload.CandidateHash) || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= created.Micros || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
+		if plan.WorkspaceID != workspaceID || plan.NodeID != request.NodeID || plan.ExpectedRevision < 0 || uint64(plan.ExpectedRevision) != payload.Candidate.Revision() || !bytes.Equal(plan.CandidateHash, payload.Candidate.Digest()) || plan.ExpiresAt.IsZero() || !plan.ExpiresAt.After(created) || plan.State != "succeeded" || proto.Unmarshal(plan.Result, &validation) != nil || !validation.GetCurrentUnchanged() || !validation.GetStagingCleaned() || !bytes.Equal(validation.GetCandidateHash(), plan.CandidateHash) || !bytes.Equal(validation.GetCurrentHash(), payload.ExpectedCurrentHash) {
 			return ErrStaleRevision
 		}
-		if payload.CompleteCandidate != nil {
-			expires, expiryErr := plan.ExpiresAt.Time()
-			if expiryErr != nil || !proto.Equal(timestamppb.New(expires), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
-				return ErrStaleRevision
-			}
-		} else if len(validation.GetMaterializedHash()) != 0 {
-			return ErrInvalidRequest
+		if !proto.Equal(timestamppb.New(plan.ExpiresAt.UTC()), payload.PlanExpiresAt) || !bytes.Equal(validation.GetMaterializedHash(), payload.MaterializedHash) || len(validation.GetWarnings()) != 0 {
+			return ErrStaleRevision
 		}
 		state, err := configStore.State(ctx, request.NodeID)
 		if err != nil {
@@ -108,22 +93,18 @@ func validateObservedTarget(ctx context.Context, intentStore operationstore.Stor
 	return nil
 }
 
-func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID, operationID uuid.UUID, created, expiry value.Timestamp, fromVersion string) error {
+func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operationstore.Store, request CreateRequest, workspaceID, operationID uuid.UUID, created, expiry time.Time, fromVersion string) error {
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
 		warnings, err := json.Marshal(payload.PlanMetadata.Warnings)
 		if err != nil {
 			return fmt.Errorf("marshal configuration plan warnings: %w", err)
 		}
-		logicalWarnings, err := value.ParseJSONB(warnings)
-		if err != nil {
-			return err
-		}
 		configStore, err := configurationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.PlanRevision, CandidateHash: payload.CandidateHash, CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: logicalWarnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
+		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.Candidate.Revision(), CandidateHash: payload.Candidate.Digest(), CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: warnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration plan: %w", err)
 		}
 	case ConfigApplyPayload:
@@ -131,7 +112,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return err
 		}
-		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: payload.ApplyMetadata.PlanID, ExpectedRevision: payload.PlanRevision, DesiredRevision: payload.DesiredRevision, CandidateHash: payload.CandidateHash, PreviousHash: payload.ExpectedCurrentHash, CreatedAt: created}); err != nil {
+		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: payload.ApplyMetadata.PlanID, ExpectedRevision: payload.Candidate.Revision(), DesiredRevision: payload.DesiredRevision, CandidateHash: payload.Candidate.Digest(), PreviousHash: payload.ExpectedCurrentHash, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration apply: %w", err)
 		}
 		advanced, err := configStore.AdvanceDesiredRevision(ctx, request.NodeID, payload.DesiredRevision, created)
@@ -146,15 +127,11 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return fmt.Errorf("marshal certificate DNS names: %w", err)
 		}
-		names, err := value.ParseJSONB(dnsNames)
-		if err != nil {
-			return err
-		}
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: names, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
+		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: dnsNames, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate request: %w", err)
 		}
 	case CertificateP12Payload:
@@ -162,11 +139,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return err
 		}
-		artifactExpiry, err := value.FromTime(payload.ArtifactMetadata.ExpiresAt)
-		if err != nil {
-			return err
-		}
-		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, RequestHash: payload.ArtifactMetadata.RequestHash, ExpiresAt: artifactExpiry, CreatedAt: created}); err != nil {
+		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, ExpiresAt: payload.ArtifactMetadata.ExpiresAt.UTC(), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	case CertificateRevokePayload:
@@ -192,7 +165,7 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 	return nil
 }
 
-func lockRolloutDispatch(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, workspaceID uuid.UUID, created value.Timestamp) error {
+func lockRolloutDispatch(ctx context.Context, intentStore operationstore.Store, request CreateRequest, upgrade AgentUpgradePayload, workspaceID uuid.UUID, now time.Time) error {
 	// Serialize generated operation intent, including idempotent replay,
 	// with rollout pause/resume. A cleared claim or non-running rollout
 	// must not create or recover an operation from an older memory claim.
@@ -203,14 +176,14 @@ func lockRolloutDispatch(ctx context.Context, intentStore operationstore.Store, 
 	if err != nil {
 		return fmt.Errorf("lock rollout dispatch claim: %w", err)
 	}
-	if claim.State != RolloutStateRunning || claim.NodeState != RolloutNodePending || !claim.DispatchLease.Valid || claim.DispatchLease.Micros <= created.Micros {
+	if claim.State != RolloutStateRunning || claim.NodeState != RolloutNodePending || claim.DispatchLease == nil || !claim.DispatchLease.After(now) {
 		return ErrRolloutState
 	}
 	rollout, err := intentStore.Rollout(ctx, upgrade.RolloutID, false)
 	if err != nil {
 		return err
 	}
-	if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion || !bytes.Equal(rollout.RequestHash, upgrade.RolloutRequestHash) {
+	if rollout.WorkspaceID != workspaceID || rollout.CreatedBy != request.ActorIdentityID || rollout.ActorSession != request.ActorSessionID || rollout.TargetVersion != upgrade.TargetVersion {
 		return ErrRolloutState
 	}
 	return nil
@@ -227,7 +200,7 @@ func (s *Service) lockRolloutObservation(ctx context.Context, intentStore operat
 		}
 		return nil, fmt.Errorf("lock rollout node observation: %w", err)
 	}
-	observation := rolloutNodeObservation{NodeID: request.NodeID, Status: nodeStatus, Architecture: observed.Architecture, AgentVersion: observed.AgentVersion, LastHeartbeatAt: observed.LastHeartbeatAt}
+	observation := rolloutNodeObservation{NodeID: request.NodeID, Status: nodeStatus, Architecture: observed.Architecture, OSRelease: observed.OSRelease, AgentVersion: observed.AgentVersion, LastHeartbeatAt: observed.LastHeartbeatAt}
 	observation.CapabilityOK, err = intentStore.LockUpgradeCapability(ctx, request.NodeID)
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrCapabilityMissing
@@ -265,9 +238,9 @@ func appendIntentAudit(ctx context.Context, tx database.Tx, request CreateReques
 	var auditSummary json.RawMessage
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
-		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", payload.CandidateHash), "expected_revision": payload.PlanRevision})
+		auditSummary, _ = json.Marshal(map[string]any{"candidate_hash": fmt.Sprintf("%x", payload.Candidate.Digest()), "expected_revision": payload.Candidate.Revision()})
 	case ConfigApplyPayload:
-		auditSummary, _ = json.Marshal(map[string]any{"plan_id": payload.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", payload.CandidateHash), "previous_hash": fmt.Sprintf("%x", payload.ExpectedCurrentHash), "desired_revision": payload.DesiredRevision})
+		auditSummary, _ = json.Marshal(map[string]any{"plan_id": payload.ApplyMetadata.PlanID, "candidate_hash": fmt.Sprintf("%x", payload.Candidate.Digest()), "previous_hash": fmt.Sprintf("%x", payload.ExpectedCurrentHash), "desired_revision": payload.DesiredRevision})
 	case AgentUpgradePayload:
 		summary := map[string]any{"from_version": fromVersion, "target_version": payload.TargetVersion, "architecture": payload.Architecture, "package_sha256": fmt.Sprintf("%x", payload.PackageSHA256)}
 		if payload.RolloutID != uuid.Nil {

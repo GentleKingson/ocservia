@@ -1,4 +1,4 @@
-import type { UserPasswordSealingKey } from "@ocservia/api-client";
+import type { UserPasswordSealingKey } from "@/api/models";
 
 // Takes ownership of the UTF-8 buffer; clear it on every outcome. The caller
 // clears the password input before awaiting network or cryptographic work.
@@ -27,7 +27,6 @@ export async function sealUserPassword(
       !/^[0-9a-f]{64}$/.test(binding.endpointId) ||
       !binding.keyId ||
       binding.keyId.length > 128 ||
-      !/^[0-9a-f]{64}$/.test(binding.publicKeySha256) ||
       !binding.publicKeyDer ||
       binding.publicKeyDer.length > 1368
     )
@@ -37,13 +36,6 @@ export async function sealUserPassword(
       const binary = atob(binding.publicKeyDer);
       if (btoa(binary) !== binding.publicKeyDer) throw new Error();
       der = Uint8Array.from(binary, (value) => value.charCodeAt(0));
-      const digest = new Uint8Array(await subtle.digest("SHA-256", der));
-      if (
-        Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(
-          "",
-        ) !== binding.publicKeySha256
-      )
-        throw new Error();
       key = await subtle.importKey(
         "spki",
         der,

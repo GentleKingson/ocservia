@@ -20,9 +20,9 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -52,7 +52,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	s := NewBackend(b, "", "test", signer)
 	endpoint := endpointFixture(101)
 	readOnly := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read"}
-	capabilities := append(slices.Clone(readOnly), "ocserv.user.manage", "future.feature.read", ownersession.FencingCapability)
+	capabilities := append(slices.Clone(readOnly), "ocserv.user.manage", "future.feature.read")
 	token := createToken(t, s, workspace, endpoint)
 	request := enrollmentRequestCapabilities(token.Value, endpoint, capabilities)
 	if err := s.ValidateEnrollment(ctx, request); err != nil {
@@ -103,8 +103,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"}); err != nil || !allowed {
 		t.Fatal("active agent not permitted", allowed, err)
 	}
-	at, _ := value.FromTime(time.Now().UTC())
-	expires, _ := at.Add(time.Hour)
+	at := time.Now().UTC()
+	expires := at.Add(time.Hour)
 	requester, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, requester, requester.String(), at, at)
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,$3)`, workspace, requester, at)
@@ -137,7 +137,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	t.Run("legacy-capability-policy", func(t *testing.T) {
 		t.Run("grantless-1.0-rejected", func(t *testing.T) {
 			handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: 0, AgentVersion: "compatibility-fixture", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
-			response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+			connectionID := uuid.Must(uuid.NewV7())
+			response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: connectionID[:]})
 			if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_INCOMPATIBLE_PROTOCOL || len(response.GetNegotiatedCapabilities()) != 0 || response.GetSessionGrant() != nil {
 				t.Fatalf("protocol 1.0 authorization = %v, %v; want INCOMPATIBLE_PROTOCOL", response, err)
 			}
@@ -155,7 +156,8 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 				if test.sealing {
 					handshake.SealingKeys = enrollmentSealingKeys()
 				}
-				response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake})
+				connectionID := uuid.Must(uuid.NewV7())
+				response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: connectionID[:]})
 				if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || !slices.Equal(response.GetNegotiatedCapabilities(), test.want) || response.GetSessionGrant() == nil {
 					t.Fatalf("compatibility authorization = %v, %v; want capabilities %v", response, err, test.want)
 				}
@@ -163,41 +165,40 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		}
 	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
+	manager, err := ownersession.NewManagerBackend(b, logger)
 	testutil.NoError(t, err)
 	s.ownerSessions = manager
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
-	authorize := &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake}
+	v4 := uuid.New()
+	for _, invalid := range [][]byte{nil, v4[:]} {
+		response, err := s.AuthorizeSession(ctx, &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: invalid})
+		if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED || response.GetSessionGrant() != nil {
+			t.Fatalf("invalid connection ID authorization = %v, %v; want REVOKED", response, err)
+		}
+	}
+	connectionID := uuid.Must(uuid.NewV7())
+	authorize := &transportv1.AuthorizeSessionRequest{RemoteEndpointId: endpoint, Handshake: handshake, ConnectionId: connectionID[:]}
 	response, err := s.AuthorizeSession(ctx, authorize)
-	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetConnectionFence() == nil || response.GetSessionGrant() == nil || !slices.Equal(response.NegotiatedCapabilities, normalizedCapabilities(capabilities)) {
+	if err != nil || response.GetResult() != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED || response.GetSessionGrant() == nil || response.GetSessionGrant().GetSessionEpoch() == 0 || !slices.Equal(response.NegotiatedCapabilities, normalizedCapabilities(capabilities)) {
 		t.Fatal("fenced session", response, err)
 	}
-	fence := response.ConnectionFence
-	connection, err := fixed16(fence.GetConnectionId())
+	firstEpoch := response.GetSessionGrant().GetSessionEpoch()
+	successor, err := ownersession.NewManagerBackend(b, logger)
 	testutil.NoError(t, err)
-	if err := manager.CloseSession(ctx, [16]byte(node), connection, int64(fence.GetOwnerEpoch())); err != nil {
-		t.Fatal(err)
+	// A restarted Controller must release the term using transportd's identity.
+	testutil.NoError(t, successor.CloseSession(ctx, node, connectionID, firstEpoch))
+	state, err := connectionowner.ReadStateBackend(ctx, b, node)
+	testutil.NoError(t, err)
+	if state.ConnectionID != connectionID || uint64(state.Epoch) != firstEpoch || state.Active {
+		t.Fatalf("transportd disconnect did not release its exact owner term: %+v", state)
 	}
-	// A grant whose authority transaction fails must release the exact newly
-	// opened owner term, including on a backend without pgx transactions.
-	cancelled, cancel := context.WithCancel(ctx)
-	defer cancel()
-	failingManager, err := ownersession.NewManagerBackend(b, signer, &cancellingRegistrar{cancelled: cancel}, 30*time.Second, logger)
-	testutil.NoError(t, err)
-	s.ownerSessions = failingManager
-	if response, err := s.AuthorizeSession(cancelled, authorize); err == nil || response != nil {
-		t.Fatal("cancelled authorization granted", response, err)
-	}
-	successor, err := ownersession.NewManagerBackend(b, signer, &recordingRegistrar{}, 30*time.Second, logger)
-	testutil.NoError(t, err)
 	s.ownerSessions = successor
+	nextConnectionID := uuid.Must(uuid.NewV7())
+	authorize.ConnectionId = nextConnectionID[:]
 	response, err = s.AuthorizeSession(ctx, authorize)
-	if err != nil || response.GetConnectionFence() == nil || response.ConnectionFence.OwnerEpoch <= fence.OwnerEpoch {
-		t.Fatal("failed commit leaked owner lease", response, err)
+	if err != nil || response.GetSessionGrant() == nil || response.GetSessionGrant().GetSessionEpoch() <= firstEpoch {
+		t.Fatal("reopened session did not advance session_epoch", response, err)
 	}
-	fence = response.ConnectionFence
-	connection, _ = fixed16(fence.ConnectionId)
-	defer successor.CloseSession(context.Background(), [16]byte(node), connection, int64(fence.OwnerEpoch))
 	revocation := Revocation{NodeID: node, ActorID: requester.String(), IdentityID: requester, SessionID: session, Reason: "revoke", RequestID: uuid.NewString()}
 	locked, lockedStore, err := s.begin(ctx, database.RepeatableRead)
 	testutil.NoError(t, err)
@@ -255,24 +256,19 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("prebound token consumed by another endpoint", err)
 	}
 	bootstrapRequest := enrollmentRequest(bootstrap.Value, bootstrapEndpoint)
-	negative, positive := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
-	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, positive, bootstrap.ID)
+	now := time.Now().UTC()
+	created, past, future := now.Add(-2*time.Hour), now.Add(-time.Hour), now.Add(time.Hour)
+	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, created, future, bootstrap.ID)
 	if err := s.ValidateEnrollment(ctx, bootstrapRequest); err != nil {
-		t.Fatal("logical bootstrap expiry", err)
+		t.Fatal("bootstrap expiry", err)
 	}
 	bootstrapped, err := s.Enroll(ctx, bootstrapRequest)
 	testutil.NoError(t, err)
-	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, positive, value.Timestamp{Valid: true, Micros: value.MinTimestamp}, bootstrap.ID)
+	exec(`UPDATE node_bootstrap_tokens SET consumed_at=$1,expires_at=$2 WHERE id=$3`, future, past, bootstrap.ID)
 	if replay, err := s.Enroll(ctx, bootstrapRequest); err != nil || !bytes.Equal(replay.GetNodeId(), bootstrapped.GetNodeId()) {
 		t.Fatal("bound bootstrap retry with expired token", replay, err)
 	}
 	if _, err := s.Enroll(ctx, enrollmentRequest(bootstrap.Value, endpointFixture(103))); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("bootstrap endpoint substitution", err)
-	}
-	wideEndpoint := endpointFixture(104)
-	wide := createToken(t, s, workspace, wideEndpoint)
-	exec(`UPDATE node_bootstrap_tokens SET created_at=$1,expires_at=$2 WHERE id=$3`, negative, value.Timestamp{Valid: true, Micros: value.EndTimestamp - 1}, wide.ID)
-	if _, err := s.Enroll(ctx, enrollmentRequest(wide.Value, wideEndpoint)); err != nil {
-		t.Fatal("full finite token expiry", err)
 	}
 }

@@ -46,7 +46,7 @@ func (s *Server) getSecretRef(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, value)
 }
 func (s *Server) rotateSecretRef(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("secret_ref_action"), ":rotate"))
+	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("secret_ref_id"), ":rotate"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "secret_ref_id must be UUIDv7")
 		return

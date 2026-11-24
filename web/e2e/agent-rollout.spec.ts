@@ -56,6 +56,7 @@ test.beforeEach(async ({ page }) => {
   await installConsoleMocks(page, {
     workspace: { id: workspaceId, name: "Rollout", slug: "rollout" },
     recommendedAgentVersion: recommended,
+    default404: true,
     nodes: [
       nodeRow(canaryNodeId, "node-a"),
       nodeRow(batchNodeId, "node-b"),
@@ -95,6 +96,61 @@ async function fulfillRolloutCreate(route: Route): Promise<void> {
     ),
   });
 }
+
+test("refreshes the Nodes list without showing a progress message", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto("/nodes");
+  await expect(page.getByRole("row", { name: /node-a/ })).toBeVisible();
+  const path = "**/api/v1/nodes?**";
+  const release = Promise.withResolvers<undefined>();
+  await page.route(path, async (route) => {
+    await release.promise;
+    await route.fallback();
+  });
+  const request = page.waitForRequest(path);
+  try {
+    await page.clock.fastForward(16_000);
+    await request;
+    await expect(page.getByText("Refreshing nodes…")).toHaveCount(0);
+    await expect(page.getByRole("row", { name: /node-a/ })).toBeVisible();
+  } finally {
+    release.resolve(undefined);
+  }
+});
+
+test("keeps the last rollout details through a temporary polling failure", async ({
+  page,
+}) => {
+  await page.clock.install();
+  let polls = 0;
+  await page.route(`**/api/v1/agent-rollouts/${rolloutId}`, (route) => {
+    if (++polls === 2) return route.fulfill({ status: 503, json: {} });
+    if (polls === 4) return route.fulfill({ status: 403, json: {} });
+    return route.fulfill({ json: rollout("paused", []) });
+  });
+  await page.goto(`/rollouts/${rolloutId}`);
+  const details = page.getByTestId("rollout-totals");
+  const warning = page.getByText(
+    "Refresh failed. Showing the last successful data.",
+  );
+  const resume = page.getByRole("button", { name: /resume/i });
+  await expect(details).toBeVisible();
+  await expect(resume).toBeEnabled();
+  await page.clock.fastForward(2100);
+  await expect(warning).toBeVisible();
+  await expect(details).toBeVisible();
+  await expect(resume).toBeDisabled();
+  await page.clock.fastForward(2100);
+  await expect(warning).toHaveCount(0);
+  await expect(details).toBeVisible();
+  await expect(resume).toBeEnabled();
+  await page.clock.fastForward(2100);
+  await expect(page.getByText("Rollout state is unavailable")).toBeVisible();
+  await expect(details).toHaveCount(0);
+  await expect(resume).toHaveCount(0);
+});
 
 test("runs the canary and batch rollout to completion", async ({ page }) => {
   await page.route("**/api/v1/agent-rollouts", fulfillRolloutCreate);

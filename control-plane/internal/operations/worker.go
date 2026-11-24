@@ -1,53 +1,32 @@
 package operations
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 )
 
 type Sender interface {
 	SendCommand(context.Context, []byte, []byte) error
 }
 
-// FenceExecutor runs dispatch mutations inside the connection owner's
-// fencing interval. A nil executor keeps the unfenced compatibility path for
-// deployments whose agent sessions never negotiated connection fencing.
-type FenceExecutor interface {
-	ExecuteFenced(ctx context.Context, nodeID [16]byte, kind agentv1.FenceOperationKind, operationID [16]byte, capability string, action ownersession.FencedAction) error
-}
-
 type Worker struct {
-	service           *Service
-	sender            Sender
-	fences            FenceExecutor
-	logger            *slog.Logger
-	id                uuid.UUID
-	testClaimLease    time.Duration
-	preSendBarrierDir string
+	service *Service
+	sender  Sender
+	logger  *slog.Logger
+	id      uuid.UUID
+	workerFaults
 }
 
 const (
 	defaultCommandLease    = 10 * time.Second
-	maxTestCommandLease    = 60 * time.Second
 	dispatchBatchLimit     = 16
 	maxDispatchConcurrency = 8
 	maxDrainBatchesPerTick = 8
@@ -59,39 +38,6 @@ func NewWorker(service *Service, sender Sender, logger *slog.Logger) (*Worker, e
 		return nil, err
 	}
 	return &Worker{service: service, sender: sender, logger: logger, id: id}, nil
-}
-
-// NewFencedWorker runs every dispatch to a fenced session inside the
-// connection owner's fencing interval, so the fence and attempt binding on
-// the wire were backed by the ownership authority at mutation time.
-func NewFencedWorker(service *Service, sender Sender, fences FenceExecutor, logger *slog.Logger) (*Worker, error) {
-	worker, err := NewWorker(service, sender, logger)
-	if err != nil {
-		return nil, err
-	}
-	worker.fences = fences
-	return worker, nil
-}
-
-// EnablePreSendBarrier configures a development-only barrier for one exact
-// claimed command. Production configuration rejects the hook before startup.
-func (w *Worker) EnablePreSendBarrier(directory string, claimLease time.Duration) error {
-	if !filepath.IsAbs(directory) {
-		return errors.New("pre-send barrier path must be absolute")
-	}
-	info, err := os.Stat(directory)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return errors.New("pre-send barrier path is not a directory")
-	}
-	if claimLease < defaultCommandLease || claimLease > maxTestCommandLease {
-		return errors.New("pre-send barrier command lease must be between 10s and 60s")
-	}
-	w.preSendBarrierDir = filepath.Clean(directory)
-	w.testClaimLease = claimLease
-	return nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -144,33 +90,19 @@ func (w *Worker) dispatch(ctx context.Context) error {
 }
 
 func (w *Worker) dispatchBatch(ctx context.Context) (int, bool, error) {
-	_, armedBeforeClaim, err := w.readBarrierArm("arm")
-	if err != nil {
-		return 0, false, err
-	}
-	limit := dispatchBatchLimit
-	if armedBeforeClaim {
-		limit = 1
-	}
-	jobs, err := w.service.Claim(ctx, w.id, limit, defaultCommandLease)
+	jobs, err := w.service.Claim(ctx, w.id, dispatchBatchLimit, defaultCommandLease)
 	if err != nil {
 		return 0, false, err
 	}
 	claimedCount := len(jobs)
-	jobs, err = w.selectPreSendBarrierTarget(ctx, jobs)
-	if err != nil {
-		return claimedCount, false, err
-	}
 	if len(jobs) == 0 {
 		return claimedCount, false, nil
 	}
 	// DispatchCandidates selects at most one command per node, so cross-node
-	// dispatches are independent; keep pre-send barrier runs strictly serial.
-	if len(jobs) == 1 || armedBeforeClaim || w.preSendBarrierDir != "" {
-		for _, job := range jobs {
-			w.dispatchOne(ctx, job)
-		}
-		return claimedCount, claimedCount == limit && !armedBeforeClaim, nil
+	// dispatches are independent.
+	if len(jobs) == 1 {
+		w.dispatchOne(ctx, jobs[0])
+		return claimedCount, false, nil
 	}
 	workerCount := min(maxDispatchConcurrency, len(jobs))
 	queue := make(chan Dispatch, len(jobs))
@@ -189,7 +121,7 @@ func (w *Worker) dispatchBatch(ctx context.Context) (int, bool, error) {
 		}()
 	}
 	wg.Wait()
-	return claimedCount, claimedCount == limit, nil
+	return claimedCount, claimedCount == dispatchBatchLimit, nil
 }
 
 func (w *Worker) dispatchOne(ctx context.Context, job Dispatch) {
@@ -212,225 +144,27 @@ func (w *Worker) dispatchOne(ctx context.Context, job Dispatch) {
 	span.End()
 }
 
-func (w *Worker) readBarrierArm(name string) (uuid.UUID, bool, error) {
-	if w.preSendBarrierDir == "" {
-		return uuid.Nil, false, nil
-	}
-	armed, err := os.ReadFile(filepath.Join(w.preSendBarrierDir, name))
-	if errors.Is(err, os.ErrNotExist) {
-		return uuid.Nil, false, nil
-	}
-	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("read %s command barrier: %w", name, err)
-	}
-	armedID := string(bytes.TrimSpace(armed))
-	parsed, err := uuid.Parse(armedID)
-	if err != nil || parsed.String() != armedID {
-		return uuid.Nil, false, fmt.Errorf("%s command barrier must contain a canonical command UUID", name)
-	}
-	return parsed, true, nil
-}
-
-func (w *Worker) selectPreSendBarrierTarget(ctx context.Context, jobs []Dispatch) ([]Dispatch, error) {
-	armedID, armed, err := w.readBarrierArm("arm")
-	if err != nil {
-		for _, job := range jobs {
-			_ = w.service.MarkFailed(ctx, job, err)
-		}
-		return nil, err
-	}
-	if !armed {
-		return jobs, nil
-	}
-	var target *Dispatch
-	for index := range jobs {
-		if jobs[index].CommandID == armedID {
-			target = &jobs[index]
-			continue
-		}
-		if markErr := w.service.MarkFailed(ctx, jobs[index], errors.New("pre-send barrier selected a different command")); markErr != nil {
-			return nil, fmt.Errorf("release non-target pre-send claim: %w", markErr)
-		}
-	}
-	if target == nil {
-		if len(jobs) == 0 {
-			return nil, nil
-		}
-		return nil, errors.New("pre-send barrier target was not the claimed command")
-	}
-	return []Dispatch{*target}, nil
-}
-
 type sentDispatchError struct{ err error }
 
 func (e *sentDispatchError) Error() string { return e.err.Error() }
 func (e *sentDispatchError) Unwrap() error { return e.err }
 
-// dispatchFenced sends and records one dispatch inside the owner's fencing
-// interval. Keeping MarkSent inside the action prevents a same-process reopen
-// from advancing the owner epoch between transport acceptance and persistence
-// of the exact sent frame.
 func (w *Worker) dispatchFenced(ctx context.Context, job Dispatch) error {
-	if err := w.waitAtCommandBarrier(ctx, job.CommandID, "arm", "received", "release", func() error {
-		return w.extendPreSendClaim(ctx, job)
-	}); err != nil {
-		return err
-	}
-	if w.fences == nil {
-		if err := w.sender.SendCommand(ctx, job.NodeID[:], job.Envelope); err != nil {
+	if faultInjection {
+		if err := w.beforeSend(ctx, job); err != nil {
 			return err
 		}
-		if err := w.waitAtPostSendBarrier(ctx, job.CommandID); err != nil {
+	}
+	if err := w.sender.SendCommand(ctx, job.NodeID[:], job.Envelope); err != nil {
+		return err
+	}
+	if faultInjection {
+		if err := w.afterSend(ctx, job); err != nil {
 			return &sentDispatchError{err: err}
 		}
-		if err := w.service.MarkSentWithEnvelope(ctx, job, job.Envelope); err != nil {
-			return &sentDispatchError{err: err}
-		}
-		return nil
 	}
-	requiredCapability, cleanWire := scanEnvelopeForFencing(job.Envelope)
-	var fallbackEnvelope *agentv1.CommandEnvelope
-	if !cleanWire {
-		fallbackEnvelope = &agentv1.CommandEnvelope{}
-		if err := proto.Unmarshal(job.Envelope, fallbackEnvelope); err != nil {
-			return fmt.Errorf("decode command envelope for fencing: %w", err)
-		}
-		requiredCapability = fallbackEnvelope.GetRequiredCapability()
+	if err := w.service.MarkSent(ctx, job); err != nil {
+		return &sentDispatchError{err: err}
 	}
-	var nodeID [16]byte
-	copy(nodeID[:], job.NodeID[:])
-	var commandID [16]byte
-	copy(commandID[:], job.CommandID[:])
-	return w.fences.ExecuteFenced(ctx, nodeID, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, commandID, requiredCapability,
-		func(ctx context.Context, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) error {
-			var fenced []byte
-			var err error
-			if cleanWire {
-				fenced, err = appendOwnerProofsWire(job.Envelope, fence, binding)
-			} else {
-				fallbackEnvelope.ConnectionFence = fence
-				fallbackEnvelope.FenceBinding = binding
-				fenced, err = proto.Marshal(fallbackEnvelope)
-			}
-			if err != nil {
-				return fmt.Errorf("encode fenced command envelope: %w", err)
-			}
-			if err := w.sender.SendCommand(ctx, job.NodeID[:], fenced); err != nil {
-				return err
-			}
-			if err := w.waitAtPostSendBarrier(ctx, job.CommandID); err != nil {
-				return &sentDispatchError{err: err}
-			}
-			if err := w.service.MarkSentWithEnvelope(ctx, job, fenced); err != nil {
-				return &sentDispatchError{err: err}
-			}
-			return nil
-		})
-}
-
-func appendOwnerProofsWire(base []byte, fence *agentv1.ConnectionFenceV2, binding *agentv1.FenceBindingV2) ([]byte, error) {
-	if fence == nil && binding == nil {
-		return base, nil
-	}
-	var fenceBytes, bindingBytes []byte
-	var err error
-	extra := 0
-	if fence != nil {
-		fenceBytes, err = proto.Marshal(fence)
-		if err != nil {
-			return nil, err
-		}
-		extra += protowire.SizeTag(envelopeConnectionFenceField) + protowire.SizeBytes(len(fenceBytes))
-	}
-	if binding != nil {
-		bindingBytes, err = proto.Marshal(binding)
-		if err != nil {
-			return nil, err
-		}
-		extra += protowire.SizeTag(envelopeFenceBindingField) + protowire.SizeBytes(len(bindingBytes))
-	}
-	out := make([]byte, len(base), len(base)+extra)
-	copy(out, base)
-	if fence != nil {
-		out = protowire.AppendTag(out, envelopeConnectionFenceField, protowire.BytesType)
-		out = protowire.AppendBytes(out, fenceBytes)
-	}
-	if binding != nil {
-		out = protowire.AppendTag(out, envelopeFenceBindingField, protowire.BytesType)
-		out = protowire.AppendBytes(out, bindingBytes)
-	}
-	return out, nil
-}
-
-func (w *Worker) waitAtPostSendBarrier(ctx context.Context, commandID uuid.UUID) error {
-	return w.waitAtCommandBarrier(ctx, commandID, "post-send-arm", "post-send-received", "post-send-release", nil)
-}
-
-func (w *Worker) waitAtCommandBarrier(ctx context.Context, commandID uuid.UUID, armName, receivedName, releaseName string, onArmed func() error) error {
-	armedID, armed, err := w.readBarrierArm(armName)
-	if err != nil {
-		return err
-	}
-	if !armed || armedID != commandID {
-		return nil
-	}
-	if onArmed != nil {
-		if err := onArmed(); err != nil {
-			return err
-		}
-	}
-	received := []byte(commandID.String() + "\n" + time.Now().UTC().Format(time.RFC3339) + "\n")
-	if err := writeCommandBarrierSignal(w.preSendBarrierDir, receivedName, received); err != nil {
-		return fmt.Errorf("signal %s command barrier: %w", armName, err)
-	}
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			release, readErr := os.ReadFile(filepath.Join(w.preSendBarrierDir, releaseName))
-			if readErr == nil && string(bytes.TrimSpace(release)) == commandID.String() {
-				return nil
-			}
-			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-				return fmt.Errorf("read %s command barrier release: %w", armName, readErr)
-			}
-		}
-	}
-}
-
-func (w *Worker) extendPreSendClaim(ctx context.Context, dispatch Dispatch) error {
-	return database.Within(ctx, w.service.backend, database.ReadCommitted, func(tx database.Tx) error {
-		if err := commandlimit.Lock(ctx, tx); err != nil {
-			return fmt.Errorf("serialize pre-send claim extension: %w", err)
-		}
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return store.ExtendDispatch(ctx, dispatch, w.id, w.testClaimLease)
-	})
-}
-
-func writeCommandBarrierSignal(directory, name string, contents []byte) error {
-	temporary, err := os.CreateTemp(directory, ".received-")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if _, err := temporary.Write(contents); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Chmod(0o644); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, filepath.Join(directory, name))
+	return nil
 }

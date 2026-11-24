@@ -19,7 +19,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -93,18 +92,19 @@ func (f lifecycleFixture) job(t *testing.T) enrollmentstore.TrustJob {
 		return s.InsertEndpoint(context.Background(), id, v.EndpointID, at)
 	})
 	f.trust(t, func(s enrollmentstore.TrustStore) error {
-		return s.Enqueue(context.Background(), v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+		return s.Enqueue(context.Background(), v, time.Unix(0, 0).UTC())
 	})
 	return v
 }
 
 type trustSnapshot struct {
-	Revision                  uint64
-	Attempts                  int
-	Update, Required, Close   bool
-	Until, Available, Updated value.Timestamp
-	Worker                    *uuid.UUID
-	Error                     *string
+	Revision                uint64
+	Attempts                int
+	Update, Required, Close bool
+	Until                   *time.Time
+	Available, Updated      time.Time
+	Worker                  *uuid.UUID
+	Error                   *string
 }
 
 func (f lifecycleFixture) snapshot(t *testing.T, id uuid.UUID) trustSnapshot {
@@ -147,7 +147,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		}
 	}
 	t.Run("expired-unclaimed", func(t *testing.T) {
-		f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+		f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 		stale(t, v)
 	})
 	t.Run("same-worker-new-attempt", func(t *testing.T) {
@@ -164,7 +164,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		defer rollback(lock)
 		at, err := database.WallTime(ctx, lock)
 		testutil.NoError(t, err)
-		until, _ := at.Add(300 * time.Millisecond)
+		until := at.Add(300 * time.Millisecond)
 		if _, err := lock.Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, until, v.NodeID); err != nil {
 			t.Fatal(err)
 		}
@@ -192,7 +192,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		old := v
 		v.Revision++
 		f.trust(t, func(s enrollmentstore.TrustStore) error {
-			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+			return s.Enqueue(ctx, v, time.Unix(0, 0).UTC())
 		})
 		v = claim(t)
 		stale(t, old)
@@ -210,7 +210,7 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 			}
 			return s.Release(ctx, v, worker, 0, "close retry")
 		})
-		f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+		f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 		v = claim(t)
 		if !v.UpdateApplied || !v.CloseRequired || v.CloseApplied {
 			t.Fatal("lost retry progress", v)
@@ -234,10 +234,10 @@ type leasedTransport struct {
 	closes int
 }
 
-func (s *leasedTransport) UpdateNodeTrust(ctx context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64, _ []byte, _ *agentv1.FenceBindingV2) error {
+func (s *leasedTransport) UpdateNodeTrust(ctx context.Context, _, _ []byte, _ transportv1.NodeTrustState, _ string, _ uint64) error {
 	return s.update(ctx)
 }
-func (s *leasedTransport) CloseNode(ctx context.Context, _ []byte, _ string, _ *agentv1.FenceBindingV2) error {
+func (s *leasedTransport) CloseNode(ctx context.Context, _ []byte, _ string) error {
 	s.closes++
 	if s.close != nil {
 		return s.close(ctx)
@@ -316,7 +316,7 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 					// Neither uncertain RPC results nor a subsequent lost owner
 					// can manufacture the missing acknowledgement.
 					if code != codes.OK {
-						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+						f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 						transport.update = func(context.Context) error { updates++; return ownersession.ErrNotOwner }
 						transport.close = func(context.Context) error { return ownersession.ErrNotOwner }
 						if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
@@ -334,48 +334,6 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 				})
 			}
 		}
-	}
-}
-
-func TestTrustOwnerEndedBackendIntegration(t *testing.T) {
-	for _, ending := range []string{"closed", "expired", "replaced"} {
-		t.Run(ending, func(t *testing.T) {
-			f, ctx := newLifecycleFixture(t), context.Background()
-			v := f.job(t)
-			signer, err := commandauth.NewRandomSigner()
-			testutil.NoError(t, err)
-			manager, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			testutil.NoError(t, err)
-			var endpoint [32]byte
-			copy(endpoint[:], v.EndpointID)
-			fence, err := manager.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
-			testutil.NoError(t, err)
-			calls := 0
-			action := func(context.Context, *agentv1.ConnectionFenceV2, *agentv1.FenceBindingV2) error { calls++; return nil }
-			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); err != nil || calls != 1 {
-				t.Fatal("live owner refused", err, calls)
-			}
-			var connection [16]byte
-			copy(connection[:], fence.ConnectionId)
-			if ending == "closed" {
-				testutil.NoError(t, manager.CloseSession(ctx, [16]byte(v.NodeID), connection, int64(fence.OwnerEpoch)))
-			} else {
-				// Wait for the actual signed lease deadline. Shortening only the
-				// database deadline would not expire the already-issued fence.
-				time.Sleep(time.Until(fence.LeaseUntil.AsTime()) + 50*time.Millisecond)
-				if ending == "replaced" {
-					successor, err := ownersession.NewManagerBackend(f.b, signer, &recordingRegistrar{}, 30*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
-					testutil.NoError(t, err)
-					next, err := successor.OpenSession(ctx, [16]byte(v.NodeID), endpoint, 1, []string{ownersession.FencingCapability})
-					if err != nil || next.GetOwnerEpoch() <= fence.OwnerEpoch {
-						t.Fatal(next, err)
-					}
-				}
-			}
-			if err := manager.ExecuteFenced(ctx, [16]byte(v.NodeID), agentv1.FenceOperationKind_FENCE_OPERATION_KIND_CONNECTION_CLOSE, [16]byte(v.NodeID), ownersession.FencingCapability, action); !errors.Is(err, ownersession.ErrNotOwner) || calls != 1 {
-				t.Fatal("ended owner issued binding", err, calls)
-			}
-		})
 	}
 }
 
@@ -434,7 +392,7 @@ func TestTrustSupersededResultBackendIntegration(t *testing.T) {
 		v.EndpointID = bytes.Repeat([]byte{9}, 32)
 		v.Reason = "superseding intent"
 		f.trust(t, func(s enrollmentstore.TrustStore) error {
-			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+			return s.Enqueue(ctx, v, time.Unix(0, 0).UTC())
 		})
 		return nil
 	}}
@@ -479,7 +437,7 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 		case <-timer.C:
 		}
 		after := f.snapshot(t, v.NodeID)
-		if after.Until.Micros <= before.Until.Micros || after.Attempts != before.Attempts {
+		if after.Until == nil || before.Until == nil || !after.Until.After(*before.Until) || after.Attempts != before.Attempts {
 			return errors.New("in-flight lease was not renewed")
 		}
 		return nil
@@ -496,7 +454,7 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 	transport.update = func(ctx context.Context) error {
 		v.Revision++
 		f.trust(t, func(s enrollmentstore.TrustStore) error {
-			return s.Enqueue(ctx, v, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+			return s.Enqueue(ctx, v, time.Unix(0, 0).UTC())
 		})
 		select {
 		case <-ctx.Done():
@@ -519,11 +477,11 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 
 type ownerLostTransport struct{ calls int }
 
-func (s *ownerLostTransport) UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64, []byte, *agentv1.FenceBindingV2) error {
+func (s *ownerLostTransport) UpdateNodeTrust(context.Context, []byte, []byte, transportv1.NodeTrustState, string, uint64) error {
 	s.calls++
 	return ownersession.ErrNotOwner
 }
-func (s *ownerLostTransport) CloseNode(context.Context, []byte, string, *agentv1.FenceBindingV2) error {
+func (s *ownerLostTransport) CloseNode(context.Context, []byte, string) error {
 	s.calls++
 	return ownersession.ErrNotOwner
 }
@@ -593,7 +551,7 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 	if recorded, err := service.RecordRevocationSynchronized(ctx, trust, v.Reason, true); err != nil || !recorded {
 		t.Fatal(recorded, err)
 	}
-	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, v.NodeID)
+	f.exec(t, `UPDATE node_trust_convergence SET available_at=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), v.NodeID)
 	settled := f.snapshot(t, v.NodeID)
 	if !settled.Update || !settled.Close {
 		t.Fatal("synchronous revocation not settled", settled)

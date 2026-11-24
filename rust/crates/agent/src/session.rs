@@ -1,22 +1,19 @@
 use crate::commands::handle_command_stream;
 use crate::startup::{invalid, system_dns_resolver, with_relay_tls_roots};
 use crate::telemetry::{build_telemetry, send_telemetry};
-use crate::{AGENT_ALPN, ARTIFACT_FRAME_MASK, CONNECTION_FENCING_CAPABILITY, HANDSHAKE_TIMEOUT};
+use crate::{AGENT_ALPN, ARTIFACT_FRAME_MASK, HANDSHAKE_TIMEOUT};
 use iroh::endpoint::{QuicTransportConfig, RelayMode, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use ocservia_agent::{CommandExecutor, PrivdClient};
 use ocservia_agent_protocol::{PrivdResponse, ReadRequest, privd_request, privd_response};
-use ocservia_command_authorization::{
-    ControllerCommandKeyring, FenceBindingClaimsV2, VerifiedConnectionFenceV2, VerifiedSessionGrant,
-};
+use ocservia_command_authorization::{ControllerCommandKeyring, VerifiedSessionGrant};
 use ocservia_command_journal::{Journal, OFFLINE_RECOVERY_RETENTION_SECONDS, TelemetryInsert};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ConnectionFenceV2, FenceBindingV2, FenceOperationKind, HandshakeResult, SealingKeyDescriptorV1,
-    SessionHandshake, SessionHandshakeResponse,
+    HandshakeResult, SealingKeyDescriptorV1, SessionGrantV1, SessionHandshake,
+    SessionHandshakeResponse,
 };
 use ocservia_contracts::session::{
     ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
-    is_read_only_session_capability,
 };
 use prost::Message;
 use std::collections::HashSet;
@@ -71,66 +68,27 @@ pub(super) struct SessionContext<'a> {
 }
 
 pub(super) struct SessionGrantAuthority {
+    pub(super) raw_grant: SessionGrantV1,
     pub(super) negotiated_capabilities: HashSet<String>,
     pub(super) authorization_revision: u64,
+    pub(super) session_epoch: u64,
     pub(super) expires_at_unix_seconds: i64,
 }
 
-pub(super) enum ActiveSessionAuthority {
-    SignedReadOnlyV11(SessionGrantAuthority),
-    FencedV11 {
-        grant: SessionGrantAuthority,
-        connection_fence: VerifiedConnectionFenceV2,
-    },
-}
-
-impl ActiveSessionAuthority {
-    pub(super) fn grant(&self) -> &SessionGrantAuthority {
-        match self {
-            Self::SignedReadOnlyV11(grant) | Self::FencedV11 { grant, .. } => grant,
-        }
-    }
-
-    fn fenced(&self) -> Option<(&SessionGrantAuthority, &VerifiedConnectionFenceV2)> {
-        match self {
-            Self::SignedReadOnlyV11(_) => None,
-            Self::FencedV11 {
-                grant,
-                connection_fence,
-            } => Some((grant, connection_fence)),
-        }
-    }
-    fn name(&self) -> &'static str {
-        match self {
-            Self::SignedReadOnlyV11(_) => "signed_read_only_v1_1",
-            Self::FencedV11 { .. } => "fenced_v1_1",
-        }
-    }
-
-    fn expires_at_unix_seconds(&self) -> i64 {
-        self.grant().expires_at_unix_seconds
-    }
-}
-
-pub(super) fn fenced_artifact_authority(
-    authority: &ActiveSessionAuthority,
-    framed_length: u32,
-) -> Result<(&SessionGrantAuthority, &VerifiedConnectionFenceV2), io::Error> {
+pub(super) fn validate_artifact_frame_kind(framed_length: u32) -> Result<(), io::Error> {
     let frame_kind = framed_length & ARTIFACT_FRAME_MASK;
     if frame_kind != ARTIFACT_FETCH_FRAME && frame_kind != ARTIFACT_CONSUME_FRAME {
         return Err(invalid("artifact frame kind invalid"));
     }
-    authority
-        .fenced()
-        .ok_or_else(|| invalid("signed read-only session received an artifact stream"))
+    Ok(())
 }
 
 async fn wait_for_session_expiry(
-    authority: &ActiveSessionAuthority,
+    authority: &SessionGrantAuthority,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let lifetime = u64::try_from(
         authority
-            .expires_at_unix_seconds()
+            .expires_at_unix_seconds
             .saturating_sub(unix_seconds()?),
     )?;
     tokio::time::sleep(Duration::from_secs(lifetime)).await;
@@ -142,10 +100,8 @@ pub(super) fn supported_capabilities() -> Vec<String> {
         .iter()
         .copied()
         .chain([
-            CONNECTION_FENCING_CAPABILITY,
             "synthetic.noop",
             "synthetic.echo",
-            "command.semantic-hash.v1",
             "command.strict-wire.v1",
             "privd_result_attestation_v1",
             "ocserv.session.disconnect",
@@ -243,8 +199,8 @@ async fn connect_once(
         negotiate_and_activate_session(&response, &supported_capabilities, session)?;
     tracing::info!(
         controller = %controller.id,
-        session_mode = session_authority.name(),
-        negotiated_capabilities = session_authority.grant().negotiated_capabilities.len(),
+        session_epoch = session_authority.session_epoch,
+        negotiated_capabilities = session_authority.negotiated_capabilities.len(),
         "agent session accepted"
     );
     let audit_upload = crate::vpn_audit::upload_loop(connection.clone());
@@ -278,8 +234,6 @@ async fn connect_once(
             _ = heartbeat.tick(), if delivery.is_none() => {
                 let sampled=SystemTime::now();
                 let observations=session.privd.snapshot().await?;
-                // Durable upgrade outcome evidence is best-effort: an older
-                // privd without the fixed read simply yields an empty report.
                 let upgrade_outcomes = match session.privd.upgrade_results().await {
                     Ok(outcomes) => outcomes,
                     Err(error) => {
@@ -307,8 +261,6 @@ async fn connect_once(
                     .command_executor
                     .journal_mut()
                     .telemetry_pending(32, i64::try_from(now)?)?;
-                // The journal owns these batches until acknowledgement. Dropping
-                // this session during a send leaves them available for replay.
                 let connection = &connection;
                 delivery = Some(Box::pin(async move {
                     let mut delivered = Vec::with_capacity(pending_batches.len());
@@ -329,7 +281,7 @@ fn negotiate_and_activate_session(
     response: &SessionHandshakeResponse,
     supported_capabilities: &[String],
     session: &mut SessionContext<'_>,
-) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<SessionGrantAuthority, Box<dyn std::error::Error + Send + Sync>> {
     let authority = negotiate_session_mode(
         response,
         supported_capabilities,
@@ -337,22 +289,15 @@ fn negotiate_and_activate_session(
         session.endpoint_id,
         session.command_keys,
     )?;
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    activate_session_connection_fence(
+    activate_session_epoch(
         &authority,
         session.command_executor.journal_mut(),
         session.fence_epoch_floor,
-        i64::try_from(now.as_secs())?,
-        now.subsec_nanos(),
     )?;
     Ok(authority)
 }
 
 /// Builds the production Agent endpoint factory.
-///
-/// The factory is indirect so tests can pin relay-only transports while
-/// production keeps the configured preset, dedicated relay, and relay CA
-/// roots.
 pub(super) fn agent_endpoint_factory(
     secret_key: SecretKey,
     relay_mode: RelayMode,
@@ -384,9 +329,6 @@ type EndpointFactory = Box<
 >;
 
 /// Supervises controller sessions for one Agent process.
-///
-/// The Iroh Endpoint outlives every controller session and is rebuilt only when
-/// it is actually closed, never between sessions.
 pub(super) async fn supervise_controller_sessions(
     mut bind_endpoint: EndpointFactory,
     controller: EndpointId,
@@ -424,10 +366,6 @@ pub(super) async fn supervise_controller_sessions(
 }
 
 /// Builds the controller dial target from the configured dedicated relay.
-///
-/// The `EndpointID` remains the authenticated controller identity. A dedicated
-/// relay URL is a safe addressing hint and keeps redial independent of public
-/// address discovery.
 pub(super) fn controller_dial_target(
     controller: EndpointId,
     relay_mode: &RelayMode,
@@ -440,13 +378,14 @@ pub(super) fn controller_dial_target(
     }
     address
 }
+
 pub(super) fn negotiate_session_mode(
     response: &SessionHandshakeResponse,
     supported_capabilities: &[String],
     node_id: Uuid,
     endpoint_id: EndpointId,
     command_keys: &ControllerCommandKeyring,
-) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<SessionGrantAuthority, Box<dyn std::error::Error + Send + Sync>> {
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     negotiate_session_mode_at_instant(
         response,
@@ -455,7 +394,6 @@ pub(super) fn negotiate_session_mode(
         endpoint_id,
         command_keys,
         i64::try_from(now.as_secs())?,
-        now.subsec_nanos(),
     )
 }
 
@@ -466,8 +404,7 @@ pub(super) fn negotiate_session_mode_at_instant(
     endpoint_id: EndpointId,
     command_keys: &ControllerCommandKeyring,
     now_unix_seconds: i64,
-    now_unix_nanos: u32,
-) -> Result<ActiveSessionAuthority, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<SessionGrantAuthority, Box<dyn std::error::Error + Send + Sync>> {
     if response.protocol_major != 1 || response.protocol_minor != 1 {
         return Err(invalid("Controller session protocol is unsupported").into());
     }
@@ -493,6 +430,7 @@ pub(super) fn negotiate_session_mode_at_instant(
     }
     let VerifiedSessionGrant {
         authorization_revision,
+        session_epoch,
         negotiated_capabilities,
         expires_at_seconds,
     } = command_keys.verify_session_grant(
@@ -504,97 +442,38 @@ pub(super) fn negotiate_session_mode_at_instant(
     if negotiated_capabilities != response.negotiated_capabilities {
         return Err(invalid("verified session capabilities do not match response").into());
     }
-    let grant = SessionGrantAuthority {
+    Ok(SessionGrantAuthority {
+        raw_grant: grant.clone(),
         negotiated_capabilities: negotiated_capabilities.into_iter().collect(),
         authorization_revision,
+        session_epoch,
         expires_at_unix_seconds: expires_at_seconds,
-    };
-    if !grant
-        .negotiated_capabilities
-        .contains(CONNECTION_FENCING_CAPABILITY)
-    {
-        if response.connection_fence.is_some() {
-            return Err(invalid("Controller returned an unexpected connection fence").into());
-        }
-        if grant
-            .negotiated_capabilities
-            .iter()
-            .any(|capability| !is_read_only_session_capability(capability))
-        {
-            return Err(invalid("Controller mutation session omitted connection fencing").into());
-        }
-        return Ok(ActiveSessionAuthority::SignedReadOnlyV11(grant));
-    }
-    let fence = response
-        .connection_fence
-        .as_ref()
-        .ok_or_else(|| invalid("Controller fencing session omitted its connection fence"))?;
-    let verified = command_keys
-        .verify_connection_fence_v2_at(
-            fence,
-            node_id.as_bytes(),
-            endpoint_id.as_bytes(),
-            now_unix_seconds,
-            now_unix_nanos,
-        )
-        .map_err(|_| invalid("Controller connection fence is invalid"))?;
-    if verified.authorization_revision != grant.authorization_revision
-        || !same_capability_set(&verified.capabilities, &grant.negotiated_capabilities)
-    {
-        return Err(invalid("Controller connection fence authority mismatch").into());
-    }
-    Ok(ActiveSessionAuthority::FencedV11 {
-        grant,
-        connection_fence: verified,
     })
 }
 
-/// Verifies and durably records the owner term before a fenced session can
-/// become active. Every accepted handshake is a replacement connection, so
-/// its epoch must be strictly newer than the Agent's retained high-water mark.
-pub(super) fn activate_session_connection_fence(
-    authority: &ActiveSessionAuthority,
+/// Durably records the monotonic `session_epoch` before a session becomes active.
+/// Every accepted handshake is a replacement connection, so its epoch must be
+/// strictly newer than the Agent's retained high-water mark.
+pub(super) fn activate_session_epoch(
+    authority: &SessionGrantAuthority,
     journal: &mut Journal,
     fence_epoch_floor: &mut u64,
-    now_unix_seconds: i64,
-    now_unix_nanos: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let verified = match authority {
-        ActiveSessionAuthority::SignedReadOnlyV11(_) => return Ok(()),
-        ActiveSessionAuthority::FencedV11 {
-            connection_fence, ..
-        } => connection_fence,
-    };
-    if verified.lease_expired(now_unix_seconds, now_unix_nanos) {
-        return Err(invalid("Controller connection fence lease has expired").into());
-    }
-    if (verified.expires_at_seconds, verified.expires_at_nanos)
-        <= (now_unix_seconds, now_unix_nanos)
-    {
-        return Err(invalid("Controller connection fence proof has expired").into());
-    }
     refresh_fence_epoch_floor(journal, fence_epoch_floor)?;
-    if verified.owner_epoch <= *fence_epoch_floor {
-        return Err(invalid("Controller connection fence epoch is not newer").into());
+    if authority.session_epoch <= *fence_epoch_floor {
+        return Err(invalid("Controller session epoch is not newer").into());
     }
-    let durable_floor = journal.raise_owner_fence_epoch_floor(verified.owner_epoch)?;
-    if durable_floor != verified.owner_epoch {
+    let durable_floor = journal.raise_owner_fence_epoch_floor(authority.session_epoch)?;
+    if durable_floor != authority.session_epoch {
         *fence_epoch_floor = durable_floor;
-        return Err(invalid("Controller connection fence epoch is not newer").into());
+        return Err(invalid("Controller session epoch is not newer").into());
     }
     *fence_epoch_floor = durable_floor;
     tracing::info!(
-        owner_epoch = verified.owner_epoch,
-        "connection-owner fencing epoch floor raised before session activation"
+        session_epoch = authority.session_epoch,
+        "session epoch floor raised before session activation"
     );
     Ok(())
-}
-
-fn same_capability_set(capabilities: &[String], expected: &HashSet<String>) -> bool {
-    capabilities.len() == expected.len()
-        && capabilities
-            .iter()
-            .all(|capability| expected.contains(capability))
 }
 
 pub(super) fn refresh_fence_epoch_floor(
@@ -612,125 +491,4 @@ fn unix_seconds() -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs(),
     )?)
-}
-
-pub(super) enum FenceDecision {
-    RejectedStaleOwnerEpoch,
-}
-
-fn same_fence_term(left: &VerifiedConnectionFenceV2, right: &VerifiedConnectionFenceV2) -> bool {
-    left.fence_id == right.fence_id
-        && left.owner_instance_id == right.owner_instance_id
-        && left.owner_incarnation == right.owner_incarnation
-        && left.owner_epoch == right.owner_epoch
-        && left.connection_id == right.connection_id
-        && left.authorization_revision == right.authorization_revision
-}
-
-/// Classifies a deliberately signed, read-only stale-owner diagnostic.
-/// This path can report only a valid fence below the durable floor; it never
-/// activates an owner term or authorizes a non-stale command.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn gate_signed_read_only_stale_diagnostic(
-    command_keys: &ControllerCommandKeyring,
-    fence_epoch_floor: u64,
-    node_id: &Uuid,
-    endpoint_id: &EndpointId,
-    fence: &ConnectionFenceV2,
-    command_id: &[u8],
-    now_unix_seconds: i64,
-    now_unix_nanos: u32,
-) -> Result<FenceDecision, Box<dyn std::error::Error + Send + Sync>> {
-    let verified = command_keys
-        .verify_connection_fence_v2_at(
-            fence,
-            node_id.as_bytes(),
-            endpoint_id.as_bytes(),
-            now_unix_seconds,
-            now_unix_nanos,
-        )
-        .map_err(|error| {
-            tracing::warn!(
-                command_id = %hex::encode(command_id),
-                error = %error,
-                "command connection fence is invalid"
-            );
-            invalid("command connection fence is invalid")
-        })?;
-    if verified.lease_expired(now_unix_seconds, now_unix_nanos) {
-        tracing::warn!(
-            command_id = %hex::encode(command_id),
-            owner_epoch = verified.owner_epoch,
-            "command connection-owner lease has expired"
-        );
-        return Err(invalid("command connection-owner lease has expired").into());
-    }
-    if verified.owner_epoch < fence_epoch_floor {
-        tracing::warn!(
-            command_id = %hex::encode(command_id),
-            owner_epoch = verified.owner_epoch,
-            floor = fence_epoch_floor,
-            "command from a stale connection-owner epoch rejected"
-        );
-        return Ok(FenceDecision::RejectedStaleOwnerEpoch);
-    }
-    Err(invalid("signed read-only session cannot authorize a non-stale command").into())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn verify_fenced_operation(
-    command_keys: &ControllerCommandKeyring,
-    grant: &SessionGrantAuthority,
-    active_fence: &VerifiedConnectionFenceV2,
-    fence_epoch_floor: u64,
-    node_id: &Uuid,
-    endpoint_id: &EndpointId,
-    fence: Option<&ConnectionFenceV2>,
-    binding: Option<&FenceBindingV2>,
-    operation_kind: FenceOperationKind,
-    operation_id: &[u8],
-    capability: &str,
-    now_unix_seconds: i64,
-    now_unix_nanos: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let fence = fence.ok_or_else(|| invalid("fenced operation omitted its connection fence"))?;
-    let binding = binding.ok_or_else(|| invalid("fenced operation omitted its fence binding"))?;
-    let verified = command_keys
-        .verify_connection_fence_v2_at(
-            fence,
-            node_id.as_bytes(),
-            endpoint_id.as_bytes(),
-            now_unix_seconds,
-            now_unix_nanos,
-        )
-        .map_err(|_| invalid("operation connection fence is invalid"))?;
-    if verified.lease_expired(now_unix_seconds, now_unix_nanos) {
-        return Err(invalid("operation connection-owner lease has expired").into());
-    }
-    if active_fence.owner_epoch != fence_epoch_floor
-        || verified.owner_epoch != fence_epoch_floor
-        || !same_fence_term(&verified, active_fence)
-        || verified.authorization_revision != grant.authorization_revision
-        || !same_capability_set(&verified.capabilities, &grant.negotiated_capabilities)
-    {
-        return Err(invalid("operation fence does not match the active session term").into());
-    }
-    let claims: FenceBindingClaimsV2 = command_keys
-        .verify_fence_binding_v2_at(
-            binding,
-            node_id.as_bytes(),
-            endpoint_id.as_bytes(),
-            now_unix_seconds,
-            now_unix_nanos,
-        )
-        .map_err(|_| invalid("operation fence binding is invalid"))?;
-    if claims.operation_kind != operation_kind as u32
-        || claims.operation_id.as_slice() != operation_id
-        || claims.capability != capability
-        || !grant.negotiated_capabilities.contains(capability)
-        || !claims.matches_fence(&verified)
-    {
-        return Err(invalid("operation fence binding does not match its carrier").into());
-    }
-    Ok(())
 }

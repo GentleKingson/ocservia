@@ -86,7 +86,9 @@ if [[ "${3:-}" != --skip-backup ]]; then
   services+=(backup)
 fi
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
-  services+=(relay signer)
+  relay=relay
+  [[ "${OCSERV_TLS_MODE:-manual}" != acme ]] || relay="relay-acme"
+  services+=("${relay}" signer)
 fi
 health_json="$("${COMPOSE_LAUNCHER}" ps --format json "${services[@]}")" ||
   fail "cannot inspect Compose health"

@@ -2,10 +2,10 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -16,23 +16,6 @@ func (t *transaction) ConfigurationStore() configurationstore.Store { return con
 func (s configurationStore) Node(ctx context.Context, id uuid.UUID) (v configurationstore.Node, err error) {
 	err = s.QueryRow(ctx, `SELECT n.workspace_id,n.version,COALESCE((SELECT o.ocserv_version FROM node_observed_snapshots o WHERE o.node_id=n.id),'') FROM nodes n WHERE n.id=$1 AND n.status IN('active','offline')`, id).Scan(&v.WorkspaceID, &v.Version, &v.OcservVersion)
 	return
-}
-
-func (s configurationStore) Capabilities(ctx context.Context, id uuid.UUID) ([]string, error) {
-	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND approved=true AND capability='ocserv.config.complete.plan' ORDER BY capability`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []string
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
 }
 
 func (s configurationStore) Get(ctx context.Context, id uuid.UUID) (v configurationstore.Plan, err error) {
@@ -90,7 +73,7 @@ func (s configurationStore) InsertApply(ctx context.Context, v configurationstor
 	return err
 }
 
-func (s configurationStore) AdvanceDesiredRevision(ctx context.Context, node uuid.UUID, revision uint64, at value.Timestamp) (bool, error) {
+func (s configurationStore) AdvanceDesiredRevision(ctx context.Context, node uuid.UUID, revision uint64, at time.Time) (bool, error) {
 	count, err := s.Exec(ctx, `INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at)VALUES($1,0,$2,'',$3)
 		ON CONFLICT(node_id) DO UPDATE SET desired_revision=EXCLUDED.desired_revision,updated_at=EXCLUDED.updated_at WHERE node_config_state.desired_revision=$2-1`, node, revision, at)
 	return count == 1, err

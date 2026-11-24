@@ -11,15 +11,21 @@ import (
 )
 
 type logOutput struct {
-	skipped atomic.Uint64
-	mu      sync.RWMutex
-	records chan []byte
-	done    chan struct{}
-	err     error // published by closing done
+	skipped   atomic.Uint64
+	mu        sync.RWMutex
+	records   chan []byte
+	closing   chan struct{}
+	closeOnce sync.Once
+	done      chan struct{}
+	err       error // published by closing done
 }
 
 func newLogOutput(dst, fallback io.Writer) *logOutput {
-	out := &logOutput{records: make(chan []byte, 256), done: make(chan struct{})}
+	out := &logOutput{
+		records: make(chan []byte, 256),
+		closing: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
 	records := out.records
 	go func() {
 		defer close(out.done)
@@ -67,9 +73,18 @@ func (out *logOutput) Write(record []byte) (int, error) {
 	if out.records == nil {
 		return 0, io.ErrClosedPipe
 	}
+	select {
+	case <-out.closing:
+		return 0, io.ErrClosedPipe
+	default:
+	}
 	// JSONHandler reuses the encoded record after Write returns.
-	out.records <- bytes.Clone(record)
-	return len(record), nil
+	select {
+	case out.records <- bytes.Clone(record):
+		return len(record), nil
+	case <-out.closing:
+		return 0, io.ErrClosedPipe
+	}
 }
 
 // Separate JSON handlers keep a blocked critical write from holding the
@@ -83,6 +98,11 @@ func (out accessOutput) Write(record []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	select {
+	case <-out.closing:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	select {
 	case out.records <- bytes.Clone(record):
 	default:
 		out.skipped.Add(1)
@@ -91,10 +111,13 @@ func (out accessOutput) Write(record []byte) (int, error) {
 }
 
 func (out *logOutput) Close() error {
-	out.mu.Lock()
-	close(out.records)
-	out.records = nil
-	out.mu.Unlock()
+	out.closeOnce.Do(func() {
+		close(out.closing)
+		out.mu.Lock()
+		close(out.records)
+		out.records = nil
+		out.mu.Unlock()
+	})
 	<-out.done
 	return out.err
 }

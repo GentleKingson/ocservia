@@ -14,7 +14,6 @@ import (
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
@@ -60,7 +59,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return trust.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: node, EndpointID: endpoint, DesiredState: "revoked", Revision: revision, Reason: "restart"}, value.Timestamp{Valid: true, Micros: value.NegativeInfinity})
+		return trust.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: node, EndpointID: endpoint, DesiredState: "revoked", Revision: revision, Reason: "restart"}, time.Unix(0, 0).UTC())
 	})
 	workerID := uuid.New()
 	f.trust(t, func(s enrollmentstore.TrustStore) error {
@@ -77,7 +76,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		}
 		return err
 	})
-	f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, node)
+	f.exec(t, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, time.Unix(0, 0).UTC(), node)
 	before := f.snapshot(t, node)
 	testutil.NoError(t, os.WriteFile(filepath.Join(gate, "ready"), []byte("committed\n"), 0600))
 	deadline := time.Now().Add(90 * time.Second)

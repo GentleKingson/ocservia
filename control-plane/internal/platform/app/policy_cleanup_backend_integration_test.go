@@ -9,10 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/google/uuid"
@@ -32,15 +30,15 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 	t.Helper()
 	state := &policyCleanupState{owner: owner, runtime: runtime, account: account}
 	workspace, node := uuid.New(), uuid.New()
-	at, _ := value.FromTime(time.Now().UTC())
-	period, _ := value.FromTime(time.Unix(0, 0))
+	at := time.Now().UTC()
+	period := time.Unix(0, 0).UTC()
 	state.item = userstore.Candidate{NodeID: node, Username: "cleanup_orphan", UserVersion: 1, PolicyVersion: 1, Cause: "expiry", PeriodStart: period}
 	queries := []string{
 		`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'cleanup',$2,$3,$4)`,
 		`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'cleanup','active',$3,$4)`,
-		`INSERT INTO desired_users(node_id,username,enabled,version,revision,fingerprint,created_at,updated_at)VALUES($1,'cleanup_orphan',false,1,1,$2,$3,$4)`,
+		`INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,'cleanup_orphan',false,1,1,$2,$3)`,
 	}
-	args := [][]any{{workspace, workspace.String(), at, at}, {node, workspace, at, at}, {node, make([]byte, 32), at, at}}
+	args := [][]any{{workspace, workspace.String(), at, at}, {node, workspace, at, at}, {node, at, at}}
 	for i, query := range queries {
 		if _, err := owner.Store.Exec(ctx, query, args[i]...); err != nil {
 			t.Fatal(err)
@@ -51,7 +49,8 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 		if err != nil {
 			return err
 		}
-		if err := store.PutPolicy(ctx, userstore.Policy{NodeID: node, Username: state.item.Username, QuotaPeriod: "none", QuotaDirection: "rxtx", Version: 1, ExpiresAt: at, CreatedAt: at, UpdatedAt: at}); err != nil {
+		exp := at
+		if err := store.PutPolicy(ctx, userstore.Policy{NodeID: node, Username: state.item.Username, QuotaPeriod: "none", QuotaDirection: "rxtx", Version: 1, ExpiresAt: &exp, CreatedAt: at, UpdatedAt: at}); err != nil {
 			return err
 		}
 		return store.EnsureEnforcement(ctx, state.item, at)
@@ -103,7 +102,7 @@ func (s *policyCleanupState) assertPermissions(t *testing.T, ctx context.Context
 	}
 	for _, query := range []string{
 		"DELETE FROM desired_user_policies WHERE false", "DELETE FROM user_policy_mutations WHERE false",
-		"DELETE FROM scheduler_leadership WHERE false", "DELETE FROM observed_user_usage WHERE false",
+		"DELETE FROM observed_user_usage WHERE false",
 		"TRUNCATE TABLE user_policy_enforcements", "CREATE TABLE cleanup_forbidden(id int)",
 		"ALTER TABLE user_policy_enforcements ADD COLUMN cleanup_forbidden int",
 	} {
@@ -157,8 +156,7 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 		if err != nil {
 			return err
 		}
-		at, _ := value.FromTime(time.Now().UTC())
-		return store.EnsureEnforcement(ctx, state.item, at)
+		return store.EnsureEnforcement(ctx, state.item, time.Now().UTC())
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +167,6 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 	ticks := make(chan time.Time)
 	log := schedulerLog{quietLogger().Handler(), make(chan slog.Record, 16)}
 	logger := slog.New(log)
-	identity, _ := coordination.NewIdentity()
-	leader := coordination.NewRunnerBackend(runtime.Store, identity, 15*time.Second, 5*time.Second, logger)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var steps []string
@@ -178,14 +174,19 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 	step := func(name string) func(context.Context) error {
 		return func(context.Context) error { steps = append(steps, name); return nil }
 	}
-	work := maintenanceWork{users: state.service.RunOnce, rollouts: step("rollouts"), telemetry: step("telemetry"), certificates: step("certificates"), audit: step("audit")}
-	work.evidence = func(context.Context, *coordination.Session) error {
-		steps = append(steps, "evidence")
-		completed <- struct{}{}
-		return nil
+	work := maintenanceWork{
+		users:        state.service.RunOnce,
+		rollouts:     step("rollouts"),
+		telemetry:    step("telemetry"),
+		certificates: step("certificates"),
+		audit: func(context.Context) error {
+			steps = append(steps, "audit")
+			completed <- struct{}{}
+			return nil
+		},
 	}
 	done := make(chan error, 1)
-	go func() { done <- runScheduler(runCtx, leader, ticks, work, 1, logger) }()
+	go func() { done <- runScheduler(runCtx, ticks, work, 1, logger) }()
 	defer func() {
 		cancel()
 		select {
@@ -195,10 +196,6 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 			}
 		case <-time.After(10 * time.Second):
 			t.Error("scheduler failed to stop")
-		}
-		// The next lifecycle case must not wait for this fixture's lease.
-		if _, err := owner.Store.Exec(ctx, `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`); err != nil {
-			t.Error(err)
 		}
 	}()
 	for {
@@ -241,7 +238,7 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 	}
 	select {
 	case <-completed:
-		if !reflect.DeepEqual(steps, []string{"rollouts", "telemetry", "certificates", "audit", "evidence"}) {
+		if !reflect.DeepEqual(steps, []string{"rollouts", "telemetry", "certificates", "audit"}) {
 			t.Fatal("maintenance recovery order", steps)
 		}
 	case <-time.After(10 * time.Second):

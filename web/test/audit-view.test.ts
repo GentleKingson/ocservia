@@ -1,18 +1,12 @@
 import { mountSetup } from "./renderer";
 import { nextTick } from "vue";
-import { ResponseError } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listAuditEvents: vi.fn(),
   verifyAuditChain: vi.fn(),
-  getWorkspace: vi.fn(),
-  workspaceContext: vi.fn(),
 }));
 vi.mock("../src/api/events", () => mocks);
-vi.mock("../src/api/workspace", async (original) => ({
-  ...(await original<typeof import("../src/api/workspace")>()),
-  ...mocks,
-}));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 import AuditView from "../src/views/AuditView.vue";
 let unmount: (() => void) | undefined;
@@ -55,8 +49,6 @@ async function mount(): Promise<View> {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubGlobal("window", new EventTarget());
-  mocks.getWorkspace.mockResolvedValue({ id: "workspace-a" });
-  mocks.workspaceContext.mockReturnValue({ id: "workspace-a", generation: 1 });
   mocks.listAuditEvents.mockResolvedValue({ items: [record] });
 });
 afterEach(() => {

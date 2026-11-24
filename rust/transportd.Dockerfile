@@ -5,7 +5,6 @@ WORKDIR /src
 FROM chef AS planner
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
-COPY rust/vendor ./vendor
 COPY rust/crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -13,16 +12,13 @@ FROM chef AS dependencies
 COPY --from=planner /src/recipe.json recipe.json
 COPY rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
-# The patched path dependency has a build script; keep its real source.
-COPY rust/vendor ./vendor
 RUN cargo chef cook --locked --release --package ocservia-transportd --recipe-path recipe.json
 
 FROM dependencies AS build
 COPY rust/Cargo.toml rust/Cargo.lock rust/rust-toolchain.toml ./
 COPY rust/.cargo ./.cargo
-COPY rust/vendor ./vendor
 COPY rust/crates ./crates
-RUN cargo build --locked --release --package ocservia-transportd
+RUN cargo build --locked --release --package ocservia-transportd && install -Dm0755 /src/target/release/ocservia-transportd /out/ocservia-transportd && rm -rf /src/target
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-base
 RUN apt-get -o APT::Update::Error-Mode=any update \
@@ -39,6 +35,6 @@ COPY --chmod=0555 deploy/production/transportd-relays.sh /usr/local/libexec/ocse
 USER transportd:ocservia
 
 FROM runtime-base
-COPY --from=build /src/target/release/ocservia-transportd /usr/local/bin/ocservia-transportd
+COPY --from=build /out/ocservia-transportd /usr/local/bin/ocservia-transportd
 ENTRYPOINT ["/usr/local/bin/ocservia-transportd"]
 CMD ["--socket", "/run/ocserv-platform/transportd.sock", "--key-file", "/run/secrets/controller-iroh.key", "--control-plane-uid", "65534", "--control-plane-gid", "65532"]

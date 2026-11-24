@@ -2,7 +2,6 @@ package certificates
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,11 +11,8 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
 )
 
@@ -49,9 +45,9 @@ type SecretSealer interface {
 }
 
 type ArtifactFetcher interface {
-	FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error)
-	ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) error
-	ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error)
+	FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error)
+	ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error
+	ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error)
 }
 
 type RevokeSignerRequest struct {
@@ -67,7 +63,6 @@ type Service struct {
 	sealer      SecretSealer
 	artifacts   ArtifactFetcher
 	grantSigner *commandauth.Signer
-	fences      ownersession.FencedExecutor
 	now         func() time.Time
 }
 
@@ -81,22 +76,21 @@ type CreateRequest struct {
 }
 
 type Certificate struct {
-	ID              uuid.UUID        `json:"id"`
-	WorkspaceID     uuid.UUID        `json:"workspace_id"`
-	NodeID          uuid.UUID        `json:"node_id"`
-	OperationID     uuid.UUID        `json:"operation_id"`
-	CommonName      string           `json:"common_name"`
-	DNSNames        json.RawMessage  `json:"dns_names"`
-	KeyBits         uint32           `json:"key_bits"`
-	State           string           `json:"state"`
-	Version         int64            `json:"version"`
-	PublicKeySHA256 []byte           `json:"public_key_sha256,omitempty"`
-	SerialNumber    string           `json:"serial_number,omitempty"`
-	NotBefore       *value.Timestamp `json:"not_before,omitempty"`
-	NotAfter        *value.Timestamp `json:"not_after,omitempty"`
-	RevokedAt       *value.Timestamp `json:"revoked_at,omitempty"`
-	CreatedAt       value.Timestamp  `json:"created_at"`
-	UpdatedAt       value.Timestamp  `json:"updated_at"`
+	ID           uuid.UUID       `json:"id"`
+	WorkspaceID  uuid.UUID       `json:"workspace_id"`
+	NodeID       uuid.UUID       `json:"node_id"`
+	OperationID  uuid.UUID       `json:"operation_id"`
+	CommonName   string          `json:"common_name"`
+	DNSNames     json.RawMessage `json:"dns_names"`
+	KeyBits      uint32          `json:"key_bits"`
+	State        string          `json:"state"`
+	Version      int64           `json:"version"`
+	SerialNumber string          `json:"serial_number,omitempty"`
+	NotBefore    *time.Time      `json:"not_before,omitempty"`
+	NotAfter     *time.Time      `json:"not_after,omitempty"`
+	RevokedAt    *time.Time      `json:"revoked_at,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 type IssueRequest struct {
@@ -123,7 +117,7 @@ type ArtifactGrant struct {
 	Operation     operations.Operation `json:"operation"`
 	DownloadToken string               `json:"download_token,omitempty"`
 	Password      string               `json:"password,omitempty"`
-	ExpiresAt     value.Timestamp      `json:"expires_at"`
+	ExpiresAt     time.Time            `json:"expires_at"`
 }
 
 type ArtifactDownload struct {
@@ -139,28 +133,6 @@ type ArtifactDownload struct {
 // require an operations service configured for the same backend.
 func NewBackend(backend database.Backend, operationService *operations.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
 	return &Service{backend: backend, operations: operationService, signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
-}
-
-// EnableOwnerFencing runs artifact mutations inside the connection owner's
-// fencing interval. Artifact transfers are owner-fenced operations: a stale
-// owner must neither fetch nor confirm artifacts, and no binding may outlive
-// the term the ownership authority backed at mutation time.
-func (s *Service) EnableOwnerFencing(fences ownersession.FencedExecutor) {
-	s.fences = fences
-}
-
-// executeArtifactFenced runs one artifact transfer mutation inside the owner
-// fencing interval. Fetches bind the artifact identity; consumes and
-// confirmations bind the grant identity.
-func (s *Service) executeArtifactFenced(ctx context.Context, nodeID, operationID uuid.UUID, action ownersession.FencedAction) error {
-	if s.fences == nil {
-		return action(ctx, nil, nil)
-	}
-	var fixedNode [16]byte
-	copy(fixedNode[:], nodeID[:])
-	var fixedOperation [16]byte
-	copy(fixedOperation[:], operationID[:])
-	return s.fences.ExecuteFenced(ctx, fixedNode, agentv1.FenceOperationKind_FENCE_OPERATION_KIND_ARTIFACT, fixedOperation, ownersession.FencingCapability, action)
 }
 
 func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificate, bool, error) {
@@ -210,10 +182,7 @@ func (s *Service) releaseOperation(ctx context.Context, operationID, certificate
 		if err != nil {
 			return err
 		}
-		if err := store.ReleaseOperation(ctx, operationID, certificateID); err != nil {
-			return err
-		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return store.ReleaseOperation(ctx, operationID, certificateID)
 	})
 }
 
@@ -241,10 +210,7 @@ func (s *Service) Maintain(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := store.Maintain(ctx, s.now()); err != nil {
-			return err
-		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return store.Maintain(ctx, s.now())
 	})
 }
 
@@ -306,16 +272,5 @@ func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, node
 }
 
 func readCertificate(v certificatestore.Certificate) Certificate {
-	optional := func(at value.Timestamp) *value.Timestamp {
-		if !at.Valid {
-			return nil
-		}
-		return &at
-	}
-	return Certificate{ID: v.ID, WorkspaceID: v.WorkspaceID, NodeID: v.NodeID, OperationID: v.OperationID, CommonName: v.CommonName, DNSNames: v.DNSNames.Bytes(), KeyBits: v.KeyBits, State: v.State, Version: v.Version, PublicKeySHA256: v.PublicKeySHA256, SerialNumber: v.SerialNumber, NotBefore: optional(v.NotBefore), NotAfter: optional(v.NotAfter), RevokedAt: optional(v.RevokedAt), CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
-}
-
-func sha256Bytes(value []byte) []byte {
-	digest := sha256.Sum256(value)
-	return digest[:]
+	return Certificate{ID: v.ID, WorkspaceID: v.WorkspaceID, NodeID: v.NodeID, OperationID: v.OperationID, CommonName: v.CommonName, DNSNames: v.DNSNames, KeyBits: v.KeyBits, State: v.State, Version: v.Version, SerialNumber: v.SerialNumber, NotBefore: v.NotBefore, NotAfter: v.NotAfter, RevokedAt: v.RevokedAt, CreatedAt: v.CreatedAt.UTC(), UpdatedAt: v.UpdatedAt.UTC()}
 }

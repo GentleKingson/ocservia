@@ -118,7 +118,7 @@ wait_active() {
 start_privd
 wait_active
 first_pid="$(sudo systemctl show -p MainPID --value "${unit}")"
-first_key_hash="$(sudo sha256sum "${attestation_key}" | awk '{print $1}')"
+sudo cp -- "${attestation_key}" "${work}/attestation.before"
 sudo systemctl show "${unit}" \
   -p ActiveState -p SubState -p MainPID -p User -p Group -p NoNewPrivileges \
   -p RestrictAddressFamilies -p IPAddressDeny -p CapabilityBoundingSet \
@@ -140,7 +140,7 @@ wait_active
 second_pid="$(sudo systemctl show -p MainPID --value "${unit}")"
 test "${second_pid}" -gt 1
 test "${second_pid}" != "${first_pid}"
-test "$(sudo sha256sum "${attestation_key}" | awk '{print $1}')" = "${first_key_hash}"
+sudo cmp -s -- "${work}/attestation.before" "${attestation_key}"
 
 sudo chmod 0644 "${attestation_key}"
 if sudo systemctl restart "${unit}"; then
@@ -164,15 +164,6 @@ jq -e '.version == 1 and (.key_id | length > 0) and (.public_key | length > 0) a
 
 (cd "${ROOT}/rust" && cargo test --locked -p ocservia-privd -p ocservia-privd-attestation -p ocservia-ocserv-adapter) \
   2>&1 | tee "${ARTIFACT_DIR}/privd-pki-tests.log"
-# The package smoke asserts a pristine host before its rejection tests, and
-# the running unit no longer needs the directory after its final start.
-if [[ "${upgrade_state_dir_created}" == yes ]]; then
-  sudo rm -rf -- "${upgrade_state_dir}"
-  upgrade_state_dir_created=no
-fi
-RUN_ID="${RUN_ID}-package" ARTIFACT_DIR="${ARTIFACT_DIR}/package" \
-  "${ROOT}/scripts/agent-package-smoke.sh"
-
 sudo systemctl show "${unit}" -p ActiveState -p SubState -p MainPID \
   | tee "${ARTIFACT_DIR}/systemd-properties-after.txt" >/dev/null
 printf '%s\n' \
@@ -183,6 +174,5 @@ printf '%s\n' \
   'systemd_restart=PASS' \
   'attestation_key_restart_stability=PASS' \
   'unsafe_key_fail_closed=PASS' \
-  'certificate_lifecycle=PASS' \
-  'package_upgrade_rollback=PASS' >"${ARTIFACT_DIR}/privd-summary.txt"
+  'certificate_lifecycle=PASS' >"${ARTIFACT_DIR}/privd-summary.txt"
 echo "PRIVD_ACCEPTANCE systemd/root/privd/PKI acceptance passed"

@@ -1,20 +1,25 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, shallowRef } from "vue";
-import type {
-  ListVpnAuditRecordsRequest,
-  VpnAuditRecord,
-} from "@ocservia/api-client";
+import { useI18n } from "vue-i18n";
+import type { ListVpnAuditRecordsRequest } from "@/api/events";
+import type { VpnAuditRecord } from "@/api/models";
 import { listVpnAuditRecords } from "@/api/events";
-import {
-  getWorkspace,
-  workspaceContext,
-  type WorkspaceContext,
-} from "@/api/workspace";
+import { formatTimestamp } from "@/shared/timestamp";
 import { createReadRequest } from "@/shared/read-request";
 import SectionCard from "@/components/common/SectionCard.vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
+const { t } = useI18n();
 const kind = ref<"sessions" | "network" | "observations">("sessions");
 const destination = ref("");
 const displayed = ref(kind.value);
@@ -30,9 +35,13 @@ const error = ref("");
 const reads = createReadRequest();
 onBeforeUnmount(reads.cancel);
 
+function setKind(value: unknown) {
+  if (value === "sessions" || value === "network" || value === "observations")
+    kind.value = value;
+}
+
 async function search(more = false) {
   const read = reads.begin();
-  let context: WorkspaceContext | undefined;
   reading.value = true;
   if (!more) {
     items.value = undefined;
@@ -40,23 +49,18 @@ async function search(more = false) {
   }
   error.value = "";
   try {
-    const workspace = await getWorkspace();
-    if (!read.current()) return;
-    context = workspaceContext();
     if (!more)
       submitted = {
-        xWorkspaceID: workspace.id,
         ...(username.value.trim() ? { username: username.value.trim() } : {}),
-        ...(nodeId.value.trim() ? { nodeId: nodeId.value.trim() } : {}),
-        ...(since.value ? { since: new Date(since.value) } : {}),
-        ...(until.value ? { until: new Date(until.value) } : {}),
+        ...(nodeId.value.trim() ? { node_id: nodeId.value.trim() } : {}),
+        ...(since.value ? { since: new Date(since.value).toISOString() } : {}),
+        ...(until.value ? { until: new Date(until.value).toISOString() } : {}),
         kind: kind.value,
         ...(kind.value === "network" && destination.value.trim()
-          ? { destinationIp: destination.value.trim() }
+          ? { destination_ip: destination.value.trim() }
           : {}),
-        pageSize: 200,
+        page_size: 200,
       };
-    if (submitted.xWorkspaceID !== workspace.id) return;
     const page = await listVpnAuditRecords(
       {
         ...submitted,
@@ -64,15 +68,13 @@ async function search(more = false) {
       },
       read.signal,
     );
-    if (read.current(context)) {
+    if (read.current()) {
       items.value = more ? [...(items.value ?? []), ...page.items] : page.items;
       displayed.value = submitted.kind ?? "sessions";
       nextCursor.value = page.nextCursor;
     }
   } catch {
-    if (read.current(context))
-      error.value =
-        "Session history could not be loaded. Check the filters and try again.";
+    if (read.current()) error.value = t("vpnAuditLoadFailed");
   } finally {
     if (read.finish()) reading.value = false;
   }
@@ -80,12 +82,9 @@ async function search(more = false) {
 
 function duration(row: VpnAuditRecord) {
   const start = row.flowStartedAt ?? row.connectedAt;
-  return start
-    ? Math.max(
-        0,
-        Math.floor((row.lastSeenAt.getTime() - start.getTime()) / 1000),
-      )
-    : "—";
+  if (!start) return "—";
+  const seconds = (Date.parse(row.lastSeenAt) - Date.parse(start)) / 1000;
+  return Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : "—";
 }
 
 function download() {
@@ -105,104 +104,111 @@ function download() {
 }
 </script>
 <template>
-  <SectionCard title="VPN audit history">
+  <SectionCard :title="t('vpnAuditHistory')">
     <form
       class="flex flex-wrap items-end gap-3"
       @submit.prevent="search(false)"
     >
       <label
-        >Audit source<select v-model="kind" class="block rounded-md border p-2">
-          <option value="sessions">Session events</option>
-          <option value="observations">Session snapshots</option>
-          <option value="network">Network connections</option>
-        </select></label
+        >{{ t("vpnAuditSource")
+        }}<NativeSelect :model-value="kind" @update:model-value="setKind">
+          <option value="sessions">{{ t("vpnAuditSessions") }}</option>
+          <option value="observations">{{ t("vpnAuditSnapshots") }}</option>
+          <option value="network">{{ t("vpnAuditNetwork") }}</option>
+        </NativeSelect></label
       >
       <label v-if="kind === 'network'"
-        >Destination IP<Input v-model="destination"
+        >{{ t("vpnAuditDestinationIp") }}<Input v-model="destination"
       /></label>
-      <label>Username<Input v-model="username" maxlength="128" /></label>
-      <label>Node ID<Input v-model="nodeId" /></label>
-      <label>From<Input v-model="since" type="datetime-local" /></label>
-      <label>Before<Input v-model="until" type="datetime-local" /></label>
+      <label
+        >{{ t("vpnAuditUsername") }}<Input v-model="username" maxlength="128"
+      /></label>
+      <label>{{ t("vpnAuditNodeId") }}<Input v-model="nodeId" /></label>
+      <label
+        >{{ t("vpnAuditFrom") }}<Input v-model="since" type="datetime-local"
+      /></label>
+      <label
+        >{{ t("vpnAuditBefore") }}<Input v-model="until" type="datetime-local"
+      /></label>
       <Button type="submit" :disabled="reading">{{
-        reading ? "Searching…" : "Search history"
+        t(reading ? "vpnAuditSearching" : "vpnAuditSearch")
       }}</Button>
       <Button
         type="button"
         variant="outline"
         :disabled="!items?.length"
         @click="download"
-        >Export results</Button
+        >{{ t("vpnAuditExport") }}</Button
       >
     </form>
     <p v-if="error" role="alert">{{ error }}</p>
-    <p v-if="items && !items.length">No matching records.</p>
-    <div v-if="items?.length" class="overflow-x-auto">
-      <table class="w-full text-left text-sm">
-        <caption class="text-left">
-          Latest
-          {{
-            items.length
-          }}
-          matching records loaded
-        </caption>
-        <thead>
-          <tr>
-            <th>Event</th>
-            <th>User</th>
-            <th>Node / session</th>
-            <th>Source IP</th>
-            <th>VPN IP</th>
-            <th>Connected (UTC)</th>
-            <th>Observed (UTC)</th>
-            <th v-if="displayed === 'observations'">First absent (UTC)</th>
-            <th v-if="displayed === 'network'">Destination / protocol</th>
-            <th v-if="displayed === 'network'">Flow start (UTC)</th>
-            <th>Duration (s)</th>
-            <th>RX bytes</th>
-            <th>TX bytes</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="row in items"
-            :key="
-              row.eventId ??
-              [row.nodeId, row.sessionId, row.connectedAt?.toISOString()].join(
-                '/',
-              )
-            "
-          >
-            <td>{{ row.eventType }}</td>
-            <td>{{ row.username }}</td>
-            <td>{{ row.nodeId }} / {{ row.sessionId }}</td>
-            <td>{{ row.clientIp }}</td>
-            <td>{{ row.vpnIp || "—" }}</td>
-            <td>{{ row.connectedAt?.toISOString() || "—" }}</td>
-            <td>{{ row.lastSeenAt.toISOString() }}</td>
-            <td v-if="displayed === 'observations'">
-              {{ row.absentAt?.toISOString() || "—" }}
-            </td>
-            <td v-if="displayed === 'network'">
-              {{ row.destinationIp }} {{ row.destinationPort ?? "" }} /
-              {{ row.protocol }}
-            </td>
-            <td v-if="displayed === 'network'">
-              {{ row.flowStartedAt?.toISOString() }}
-            </td>
-            <td>{{ duration(row) }}</td>
-            <td>{{ row.bytesIn ?? "—" }}</td>
-            <td>{{ row.bytesOut ?? "—" }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <p v-if="items && !items.length">{{ t("vpnAuditEmpty") }}</p>
+    <Table v-if="items?.length">
+      <caption class="text-left">
+        {{
+          t("vpnAuditCount", { count: items.length })
+        }}
+      </caption>
+      <TableHeader>
+        <TableRow>
+          <TableHead>{{ t("vpnAuditEvent") }}</TableHead>
+          <TableHead>{{ t("vpnAuditUser") }}</TableHead>
+          <TableHead>{{ t("vpnAuditNodeSession") }}</TableHead>
+          <TableHead>{{ t("vpnAuditSourceIp") }}</TableHead>
+          <TableHead>{{ t("vpnAuditVpnIp") }}</TableHead>
+          <TableHead>{{ t("vpnAuditConnected") }}</TableHead>
+          <TableHead>{{ t("vpnAuditObserved") }}</TableHead>
+          <TableHead v-if="displayed === 'observations'">
+            {{ t("vpnAuditAbsent") }}
+          </TableHead>
+          <TableHead v-if="displayed === 'network'">
+            {{ t("vpnAuditDestination") }}
+          </TableHead>
+          <TableHead v-if="displayed === 'network'">{{
+            t("vpnAuditFlowStart")
+          }}</TableHead>
+          <TableHead>{{ t("vpnAuditDuration") }}</TableHead>
+          <TableHead>{{ t("vpnAuditRx") }}</TableHead>
+          <TableHead>{{ t("vpnAuditTx") }}</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <TableRow
+          v-for="row in items"
+          :key="
+            row.eventId ??
+            [row.nodeId, row.sessionId, row.connectedAt].join('/')
+          "
+        >
+          <TableCell>{{ row.eventType }}</TableCell>
+          <TableCell>{{ row.username }}</TableCell>
+          <TableCell>{{ row.nodeId }} / {{ row.sessionId }}</TableCell>
+          <TableCell>{{ row.clientIp }}</TableCell>
+          <TableCell>{{ row.vpnIp || "—" }}</TableCell>
+          <TableCell>{{ formatTimestamp(row.connectedAt) }}</TableCell>
+          <TableCell>{{ formatTimestamp(row.lastSeenAt) }}</TableCell>
+          <TableCell v-if="displayed === 'observations'">
+            {{ formatTimestamp(row.absentAt) }}
+          </TableCell>
+          <TableCell v-if="displayed === 'network'">
+            {{ row.destinationIp }} {{ row.destinationPort ?? "" }} /
+            {{ row.protocol }}
+          </TableCell>
+          <TableCell v-if="displayed === 'network'">
+            {{ formatTimestamp(row.flowStartedAt) }}
+          </TableCell>
+          <TableCell>{{ duration(row) }}</TableCell>
+          <TableCell>{{ row.bytesIn ?? "—" }}</TableCell>
+          <TableCell>{{ row.bytesOut ?? "—" }}</TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
     <Button
       v-if="nextCursor"
       variant="outline"
       :disabled="reading"
       @click="search(true)"
-      >Load older records</Button
+      >{{ t("vpnAuditOlder") }}</Button
     >
   </SectionCard>
 </template>

@@ -11,13 +11,7 @@ import (
 
 func privateSocketDirectory(t *testing.T) string {
 	t.Helper()
-	workingDirectory, err := os.Getwd()
-	testutil.NoError(t, err)
-	directory, err := os.MkdirTemp(workingDirectory, ".uds-test-")
-	testutil.NoError(t, err)
-	testutil.NoError(t, os.Chmod(directory, 0o700))
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	return directory
+	return testutil.PrivateTempDir(t)
 }
 
 func TestRequirePeerUIDRejectsUnauthorizedProcess(t *testing.T) {

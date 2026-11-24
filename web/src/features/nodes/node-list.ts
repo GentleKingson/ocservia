@@ -1,4 +1,4 @@
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import type { LocationQuery, LocationQueryRaw } from "vue-router";
 
 // Filter buckets only hold values the API defines. Missing optional fields
@@ -29,8 +29,6 @@ export interface NodeListState {
 }
 
 const agentFilterValues = new Set<string>(nodeFilterGroups.agent);
-const extendedYearPrefix = /^\+?\d{5,}-/;
-const isoYearPrefix = /^\d{4}-/;
 
 export function nodeFilterValue(
   node: NodeObservedState,
@@ -101,15 +99,9 @@ export function countFilterValues(
   return counts;
 }
 
-// Orders heartbeats without forcing every value through Date: infinity and
-// years beyond four digits keep their textual meaning, anything else that
-// does not parse is unknown. Precision below milliseconds ties.
+// Missing or invalid timestamps sort last. Precision below milliseconds ties.
 export function heartbeatOrder(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  if (value === "infinity") return Number.POSITIVE_INFINITY;
-  if (value === "-infinity") return Number.NEGATIVE_INFINITY;
-  if (extendedYearPrefix.test(value)) return Number.MAX_VALUE;
-  if (!isoYearPrefix.test(value)) return undefined;
+  if (!value) return undefined;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? undefined : parsed;
 }

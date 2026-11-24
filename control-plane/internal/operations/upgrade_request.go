@@ -36,13 +36,13 @@ func (s *Service) PrepareAgentUpgrade(ctx context.Context, workspaceID, nodeID u
 		return AgentUpgradeTarget{}, fmt.Errorf("%w: %w", ErrNodeUnavailable, database.ErrUnsupported)
 	}
 	var nodeWorkspace uuid.UUID
-	var architecture string
+	var architecture, osRelease string
 	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := operationstore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		nodeWorkspace, architecture, _, err = store.UpgradeNode(ctx, nodeID)
+		nodeWorkspace, architecture, osRelease, err = store.UpgradeNode(ctx, nodeID)
 		return err
 	}); err != nil {
 		return AgentUpgradeTarget{}, fmt.Errorf("%w: %w", ErrNodeUnavailable, err)
@@ -53,7 +53,7 @@ func (s *Service) PrepareAgentUpgrade(ctx context.Context, workspaceID, nodeID u
 	if architecture == "" {
 		return AgentUpgradeTarget{}, ErrUpgradeArchitectureUnknown
 	}
-	digest, trusted := s.releaseCatalog.Lookup(version, architecture)
+	digest, trusted := s.releaseCatalog.Lookup(version, architecture, osRelease)
 	if !trusted {
 		return AgentUpgradeTarget{}, ErrUpgradeReleaseNotTrusted
 	}

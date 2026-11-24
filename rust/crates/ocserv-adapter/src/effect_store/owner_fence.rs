@@ -1,7 +1,7 @@
 use super::super::{
     AdapterError, OptionalExtension, OwnerFenceIdentity, TransactionBehavior, Uuid, params,
 };
-use super::hmac::authenticate_owner_fence_record;
+use super::hmac::{authenticate_owner_fence_record, verify_mac};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
 #[derive(Debug)]
@@ -87,7 +87,10 @@ pub(crate) fn enforce_owner_fence(
         .optional()
         .map_err(sqlite_io)?;
     if let Some(mut record) = existing {
-        if authenticate_owner_fence_record(hmac_key, &record) != record.record_hmac {
+        if !verify_mac(
+            &authenticate_owner_fence_record(hmac_key, &record),
+            &record.record_hmac,
+        ) {
             return Err(AdapterError::InvalidResource);
         }
         if identity.owner_epoch < record.owner_epoch {

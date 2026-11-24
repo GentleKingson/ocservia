@@ -68,14 +68,10 @@ type Config struct {
 	ControllerEndpointID     string
 	TransportTimeout         time.Duration
 	TransportQueue           int
-	OwnerLeaseTTL            time.Duration
 	UserOperationConcurrency int
 	LocalSimulator           bool
 	PprofAddress             string
-	TestResultCommitBarrier  string
-	TestPreSendBarrier       string
-	TestCommandLease         time.Duration
-	TestSchedulerEvidence    bool
+
 	CertificateSignerURL     string
 	CertificateSignerCAFile  string
 	CertificateSignerToken   string
@@ -94,7 +90,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		BodyLimit: 1 << 20, RequestTimeout: 15 * time.Second, ShutdownTimeout: 10 * time.Second,
 		LogLevelName: "info", TransportSocket: "/run/ocserv-platform/transportd.sock",
 		TrustSocket:      "/run/ocserv-trust/control-plane.sock",
-		TransportTimeout: 3 * time.Second, TransportQueue: 256, OwnerLeaseTTL: 30 * time.Second, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
+		TransportTimeout: 3 * time.Second, TransportQueue: 256, UserOperationConcurrency: 50, SessionTTL: 8 * time.Hour, CertificateSignerTimeout: 10 * time.Second,
 		AgentUpgradeReconcile: 30 * time.Minute,
 		EventStreams:          eventstream.DefaultConfig(),
 		HistoryRetention:      historyretention.DefaultPolicy(),
@@ -170,8 +166,8 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		if cfg.Environment == "production" || len(cfg.AuditEventKey) != 0 {
 			return Config{}, errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX is test-only and cannot override a key file")
 		}
-		key, err := hex.DecodeString(testKey)
-		if err != nil || len(key) != 32 || strings.ToLower(testKey) != testKey {
+		key, err := decode32ByteKey(testKey)
+		if err != nil {
 			return Config{}, errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX must contain exactly 32 bytes as lowercase hex")
 		}
 		cfg.AuditEventKey = key
@@ -189,8 +185,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		}
 	}
 	setString(lookup, "OCSERV_PPROF_ADDRESS", &cfg.PprofAddress)
-	setString(lookup, "OCSERV_TEST_RESULT_COMMIT_BARRIER_DIR", &cfg.TestResultCommitBarrier)
-	setString(lookup, "OCSERV_TEST_PRE_SEND_BARRIER_DIR", &cfg.TestPreSendBarrier)
 	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
 		return Config{}, err
 	}
@@ -209,35 +203,14 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	if err := setDuration(lookup, "OCSERV_TRANSPORT_TIMEOUT", &cfg.TransportTimeout); err != nil {
 		return Config{}, err
 	}
-	testCommandLeaseConfigured := false
-	if value, ok := lookup("OCSERV_TEST_COMMAND_LEASE"); ok {
-		parsed, err := time.ParseDuration(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_TEST_COMMAND_LEASE: %w", err)
-		}
-		if parsed == 0 {
-			return Config{}, errors.New("OCSERV_TEST_COMMAND_LEASE must not be zero")
-		}
-		cfg.TestCommandLease = parsed
-		testCommandLeaseConfigured = true
-	}
-	if cfg.TestPreSendBarrier != "" && !testCommandLeaseConfigured {
-		cfg.TestCommandLease = 10 * time.Second
-	}
 	if err := setDuration(lookup, "OCSERV_CERTIFICATE_SIGNER_TIMEOUT", &cfg.CertificateSignerTimeout); err != nil {
 		return Config{}, err
 	}
 	if err := setInt(lookup, "OCSERV_TRANSPORT_QUEUE_CAPACITY", &cfg.TransportQueue); err != nil {
 		return Config{}, err
 	}
-	if err := setDuration(lookup, "OCSERV_OWNER_LEASE_TTL", &cfg.OwnerLeaseTTL); err != nil {
-		return Config{}, err
-	}
 	if err := setDuration(lookup, "OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT", &cfg.AgentUpgradeReconcile); err != nil {
 		return Config{}, err
-	}
-	if cfg.OwnerLeaseTTL <= 0 {
-		cfg.OwnerLeaseTTL = 30 * time.Second
 	}
 	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
 		return Config{}, err
@@ -305,13 +278,6 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 			return Config{}, fmt.Errorf("OCSERV_LOCAL_SIMULATOR: %w", err)
 		}
 		cfg.LocalSimulator = parsed
-	}
-	if value, ok := lookup("OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_TEST_SCHEDULER_MAINTENANCE_EVIDENCE: %w", err)
-		}
-		cfg.TestSchedulerEvidence = parsed
 	}
 	if value, ok := lookup("OCSERV_BREAK_GLASS_ENABLED"); ok {
 		parsed, err := strconv.ParseBool(value)
@@ -508,31 +474,8 @@ func (c Config) Validate() error {
 			return errors.New("pprof requires environment=development or test and a loopback address")
 		}
 	}
-	if c.TestResultCommitBarrier != "" {
-		if c.Environment == "production" || !filepath.IsAbs(c.TestResultCommitBarrier) {
-			return errors.New("result commit barrier is test-only and requires an absolute directory")
-		}
-	}
-	if c.TestPreSendBarrier != "" {
-		if c.Environment == "production" || !filepath.IsAbs(c.TestPreSendBarrier) {
-			return errors.New("pre-send barrier is test-only and requires an absolute directory")
-		}
-	}
-	if c.TestCommandLease != 0 {
-		if c.TestPreSendBarrier == "" {
-			return errors.New("test command lease requires the pre-send barrier")
-		}
-		if c.Environment == "production" || c.TestCommandLease < 10*time.Second || c.TestCommandLease > 60*time.Second {
-			return errors.New("test command lease is test-only and must be between 10s and 60s")
-		}
-	} else if c.TestPreSendBarrier != "" {
-		return errors.New("pre-send barrier requires a test command lease")
-	}
 	if c.LocalSimulator && c.Environment == "production" {
 		return errors.New("local simulator is forbidden in production")
-	}
-	if c.TestSchedulerEvidence && c.Environment == "production" {
-		return errors.New("scheduler maintenance evidence is test-only")
 	}
 	if _, ok := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}[c.LogLevelName]; !ok {
 		return fmt.Errorf("invalid log level %q", c.LogLevelName)
@@ -551,24 +494,35 @@ func setString(lookup LookupEnv, name string, target *string) {
 }
 
 func setStringOrFile(lookup LookupEnv, name string, target *string) error {
+	value, configured, err := secretSetting(lookup, name)
+	if err == nil && configured {
+		*target = value
+	}
+	return err
+}
+
+func secretSetting(lookup LookupEnv, name string) (string, bool, error) {
 	value, hasValue := lookup(name)
 	path, hasFile := lookup(name + "_FILE")
 	if hasValue && hasFile {
-		return fmt.Errorf("%s and %s_FILE are mutually exclusive", name, name)
-	}
-	if hasValue {
-		*target = value
-		return nil
+		return "", false, fmt.Errorf("%s and %s_FILE are mutually exclusive", name, name)
 	}
 	if !hasFile {
-		return nil
+		return value, hasValue, nil
 	}
-	secret, err := readSecretFile(path)
+	value, err := readSecretFile(path)
 	if err != nil {
-		return fmt.Errorf("%s_FILE: %w", name, err)
+		return "", false, fmt.Errorf("%s_FILE: %w", name, err)
 	}
-	*target = secret
-	return nil
+	return value, true, nil
+}
+
+func openSecretAt(parentFD int, name string) (*os.File, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
 }
 
 func readSecretFile(path string) (string, error) {
@@ -582,7 +536,7 @@ func readSecretFile(path string) (string, error) {
 	if !before.Mode().IsRegular() {
 		return "", errors.New("secret file must be a regular file")
 	}
-	file, err := os.Open(path)
+	file, err := openSecretAt(unix.AT_FDCWD, path)
 	if err != nil {
 		return "", err
 	}
@@ -594,36 +548,35 @@ func readSecretFile(path string) (string, error) {
 	if !os.SameFile(before, after) {
 		return "", errors.New("secret file changed while opening")
 	}
-	return readSecretValue(file)
+	return readSecretValue(file, 4096)
 }
 
 func readBootstrapSecret(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", errors.New("secret file path must be absolute")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	file, err := openSecretAt(unix.AT_FDCWD, path)
 	if err != nil {
 		return "", err
 	}
-	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return "", err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0077 != 0 || stat.Nlink != 1 {
 		return "", errors.New("bootstrap secret must be launcher-owned, private, regular and not hard-linked")
 	}
-	return readSecretValue(file)
+	return readSecretValue(file, 4096)
 }
 
-func readSecretValue(file *os.File) (string, error) {
-	raw, err := io.ReadAll(io.LimitReader(file, 4097))
+func readSecretValue(file *os.File, max int64) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(file, max+1))
 	if err != nil {
 		return "", err
 	}
-	if len(raw) == 0 || len(raw) > 4096 {
-		return "", errors.New("secret file must contain 1..4096 bytes")
+	if len(raw) == 0 || int64(len(raw)) > max {
+		return "", fmt.Errorf("secret file must contain 1..%d bytes", max)
 	}
 	value := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
 	if value == "" || strings.ContainsRune(value, '\x00') {
@@ -663,18 +616,13 @@ func readStrictHexKeyFile(path string, expectedUID uint32) ([]byte, error) {
 		_ = unix.Close(directoryFD)
 		directoryFD = nextFD
 	}
-	fileFD, err := unix.Openat(directoryFD, components[len(components)-1], unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	file, err := openSecretAt(directoryFD, components[len(components)-1])
 	if err != nil {
 		return nil, fmt.Errorf("open key file: %w", err)
 	}
-	file := os.NewFile(uintptr(fileFD), path)
-	if file == nil {
-		_ = unix.Close(fileFD)
-		return nil, errors.New("open key file descriptor")
-	}
 	defer file.Close()
 	var stat unix.Stat_t
-	if err := unix.Fstat(fileFD, &stat); err != nil {
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return nil, fmt.Errorf("stat key file: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != expectedUID || stat.Nlink != 1 {
@@ -684,11 +632,14 @@ func readStrictHexKeyFile(path string, expectedUID uint32) ([]byte, error) {
 	if mode != 0o400 && mode != 0o600 {
 		return nil, errors.New("key mode must be 0400 or 0600")
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, 67))
+	value, err := readSecretValue(file, 66)
 	if err != nil {
 		return nil, err
 	}
-	value := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	return decode32ByteKey(value)
+}
+
+func decode32ByteKey(value string) ([]byte, error) {
 	if len(value) != 64 || strings.ToLower(value) != value {
 		return nil, errors.New("key must contain exactly 32 bytes as lowercase hex")
 	}
@@ -775,20 +726,9 @@ func setDuration(lookup LookupEnv, name string, target *time.Duration) error {
 }
 
 func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
-	value, hasValue := lookup(name)
-	path, hasFile := lookup(name + "_FILE")
-	if hasValue && hasFile {
-		return fmt.Errorf("%s and %s_FILE are mutually exclusive", name, name)
-	}
-	if hasFile {
-		secret, err := readSecretFile(path)
-		if err != nil {
-			return fmt.Errorf("%s_FILE: %w", name, err)
-		}
-		value, hasValue = secret, true
-	}
-	if !hasValue || value == "" {
-		return nil
+	value, configured, err := secretSetting(lookup, name)
+	if err != nil || !configured || value == "" {
+		return err
 	}
 	decoded, err := hex.DecodeString(value)
 	if err != nil {

@@ -12,7 +12,6 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"google.golang.org/protobuf/proto"
 )
@@ -59,15 +58,6 @@ func recoveryEnvelope(command operationstore.RecoveryCommand) (*agentv1.CommandE
 	return &envelope, nil
 }
 
-func recoveryTime(ctx context.Context, store operationstore.Store) (value.Timestamp, time.Time, error) {
-	at, err := store.RecoveryClock(ctx)
-	if err != nil {
-		return at, time.Time{}, err
-	}
-	clock, err := at.Time()
-	return at, clock, err
-}
-
 // A sending lease can expire before or after the network write. Its outcome
 // is always Unknown; automatic follow-up may only observe the Agent journal.
 func (s *Service) reconcileExpiredSending(ctx context.Context, store operationstore.Store, maxAttempts int) error {
@@ -78,7 +68,7 @@ func (s *Service) reconcileExpiredSending(ctx context.Context, store operationst
 	if s.signer == nil {
 		return errors.New("operations: reconciliation signer is unavailable")
 	}
-	at, now, err := recoveryTime(ctx, store)
+	now, err := store.RecoveryClock(ctx)
 	if err != nil {
 		return err
 	}
@@ -94,11 +84,8 @@ func (s *Service) reconcileExpiredSending(ctx context.Context, store operationst
 		if err != nil {
 			return err
 		}
-		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: at}
-		expires, err := command.ExpiresAt.Time()
-		if err != nil {
-			return err
-		}
+		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now}
+		expires := command.ExpiresAt
 		mode := envelope.GetDeliveryMode()
 		cap := command.AttemptLimit
 		if mode != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && command.CommandState != "queued" {
@@ -115,16 +102,13 @@ func (s *Service) reconcileExpiredSending(ctx context.Context, store operationst
 			}
 			update.Schedule = expires.After(now)
 		}
-		update.ExpiresAt, err = value.FromTime(expires)
-		if err != nil {
-			return err
-		}
+		update.ExpiresAt = expires.UTC()
 		changed, err := store.ReconcileExpiredSending(ctx, update)
 		if err != nil {
 			return err
 		}
 		if changed && command.CommandState == "queued" {
-			if err := markRecoveryProjection(ctx, store, command.OperationID, envelope, at); err != nil {
+			if err := markRecoveryProjection(ctx, store, command.OperationID, envelope, now); err != nil {
 				return err
 			}
 		}
@@ -145,15 +129,12 @@ func (s *Service) reconcileExpiredApplies(ctx context.Context, store operationst
 		if err != nil {
 			return err
 		}
-		at, now, err := recoveryTime(ctx, store)
+		now, err := store.RecoveryClock(ctx)
 		if err != nil {
 			return err
 		}
-		expires, err := command.ExpiresAt.Time()
-		if err != nil {
-			return err
-		}
-		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: at}
+		expires := command.ExpiresAt
+		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now}
 		if command.Attempts < command.AttemptLimit {
 			var nextDeadline time.Time
 			update.Envelope, nextDeadline, err = PrepareRecoveryEnvelope(envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, s.signer)
@@ -165,10 +146,7 @@ func (s *Service) reconcileExpiredApplies(ctx context.Context, store operationst
 			}
 			update.Schedule = expires.After(now)
 		}
-		update.ExpiresAt, err = value.FromTime(expires)
-		if err != nil {
-			return err
-		}
+		update.ExpiresAt = expires.UTC()
 		if err := store.ReconcileExpiredApply(ctx, update); err != nil {
 			return err
 		}
@@ -181,7 +159,7 @@ func (s *Service) reconcileMissingResults(ctx context.Context, store operationst
 	if err != nil || len(ids) == 0 {
 		return err
 	}
-	at, now, err := recoveryTime(ctx, store)
+	now, err := store.RecoveryClock(ctx)
 	if err != nil {
 		return err
 	}
@@ -206,11 +184,8 @@ func (s *Service) reconcileMissingResults(ctx context.Context, store operationst
 				continue
 			}
 		}
-		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: at, Schedule: command.Attempts < command.AttemptLimit}
-		expires, err := command.ExpiresAt.Time()
-		if err != nil {
-			return err
-		}
+		update := operationstore.RecoveryUpdate{Command: command, Envelope: command.Envelope, At: now, Schedule: command.Attempts < command.AttemptLimit}
+		expires := command.ExpiresAt
 		if update.Schedule {
 			if s.signer == nil {
 				return errors.New("operations: reconciliation signer is unavailable")
@@ -232,16 +207,13 @@ func (s *Service) reconcileMissingResults(ctx context.Context, store operationst
 				"prior_message_id", priorMessageID, "message_id", hex.EncodeToString(envelope.GetMessageId()),
 				"semantic_payload_sha256", hex.EncodeToString(envelope.GetSemanticPayloadSha256()))
 		}
-		update.ExpiresAt, err = value.FromTime(expires)
-		if err != nil {
-			return err
-		}
+		update.ExpiresAt = expires.UTC()
 		changed, err := store.ReconcileMissingResult(ctx, update)
 		if err != nil {
 			return err
 		}
 		if changed {
-			if err := markRecoveryProjection(ctx, store, command.OperationID, envelope, at); err != nil {
+			if err := markRecoveryProjection(ctx, store, command.OperationID, envelope, now); err != nil {
 				return err
 			}
 		}
@@ -257,7 +229,7 @@ func (s *Service) continueReconciliations(ctx context.Context, store operationst
 	if s.signer == nil {
 		return errors.New("operations: reconciliation signer is unavailable")
 	}
-	at, now, err := recoveryTime(ctx, store)
+	now, err := store.RecoveryClock(ctx)
 	if err != nil {
 		return err
 	}
@@ -286,7 +258,7 @@ func (s *Service) continueReconciliations(ctx context.Context, store operationst
 		if err != nil {
 			return err
 		}
-		changed, err := store.ContinueReconciliation(ctx, operationstore.RecoveryUpdate{Command: command, Envelope: payload, At: at, Schedule: true})
+		changed, err := store.ContinueReconciliation(ctx, operationstore.RecoveryUpdate{Command: command, Envelope: payload, At: now, Schedule: true})
 		if err != nil {
 			return err
 		}

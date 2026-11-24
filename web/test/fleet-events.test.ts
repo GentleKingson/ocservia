@@ -20,11 +20,6 @@ vi.mock("../src/api/events", () => ({
   listEvents: vi.fn(),
   platformEventsEvent: "ocservia:platform-events",
 }));
-vi.mock("../src/api/workspace", async (original) => ({
-  ...(await original<typeof import("../src/api/workspace")>()),
-  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
-  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
-}));
 vi.mock("../src/api/nodes", () => ({
   getNode: vi.fn(),
   listNodeIpBans: vi.fn(),
@@ -157,17 +152,14 @@ describe("fleet event stream", () => {
     store.$dispose();
   });
 
-  it("suspends the stream in the background and recovers a stale snapshot on focus", async () => {
+  it("suspends the stream in the background and recovers a stale snapshot when visible", async () => {
     vi.useFakeTimers();
-    let focused = true;
+    let hidden = false;
     vi.stubGlobal("window", new EventTarget());
-    vi.stubGlobal(
-      "document",
-      Object.assign(new EventTarget(), {
-        visibilityState: "visible",
-        hasFocus: () => focused,
-      }),
-    );
+    vi.stubGlobal("document", new EventTarget());
+    Object.defineProperty(document, "visibilityState", {
+      get: () => (hidden ? "hidden" : "visible"),
+    });
     const store = useFleetStore();
     await store.rebuild();
     await store.connect();
@@ -176,15 +168,15 @@ describe("fleet event stream", () => {
     vi.mocked(listNodes).mockRejectedValueOnce(new Error("offline"));
     await store.rebuild();
     expect(store.unavailable).toBe(true);
-    focused = false;
-    window.dispatchEvent(new Event("blur"));
+    hidden = true;
+    document.dispatchEvent(new Event("visibilitychange"));
     expect(oldStream.close).toHaveBeenCalled();
     const calls = vi.mocked(listNodes).mock.calls.length;
     oldStream.dispatchEvent(new MessageEvent("platform"));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(listNodes).toHaveBeenCalledTimes(calls);
-    focused = true;
-    window.dispatchEvent(new Event("focus"));
+    hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
     document.dispatchEvent(new Event("visibilitychange"));
     await vi.advanceTimersByTimeAsync(0);
     expect(listNodes).toHaveBeenCalledTimes(calls + 1);
@@ -200,15 +192,12 @@ describe("fleet event stream", () => {
 
   it("does not report a cancelled background read or reconnect after disposal", async () => {
     vi.useFakeTimers();
-    let focused = true;
+    let hidden = false;
     vi.stubGlobal("window", new EventTarget());
-    vi.stubGlobal(
-      "document",
-      Object.assign(new EventTarget(), {
-        visibilityState: "visible",
-        hasFocus: () => focused,
-      }),
-    );
+    vi.stubGlobal("document", new EventTarget());
+    Object.defineProperty(document, "visibilityState", {
+      get: () => (hidden ? "hidden" : "visible"),
+    });
     const store = useFleetStore();
     await store.rebuild();
     await store.connect();
@@ -233,15 +222,15 @@ describe("fleet event stream", () => {
     const pendingSelection = store.select("node");
     await vi.advanceTimersByTimeAsync(0);
     expect(store.selecting).toBe(true);
-    focused = false;
-    window.dispatchEvent(new Event("blur"));
+    hidden = true;
+    document.dispatchEvent(new Event("visibilitychange"));
     await pendingSelection;
     await vi.advanceTimersByTimeAsync(0);
     expect(store.loading).toBe(false);
     expect(store.selecting).toBe(false);
     store.$dispose();
-    focused = true;
-    window.dispatchEvent(new Event("focus"));
+    hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(store.unavailable).toBe(false);
     expect(FakeEventSource.instances).toHaveLength(1);

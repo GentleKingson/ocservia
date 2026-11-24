@@ -19,7 +19,6 @@ import (
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	telemetry "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
@@ -123,10 +122,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		fault.armed.Store(true)
 		d := claimOutbox(t, service)
 		fault.armed.Store(true)
-		if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
+		if err := service.MarkSent(ctx, d); err != nil {
 			t.Fatal("bookkeeping readback", err)
 		}
-		if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
+		if err := service.MarkSent(ctx, d); err != nil {
 			t.Fatal("bookkeeping replay", err)
 		}
 		if f.count(t, `SELECT count(*) FROM operation_events WHERE state='dispatched'`) != 1 {
@@ -221,7 +220,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 					f.exec(t, `UPDATE outbox_events SET attempts=$1 WHERE id=$2`, operationstore.ReconciliationAttemptLimit, dispatch.OutboxID)
 					f.exec(t, `UPDATE command_attempts SET attempt_number=$1 WHERE id=$2`, operationstore.ReconciliationAttemptLimit, dispatch.AttemptID)
 				}
-				past := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
+				past := time.Unix(0, 0).UTC()
 				f.exec(t, `UPDATE node_command_leases SET leased_until=$1 WHERE lease_token=$2`, past, dispatch.LeaseToken)
 				f.exec(t, `UPDATE outbox_events SET locked_until=$1 WHERE id=$2`, past, dispatch.OutboxID)
 				testutil.NoError(t, service.Reap(ctx, 3))
@@ -229,7 +228,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				if err != nil || op.State != "unknown" {
 					t.Fatal(op, err)
 				}
-				if err := service.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope); err == nil {
+				if err := service.MarkSent(ctx, dispatch); err == nil {
 					t.Fatal("expired claim accepted")
 				}
 				if attempt == 4 {
@@ -260,7 +259,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		operationID := uuid.MustParse(created.ID)
 		for i, backoff := range []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second} {
 			dispatch := claimOutbox(t, service)
-			testutil.NoError(t, service.MarkSentWithEnvelope(ctx, dispatch, dispatch.Envelope))
+			testutil.NoError(t, service.MarkSent(ctx, dispatch))
 			f.exec(t, `UPDATE commands SET state='unknown' WHERE id=$1`, dispatch.CommandID)
 			f.exec(t, `UPDATE operations SET state='unknown' WHERE id=$1`, operationID)
 			var envelope agentv1.CommandEnvelope
@@ -268,35 +267,31 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			payload, expires, err := operations.PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, f.signer)
 			testutil.NoError(t, err)
-			expiry, err := value.FromTime(expires)
-			testutil.NoError(t, err)
-			observed, err := value.FromTime(now)
-			testutil.NoError(t, err)
 			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
 				store, err := resultstore.Results(tx)
 				if err != nil {
 					return err
 				}
-				return store.ScheduleRecovery(ctx, dispatch.CommandID, payload, expiry, observed, true)
+				return store.ScheduleRecovery(ctx, dispatch.CommandID, payload, expires, now, true)
 			}))
-			var available, published value.Timestamp
+			var available time.Time
+			var published *time.Time
 			var limit int
 			testutil.NoError(t, f.owner.QueryRow(ctx, `SELECT available_at,published_at,receipt_recovery_attempt_limit FROM outbox_events WHERE id=$1`, dispatch.OutboxID).Scan(&available, &published, &limit))
 			if limit != 4 {
 				t.Fatalf("receipt cap=%d after attempt %d", limit, i+1)
 			}
 			if i == 3 {
-				if published != observed {
-					t.Fatalf("receipt fuse published=%+v want %+v", published, observed)
+				if published == nil || !published.Equal(now) {
+					t.Fatalf("receipt fuse published=%+v want %+v", published, now)
 				}
 				if jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute); err != nil || len(jobs) != 0 {
 					t.Fatal("receipt fuse allowed another claim", jobs, err)
 				}
 				break
 			}
-			want, err := observed.Add(backoff)
-			testutil.NoError(t, err)
-			if published.Valid || available != want {
+			want := now.Add(backoff)
+			if published != nil || !available.Equal(want) {
 				t.Fatalf("attempt %d available=%+v published=%+v want available=%+v", i+1, available, published, want)
 			}
 			f.exec(t, `UPDATE outbox_events SET available_at=now() WHERE id=$1`, dispatch.OutboxID)
@@ -326,7 +321,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			testutil.NoError(t, ingress.Ingest(ctx, event))
 		}
 		for range 2 {
-			if err := service.MarkSentWithEnvelope(ctx, d, d.Envelope); err != nil {
+			if err := service.MarkSent(ctx, d); err != nil {
 				t.Fatal("late bookkeeping", err)
 			}
 		}
@@ -359,7 +354,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 					f.exec(t, `UPDATE commands SET state=$1 WHERE operation_id=$2`, state, operation)
 				}
 				if published {
-					at := value.Timestamp{Valid: true, Micros: value.NegativeInfinity}
+					at := time.Unix(0, 0).UTC()
 					f.exec(t, `UPDATE outbox_events SET published_at=$1 WHERE command_id IN (SELECT id FROM commands WHERE operation_id=$2)`, at, operation)
 				}
 				return operation
@@ -369,8 +364,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		t.Run("quiescent-unknown-does-not-block-other-workspace", func(t *testing.T) {
 			f, service, seed := newFixture(t)
 			otherWorkspace := uuid.Must(uuid.NewV7())
-			at, err := value.FromTime(time.Now().UTC())
-			testutil.NoError(t, err)
+			at := time.Now().UTC()
 			f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox other workspace',$2,$3,$4)`, otherWorkspace, otherWorkspace.String(), at, at)
 			f.exec(t, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, otherWorkspace, outboxIdentityID, at)
 			node := uuid.Must(uuid.NewV7())
@@ -421,7 +415,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Fatal("recovery retries were not claimed", jobs, err)
 			}
 			for _, job := range jobs {
-				testutil.NoError(t, service.MarkSentWithEnvelope(context.Background(), job, job.Envelope))
+				testutil.NoError(t, service.MarkSent(context.Background(), job))
 			}
 			// The retries are sent with no result yet: their leases are gone
 			// and their operations are still Unknown, but they are executing.
@@ -466,7 +460,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			id := uuid.MustParse(created.ID)
 			if source == "certificate-release" {
 				f.exec(t, `UPDATE commands SET payload_type='certificate_revoke' WHERE operation_id=$1`, id)
-				f.exec(t, `UPDATE outbox_events SET available_at=$1`, value.Timestamp{Valid: true, Micros: value.PositiveInfinity})
+				f.exec(t, `UPDATE outbox_events SET available_at=$1`, time.Now().UTC().Add(24*time.Hour))
 			} else {
 				f.exec(t, `UPDATE nodes SET status='offline' WHERE id=$1`, node)
 			}
@@ -510,7 +504,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			if d.OperationID != id {
 				t.Fatal("released wrong operation", d)
 			}
-			testutil.NoError(t, service.MarkSentWithEnvelope(ctx, d, d.Envelope))
+			testutil.NoError(t, service.MarkSent(ctx, d))
 			// Repeated release/activation must not revive a published command.
 			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, change))
 			assertUnclaimed()
@@ -546,7 +540,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 	defer cancel()
 	nodes := []uuid.UUID{f.node(t), f.node(t)}
 	for _, node := range nodes {
-		_, err := connectionowner.AcquireBackend(ctx, f.backend, node, connectionowner.Identity{InstanceID: uuid.Must(uuid.NewV7()), Incarnation: 1}, uuid.Must(uuid.NewV7()), time.Minute)
+		_, err := connectionowner.AcquireBackend(ctx, f.backend, node, uuid.Must(uuid.NewV7()))
 		testutil.NoError(t, err)
 	}
 	// Fence rows have independent row locks for a deterministic two-row deadlock rendezvous.
@@ -559,7 +553,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 			done <- database.WithinRetry(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
 				local++
 				attempts.Add(1)
-				if n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
+				if n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
 					return err
 				} else if n != 1 {
 					return errors.New("missing first deadlock row")
@@ -572,7 +566,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET owner_epoch=owner_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
+				n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
 				if err == nil && n != 1 {
 					return errors.New("missing second deadlock row")
 				}
@@ -597,7 +591,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 		t.Fatal("did not exercise one real deadlock rollback", attempts.Load())
 	}
 	for _, node := range nodes {
-		if got := f.count(t, `SELECT owner_epoch FROM connection_owner_fencing WHERE node_id=$1`, node[:]); got != 3 {
+		if got := f.count(t, `SELECT session_epoch FROM connection_owner_fencing WHERE node_id=$1`, node[:]); got != 3 {
 			t.Fatal("partial transaction leaked", got)
 		}
 	}

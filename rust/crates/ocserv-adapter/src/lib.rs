@@ -34,7 +34,7 @@ use ocservia_agent_protocol::{
     ServiceStatus, Session, SessionList, UserList,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
+    SealedSecretPurpose, SealedSecretV1,
 };
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -51,8 +51,7 @@ const MAX_USER_FILE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: usize = 256 * 1024;
 const EFFECT_STORE_KEY_BYTES: usize = 32;
 const MAX_EFFECT_RECORDS: i64 = 65_536;
-const ARTIFACT_CHUNK_BYTES: usize = 256 * 1024;
-const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES: usize = 256 * 1024;
 const USER_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug)]
@@ -435,6 +434,7 @@ pub struct Adapter {
     user_file_lock: Arc<Mutex<()>>,
     config_plan_lock: Arc<Mutex<()>>,
     certificate_artifact_lock: Arc<Mutex<()>>,
+    effect_store: Arc<std::sync::Mutex<Option<EffectStore>>>,
     #[cfg(test)]
     config_apply_fault: Arc<AtomicU8>,
 }
@@ -449,9 +449,35 @@ impl Adapter {
             user_file_lock: Arc::new(Mutex::new(())),
             config_plan_lock: Arc::new(Mutex::new(())),
             certificate_artifact_lock: Arc::new(Mutex::new(())),
+            effect_store: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             config_apply_fault: Arc::new(AtomicU8::new(0)),
         }
+    }
+
+    pub(crate) fn with_effect_store<T>(
+        &self,
+        allow_initialize: bool,
+        run: impl FnOnce(&mut EffectStore) -> Result<T, AdapterError>,
+    ) -> Result<T, AdapterError> {
+        let mut slot = self
+            .effect_store
+            .lock()
+            .map_err(|_| AdapterError::Unavailable)?;
+        if slot.is_none() {
+            let store = if allow_initialize {
+                EffectStore::open_for_mutation(&self.resources)?
+            } else {
+                EffectStore::open_existing(&self.resources)?
+            };
+            *slot = Some(store);
+        }
+        let store = slot.as_mut().ok_or(AdapterError::Unavailable)?;
+        let result = run(store);
+        if matches!(result, Err(AdapterError::Io(_))) {
+            *slot = None;
+        }
+        result
     }
 
     /// Durably reserves one Controller-authorized privileged effect before it
@@ -466,7 +492,9 @@ impl Adapter {
         identity: AuthorizedEffectIdentity<'_>,
         owner_fence: OwnerFenceIdentity<'_>,
     ) -> Result<AuthorizedEffectDecision, AdapterError> {
-        EffectStore::open_for_mutation(&self.resources)?.prepare_authorized(identity, owner_fence)
+        self.with_effect_store(true, |store| {
+            store.prepare_authorized(identity, owner_fence)
+        })
     }
 
     /// Durably accepts a root-verified connection-owner term before any
@@ -481,7 +509,7 @@ impl Adapter {
         &self,
         owner_fence: OwnerFenceIdentity<'_>,
     ) -> Result<(), AdapterError> {
-        EffectStore::open_for_mutation(&self.resources)?.accept_owner_fence(owner_fence)
+        self.with_effect_store(true, |store| store.accept_owner_fence(owner_fence))
     }
 
     /// Reads an exact authenticated terminal response only after atomically
@@ -497,8 +525,9 @@ impl Adapter {
         identity: AuthorizedEffectIdentity<'_>,
         owner_fence: OwnerFenceIdentity<'_>,
     ) -> Result<Option<Vec<u8>>, AdapterError> {
-        EffectStore::open_for_mutation(&self.resources)?
-            .replay_authorized_after_fence(identity, owner_fence)
+        self.with_effect_store(true, |store| {
+            store.replay_authorized_after_fence(identity, owner_fence)
+        })
     }
 
     /// Persists the bounded successful response for exact replay without a
@@ -512,7 +541,17 @@ impl Adapter {
         identity: AuthorizedEffectIdentity<'_>,
         response: &[u8],
     ) -> Result<(), AdapterError> {
-        EffectStore::open_existing(&self.resources)?.complete_authorized(identity, response)
+        self.with_effect_store(false, |store| store.complete_authorized(identity, response))
+    }
+
+    /// Allocates the next durable, HMAC-authenticated monotonic receipt
+    /// sequence number for a newly settled privileged effect.
+    ///
+    /// # Errors
+    ///
+    /// Rejects uninitialized, tampered, or unavailable effect stores.
+    pub fn next_receipt_sequence(&self) -> Result<u64, AdapterError> {
+        self.with_effect_store(true, EffectStore::next_receipt_sequence)
     }
 
     /// Reads the exact authenticated terminal response for reconciliation.
@@ -525,7 +564,7 @@ impl Adapter {
         &self,
         identity: AuthorizedEffectIdentity<'_>,
     ) -> Result<Option<Vec<u8>>, AdapterError> {
-        EffectStore::open_existing(&self.resources)?.replay_authorized(identity)
+        self.with_effect_store(false, |store| store.replay_authorized(identity))
     }
 
     #[cfg(test)]
@@ -544,15 +583,29 @@ impl Adapter {
     /// This does not initialize stores, clean staging, or mutate ocserv.
     ///
     /// # Errors
-    /// Returns the same bounded resource/parser errors as ordinary snapshots.
-    pub async fn host_preflight(&self) -> Result<(), AdapterError> {
-        self.user_list().await?;
-        self.group_list().await?;
-        self.ocserv_version().await?;
-        self.config_fingerprint().await?;
-        self.service_status().await?;
-        self.session_list().await?;
-        self.ip_ban_list().await?;
+    /// Returns the first failing check's name and its bounded resource or parser error.
+    pub async fn host_preflight(&self) -> Result<(), (&'static str, AdapterError)> {
+        self.user_list()
+            .await
+            .map_err(|error| ("ocpasswd.users", error))?;
+        self.group_list()
+            .await
+            .map_err(|error| ("ocpasswd.groups", error))?;
+        self.ocserv_version()
+            .await
+            .map_err(|error| ("ocserv.version", error))?;
+        self.config_fingerprint()
+            .await
+            .map_err(|error| ("ocserv.config-fingerprint", error))?;
+        self.service_status()
+            .await
+            .map_err(|error| ("systemctl.ocserv-service-status", error))?;
+        self.session_list()
+            .await
+            .map_err(|error| ("occtl.show-users-json", error))?;
+        self.ip_ban_list()
+            .await
+            .map_err(|error| ("occtl.show-ip-bans-json", error))?;
         Ok(())
     }
 

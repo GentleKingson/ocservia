@@ -13,7 +13,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 )
@@ -67,16 +66,13 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if err != nil || principal.IdentityID != id {
 		t.Fatalf("session: %+v %v", principal, err)
 	}
-	// Stored infinite or extended-range expiry must never lengthen the finite
-	// lifetime authenticated by the signed cookie.
-	for _, micros := range []int64{value.PositiveInfinity, value.EndTimestamp - 1} {
-		if _, err := backend.Exec(ctx, `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, value.Timestamp{Micros: micros, Valid: true}, principal.SessionID); err != nil {
-			t.Fatal(err)
-		}
-		bounded, err := service.Authenticate(ctx, cookie)
-		if err != nil || !bounded.ExpiresAt.Truncate(time.Microsecond).Equal(principal.ExpiresAt) {
-			t.Fatalf("logical session expiry %d: %+v %v", micros, bounded, err)
-		}
+	// Stored later expiry must never lengthen the finite lifetime authenticated by the signed cookie.
+	if _, err := backend.Exec(ctx, `UPDATE auth_sessions SET expires_at=$1 WHERE id=$2`, time.Now().UTC().Add(365*24*time.Hour), principal.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := service.Authenticate(ctx, cookie)
+	if err != nil || !bounded.ExpiresAt.Truncate(time.Microsecond).Equal(principal.ExpiresAt) {
+		t.Fatalf("extended session expiry: %+v %v", bounded, err)
 	}
 	logout := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
 	logout.Header.Set("Origin", authTestOrigin)
@@ -107,13 +103,13 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if _, err := owner.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP management',$2,now(),now())`, workspace, name); err != nil {
 		t.Fatal(err)
 	}
-	adminName := "admin-" + name
-	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, password, workspace)
+	const adminName, bootstrapPassword = "admin", "nA6/X2kZ"
+	adminID, err := service.BootstrapLocalAdmin(ctx, adminName, bootstrapPassword, workspace)
 	testutil.NoError(t, err)
-	if _, err = service.BootstrapLocalAdmin(ctx, adminName, password, workspace); !errors.Is(err, auth.ErrLocalInitialized) {
+	if _, err = service.BootstrapLocalAdmin(ctx, adminName, bootstrapPassword, workspace); !errors.Is(err, auth.ErrLocalInitialized) {
 		t.Fatalf("repeat bootstrap: %v", err)
 	}
-	adminCookie, admin, err := service.AuthenticateLocal(ctx, adminName, password)
+	adminCookie, admin, err := service.AuthenticateLocal(ctx, adminName, bootstrapPassword)
 	testutil.NoError(t, err)
 	if admin.IdentityID != adminID {
 		t.Fatal("wrong bootstrap principal")
@@ -144,8 +140,14 @@ func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	if retired := call("/api/v1/local-users", `{}`, adminCookie); retired.Code != http.StatusNotFound {
 		t.Fatalf("retired local-users API remained reachable: %d", retired.Code)
 	}
-	newPassword := "a distinct replacement authentication password"
-	changed := call("/api/v1/auth/change-password", `{"current_password":"`+password+`","new_password":"`+newPassword+`"}`, adminCookie)
+	changePassword := func(password string) *httptest.ResponseRecorder {
+		return call("/api/v1/auth/change-password", `{"current_password":"`+bootstrapPassword+`","new_password":"`+password+`"}`, adminCookie)
+	}
+	if rejected := changePassword("f8V!q2x"); rejected.Code != http.StatusBadRequest {
+		t.Fatalf("seven-character password: %d %s", rejected.Code, rejected.Body)
+	}
+	const newPassword = "f8V!q2xR"
+	changed := changePassword(newPassword)
 	if changed.Code != http.StatusNoContent {
 		t.Fatalf("HTTP password change: %d %s", changed.Code, changed.Body)
 	}

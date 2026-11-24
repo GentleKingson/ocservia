@@ -15,7 +15,6 @@ import (
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
@@ -56,9 +55,9 @@ type Plan struct {
 	Warnings         []json.RawMessage `json:"warnings"`
 	CurrentUnchanged bool              `json:"current_unchanged"`
 	StagingCleaned   bool              `json:"staging_cleaned"`
-	CurrentHash      string            `json:"current_hash,omitempty"`
-	ExpiresAt        value.Timestamp   `json:"expires_at"`
-	CreatedAt        value.Timestamp   `json:"created_at"`
+	CurrentHash      string            `json:"-"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+	CreatedAt        time.Time         `json:"created_at"`
 }
 
 type ApplyRequest struct {
@@ -93,7 +92,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 		return Plan{}, false, ErrInvalid
 	}
 	var node configurationstore.Node
-	var capabilities []string
 	var hydrated Template
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		hydrated = request.Template
@@ -105,19 +103,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 		node, err = store.Node(ctx, request.NodeID)
 		if err != nil {
 			return err
-		}
-		capabilities, err = store.Capabilities(ctx, request.NodeID)
-		if err != nil {
-			return err
-		}
-		hasPlan := false
-		for _, capability := range capabilities {
-			if capability == configprofile.PlanCapability {
-				hasPlan = true
-			}
-		}
-		if !hasPlan {
-			return ErrCapability
 		}
 		for index := range hydrated.Directives {
 			ref := hydrated.Directives[index].SecretRef
@@ -150,7 +135,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 	if err != nil {
 		return Plan{}, false, err
 	}
-	rendered, err := renderComplete(RenderInput{Template: hydrated, OcservVersion: node.OcservVersion, Capabilities: capabilities}, request.NodeID, uint64(request.ExpectedRevision))
+	rendered, err := renderComplete(RenderInput{Template: hydrated, OcservVersion: node.OcservVersion}, request.NodeID, uint64(request.ExpectedRevision))
 	if err != nil {
 		return Plan{}, false, err
 	}
@@ -167,15 +152,14 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 		Action:          "config.plan",
 		Reason:          request.Reason,
 		Payload: operations.ConfigPlanPayload{
-			Candidate:         rendered.Candidate,
-			CandidateHash:     rendered.Hash[:],
-			PlanRevision:      uint64(request.ExpectedRevision),
-			CompleteCandidate: rendered.CompleteCandidate,
-			OcservVersion:     node.OcservVersion,
-			PlanCapabilities:  rendered.RequiredCapabilities,
-			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted, Warnings: rendered.Warnings, CreatedBy: request.ActorIdentityID},
+			Candidate:     rendered,
+			OcservVersion: node.OcservVersion,
+			PlanMetadata:  &operations.ConfigPlanMetadata{TemplateName: request.Template.Name, CandidateRedacted: rendered.Redacted(), Warnings: []string{}, CreatedBy: request.ActorIdentityID},
 		},
 	})
+	if errors.Is(err, operations.ErrCapabilityMissing) {
+		return Plan{}, false, ErrCapability
+	}
 	if err != nil {
 		return Plan{}, false, err
 	}
@@ -200,8 +184,8 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	plan := Plan{ID: stored.ID, WorkspaceID: stored.WorkspaceID, NodeID: stored.NodeID, OperationID: stored.OperationID, TemplateName: stored.TemplateName, ExpectedRevision: stored.ExpectedRevision, State: stored.State, CandidateHash: hex.EncodeToString(stored.CandidateHash), ExpiresAt: stored.ExpiresAt, CreatedAt: stored.CreatedAt}
-	if err := json.Unmarshal(stored.Warnings.Bytes(), &plan.Warnings); err != nil {
+	plan := Plan{ID: stored.ID, WorkspaceID: stored.WorkspaceID, NodeID: stored.NodeID, OperationID: stored.OperationID, TemplateName: stored.TemplateName, ExpectedRevision: stored.ExpectedRevision, State: stored.State, CandidateHash: hex.EncodeToString(stored.CandidateHash), ExpiresAt: stored.ExpiresAt.UTC(), CreatedAt: stored.CreatedAt.UTC()}
+	if err := json.Unmarshal(stored.Warnings, &plan.Warnings); err != nil {
 		return Plan{}, err
 	}
 	expectedDiff := safeDiff(stored.CandidateRedacted)
@@ -254,11 +238,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 	if err != nil {
 		return operations.Operation{}, false, err
 	}
-	now, err := value.FromTime(s.now())
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
-	if plan.Validation != "valid" || plan.CurrentHash == "" || !plan.ExpiresAt.Valid || plan.ExpiresAt.Micros <= now.Micros {
+	if plan.Validation != "valid" || plan.CurrentHash == "" || plan.ExpiresAt.IsZero() || !plan.ExpiresAt.After(s.now()) {
 		return operations.Operation{}, false, ErrStaleRevision
 	}
 	var input configurationstore.ApplyInput
@@ -280,18 +260,15 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 	if complete == nil {
 		return operations.Operation{}, false, ErrInvalid
 	}
-	candidate, err := configprofile.Canonical(complete.GetCandidate())
-	if err != nil {
+	candidate, err := configprofile.Normalize(complete.GetCandidate())
+	if err != nil || !bytes.Equal(candidate.Digest(), complete.GetCandidateHash()) || candidate.Revision() != uint64(plan.ExpectedRevision) {
 		return operations.Operation{}, false, ErrInvalid
 	}
 	materialized, err := hex.DecodeString(plan.MaterializedHash)
 	if err != nil || len(materialized) != 32 {
 		return operations.Operation{}, false, ErrInvalid
 	}
-	expires, err := plan.ExpiresAt.Time()
-	if err != nil {
-		return operations.Operation{}, false, ErrInvalid
-	}
+	expires := plan.ExpiresAt.UTC()
 	previousHash, err := hex.DecodeString(plan.CurrentHash)
 	if err != nil || len(previousHash) != 32 {
 		return operations.Operation{}, false, ErrInvalid
@@ -309,12 +286,9 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 		Action:          "config.apply",
 		Reason:          request.Reason,
 		Payload: operations.ConfigApplyPayload{
-			CompleteCandidate:   complete.GetCandidate(),
 			Candidate:           candidate,
-			CandidateHash:       complete.GetCandidateHash(),
 			ExpectedCurrentHash: previousHash,
 			MaterializedHash:    materialized,
-			PlanRevision:        uint64(plan.ExpectedRevision),
 			DesiredRevision:     uint64(input.DesiredRevision) + 1,
 			PlanExpiresAt:       timestamppb.New(expires),
 			ApplyMetadata:       &operations.ConfigApplyMetadata{PlanID: request.PlanID},

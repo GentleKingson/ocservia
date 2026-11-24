@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/google/uuid"
@@ -101,35 +100,24 @@ func (s telemetryStore) LockNode(ctx context.Context, node uuid.UUID) error {
 	return s.tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR NO KEY UPDATE`, node).Scan(&node)
 }
 
-func (s telemetryStore) ValidateJSON(ctx context.Context, documents []json.RawMessage) error {
-	encoded, err := json.Marshal(documents)
-	if err != nil {
-		return fmt.Errorf("%w: encode JSON documents", telemetrystore.ErrInvalidJSON)
+// InsertObservation writes documents through their JSONB input types. PostgreSQL
+// checks the bind parameters even for duplicate batches, before the CTE runs.
+func (s telemetryStore) InsertObservation(ctx context.Context, id, node uuid.UUID, sequence uint64, kind string, size int, snapshot telemetrystore.Snapshot, events []telemetrystore.SecurityEvent) (inserted, updated bool, err error) {
+	ids := make([]uuid.UUID, len(events))
+	times := make([]time.Time, len(events))
+	severities := make([]string, len(events))
+	types := make([]string, len(events))
+	details := make([]json.RawMessage, len(events))
+	for i, event := range events {
+		ids[i], times[i], severities[i], types[i], details[i] = event.ID, event.ObservedAt, event.Severity, event.Type, event.Detail
 	}
-	var documentCount int
-	err = s.tx.QueryRow(ctx, `SELECT jsonb_array_length($1::jsonb)`, string(encoded)).Scan(&documentCount)
-	if err != nil {
-		var postgresError *pgconn.PgError
-		if errors.As(err, &postgresError) && (strings.HasPrefix(postgresError.Code, "22") || postgresError.Code == "54001") {
-			return fmt.Errorf("%w: JSON document is not PostgreSQL-compatible", telemetrystore.ErrInvalidJSON)
-		}
-		return fmt.Errorf("validate telemetry JSON storage compatibility: %w", err)
-	}
-	if documentCount != len(documents) {
-		return fmt.Errorf("%w: JSON document count changed during validation", telemetrystore.ErrInvalidJSON)
-	}
-	return nil
-}
-
-func (s telemetryStore) InsertBatch(ctx context.Context, id, node uuid.UUID, sequence uint64, kind string, observed time.Time, size int) (bool, error) {
-	n, err := s.tx.Exec(ctx, `INSERT INTO telemetry_ingest_batches (batch_id,node_id,sequence,kind,observed_at,payload_bytes) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, id, node, sequence, kind, observed, size)
-	return n > 0, err
-}
-
-func (s telemetryStore) UpsertSnapshot(ctx context.Context, node uuid.UUID, snapshot telemetrystore.Snapshot) (bool, error) {
-	updated, err := s.tx.Exec(ctx, `INSERT INTO node_observed_snapshots
+	err = s.tx.QueryRow(ctx, `WITH batch AS (
+		INSERT INTO telemetry_ingest_batches (batch_id,node_id,sequence,kind,observed_at,payload_bytes)
+		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING 1
+	), snapshot AS (
+		INSERT INTO node_observed_snapshots
 		(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at,dropped_security,dropped_health,dropped_aggregate,dropped_raw)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$15,$8,$9,$10,$2,$11,$12,$13,$14)
+		SELECT $2,$5,$7,$8,$9,$10,$11,$19,$12::jsonb,$13::jsonb,$14::jsonb,$5,$15,$16,$17,$18 FROM batch WHERE true
 		ON CONFLICT (node_id) DO UPDATE SET observed_at=EXCLUDED.observed_at,received_at=now(),boot_id=EXCLUDED.boot_id,
 		agent_instance_id=EXCLUDED.agent_instance_id,agent_version=EXCLUDED.agent_version,ocserv_version=EXCLUDED.ocserv_version,
 		os_release=EXCLUDED.os_release,architecture=EXCLUDED.architecture,ocserv=EXCLUDED.ocserv,system=EXCLUDED.system,path=EXCLUDED.path,
@@ -138,16 +126,26 @@ func (s telemetryStore) UpsertSnapshot(ctx context.Context, node uuid.UUID, snap
 		dropped_health=GREATEST(node_observed_snapshots.dropped_health,EXCLUDED.dropped_health),
 		dropped_aggregate=GREATEST(node_observed_snapshots.dropped_aggregate,EXCLUDED.dropped_aggregate),
 		dropped_raw=GREATEST(node_observed_snapshots.dropped_raw,EXCLUDED.dropped_raw)
-		WHERE EXCLUDED.observed_at > node_observed_snapshots.observed_at`,
-		node, snapshot.ObservedAt, snapshot.BootID, snapshot.AgentInstance,
-		snapshot.AgentVersion, snapshot.OcservVersion, snapshot.OSRelease,
+		WHERE EXCLUDED.observed_at > node_observed_snapshots.observed_at
+		RETURNING 1
+	), security AS (
+		INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail)
+		SELECT e.id,$2,e.observed_at,e.severity,e.event_type,e.detail
+		FROM batch CROSS JOIN unnest($20::uuid[],$21::timestamptz[],$22::text[],$23::text[],$24::jsonb[])
+		AS e(id,observed_at,severity,event_type,detail)
+		WHERE true ON CONFLICT DO NOTHING
+	)
+	SELECT EXISTS(SELECT 1 FROM batch), EXISTS(SELECT 1 FROM snapshot)`,
+		id, node, sequence, kind, snapshot.ObservedAt, size,
+		snapshot.BootID, snapshot.AgentInstance, snapshot.AgentVersion, snapshot.OcservVersion, snapshot.OSRelease,
 		snapshot.Ocserv, snapshot.System, snapshot.Path,
-		snapshot.Security, snapshot.Health, snapshot.Aggregate, snapshot.Raw,
-		snapshot.Architecture)
-	if err != nil {
-		return false, err
+		snapshot.Security, snapshot.Health, snapshot.Aggregate, snapshot.Raw, snapshot.Architecture,
+		ids, times, severities, types, details).Scan(&inserted, &updated)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (strings.HasPrefix(pgErr.Code, "22") || pgErr.Code == "54001") {
+		return false, false, fmt.Errorf("%w: JSON document is not PostgreSQL-compatible", telemetrystore.ErrInvalidJSON)
 	}
-	return updated > 0, nil
+	return
 }
 
 func (s telemetryStore) ReplaceSessions(ctx context.Context, node uuid.UUID, observed time.Time, sessions []telemetrystore.Session) error {
@@ -238,7 +236,6 @@ func (s telemetryStore) ReplaceUsers(ctx context.Context, node uuid.UUID, observ
 	usernames := make([]string, len(users))
 	enabled := make([]bool, len(users))
 	revisions := make([]int64, len(users))
-	fingerprints := make([][]byte, len(users))
 	for i, user := range users {
 		if user.Revision > math.MaxInt64 {
 			return database.ErrConstraint
@@ -246,12 +243,11 @@ func (s telemetryStore) ReplaceUsers(ctx context.Context, node uuid.UUID, observ
 		usernames[i] = user.Username
 		enabled[i] = user.Enabled
 		revisions[i] = int64(user.Revision)
-		fingerprints[i] = user.Fingerprint
 	}
-	_, err := s.tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)
-		SELECT $1,u.username,u.enabled,u.revision,u.fingerprint,$6
-		FROM unnest($2::text[],$3::boolean[],$4::bigint[],$5::bytea[]) AS u(username,enabled,revision,fingerprint)`,
-		node, usernames, enabled, revisions, fingerprints, observed)
+	_, err := s.tx.Exec(ctx, `INSERT INTO observed_users(node_id,username,enabled,revision,observed_at)
+		SELECT $1,u.username,u.enabled,u.revision,$5
+		FROM unnest($2::text[],$3::boolean[],$4::bigint[]) AS u(username,enabled,revision)`,
+		node, usernames, enabled, revisions, observed)
 	return err
 }
 
@@ -288,44 +284,23 @@ func (s telemetryStore) ReplaceGroups(ctx context.Context, node uuid.UUID, group
 	for start := 0; start < len(groups); start += chunkSize {
 		chunk := groups[start:min(start+chunkSize, len(groups))]
 		var query strings.Builder
-		query.Grow(84 + len(chunk)*28)
-		query.WriteString(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at) VALUES `)
-		args := make([]any, 1, 1+len(chunk)*5)
+		query.Grow(72 + len(chunk)*24)
+		query.WriteString(`INSERT INTO observed_groups(node_id,group_name,members,revision,observed_at) VALUES `)
+		args := make([]any, 1, 1+len(chunk)*4)
 		args[0] = node
 		for i, g := range chunk {
 			if i > 0 {
 				query.WriteByte(',')
 			}
-			base := 2 + i*5
-			fmt.Fprintf(&query, "($1,$%d,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4)
-			args = append(args, g.Name, g.Members, g.Revision, g.Fingerprint, g.ObservedAt)
+			base := 2 + i*4
+			fmt.Fprintf(&query, "($1,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3)
+			args = append(args, g.Name, g.Members, g.Revision, g.ObservedAt)
 		}
 		if _, err := s.tx.Exec(ctx, query.String(), args...); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func (s telemetryStore) InsertSecurity(ctx context.Context, node uuid.UUID, events []telemetrystore.SecurityEvent) error {
-	if len(events) == 0 {
-		return nil
-	}
-	var query strings.Builder
-	query.WriteString("INSERT INTO telemetry_security_events(event_id,node_id,observed_at,severity,event_type,detail) VALUES ")
-	args := make([]any, 1, 1+5*len(events))
-	args[0] = node
-	for i, e := range events {
-		if i > 0 {
-			query.WriteByte(',')
-		}
-		base := 2 + 5*i
-		fmt.Fprintf(&query, "($%d,$1,$%d,$%d,$%d,$%d)", base, base+1, base+2, base+3, base+4)
-		args = append(args, e.ID, e.ObservedAt, e.Severity, e.Type, e.Detail)
-	}
-	query.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := s.tx.Exec(ctx, query.String(), args...)
-	return err
 }
 
 func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.UUID, samples []telemetrystore.Sample) error {
@@ -349,11 +324,8 @@ func (s telemetryStore) InsertHistory(ctx context.Context, nodeID, batchID uuid.
 	return nil
 }
 
-func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]telemetrystore.Point, error) {
-	if err := since.Validate(); err != nil {
-		return nil, err
-	}
-	if !since.Valid {
+func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]telemetrystore.Point, error) {
+	if since.IsZero() {
 		return nil, database.ErrConstraint
 	}
 	query := `SELECT sampled_at,metric,1,value,value,value FROM (
@@ -393,14 +365,14 @@ func (s telemetryStore) MaintainHistory(ctx context.Context, now time.Time) erro
 	// The trigger locks every affected queue key, even when it was already
 	// dirty. Read raw data in a fresh statement after locking the keys, so
 	// samples committed during selection are either included or leave a mark.
-	var keys value.JSONB
+	var keys []byte
 	if err := s.tx.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(d),'[]'::jsonb) FROM (
 		SELECT bucket_at,node_id,metric FROM telemetry_rollup_queue
 		ORDER BY bucket_at,node_id,metric LIMIT 4096 FOR UPDATE SKIP LOCKED
 	) d`).Scan(&keys); err != nil {
 		return err
 	}
-	if string(keys.Bytes()) != "[]" {
+	if string(keys) != "[]" {
 		if err := s.refreshRollups(ctx, keys); err != nil {
 			return err
 		}
@@ -412,7 +384,7 @@ func (s telemetryStore) MaintainHistory(ctx context.Context, now time.Time) erro
 	return err
 }
 
-func (s telemetryStore) refreshRollups(ctx context.Context, keys value.JSONB) error {
+func (s telemetryStore) refreshRollups(ctx context.Context, keys []byte) error {
 	_, err := s.tx.Exec(ctx, `WITH dirty AS (
 		SELECT * FROM jsonb_to_recordset($1::jsonb) AS d(bucket_at timestamptz,node_id uuid,metric text)
 	), consumed AS (
@@ -524,7 +496,7 @@ func (s *UsageStore) PutCursor(ctx context.Context, nodeID uuid.UUID, sample use
 	return err
 }
 
-func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor, period string, start value.Timestamp, rx, tx int64) error {
+func (s *UsageStore) AddUsage(ctx context.Context, nodeID uuid.UUID, sample userstore.UsageCursor, period string, start time.Time, rx, tx int64) error {
 	_, err := s.tx.Exec(ctx, `INSERT INTO observed_user_usage(node_id,username,period,period_start,rx_bytes,tx_bytes,observed_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(node_id,username,period,period_start) DO UPDATE SET rx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.rx_bytes::numeric+EXCLUDED.rx_bytes::numeric)::bigint,tx_bytes=LEAST(9223372036854775807::numeric,observed_user_usage.tx_bytes::numeric+EXCLUDED.tx_bytes::numeric)::bigint,observed_at=GREATEST(observed_user_usage.observed_at,EXCLUDED.observed_at)`, nodeID, sample.Username, period, start, rx, tx, sample.ObservedAt)
 	return err
 }

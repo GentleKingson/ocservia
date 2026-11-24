@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
-use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    PrivdAttestationRegistrationV1, PrivdReceiptVersion,
-};
+use ocservia_contracts::generated::ocserv::platform::agent::v1::PrivdAttestationRegistrationV1;
 use ocservia_ocserv_adapter::{Adapter, FixedResources, Limits};
 use ocservia_privd::{ServerConfig, bind_socket, remove_socket, serve};
 use ocservia_privd_attestation::{key_id, load_or_create_signing_key, sign_registration};
@@ -43,8 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Err(invalid("--host-preflight accepts no additional arguments").into());
         }
         let adapter = Adapter::new(FixedResources::default(), Limits::default());
-        if let Err(error) = adapter.host_preflight().await {
-            eprintln!("host preflight failed: {error}");
+        if let Err((check, error)) = adapter.host_preflight().await {
+            eprintln!("host preflight failed: check={check}: {error}");
             eprintln!(
                 "Check the named resource and ocserv/occtl access; correct it deliberately, then rerun. No host state was changed."
             );
@@ -104,7 +102,7 @@ fn attestation_registration(
     let key = load_or_create_signing_key(&key_path, owner)?;
     let registration = sign_registration(
         PrivdAttestationRegistrationV1 {
-            version: PrivdReceiptVersion::V1.into(),
+            version: 1,
             node_id: node_id.as_bytes().to_vec(),
             privd_attestation_key_id: key_id(&key.verifying_key()),
             public_key: key.verifying_key().as_bytes().to_vec(),
@@ -430,12 +428,7 @@ mod tests {
 
     #[test]
     fn installed_binary_emits_root_key_registration_proof() {
-        let directory = std::env::current_dir()
-            .expect("current directory")
-            .join(format!(".privd-registration-test-{}", Uuid::now_v7()));
-        fs::create_dir(&directory).expect("create key directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("secure key directory mode");
+        let directory = ocservia_test_support::PrivateTempDir::new("privd-reg");
         let node_id = Uuid::now_v7();
         let output = attestation_registration(
             [
@@ -454,8 +447,8 @@ mod tests {
         };
         let public_key = decode("public_key");
         let registration = PrivdAttestationRegistrationV1 {
-            version: i32::try_from(output["version"].as_i64().expect("registration version"))
-                .expect("version fits i32"),
+            version: u32::try_from(output["version"].as_u64().expect("registration version"))
+                .expect("version fits u32"),
             node_id: node_id.as_bytes().to_vec(),
             privd_attestation_key_id: output["key_id"]
                 .as_str()
@@ -476,18 +469,12 @@ mod tests {
                 &Signature::from_slice(&registration.signature).expect("Ed25519 signature"),
             )
             .expect("root registration signature");
-        fs::remove_dir_all(directory).expect("remove key fixture");
     }
 
     #[test]
     #[allow(clippy::too_many_lines)]
     fn production_startup_rejects_reused_or_mismatched_sealing_keys() {
-        let directory = std::env::current_dir()
-            .expect("current directory")
-            .join(format!(".privd-sealing-test-{}", Uuid::now_v7()));
-        fs::create_dir(&directory).expect("create secure key directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("secure key directory mode");
+        let directory = ocservia_test_support::PrivateTempDir::new("privd-seal");
         let command_key = directory.join("controller.pem");
         fs::write(
             &command_key,
@@ -583,6 +570,5 @@ mod tests {
         let reused = parse_args_from(arguments(&fingerprint).into_iter())
             .expect_err("reused RSA pair must fail startup");
         assert!(reused.to_string().contains("distinct RSA key pairs"));
-        fs::remove_dir_all(directory).expect("remove key fixtures");
     }
 }

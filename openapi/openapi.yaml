@@ -732,7 +732,8 @@ paths:
           in: query
           required: false
           schema:
-            $ref: "#/components/schemas/TelemetryTimestamp"
+            type: string
+            format: date-time
       responses:
         "200":
           description: At most 2000 chronological telemetry points.
@@ -1442,8 +1443,8 @@ paths:
                   type: string
                   format: password
                   writeOnly: true
-                  minLength: 15
-                  description: 15 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
+                  minLength: 8
+                  description: 8 or more Unicode code points, at most 1024 UTF-8 bytes; must pass the common, compromised and service-related password blocklist. Never normalized.
       responses:
         "204": { description: "Password changed, all old sessions revoked and cookie cleared. Log in again." }
         "400": { $ref: "#/components/responses/Problem" }
@@ -1786,11 +1787,14 @@ components:
           format: int64
           minimum: 1
         created_at:
-          $ref: "#/components/schemas/TelemetryTimestamp"
+          type: string
+          format: date-time
         updated_at:
-          $ref: "#/components/schemas/TelemetryTimestamp"
+          type: string
+          format: date-time
         expires_at:
-          $ref: "#/components/schemas/TelemetryTimestamp"
+          type: string
+          format: date-time
     SyntheticCommandRequest:
       type: object
       additionalProperties: false
@@ -1939,21 +1943,15 @@ components:
         observed_enabled: { type: boolean }
         desired_members:
           type: array
-          items: { type: [string, "null"] }
+          items: { type: string }
           maxItems: 4096
         observed_members:
           type: array
-          items: { type: [string, "null"] }
+          items: { type: string }
           maxItems: 4096
-        desired_member_dimensions:
-          $ref: "#/components/schemas/ResourceMemberDimensions"
-        observed_member_dimensions:
-          $ref: "#/components/schemas/ResourceMemberDimensions"
         desired_version: { type: integer, format: int64, minimum: 1 }
         desired_revision: { type: integer, format: int64, minimum: 1 }
         observed_revision: { type: integer, format: int64, minimum: 0 }
-        desired_fingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
-        observed_fingerprint: { type: string, pattern: "^[0-9a-f]{64}$" }
         convergence: { type: string, enum: [converged, pending, offline_pending, drifted] }
         operation_id: { $ref: "#/components/schemas/UuidV7" }
         operation_state: { $ref: "#/components/schemas/OperationState" }
@@ -1961,19 +1959,7 @@ components:
         recovery_mutation_kind:
           type: string
           enum: [user_create, user_disable, user_enable, user_password_rotate, group_apply]
-        observed_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-    ResourceMemberDimensions:
-      type: array
-      minItems: 1
-      maxItems: 6
-      description: Present only for multidimensional or non-one-based arrays. Members are in row-major order; absence means an ordinary one-based list or empty array.
-      items:
-        type: object
-        additionalProperties: false
-        required: [length, lower_bound]
-        properties:
-          length: { type: integer, format: int32, minimum: 1 }
-          lower_bound: { type: integer, format: int32 }
+        observed_at: { type: string, format: date-time }
     UserGroupStatePage:
       type: object
       additionalProperties: false
@@ -2037,9 +2023,8 @@ components:
         warnings: { type: array, items: {}, description: Stored JSONB warning array plus verified validation warning strings. }
         current_unchanged: { type: boolean }
         staging_cleaned: { type: boolean }
-        current_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
     ConfigApplyRequest:
       type: object
       additionalProperties: false
@@ -2092,7 +2077,7 @@ components:
         operation: { $ref: "#/components/schemas/Operation" }
         download_token: { type: string, minLength: 43, maxLength: 43, writeOnly: true }
         password: { type: string, minLength: 32, maxLength: 32, writeOnly: true }
-        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        expires_at: { type: string, format: date-time }
     SecretProviderRefRequest:
       type: object
       additionalProperties: false
@@ -2120,9 +2105,9 @@ components:
         key_path: { type: string, maxLength: 512 }
         version: { type: string, maxLength: 128 }
         state: { type: string, enum: [active, rotating, disabled, unavailable] }
-        rotated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        rotated_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Certificate:
       type: object
       additionalProperties: false
@@ -2137,13 +2122,12 @@ components:
         key_bits: { type: integer, format: int32, enum: [2048, 3072, 4096] }
         state: { type: string, enum: [csr_pending, csr_ready, signing, signer_unavailable, issued, expiring, expired, revoking, revocation_unknown, revoked, failed, unknown] }
         version: { type: integer, format: int64, minimum: 1 }
-        public_key_sha256: { type: string, format: byte, description: SHA-256 of the node-local public key. }
         serial_number: { type: string, maxLength: 128 }
-        not_before: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        not_after: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        revoked_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     UserPolicyRequest:
       type: object
       additionalProperties: false
@@ -2172,12 +2156,12 @@ components:
         quota_period: { type: string, enum: [none, monthly, lifetime] }
         quota_direction: { type: string, enum: [rx, tx, rxtx] }
         quota_bytes: { type: integer, format: int64, minimum: 0, maximum: 9007199254740991 }
-        expires_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        expires_at: { type: string, format: date-time }
         version: { type: integer, format: int64, minimum: 1 }
-        period_start: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        period_start: { type: string, format: date-time }
         observed_rx_bytes: { type: integer, format: int64, minimum: 0 }
         observed_tx_bytes: { type: integer, format: int64, minimum: 0 }
-        observed_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        observed_at: { type: string, format: date-time }
         exceeded: { type: boolean }
         expired: { type: boolean }
         convergence: { type: string, enum: [converged, pending, offline_pending, drifted] }
@@ -2248,8 +2232,8 @@ components:
         created_by: { $ref: "#/components/schemas/UuidV7" }
         current_batch: { type: integer, minimum: 0 }
         pause_code: { type: string }
-        created_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        updated_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
         nodes:
           type: array
           maxItems: 500
@@ -2566,8 +2550,8 @@ components:
         trust_status: { type: string, enum: [pending, active, revoked, offline] }
         connection_state: { type: string, enum: [online, offline] }
         freshness: { type: string, enum: [fresh, stale, never] }
-        observed_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
-        last_heartbeat_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        observed_at: { type: string, format: date-time }
+        last_heartbeat_at: { type: string, format: date-time }
         boot_id: { type: string, minLength: 1, maxLength: 128 }
         agent_instance_id: { $ref: "#/components/schemas/UuidV7" }
         agent_version: { type: string, minLength: 1, maxLength: 128 }
@@ -2620,7 +2604,7 @@ components:
         id: { type: string, minLength: 1, maxLength: 256 }
         username: { type: string, minLength: 1, maxLength: 256 }
         client_ip: { type: string, format: ip }
-        connected_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        connected_at: { type: string, format: date-time }
         bytes_in: { type: integer, format: int64, minimum: 0 }
         bytes_out: { type: integer, format: int64, minimum: 0 }
     NodeSessionPage:
@@ -2652,21 +2636,12 @@ components:
     TelemetryMetric:
       type: string
       enum: [cpu_usage_ratio, memory_used_bytes, network_rx_bytes, network_tx_bytes, session_count, connection_rtt_ms]
-    TelemetryTimestamp:
-      type: string
-      description: >-
-        Lossless PostgreSQL-range timestamp. Ordinary years use RFC 3339;
-        years outside 0000..9999 use an ISO 8601 signed six-digit year.
-        Infinite values are the strings infinity and -infinity. Responses
-        are normalized to UTC with microsecond precision. Keep this as text,
-        not a JavaScript Date, which cannot represent the complete domain.
-      example: "2026-09-10T04:34:56.123456Z"
     TelemetryPoint:
       type: object
       additionalProperties: false
       required: [at, metric, count, minimum, maximum, average]
       properties:
-        at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        at: { type: string, format: date-time }
         metric: { $ref: "#/components/schemas/TelemetryMetric" }
         count: { type: integer, format: int64, minimum: 1 }
         minimum: { type: number }
@@ -2702,7 +2677,8 @@ components:
         traceparent:
           $ref: "#/components/schemas/Traceparent"
         occurred_at:
-          $ref: "#/components/schemas/TelemetryTimestamp"
+          type: string
+          format: date-time
     PlatformEventPage:
       type: object
       additionalProperties: false
@@ -2763,7 +2739,7 @@ components:
       required: [id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, node_id, request_id, trace_id, command_id, result, reason, error_type, previous_event_hash, event_hash]
       properties:
         id: { type: string, format: uuid }
-        occurred_at: { $ref: "#/components/schemas/TelemetryTimestamp" }
+        occurred_at: { type: string, format: date-time }
         actor_type: { type: string }
         actor_id: { type: string }
         action: { type: string }

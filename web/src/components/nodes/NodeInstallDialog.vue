@@ -1,13 +1,10 @@
 <script setup lang="ts">
-import { ResponseError, type Workspace } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { Workspace } from "@/api/models";
 import { defaultWindow, useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { createNodeBootstrapToken } from "../../api/enrollment";
-import {
-  getWorkspace,
-  sameWorkspaceContext,
-  workspaceContext,
-} from "../../api/workspace";
+import { getWorkspace } from "../../api/workspace";
 import {
   installCommand,
   validInstallConfig,
@@ -34,13 +31,12 @@ const expires = ref("");
 const error = ref("");
 const attempted = ref(false);
 const pending = ref(false);
-let active = true;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 const controller = new AbortController();
+const isActive = () => !controller.signal.aborted;
 const command = computed(() => installCommand(config.value.release));
 
 function clear(): void {
-  active = false;
   controller.abort();
   clearTimeout(expiryTimer);
   token.value = "";
@@ -56,9 +52,9 @@ useEventListener(defaultWindow, "pagehide", close);
 onMounted(async () => {
   try {
     const selected = await getWorkspace();
-    if (active) workspace.value = selected;
+    if (isActive()) workspace.value = selected;
   } catch {
-    if (active) error.value = "installWorkspaceFailed";
+    if (isActive()) error.value = "installWorkspaceFailed";
   }
 });
 
@@ -68,20 +64,13 @@ function prepare(): void {
 }
 async function issue(): Promise<void> {
   if (
-    !active ||
+    !isActive() ||
     step.value !== 2 ||
     attempted.value ||
     !workspace.value ||
     !validInstallConfig(config.value)
   )
     return;
-  const context = workspaceContext();
-  if (context.id !== workspace.value.id) {
-    close();
-    return;
-  }
-  const owned = () =>
-    active && sameWorkspaceContext(context, workspaceContext());
   attempted.value = true;
   pending.value = true;
   error.value = "";
@@ -92,27 +81,25 @@ async function issue(): Promise<void> {
       config.value.name,
       controller.signal,
     );
-    if (!owned()) return;
-    const expiry = result.expiresAt.getTime();
+    if (!isActive()) return;
+    const expiry = Date.parse(result.expiresAt);
     if (
       !/^oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(result.token) ||
-      !Number.isFinite(expiry) ||
-      expiry <= Date.now()
+      !Number.isFinite(expiry)
     ) {
       error.value = "installUnknown";
       return;
     }
     token.value = result.token;
-    expires.value = result.expiresAt.toISOString();
-    expiryTimer = setTimeout(
-      () => {
-        token.value = "";
-        error.value = "installExpired";
-      },
-      Math.min(expiry - Date.now(), 900_000),
-    );
+    expires.value = result.expiresAt;
+    const remaining = expiry - Date.now();
+    const delay = remaining > 0 ? Math.min(remaining, 900_000) : 900_000;
+    expiryTimer = setTimeout(() => {
+      token.value = "";
+      error.value = "installExpired";
+    }, delay);
   } catch (cause) {
-    if (!owned()) return;
+    if (!isActive()) return;
     error.value =
       cause instanceof ResponseError && cause.response.status === 403
         ? "installForbidden"
@@ -120,7 +107,7 @@ async function issue(): Promise<void> {
           ? "installBadRequest"
           : "installUnknown";
   } finally {
-    if (owned()) pending.value = false;
+    if (isActive()) pending.value = false;
   }
 }
 </script>

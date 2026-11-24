@@ -9,7 +9,7 @@ import {
   Server,
   ShieldOff,
 } from "@lucide/vue";
-import { type NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import {
   computed,
   onBeforeUnmount,
@@ -252,7 +252,7 @@ function openPolicy(username: string): void {
             </Button>
           </div>
           <p
-            v-if="!actionAvailable('service.reload')"
+            v-if="actionExplanation('service.reload')"
             class="text-muted-foreground m-0 text-xs"
           >
             {{ $t("reload") }}: {{ actionExplanation("service.reload") }}
@@ -293,11 +293,11 @@ function openPolicy(username: string): void {
             </Button>
           </div>
           <p
-            v-if="operationBelongsToNode && fleet.operationError"
+            v-if="operationBelongsToNode && fleet.operationError !== undefined"
             class="text-destructive m-0 text-sm break-words"
             role="alert"
           >
-            {{ fleet.operationError }}
+            {{ fleet.operationError || $t("operationTrackingFailed") }}
           </p>
         </div>
       </NodeObservedDetails>
@@ -417,7 +417,7 @@ function openPolicy(username: string): void {
           </Button>
         </div>
         <p
-          v-if="!actionAvailable('config.plan')"
+          v-if="actionExplanation('config.plan')"
           class="text-muted-foreground m-0 text-xs"
         >
           {{ actionExplanation("config.plan") }}
@@ -442,7 +442,7 @@ function openPolicy(username: string): void {
           </Button>
         </div>
         <p
-          v-if="!actionAvailable('certificate.issue')"
+          v-if="actionExplanation('certificate.issue')"
           class="text-muted-foreground m-0 text-xs"
         >
           {{ actionExplanation("certificate.issue") }}

@@ -42,15 +42,10 @@ func TestCompleteProfileVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	planID := uuid.MustParse("019f6400-0000-7000-8000-000000000003")
-	nodeID := uuid.Must(uuid.FromBytes(candidate.NodeId))
 	expiry := &timestamppb.Timestamp{Seconds: 1790000000, Nanos: 123000}
 	materialized, current := bytes.Repeat([]byte{0x53}, 32), bytes.Repeat([]byte{0x64}, 32)
-	approval, err := configprofile.ApprovalHash(planID, nodeID, hash[:], materialized, current, 7, expiry)
-	if err != nil {
-		t.Fatal(err)
-	}
 	plan := &agentv1.CommandEnvelope{NodeId: candidate.NodeId, ExpectedRevision: 42, SemanticPayloadHashVersion: 2, Payload: &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{Candidate: candidate, CandidateHash: hash[:]}}}
-	apply := &agentv1.CommandEnvelope{NodeId: candidate.NodeId, ExpectedRevision: 42, SemanticPayloadHashVersion: 2, ApprovalId: planID[:], ApprovalRequestSha256: approval, Payload: &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: candidate, CandidateHash: hash[:], MaterializedHash: materialized, ExpectedCurrentHash: current, DesiredRevision: 8, PlanId: planID[:], PlanExpiresAt: expiry}}}
+	apply := &agentv1.CommandEnvelope{NodeId: candidate.NodeId, ExpectedRevision: 42, SemanticPayloadHashVersion: 2, Payload: &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{Candidate: candidate, CandidateHash: hash[:], MaterializedHash: materialized, ExpectedCurrentHash: current, DesiredRevision: 8, PlanId: planID[:], PlanExpiresAt: expiry}}}
 	wire := func(message proto.Message) string {
 		b, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
 		if err != nil {
@@ -65,7 +60,7 @@ func TestCompleteProfileVectors(t *testing.T) {
 		}
 		return hex.EncodeToString(h[:])
 	}
-	values := map[string]string{"candidate_proto": wire(candidate), "canonical": hex.EncodeToString(canonical), "candidate_hash": hex.EncodeToString(hash[:]), "approval_hash": hex.EncodeToString(approval), "plan_proto": wire(plan), "plan_semantic_hash": semantic(plan), "apply_proto": wire(apply), "apply_semantic_hash": semantic(apply)}
+	values := map[string]string{"candidate_proto": wire(candidate), "canonical": hex.EncodeToString(canonical), "candidate_hash": hex.EncodeToString(hash[:]), "plan_proto": wire(plan), "plan_semantic_hash": semantic(plan), "apply_proto": wire(apply), "apply_semantic_hash": semantic(apply)}
 	path := "../../../testdata/complete-config-v1.json"
 	if os.Getenv("UPDATE_COMPLETE_CONFIG_FIXTURES") == "1" {
 		encoded, err := json.MarshalIndent(values, "", "  ")
@@ -89,12 +84,6 @@ func TestCompleteProfileVectors(t *testing.T) {
 			t.Fatalf("%s mismatch: %s", name, actual)
 		}
 	}
-	if _, err = semanticpayload.HashV1(plan); err == nil {
-		t.Fatal("complete profile must not enter hash v1")
-	}
-	if _, err = semanticpayload.HashV1(apply); err == nil {
-		t.Fatal("complete apply must not enter hash v1")
-	}
 	original := semantic(apply)
 	for _, mutate := range []func(*agentv1.CommandEnvelope){
 		func(v *agentv1.CommandEnvelope) { v.GetCompleteConfigApply().MaterializedHash[0] ^= 1 },
@@ -102,8 +91,6 @@ func TestCompleteProfileVectors(t *testing.T) {
 		func(v *agentv1.CommandEnvelope) { v.GetCompleteConfigApply().DesiredRevision++ },
 		func(v *agentv1.CommandEnvelope) { v.GetCompleteConfigApply().PlanId[0] ^= 1 },
 		func(v *agentv1.CommandEnvelope) { v.GetCompleteConfigApply().PlanExpiresAt.Seconds++ },
-		func(v *agentv1.CommandEnvelope) { v.ApprovalId[0] ^= 1 },
-		func(v *agentv1.CommandEnvelope) { v.ApprovalRequestSha256[0] ^= 1 },
 	} {
 		altered := proto.Clone(apply).(*agentv1.CommandEnvelope)
 		mutate(altered)
@@ -170,21 +157,7 @@ func TestCompleteApplyWithoutHumanApproval(t *testing.T) {
 			DesiredRevision: 8, PlanId: plan[:], PlanExpiresAt: &timestamppb.Timestamp{Seconds: 1790000000},
 		}},
 	}
-	direct, err := semanticpayload.HashV2(envelope)
-	if err != nil {
+	if _, err := semanticpayload.HashV2(envelope); err != nil {
 		t.Fatalf("single administrator apply: %v", err)
-	}
-	envelope.ApprovalId = plan[:]
-	if _, err := semanticpayload.HashV2(envelope); err == nil {
-		t.Fatal("orphaned legacy approval ID accepted")
-	}
-	envelope.ApprovalRequestSha256 = bytes.Repeat([]byte{3}, 32)
-	legacy, err := semanticpayload.HashV2(envelope)
-	if err != nil || legacy == direct {
-		t.Fatalf("legacy approval binding lost: %v", err)
-	}
-	envelope.ApprovalId = nil
-	if _, err := semanticpayload.HashV2(envelope); err == nil {
-		t.Fatal("orphaned legacy approval hash accepted")
 	}
 }

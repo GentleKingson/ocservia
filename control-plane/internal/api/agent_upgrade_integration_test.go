@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"io"
 	"log/slog"
@@ -70,7 +71,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 			struct {
 				query string
 				args  []any
-			}{"INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,now(),$2,$3,'1.2.0','1.2.3','Debian GNU/Linux 12','amd64','{}','{}','{}',now())", []any{nodeID, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}},
+			}{"INSERT INTO node_observed_snapshots(node_id,observed_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,now(),$2,$3,'1.2.0','1.2.3','debian','amd64','{}','{}','{}',now())", []any{nodeID, uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())}},
 		)
 	}
 	fixtures = append(fixtures,
@@ -138,7 +139,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 
 	trustedDigest := bytes.Repeat([]byte{0x63}, 32)
 	manifest := filepath.Join(t.TempDir(), "agent-releases.json")
-	manifestJSON := `{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"` + hex.EncodeToString(trustedDigest) + `"}]}`
+	manifestJSON := `{"releases":[{"version":"2.0.0","architecture":"amd64","package_format":"deb","package_sha256":"` + hex.EncodeToString(trustedDigest) + `"}]}`
 	testutil.NoError(t, os.WriteFile(manifest, []byte(manifestJSON), 0o600))
 	catalog, err := releasecatalog.Load(manifest)
 	testutil.NoError(t, err)
@@ -472,5 +473,14 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	assertPausedSkip(batchSkipRolloutID, batchID, 1, "offline")
 	if countRolloutNodeUpgrades(batchSkipRolloutID, batchID) != 0 || countRolloutNodeUpgrades(batchSkipRolloutID, otherID) != 0 {
 		t.Fatal("an ineligible ordinary-batch node must hold it and every later batch")
+	}
+
+	// Second-layer in-transaction authorization must reject a revoked session even
+	// if HTTP authorization already succeeded before the session was revoked.
+	if _, err := pool.Exec(ctx, "UPDATE auth_sessions SET revoked_at=now() WHERE id=$1", operator.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.operations.ResumeAgentRollout(ctx, batchSkipRolloutID, operator.Subject, operator.IdentityID, operator.SessionID, "req-revoked-resume", testfixture.Traceparent); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("ResumeAgentRollout with revoked session = %v, want auth.ErrForbidden", err)
 	}
 }

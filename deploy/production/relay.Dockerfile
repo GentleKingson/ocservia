@@ -10,7 +10,7 @@ FROM toolchain AS build
 COPY --from=inputs /build/ ./
 COPY scripts/build-relay.sh ./scripts/
 COPY deploy/production/relay.Cargo.lock ./deploy/production/
-RUN bash scripts/build-relay.sh /usr/local/cargo
+RUN bash scripts/build-relay.sh /usr/local/cargo && rm -rf /usr/local/cargo/registry /usr/local/cargo/git
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS relay-runtime
 RUN apt-get -o APT::Update::Error-Mode=any update \

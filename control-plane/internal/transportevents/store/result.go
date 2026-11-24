@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -13,7 +13,7 @@ type ResultCommand struct {
 	Compacted             bool
 	Envelope              []byte
 	State                 string
-	CreatedAt, ExpiresAt  value.Timestamp
+	CreatedAt, ExpiresAt  time.Time
 	ReceiptRecovery       bool
 	DispatchInFlight      bool
 	AttemptID, LeaseToken uuid.UUID
@@ -25,11 +25,12 @@ type Result struct {
 	HashVersion                        int16
 	State                              string
 	ErrorCode                          *string
-	AcceptedAt, CompletedAt            value.Timestamp
+	AcceptedAt                         *time.Time
+	CompletedAt                        time.Time
 	Replayed                           bool
 	VerificationStatus                 string
 	FailureReason, KeyID               *string
-	EffectRecordID, ReceiptHash, Proof []byte
+	ReceiptHash, Proof                 []byte
 	EffectSequence                     *int64
 }
 
@@ -44,21 +45,23 @@ type ConfigOutcome struct {
 	FailureCode                               *string
 	Revision                                  uint64
 	CandidateHash                             []byte
-	At                                        value.Timestamp
+	At                                        time.Time
 }
 
 type CSROutcome struct {
-	CertificateID, OperationID                                         uuid.UUID
-	State                                                              string
-	DER, PublicHash, ReceiptHash, EffectRecordID, CSRHash, SubjectHash []byte
-	KeyID                                                              *string
-	At, VerifiedAt                                                     value.Timestamp
+	CertificateID, OperationID            uuid.UUID
+	State                                 string
+	DER, PublicHash, ReceiptHash, CSRHash []byte
+	KeyID                                 *string
+	At                                    time.Time
+	VerifiedAt                            *time.Time
 }
 
 type RevokeOutcome struct {
 	CertificateID, NodeID uuid.UUID
 	State, Reason         string
-	RevokedAt, At         value.Timestamp
+	RevokedAt             *time.Time
+	At                    time.Time
 }
 
 type ArtifactOutcome struct {
@@ -66,26 +69,26 @@ type ArtifactOutcome struct {
 	State                   string
 	Digest                  []byte
 	Size                    *int64
-	At                      value.Timestamp
+	At                      time.Time
 }
 
 type ResultStore interface {
 	LoadCommand(context.Context, uuid.UUID, uuid.UUID) (ResultCommand, error)
-	Receipt(context.Context, string, []byte, uint64) (uuid.UUID, []byte, error)
+	Receipt(context.Context, string, uint64) (uuid.UUID, []byte, error)
 	InsertResult(context.Context, Result) error
 	Workspace(context.Context, uuid.UUID) (uuid.UUID, error)
-	Alert(context.Context, uuid.UUID, uuid.UUID, string, string, value.Timestamp) error
-	UpdateCommand(context.Context, uuid.UUID, string, value.Timestamp) (bool, error)
-	UpdateOperation(context.Context, uuid.UUID, uuid.UUID, string, bool, value.Timestamp) (ResultOperation, error)
-	CompleteOutbox(context.Context, uuid.UUID, value.Timestamp) error
+	Alert(context.Context, uuid.UUID, uuid.UUID, string, string, time.Time) error
+	UpdateCommand(context.Context, uuid.UUID, string, time.Time) (bool, error)
+	UpdateOperation(context.Context, uuid.UUID, uuid.UUID, string, bool, time.Time) (ResultOperation, error)
+	CompleteOutbox(context.Context, uuid.UUID, time.Time) error
 	CloseDispatch(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) error
 	ConfigOutcome(context.Context, ConfigOutcome) (bool, error)
 	CSROutcome(context.Context, CSROutcome) error
 	RevokeOutcome(context.Context, RevokeOutcome) error
 	ArtifactOutcome(context.Context, ArtifactOutcome) error
-	UpgradeOutcome(context.Context, uuid.UUID, string, value.Timestamp, value.Timestamp) error
-	AppendEvent(context.Context, uuid.UUID, uuid.UUID, string, value.Timestamp) error
-	ScheduleRecovery(context.Context, uuid.UUID, []byte, value.Timestamp, value.Timestamp, bool) error
+	UpgradeOutcome(context.Context, uuid.UUID, string, *time.Time, time.Time) error
+	AppendEvent(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
+	ScheduleRecovery(context.Context, uuid.UUID, []byte, time.Time, time.Time, bool) error
 }
 
 func Results(tx database.Tx) (ResultStore, error) {

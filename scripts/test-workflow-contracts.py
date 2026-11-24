@@ -56,11 +56,12 @@ def check_step(errors, label, step, valid_profiles):
                         errors.append(f'{label}: unknown setup-tools profile "{profile}"')
     run_text = step.get('run')
     if isinstance(run_text, str):
-        for line in run_text.splitlines():
+        normalized_run = re.sub(r'\\\n\s*', ' ', run_text)
+        for line in normalized_run.splitlines():
             stripped = line.strip()
             if stripped.startswith('#'):
                 continue
-            for match in re.finditer(r'(?:^|\s)docker\s+run\b([^\n\\]*)', stripped):
+            for match in re.finditer(r'(?:^|\s)docker\s+run\b([^\n]*)', stripped):
                 tokens = match.group(1).split()
                 for token in tokens:
                     cleaned = token.strip('"\'')
@@ -134,19 +135,73 @@ def check_web_e2e_coverage(errors):
 
 
 def check_specific_contracts(errors):
-    products_text = (ROOT / '.github/workflows/release-products.yml').read_text(encoding='utf-8')
-    if "hashFiles('rust/Cargo.lock')" not in products_text:
-        errors.append('release-products.yml: native-packages setup-tools must pass a rust/Cargo.lock key-suffix')
-    if "'rust/vendor/**'" not in products_text:
-        errors.append('release-products.yml: agent-target-cache key must include rust/vendor/**')
-    if "github.event_name == 'push' && github.ref_name" in products_text:
-        errors.append('release-products.yml: reusable workflow must not couple to caller github.event_name/ref_name')
+    builder = (ROOT / '.github/workflows/release-agent.yml').read_text(encoding='utf-8')
+    if "hashFiles('rust/Cargo.lock')" not in builder:
+        errors.append('release-agent.yml: native-packages setup-tools must pass a rust/Cargo.lock key-suffix')
+    for workflow in ('release-agent.yml', 'release-controller.yml'):
+        if "github.event_name == 'push' && github.ref_name" in (ROOT / '.github/workflows' / workflow).read_text(encoding='utf-8'):
+            errors.append(f'{workflow}: reusable workflow must not couple to caller github.event_name/ref_name')
 
     security_doc = load_yaml(ROOT / '.github/workflows/security.yml')
     includes = security_doc['jobs']['scan']['strategy']['matrix']['include']
     for item in includes:
         if item.get('profile') == 'npm-security' and item.get('cache_npm') is True:
             errors.append('security.yml: npm-security audit must not enable cache-npm')
+        if item.get('name') == 'Go & Web licenses' and item.get('cache_npm') is True:
+            errors.append('security.yml: Go & Web licenses must not enable cache-npm')
+        if item.get('profile') == 'rust-security':
+            cmd_lines = [line.strip() for line in str(item.get('command', '')).splitlines()]
+            if any(line == 'cargo audit' for line in cmd_lines):
+                errors.append('security.yml: rust-security must not run duplicate bare cargo audit alongside cargo deny')
+
+    ci_doc = load_yaml(ROOT / '.github/workflows/ci.yml')
+    for wf_name, doc in (('ci.yml', ci_doc), ('security.yml', security_doc)):
+        on_triggers = doc.get('on') or doc.get(True) or {}
+        if isinstance(on_triggers, dict) and 'workflow_call' in on_triggers:
+            errors.append(f'{wf_name}: unused workflow_call trigger must stay removed')
+
+    recovery_steps = ci_doc['jobs']['database-recovery-full'].get('steps') or []
+    for step in recovery_steps:
+        if isinstance(step, dict) and step.get('uses') == './.github/actions/setup-tools':
+            errors.append('ci.yml: database-recovery-full must not invoke setup-tools')
+
+    controller_wf = (ROOT / '.github/workflows/release-controller.yml').read_text(encoding='utf-8')
+    for flag in ('scan-release-images.sh --update-db-only', 'scan-release-images.sh --use-prefetched-db'):
+        if flag not in controller_wf:
+            errors.append(f'release-controller.yml: must invoke {flag}')
+
+
+def check_required_go_tests(errors):
+    manifest = ROOT / 'scripts/required-go-tests.txt'
+    pkg_sources = {}
+    for lineno, raw_line in enumerate(manifest.read_text(encoding='utf-8').splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split()
+        if len(parts) != 3:
+            errors.append(f'required-go-tests.txt:{lineno}: expected 3 fields, got {len(parts)}')
+            continue
+        _, rel_pkg, test_spec = parts
+        pkg_dir = ROOT / 'control-plane' / rel_pkg
+        if not pkg_dir.is_dir():
+            errors.append(f'required-go-tests.txt:{lineno}: missing package directory control-plane/{rel_pkg}')
+            continue
+        if rel_pkg not in pkg_sources:
+            pkg_sources[rel_pkg] = '\n'.join(
+                p.read_text(encoding='utf-8') for p in sorted(pkg_dir.glob('*_test.go'))
+            )
+        src = pkg_sources[rel_pkg]
+        segments = test_spec.split('/')
+        parent = segments[0]
+        if not re.search(rf'\bfunc\s+{re.escape(parent)}\s*\(', src):
+            errors.append(f'required-go-tests.txt:{lineno}: missing Go test {parent} in control-plane/{rel_pkg}')
+            continue
+        for subtest in segments[1:]:
+            if f'"{subtest}"' not in src:
+                errors.append(
+                    f'required-go-tests.txt:{lineno}: missing Go subtest "{subtest}" in control-plane/{rel_pkg}'
+                )
 
 
 def main():
@@ -156,6 +211,7 @@ def main():
     check_actions(errors, valid_profiles)
     check_web_e2e_coverage(errors)
     check_specific_contracts(errors)
+    check_required_go_tests(errors)
     if errors:
         for err in errors:
             print(f'workflow-contract FAIL: {err}', file=sys.stderr)

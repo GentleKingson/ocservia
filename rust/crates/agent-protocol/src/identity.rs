@@ -6,18 +6,48 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use iroh::{EndpointId, SecretKey};
+use ocservia_canonical_cbor::Bytes;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    EnrollRequest, EnrollmentProofV1, SealedSecretPurpose, SealedSecretVersion,
+    EnrollRequest, EnrollmentProofV1, SealedSecretPurpose,
 };
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "endpoint.key";
 const CONTROLLER_FILE: &str = "controller.endpoint";
-const ENROLLMENT_PROOF_DOMAIN_V1: &[u8] = b"ocservia/agent-enrollment/v1\0";
+const ENROLLMENT_PROOF_DOMAIN_V1: &str = "ocservia/agent-enrollment/cbor.v1\0";
 pub const ENROLLMENT_PROOF_VERSION_V1: u32 = 1;
 pub const ENROLLMENT_PROTOCOL_MAJOR: u32 = 1;
 pub const ENROLLMENT_PROTOCOL_MINOR: u32 = 1;
+
+#[derive(Serialize)]
+struct CborSealingKey<'a> {
+    version: u32,
+    purpose: u32,
+    key_id: &'a str,
+    public_key_sha256: Bytes<'a>,
+}
+
+#[derive(Serialize)]
+struct CborEnrollmentProofV1<'a> {
+    proof_version: u32,
+    protocol_major: u32,
+    protocol_minor: u32,
+    token_sha256: Bytes<'a>,
+    endpoint_id: Bytes<'a>,
+    agent_version: &'a str,
+    os_release: &'a str,
+    ocserv_version: &'a str,
+    boot_id: &'a str,
+    agent_instance_id: Bytes<'a>,
+    capabilities: &'a [String],
+    sealing_keys: Vec<CborSealingKey<'a>>,
+    environment: &'a str,
+    nonce: Bytes<'a>,
+    time_seconds: i64,
+    time_nanos: u32,
+}
 
 /// A long-lived Agent endpoint key paired with its immutable controller pin.
 #[derive(Clone)]
@@ -157,7 +187,7 @@ pub fn enrollment_canonical_v1(request: &EnrollRequest) -> Result<Vec<u8>, io::E
     let mut sealing_keys = request.sealing_keys.clone();
     sealing_keys.sort_by_key(|key| key.purpose);
     if sealing_keys.iter().enumerate().any(|(index, key)| {
-        key.version != i32::from(SealedSecretVersion::V1)
+        key.version != 1
             || key.purpose
                 != i32::from(if index == 0 {
                     SealedSecretPurpose::UserPassword
@@ -182,66 +212,42 @@ pub fn enrollment_canonical_v1(request: &EnrollRequest) -> Result<Vec<u8>, io::E
         return Err(invalid("enrollment proof capabilities are invalid"));
     }
     let token_hash = Sha256::digest(request.token.as_bytes());
-    let mut encoded = Vec::with_capacity(1024);
-    encoded.extend_from_slice(ENROLLMENT_PROOF_DOMAIN_V1);
-    write_u32(&mut encoded, ENROLLMENT_PROOF_VERSION_V1);
-    write_u32(&mut encoded, request.enrollment_protocol_major);
-    write_u32(&mut encoded, request.enrollment_protocol_minor);
-    encoded.extend_from_slice(&token_hash);
-    encoded.extend_from_slice(&request.endpoint_id);
-    for value in [
-        &request.agent_version,
-        &request.os_release,
-        &request.ocserv_version,
-        &request.boot_id,
-    ] {
-        write_bytes(&mut encoded, value.as_bytes())?;
-    }
-    encoded.extend_from_slice(&request.agent_instance_id);
-    write_u32(
-        &mut encoded,
-        u32::try_from(capabilities.len()).map_err(|_| invalid("too many capabilities"))?,
-    );
-    for capability in capabilities {
-        write_bytes(&mut encoded, capability.as_bytes())?;
-    }
-    write_u32(
-        &mut encoded,
-        u32::try_from(sealing_keys.len()).map_err(|_| invalid("too many sealing keys"))?,
-    );
-    for key in sealing_keys {
-        write_u32(
-            &mut encoded,
-            u32::try_from(key.version).map_err(|_| invalid("sealing key version invalid"))?,
-        );
-        write_u32(
-            &mut encoded,
-            u32::try_from(key.purpose).map_err(|_| invalid("sealing key purpose invalid"))?,
-        );
-        write_bytes(&mut encoded, key.key_id.as_bytes())?;
-        write_bytes(&mut encoded, &key.public_key_sha256)?;
-    }
-    write_bytes(&mut encoded, request.environment.as_bytes())?;
-    write_bytes(&mut encoded, &request.nonce)?;
-    encoded.extend_from_slice(&timestamp.seconds.to_be_bytes());
-    write_u32(
-        &mut encoded,
-        u32::try_from(timestamp.nanos).map_err(|_| invalid("timestamp nanos are invalid"))?,
-    );
-    Ok(encoded)
-}
-
-fn write_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), io::Error> {
-    write_u32(
-        output,
-        u32::try_from(value.len()).map_err(|_| invalid("enrollment proof field is too large"))?,
-    );
-    output.extend_from_slice(value);
-    Ok(())
-}
-
-fn write_u32(output: &mut Vec<u8>, value: u32) {
-    output.extend_from_slice(&value.to_be_bytes());
+    let cbor_keys = sealing_keys
+        .iter()
+        .map(|key| {
+            Ok(CborSealingKey {
+                version: key.version,
+                purpose: u32::try_from(key.purpose)
+                    .map_err(|_| invalid("sealing key purpose invalid"))?,
+                key_id: &key.key_id,
+                public_key_sha256: Bytes(&key.public_key_sha256),
+            })
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    let time_nanos =
+        u32::try_from(timestamp.nanos).map_err(|_| invalid("timestamp nanos are invalid"))?;
+    ocservia_canonical_cbor::marshal(
+        ENROLLMENT_PROOF_DOMAIN_V1,
+        &CborEnrollmentProofV1 {
+            proof_version: ENROLLMENT_PROOF_VERSION_V1,
+            protocol_major: request.enrollment_protocol_major,
+            protocol_minor: request.enrollment_protocol_minor,
+            token_sha256: Bytes(token_hash.as_slice()),
+            endpoint_id: Bytes(&request.endpoint_id),
+            agent_version: &request.agent_version,
+            os_release: &request.os_release,
+            ocserv_version: &request.ocserv_version,
+            boot_id: &request.boot_id,
+            agent_instance_id: Bytes(&request.agent_instance_id),
+            capabilities: &capabilities,
+            sealing_keys: cbor_keys,
+            environment: &request.environment,
+            nonce: Bytes(&request.nonce),
+            time_seconds: timestamp.seconds,
+            time_nanos,
+        },
+    )
+    .map_err(|_| invalid("enrollment proof canonical encoding failed"))
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -358,13 +364,9 @@ fn read_endpoint(file: &mut File) -> Result<EndpointId, io::Error> {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_wrap)]
 const fn no_follow() -> i32 {
-    0x20_000
-}
-#[cfg(target_os = "macos")]
-const fn no_follow() -> i32 {
-    0x100
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 #[cfg(test)]
@@ -434,13 +436,13 @@ mod tests {
             proof: None,
             sealing_keys: vec![
                 SealingKeyDescriptorV1 {
-                    version: SealedSecretVersion::V1 as i32,
+                    version: 1,
                     purpose: SealedSecretPurpose::UserPassword as i32,
                     key_id: "fixture-user-key-v1".into(),
                     public_key_sha256: vec![0x11; 32],
                 },
                 SealingKeyDescriptorV1 {
-                    version: SealedSecretVersion::V1 as i32,
+                    version: 1,
                     purpose: SealedSecretPurpose::CertificateP12Password as i32,
                     key_id: "fixture-p12-key-v1".into(),
                     public_key_sha256: vec![0x22; 32],
@@ -459,5 +461,25 @@ mod tests {
             hex::encode(&request.proof.expect("proof").signature),
             fields[1]
         );
+    }
+
+    #[test]
+    fn no_follow_matches_platform_and_rejects_symlinked_identity() {
+        assert_eq!(
+            no_follow(),
+            i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
+        );
+        let directory = test_dir().with_extension("symlink");
+        let _ = std::fs::remove_dir_all(&directory);
+        let controller = SecretKey::generate().public();
+        Identity::provision(&directory, controller).expect("provision identity");
+        let real_key = directory.join("real.key");
+        std::fs::rename(directory.join(KEY_FILE), &real_key).expect("move key");
+        std::os::unix::fs::symlink(&real_key, directory.join(KEY_FILE)).expect("symlink key");
+        assert!(
+            Identity::provision(&directory, controller).is_err(),
+            "symlinked endpoint key must be rejected"
+        );
+        std::fs::remove_dir_all(directory).expect("remove identity fixture");
     }
 }

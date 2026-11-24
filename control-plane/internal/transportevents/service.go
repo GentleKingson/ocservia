@@ -6,12 +6,9 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"time"
@@ -44,13 +41,13 @@ type Event = eventstore.Event
 type SimulationJob = eventstore.SimulationJob
 
 type Service struct {
-	backend                database.Backend
-	now                    func() time.Time
-	signer                 *commandauth.Signer
-	commandRecovery        CommandRecoverer
-	recoveryAuthority      RecoveryAuthority
-	resultCommitBarrierDir string
-	localSimulator         bool
+	backend           database.Backend
+	now               func() time.Time
+	signer            *commandauth.Signer
+	commandRecovery   CommandRecoverer
+	recoveryAuthority RecoveryAuthority
+	resultCommitFault
+	localSimulator bool
 }
 
 // CommandRecoverer is the narrow business-layer hook used after transportd
@@ -65,7 +62,7 @@ type CommandRecoverer interface {
 // exact local session term. Database ownership is rechecked by CommandRecoverer
 // inside the state-changing transaction.
 type RecoveryAuthority interface {
-	OwnsTerm(nodeID, connectionID [16]byte, ownerEpoch int64) bool
+	OwnsTerm(nodeID, connectionID [16]byte, sessionEpoch uint64) bool
 }
 
 const (
@@ -102,62 +99,6 @@ func NewBackendWithCommandRecovery(backend database.Backend, signer *commandauth
 // routine heartbeats do not run simulation updates.
 func (s *Service) SetLocalSimulator(enabled bool) {
 	s.localSimulator = enabled
-}
-
-// EnableResultCommitBarrier configures the development-harness barrier used
-// to stop a validated command result inside its still-open database
-// transaction. Production configuration rejects this hook before startup.
-func (s *Service) EnableResultCommitBarrier(directory string) error {
-	info, err := os.Stat(directory)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return errors.New("result commit barrier path is not a directory")
-	}
-	s.resultCommitBarrierDir = directory
-	return nil
-}
-
-func (s *Service) waitAtResultCommitBarrier(ctx context.Context, event *transportv1.TransportEvent, observedAt time.Time) error {
-	if s.resultCommitBarrierDir == "" || event.GetType() != transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT {
-		return nil
-	}
-	armed, err := os.ReadFile(filepath.Join(s.resultCommitBarrierDir, "arm"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read result commit barrier: %w", err)
-	}
-	var result agentv1.CommandResult
-	if err := proto.Unmarshal(event.GetPayload(), &result); err != nil {
-		return nil
-	}
-	commandID, err := uuid.FromBytes(result.GetCommandId())
-	if err != nil || string(bytes.TrimSpace(armed)) != commandID.String() {
-		return nil
-	}
-	received := []byte(commandID.String() + "\n" + observedAt.UTC().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(filepath.Join(s.resultCommitBarrierDir, "received"), received, 0o600); err != nil {
-		return fmt.Errorf("signal result commit barrier: %w", err)
-	}
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			release, readErr := os.ReadFile(filepath.Join(s.resultCommitBarrierDir, "release"))
-			if readErr == nil && string(bytes.TrimSpace(release)) == commandID.String() {
-				return nil
-			}
-			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-				return fmt.Errorf("read result commit barrier release: %w", readErr)
-			}
-		}
-	}
 }
 
 func invalidCommandResult(detail string) error {
@@ -325,37 +266,6 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 	}
 }
 
-// legacySyntheticPayloadHash preserves the historical UNSPECIFIED hash for
-// synthetic Noop/Echo commands. Versioned canonical hashes use semanticpayload.
-func legacySyntheticPayloadHash(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
-	var capability string
-	var payload []byte
-	var err error
-	switch {
-	case envelope.GetSyntheticNoop() != nil:
-		capability = "synthetic.noop"
-		payload, err = proto.Marshal(envelope.GetSyntheticNoop())
-	case envelope.GetSyntheticEcho() != nil:
-		capability = "synthetic.echo"
-		payload, err = proto.Marshal(envelope.GetSyntheticEcho())
-	default:
-		return [sha256.Size]byte{}, errors.New("command result payload type is not reconcilable")
-	}
-	if err != nil {
-		return [sha256.Size]byte{}, fmt.Errorf("encode command payload for result verification: %w", err)
-	}
-	hash := sha256.New()
-	_, _ = hash.Write([]byte(capability))
-	_, _ = hash.Write(envelope.GetNodeId())
-	var revision [8]byte
-	binary.BigEndian.PutUint64(revision[:], envelope.GetExpectedRevision())
-	_, _ = hash.Write(revision[:])
-	_, _ = hash.Write(payload)
-	var result [sha256.Size]byte
-	copy(result[:], hash.Sum(nil))
-	return result, nil
-}
-
 func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
 	ids := make([]uuid.UUID, 5)
 	for index := range ids {
@@ -429,12 +339,12 @@ func eventName(value transportv1.TransportEventType) (string, error) {
 
 func connectedOwnerTerm(event *transportv1.TransportEvent) ([16]byte, bool, error) {
 	connection := event.GetConnectionId()
-	epoch := event.GetOwnerEpoch()
+	epoch := event.GetSessionEpoch()
 	if len(connection) == 0 && epoch == 0 {
 		return [16]byte{}, false, nil
 	}
 	if len(connection) != 16 || epoch == 0 || epoch > math.MaxInt64 {
-		return [16]byte{}, false, errors.New("connected owner term must contain a 16-byte connection_id and positive owner_epoch")
+		return [16]byte{}, false, errors.New("connected owner term must contain a 16-byte connection_id and positive session_epoch")
 	}
 	id, err := uuid.FromBytes(connection)
 	if err != nil || id.Version() != 7 {

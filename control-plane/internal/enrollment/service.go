@@ -20,7 +20,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/google/uuid"
@@ -114,15 +113,8 @@ func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	}
 	digest := sha256.Sum256([]byte(encoded))
 	now := s.now().UTC()
-	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: now.Add(ttl)}
-	at, err := value.FromTime(now)
-	if err != nil {
-		return Token{}, err
-	}
-	expires, err := at.Add(ttl)
-	if err != nil {
-		return Token{}, err
-	}
+	expires := now.Add(ttl)
+	token := Token{ID: uuid.Must(uuid.NewV7()), Value: encoded, ExpiresAt: expires}
 	var expectedName *string
 	if spec.ExpectedNodeName != "" {
 		expectedName = &spec.ExpectedNodeName
@@ -142,7 +134,7 @@ func (s *Service) createBootstrapToken(ctx context.Context, spec BootstrapTokenS
 	if err := auth.AuthorizeMutationTx(ctx, tx, spec.ActorIdentityID, spec.ActorSessionID, spec.WorkspaceID); err != nil {
 		return Token{}, err
 	}
-	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: at})
+	err = store.InsertToken(ctx, enrollmentstore.Token{ID: token.ID, WorkspaceID: spec.WorkspaceID, Hash: digest[:], Environment: spec.Environment, ExpectedName: expectedName, ExpectedEndpoint: spec.ExpectedEndpointID, ExpiresAt: expires, CreatedBy: spec.ActorID, CreatedAt: now})
 	if err != nil {
 		return Token{}, fmt.Errorf("insert node bootstrap token: %w", err)
 	}
@@ -184,7 +176,7 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return ErrInvalidToken
 	}
-	if token.ConsumedAt.Valid {
+	if token.ConsumedAt != nil {
 		if token.ConsumedNode == nil || !slices.Equal(token.Endpoint, request.GetEndpointId()) {
 			return ErrInvalidToken
 		}
@@ -213,15 +205,11 @@ func (s *Service) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 // Recheck expiry after all admission and node/key lock waits. Returning false
 // rolls back the node, key and capability writes in the caller's transaction.
 func (s *Service) consumeToken(ctx context.Context, store enrollmentstore.EnrollmentStore, token enrollmentstore.Token, node uuid.UUID, endpoint []byte) (bool, error) {
-	now := s.now()
+	now := s.now().UTC()
 	if !tokenUnexpired(token.ExpiresAt, now) {
 		return false, nil
 	}
-	at, err := value.FromTime(now)
-	if err != nil {
-		return false, err
-	}
-	return store.ConsumeToken(ctx, token.ID, node, endpoint, at)
+	return store.ConsumeToken(ctx, token.ID, node, endpoint, now)
 }
 
 func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
@@ -260,7 +248,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if token.Environment != request.GetEnvironment() || (len(token.ExpectedEndpoint) != 0 && !slices.Equal(token.ExpectedEndpoint, request.GetEndpointId())) {
 		return nil, ErrInvalidToken
 	}
-	if token.ConsumedAt.Valid {
+	if token.ConsumedAt != nil {
 		if token.ConsumedNode == nil || len(token.Endpoint) != 32 || subtle.ConstantTimeCompare(token.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrEndpointMismatch
 		}
@@ -297,29 +285,25 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		return nil, ErrPendingLimit
 	}
 	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return nil, err
-	}
 	nodeID := uuid.Must(uuid.NewV7())
 	name := "node-" + fmt.Sprintf("%x", request.GetEndpointId()[:6])
 	if expectedName != nil {
 		name = *expectedName
 	}
-	if err := store.InsertNode(ctx, nodeID, workspaceID, name, at); err != nil {
+	if err := store.InsertNode(ctx, nodeID, workspaceID, name, now); err != nil {
 		return nil, fmt.Errorf("insert bootstrap node: %w", err)
 	}
-	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), at); err != nil {
+	if err := store.InsertEndpoint(ctx, nodeID, request.GetEndpointId(), now); err != nil {
 		return nil, fmt.Errorf("bind bootstrap endpoint: %w", err)
 	}
 	sealingKeys := slices.Clone(request.GetSealingKeys())
 	slices.SortFunc(sealingKeys, func(a, b *agentv1.SealingKeyDescriptorV1) int { return int(a.GetPurpose() - b.GetPurpose()) })
 	for _, key := range sealingKeys {
-		if err := store.InsertSealingKey(ctx, nodeID, enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}, at); err != nil {
+		if err := store.InsertSealingKey(ctx, nodeID, enrollmentstore.SealingKey{Purpose: int32(key.GetPurpose()), Version: int32(key.GetVersion()), ID: key.GetKeyId(), Digest: key.GetPublicKeySha256()}, now); err != nil {
 			return nil, fmt.Errorf("record bootstrap password sealing key: %w", err)
 		}
 	}
-	if err := store.InsertCapabilities(ctx, nodeID, request.GetCapabilities(), []string{ownersession.FencingCapability, "privd_result_attestation_v1"}); err != nil {
+	if err := store.InsertCapabilities(ctx, nodeID, request.GetCapabilities(), []string{"privd_result_attestation_v1"}); err != nil {
 		return nil, fmt.Errorf("record bootstrap requested capabilities: %w", err)
 	}
 	consumed, err := s.consumeToken(ctx, store, token, nodeID, request.GetEndpointId())
@@ -329,7 +313,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if !consumed {
 		return nil, ErrInvalidToken
 	}
-	revision, err := store.Activate(ctx, nodeID, "{}", "default", at)
+	revision, err := store.Activate(ctx, nodeID, "{}", "default", now)
 	if err != nil {
 		return nil, err
 	}
@@ -373,11 +357,7 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 		return NodeTrust{NodeID: revocation.NodeID, EndpointID: endpointID, Revision: revision}, nil
 	}
 	now := s.now().UTC()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return NodeTrust{}, err
-	}
-	revision, err = store.Revoke(ctx, revocation.NodeID, at)
+	revision, err = store.Revoke(ctx, revocation.NodeID, now)
 	if err != nil {
 		return NodeTrust{}, err
 	}
@@ -456,6 +436,11 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
+	connectionID, err := uuid.FromBytes(request.GetConnectionId())
+	if err != nil || connectionID.Version() != 7 {
+		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
+		return response, nil
+	}
 	// Phase 1: short read-only validation transaction. Releasing this DB
 	// connection before OpenSession prevents a two-connection pool deadlock
 	// when concurrent agent handshakes acquire owner leases and call transportd.
@@ -531,18 +516,7 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	advertised := handshake.GetCapabilities()
 	negotiated := make([]string, 0, len(advertised))
 	mutationCapable := len(handshake.GetSealingKeys()) != 0
-	fencingNegotiated := false
 	for _, capability := range advertised {
-		// The fencing capability is a protocol-level negotiation, never a
-		// per-node business capability: an approval that echoes every
-		// advertised capability must not introduce a second copy of it.
-		if capability == ownersession.FencingCapability {
-			if mutationCapable {
-				fencingNegotiated = true
-				negotiated = append(negotiated, capability)
-			}
-			continue
-		}
 		if _, ok := approved[capability]; ok && (mutationCapable || legacyReadOnlyCapability(capability)) {
 			negotiated = append(negotiated, capability)
 		}
@@ -557,38 +531,30 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	var fixedEndpoint [32]byte
 	copy(fixedNode[:], nodeID[:])
 	copy(fixedEndpoint[:], request.GetRemoteEndpointId())
-	now := s.now().UTC()
-	var err error
-	response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
-	if err != nil {
-		return nil, fmt.Errorf("issue session grant: %w", err)
-	}
-	if fencingNegotiated && s.ownerSessions != nil {
-		fence, fenceErr := s.ownerSessions.OpenSession(ctx, fixedNode, fixedEndpoint, authorizationRevision, negotiated)
-		if errors.Is(fenceErr, ownersession.ErrNotOwner) {
-			// A fencing-capable Agent must retry while another term still
-			// owns the lease. Accepting an unbounded read-only downgrade here
-			// would leave it connected forever after that lease expires, so a
-			// replacement Controller could never establish the higher epoch
-			// required to recover ambiguous commands.
-			return nil, fmt.Errorf("owner lease is not yet available: %w", fenceErr)
+	var sessionEpoch uint64 = 1
+	var openedSession *ownersession.Session
+	if s.ownerSessions != nil {
+		opened, openErr := s.ownerSessions.OpenSession(ctx, fixedNode, connectionID, fixedEndpoint)
+		if openErr != nil {
+			return nil, fmt.Errorf("open owner session: %w", openErr)
 		}
-		if fenceErr != nil {
-			return nil, fmt.Errorf("open owner session: %w", fenceErr)
-		}
-		response.ConnectionFence = fence
-		// Registered before the authority transaction so rollback releases its
-		// connection before cleanup needs another one.
+		sessionEpoch = opened.SessionEpoch
+		openedSession = &opened
 		defer func() {
-			if fence != nil && response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
-				s.closeOpenedSession(ctx, nodeID, fence)
+			if openedSession != nil && response.Result != agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED {
+				s.closeOpenedSession(ctx, nodeID, *openedSession)
 			}
 		}()
+	}
+	now := s.now().UTC()
+	response.SessionGrant, err = s.signer.IssueSessionGrant(fixedNode, fixedEndpoint, authorizationRevision, sessionEpoch, negotiated, ProtocolMajor, ProtocolMinor, now, now.Add(SessionGrantTTL))
+	if err != nil {
+		return nil, fmt.Errorf("issue session grant: %w", err)
 	}
 
 	// Phase 2: re-verify authority under FOR SHARE so any concurrent revocation
 	// or capability/revision mutation fails closed and immediately releases the
-	// newly opened owner term before a session grant can be returned.
+	// newly opened session term before a session grant can be returned.
 	recheckTx, recheckStore, err := s.begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return nil, fmt.Errorf("begin session authority confirmation: %w", err)
@@ -600,14 +566,11 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	}
 	if err != nil || (current.Status != "active" && current.Status != "offline") || current.EndpointState != "active" || current.AuthorizationRevision != authorizationRevision || current.ID != nodeID {
 		response.SessionGrant = nil
-		response.ConnectionFence = nil
 		response.NegotiatedCapabilities = nil
 		response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 		return response, nil
 	}
 	if err := recheckTx.Commit(ctx); err != nil {
-		// The session was never granted: end the exact owner term so the
-		// lease does not keep renewing behind a failed authorization.
 		return nil, fmt.Errorf("commit session authorization: %w", err)
 	}
 	response.Result = agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
@@ -615,31 +578,14 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 	return response, nil
 }
 
-// closeOpenedSession ends the owner term a handshake opened when the
-// authorization it was opened for failed to commit. The cleanup runs on its
-// own deadline because the request context is typically the cancelled cause
-// of the failure.
-func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, fence *agentv1.ConnectionFenceV2) {
+func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, opened ownersession.Session) {
 	closer, ok := s.ownerSessions.(ownersession.SessionCloser)
 	if !ok {
 		return
 	}
-	connectionID, err := fixed16(fence.GetConnectionId())
-	if err != nil {
-		return
-	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	_ = closer.CloseSession(cleanupCtx, nodeID, connectionID, int64(fence.GetOwnerEpoch()))
-}
-
-func fixed16(value []byte) ([16]byte, error) {
-	if len(value) != 16 {
-		return [16]byte{}, errors.New("enrollment: value must be 16 bytes")
-	}
-	var fixed [16]byte
-	copy(fixed[:], value)
-	return fixed, nil
+	_ = closer.CloseSession(cleanupCtx, nodeID, opened.ConnectionID, opened.SessionEpoch)
 }
 
 func validateEnrollment(request *agentv1.EnrollRequest) error {
@@ -689,15 +635,11 @@ func supportedCapabilitiesMatch(ctx context.Context, store enrollmentstore.Enrol
 }
 
 func enqueueTrustConvergence(ctx context.Context, tx database.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {
-	at, err := value.FromTime(now)
-	if err != nil {
-		return err
-	}
 	store, err := enrollmentstore.Trust(tx)
 	if err != nil {
 		return err
 	}
-	err = store.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, at)
+	err = store.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, now.UTC())
 	if err != nil {
 		return fmt.Errorf("enqueue node trust convergence: %w", err)
 	}
@@ -761,9 +703,8 @@ func rollback(tx database.Tx) {
 	_ = tx.Rollback(ctx)
 }
 
-func tokenUnexpired(expires value.Timestamp, now time.Time) bool {
-	at, err := value.FromTime(now)
-	return err == nil && expires.Valid && expires.Micros > at.Micros
+func tokenUnexpired(expires time.Time, now time.Time) bool {
+	return !expires.IsZero() && expires.After(now)
 }
 
 func (s *Service) begin(ctx context.Context, isolation database.Isolation) (database.Tx, enrollmentstore.EnrollmentStore, error) {

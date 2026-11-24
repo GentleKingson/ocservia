@@ -41,26 +41,34 @@ image_ref() {
   printf '%s/%s:%s-linux-%s' "${CONTROLLER_IMAGE_PREFIX}" "$1" "${VERSION}" "${CONTROLLER_ARCH}"
 }
 
-for name in gateway control transport backup edge relay signer; do
+roles=(gateway control transport backup edge relay signer)
+load_pids=()
+max_load_jobs=4
+load_errors=0
+for idx in "${!roles[@]}"; do
+  name="${roles[idx]}"
   archive="${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
   [[ -s "${archive}" ]] || fail "Controller image archive is missing or empty: ${archive}"
+  docker load --input "${archive}" >/dev/null &
+  load_pids+=("$!")
+  if ((idx + 1 >= max_load_jobs)); then
+    wait "${load_pids[idx + 1 - max_load_jobs]}" || load_errors=1
+  fi
+done
+start_load_wait=$((${#load_pids[@]} >= max_load_jobs ? ${#load_pids[@]} - max_load_jobs + 1 : 0))
+for ((idx = start_load_wait; idx < ${#load_pids[@]}; idx++)); do
+  wait "${load_pids[idx]}" || load_errors=1
+done
+((load_errors == 0)) || fail "failed loading one or more Controller image archives"
+
+for name in "${roles[@]}"; do
   image="$(image_ref "${name}")"
-  docker load --input "${archive}" >/dev/null
   docker image inspect "${image}" >/dev/null ||
     fail "Controller image ${name} was not loaded into the daemon"
   platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${image}")"
   [[ "${platform}" == "linux/${CONTROLLER_ARCH}" ]] ||
     fail "loaded ${name} image is ${platform}, expected linux/${CONTROLLER_ARCH}"
 done
-
-# Exercise the additional native runtimes, not just their archive headers.
-docker run --rm --entrypoint nginx "$(image_ref edge)" -V 2>&1 | grep -Fq -- --with-stream_ssl_preread_module
-docker run --rm --entrypoint /usr/local/bin/iroh-relay "$(image_ref relay)" --version | grep -Fq iroh-relay
-if signer_output="$(docker run --rm "$(image_ref signer)" invalid-command 2>&1)"; then
-  fail "signer accepted an unknown command"
-fi
-grep -Fq 'unknown command' <<<"${signer_output}" || fail "signer did not reach command validation"
-docker run --rm --entrypoint pg_basebackup "$(image_ref backup)" --version | grep -Fq 'pg_basebackup (PostgreSQL) 18.'
 
 # Gateway must actually start: its USER directive once referenced an
 # account the upstream image never created (#139), so boot it for real,
@@ -84,13 +92,77 @@ docker run --detach --name "${gateway_container}" \
   --publish "127.0.0.1:${gateway_port}:8443" \
   --volume "${fixture}/Caddyfile:/etc/caddy/Caddyfile:ro" \
   "$(image_ref gateway)" >/dev/null
+
+# Exercise the additional native runtimes in parallel while gateway boots.
+check_edge() {
+  docker run --rm --entrypoint nginx "$(image_ref edge)" -V 2>&1 | grep -Fq -- --with-stream_ssl_preread_module
+}
+check_relay() {
+  docker run --rm --entrypoint /usr/local/bin/iroh-relay "$(image_ref relay)" --version | grep -Fq iroh-relay
+}
+check_signer() {
+  local signer_output
+  if signer_output="$(docker run --rm "$(image_ref signer)" invalid-command 2>&1)"; then
+    fail "signer accepted an unknown command"
+  fi
+  grep -Fq 'unknown command' <<<"${signer_output}" || fail "signer did not reach command validation"
+}
+check_control() {
+  local control_output
+  if control_output="$(docker run --rm "$(image_ref control)" --role=bogus 2>&1)"; then
+    fail "control image accepted an invalid role"
+  fi
+  grep -Fq 'invalid role' <<<"${control_output}" ||
+    fail "control image did not reach role validation: ${control_output}"
+}
+check_transport() {
+  local transport_output
+  if transport_output="$(docker run --rm "$(image_ref transport)" --socket /run/ocserv-platform/transportd.sock 2>&1)"; then
+    fail "transport image started without a key file"
+  fi
+  grep -Fq -- '--key-file is required' <<<"${transport_output}" ||
+    fail "transport image did not reach argument validation: ${transport_output}"
+}
+check_backup() {
+  local psql_version backup_output
+  docker run --rm --entrypoint pg_basebackup "$(image_ref backup)" --version | grep -Fq 'pg_basebackup (PostgreSQL) 18.'
+  psql_version="$(docker run --rm --entrypoint psql "$(image_ref backup)" --version)"
+  grep -Eq 'psql \(PostgreSQL\) 18\.' <<<"${psql_version}" ||
+    fail "backup image psql runtime did not report PostgreSQL 18: ${psql_version}"
+  if backup_output="$(docker run --rm "$(image_ref backup)" 2>&1)"; then
+    fail "backup entrypoint ran without its pgpass source"
+  fi
+  grep -Fq 'PostgreSQL passfile source must be a regular file' <<<"${backup_output}" ||
+    fail "backup image did not reach the entrypoint guard: ${backup_output}"
+}
+
+check_pids=()
+check_logs=()
+for check_fn in check_edge check_relay check_signer check_control check_transport check_backup; do
+  log_file="${fixture}/${check_fn}.log"
+  check_logs+=("${log_file}")
+  "${check_fn}" >"${log_file}" 2>&1 &
+  check_pids+=("$!")
+done
+
+check_errors=0
+for idx in "${!check_pids[@]}"; do
+  if ! wait "${check_pids[idx]}"; then
+    check_errors=1
+  fi
+  if [[ -s "${check_logs[idx]}" ]]; then
+    cat "${check_logs[idx]}" >&2
+  fi
+done
+((check_errors == 0)) || fail "one or more Controller image runtime checks failed"
+
 ready=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 150); do
   if [[ "$(curl --silent --max-time 2 "http://127.0.0.1:${gateway_port}/" 2>/dev/null || true)" == "controller-image-smoke-ok" ]]; then
     ready=1
     break
   fi
-  sleep 1
+  sleep 0.2
 done
 if [[ "${ready}" != "1" ]]; then
   docker logs "${gateway_container}" >&2 || true
@@ -98,32 +170,5 @@ if [[ "${ready}" != "1" ]]; then
 fi
 gateway_uid="$(docker exec "${gateway_container}" id -u)"
 [[ "${gateway_uid}" != "0" ]] || fail "gateway container must not run as root"
-
-# control: prove the binary executes on this architecture up to its
-# configuration boundary — it must reject an invalid role, not crash.
-if control_output="$(docker run --rm "$(image_ref control)" --role=bogus 2>&1)"; then
-  fail "control image accepted an invalid role"
-fi
-grep -Fq 'invalid role' <<<"${control_output}" ||
-  fail "control image did not reach role validation: ${control_output}"
-
-# transport: same boundary — the daemon must refuse to start without its
-# required key file argument.
-if transport_output="$(docker run --rm "$(image_ref transport)" --socket /run/ocserv-platform/transportd.sock 2>&1)"; then
-  fail "transport image started without a key file"
-fi
-grep -Fq -- '--key-file is required' <<<"${transport_output}" ||
-  fail "transport image did not reach argument validation: ${transport_output}"
-
-# backup: the PostgreSQL client runtime must execute, and the real
-# entrypoint must reach its own guard when the pgpass source is absent.
-psql_version="$(docker run --rm --entrypoint psql "$(image_ref backup)" --version)"
-grep -Eq 'psql \(PostgreSQL\) 18\.' <<<"${psql_version}" ||
-  fail "backup image psql runtime did not report PostgreSQL 18: ${psql_version}"
-if backup_output="$(docker run --rm "$(image_ref backup)" 2>&1)"; then
-  fail "backup entrypoint ran without its pgpass source"
-fi
-grep -Fq 'PostgreSQL passfile source must be a regular file' <<<"${backup_output}" ||
-  fail "backup image did not reach the entrypoint guard: ${backup_output}"
 
 echo "Controller ${CONTROLLER_ARCH} image smoke passed (gateway uid ${gateway_uid})"

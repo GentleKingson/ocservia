@@ -1,8 +1,5 @@
-import {
-  ResponseError,
-  type UserPolicy,
-  type UserPolicyRequest,
-} from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { UserPolicy, UserPolicyRequest } from "@/api/models";
 
 import { getUserPolicy, setUserPolicy } from "../api/users";
 
@@ -71,7 +68,7 @@ export function formToRequest(
     quotaPeriod: form.period,
     quotaDirection: form.direction,
     quotaBytes,
-    ...(expiresAt ? { expiresAt } : {}),
+    ...(expiresAt ? { expiresAt: `${expiry}Z` } : {}),
     expectedVersion: form.version,
     reason,
   };

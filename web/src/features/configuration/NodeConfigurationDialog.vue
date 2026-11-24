@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { Ref } from "vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { useI18n } from "vue-i18n";
-import { workspaceContext } from "@/api/workspace";
+import { cachedWorkspaceId } from "@/api/workspace";
 import { useNodeConfiguration } from "@/features/configuration/useNodeConfiguration";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,7 +52,7 @@ const {
 } = useNodeConfiguration({
   currentNode,
   readReady: props.context.readReady,
-  workspaceContext,
+  workspaceId: cachedWorkspaceId,
   trackOperation: (id) => fleet.trackOperation(id),
   t,
 });
@@ -213,26 +213,6 @@ defineExpose({ open: openConfigPlan, close, currentConfigRevision });
         </div>
         <div class="grid min-w-0 gap-1">
           <dt class="text-muted-foreground text-xs">
-            {{ $t("candidateHash") }}
-          </dt>
-          <dd class="m-0">
-            <code class="text-xs break-all">{{
-              configPlan.candidateHash
-            }}</code>
-          </dd>
-        </div>
-        <div v-if="configPlan.materializedHash" class="grid min-w-0 gap-1">
-          <dt class="text-muted-foreground text-xs">
-            {{ $t("materializedHash") }}
-          </dt>
-          <dd class="m-0">
-            <code class="text-xs break-all">{{
-              configPlan.materializedHash
-            }}</code>
-          </dd>
-        </div>
-        <div class="grid min-w-0 gap-1">
-          <dt class="text-muted-foreground text-xs">
             {{ $t("configSourceRevision") }}
           </dt>
           <dd class="m-0">
@@ -256,7 +236,7 @@ defineExpose({ open: openConfigPlan, close, currentConfigRevision });
         </li>
       </ul>
       <p
-        v-if="!actionAvailable('config.apply')"
+        v-if="actionExplanation('config.apply')"
         class="text-muted-foreground m-0 text-xs"
       >
         {{ $t("apply") }}: {{ actionExplanation("config.apply") }}

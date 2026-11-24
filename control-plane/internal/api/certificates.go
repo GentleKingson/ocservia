@@ -73,6 +73,10 @@ func (s *Server) createCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNodeCertificates(w http.ResponseWriter, r *http.Request) {
+	if s.certificates == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service unavailable", "certificate service is unavailable")
+		return
+	}
 	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be UUIDv7")
@@ -87,7 +91,7 @@ func (s *Server) listNodeCertificates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) issueCertificate(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_action"), ":issue"))
+	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_id"), ":issue"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
 		return
@@ -106,7 +110,7 @@ func (s *Server) issueCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeCertificate(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_action"), ":revoke"))
+	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_id"), ":revoke"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
 		return
@@ -132,7 +136,7 @@ func (s *Server) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createCertificateP12(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_action"), ":p12"))
+	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_id"), ":p12"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
 		return
@@ -175,7 +179,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := principal(r)
-	download, err := s.certificates.OpenArtifact(r.Context(), id, token, actor.IdentityID)
+	download, err := s.certificates.OpenArtifact(r.Context(), id, token, actor.IdentityID, actor.SessionID)
 	if err != nil {
 		writeCertificateError(w, r, err)
 		return
@@ -240,11 +244,11 @@ func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
 
 func (s *Server) certificateAction(w http.ResponseWriter, r *http.Request) {
 	switch {
-	case strings.HasSuffix(r.PathValue("certificate_action"), ":issue"):
+	case strings.HasSuffix(r.PathValue("certificate_id"), ":issue"):
 		s.issueCertificate(w, r)
-	case strings.HasSuffix(r.PathValue("certificate_action"), ":revoke"):
+	case strings.HasSuffix(r.PathValue("certificate_id"), ":revoke"):
 		s.revokeCertificate(w, r)
-	case strings.HasSuffix(r.PathValue("certificate_action"), ":p12"):
+	case strings.HasSuffix(r.PathValue("certificate_id"), ":p12"):
 		s.createCertificateP12(w, r)
 	default:
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the certificate action does not exist")

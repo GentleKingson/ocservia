@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { Ref } from "vue";
+import { computed, type Ref } from "vue";
 import { Download, KeyRound } from "@lucide/vue";
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { useI18n } from "vue-i18n";
 import { formatTimestamp } from "@/shared/timestamp";
-import { workspaceContext } from "@/api/workspace";
+import { cachedWorkspaceId } from "@/api/workspace";
 import { useNodeCertificates } from "@/features/certificates/useNodeCertificates";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,9 @@ const props = defineProps<{
   actionExplanation: (action: string) => string;
 }>();
 const { currentNode } = props.context;
+const issueExplanation = computed(() =>
+  props.actionExplanation("certificate.issue"),
+);
 const fleet = useFleetStore();
 const { t } = useI18n();
 const {
@@ -45,7 +48,7 @@ const {
 } = useNodeCertificates({
   currentNode,
   readReady: props.context.readReady,
-  workspaceContext,
+  workspaceId: cachedWorkspaceId,
   trackOperation: (id) => fleet.trackOperation(id),
   t,
 });
@@ -64,13 +67,10 @@ defineExpose({ open: openCertificate, close });
     @close="certificateDialog = false"
     @submit="submitCertificateRequest"
   >
-    <p
-      v-if="!actionAvailable('certificate.issue')"
-      class="text-muted-foreground m-0 text-xs"
-    >
-      {{ $t("requestCsr") }}: {{ actionExplanation("certificate.issue") }}
+    <p v-if="issueExplanation" class="text-muted-foreground m-0 text-xs">
+      {{ $t("requestCsr") }}: {{ issueExplanation }}
     </p>
-    <template v-if="!certificate && actionAvailable('certificate.issue')">
+    <template v-if="!certificate && !issueExplanation">
       <FormField id="certificate-cn" :label="$t('commonName')">
         <Input
           id="certificate-cn"

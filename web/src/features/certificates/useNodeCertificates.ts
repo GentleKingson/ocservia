@@ -3,7 +3,7 @@ import type {
   Certificate,
   NodeObservedState,
   Operation,
-} from "@ocservia/api-client";
+} from "@/api/models";
 import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   createCertificate,
@@ -16,6 +16,7 @@ import {
   revokeCertificate,
 } from "../../api/certificates";
 import { getOperation } from "../../api/operations";
+import { ResponseError } from "../../api/transport";
 import {
   beginNodeMutation,
   createNodeWorkflow,
@@ -29,12 +30,11 @@ import {
   readCertificateGrant,
   rememberCertificateGrant,
 } from "../node-workflow";
-import type { WorkspaceContext } from "../../api/workspace";
 
 interface CertificatesInputs {
   currentNode: Readonly<Ref<NodeObservedState | undefined>>;
   readReady: Readonly<Ref<boolean>>;
-  workspaceContext: () => WorkspaceContext;
+  workspaceId: () => string | undefined;
   trackOperation: (id: string) => Promise<void>;
   t: (key: string) => string;
 }
@@ -42,7 +42,7 @@ interface CertificatesInputs {
 export function useNodeCertificates({
   currentNode,
   readReady,
-  workspaceContext,
+  workspaceId,
   trackOperation,
   t,
 }: CertificatesInputs) {
@@ -62,7 +62,7 @@ export function useNodeCertificates({
   const certificateWorkflow = createNodeWorkflow(
     () => currentNode.value?.id,
     () => certificateDialog.value,
-    workspaceContext,
+    workspaceId,
   );
   let certificateContext: NodeWorkflowContext | undefined;
 
@@ -117,7 +117,7 @@ export function useNodeCertificates({
       if (record) {
         if (
           record.nodeId !== context.nodeId ||
-          record.workspaceId !== context.workspace.id
+          record.workspaceId !== context.workspaceId
         )
           return;
         await pollCertificate(context, record);
@@ -143,7 +143,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateRecordsFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateRecordsFailed");
     } finally {
       if (certificateWorkflow.isCurrent(context))
         certificateLoading.value = false;
@@ -189,12 +190,14 @@ export function useNodeCertificates({
       const value = await createCertificate(node.id, {
         expectedVersion: node.version,
         commonName: certificateCommonName.value.trim(),
-        dnsNames: new Set(
-          certificateDnsNames.value
-            .split(",")
-            .map((name) => name.trim())
-            .filter(Boolean),
-        ),
+        dnsNames: [
+          ...new Set(
+            certificateDnsNames.value
+              .split(",")
+              .map((name) => name.trim())
+              .filter(Boolean),
+          ),
+        ],
         keyBits: 3072,
         reason: certificateReason.value.trim(),
       });
@@ -206,7 +209,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateRequestFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateRequestFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -241,7 +245,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateIssueFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateIssueFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -267,12 +272,12 @@ export function useNodeCertificates({
     if (!ticket) return;
     certificateLoading.value = true;
     certificateError.value = "";
+    const exportKey = JSON.stringify([
+      context.workspaceId,
+      context.nodeId,
+      current.id,
+    ]);
     try {
-      const exportKey = JSON.stringify([
-        context.workspace.id,
-        context.nodeId,
-        current.id,
-      ]);
       let request = pendingExports.get(exportKey);
       if (!request) {
         request = {
@@ -297,9 +302,14 @@ export function useNodeCertificates({
         certificateError.value = t("p12GrantUnavailable");
       await trackOperation(grant.operation.id);
     } catch (error) {
+      if (
+        error instanceof ResponseError &&
+        [400, 409].includes(error.response.status)
+      )
+        pendingExports.delete(exportKey);
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("p12CreationFailed");
+        (error instanceof Error && error.message) || t("p12CreationFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -345,7 +355,7 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("p12DownloadFailed");
+        (error instanceof Error && error.message) || t("p12DownloadFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))
@@ -389,7 +399,8 @@ export function useNodeCertificates({
     } catch (error) {
       if (!certificateWorkflow.isCurrent(context)) return;
       certificateError.value =
-        error instanceof Error ? error.message : t("certificateRevokeFailed");
+        (error instanceof Error && error.message) ||
+        t("certificateRevokeFailed");
     } finally {
       finishNodeMutation(ticket);
       if (certificateWorkflow.isCurrent(context))

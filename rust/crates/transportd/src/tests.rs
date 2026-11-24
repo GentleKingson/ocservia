@@ -6,28 +6,26 @@
 )]
 
 use std::net::SocketAddr;
+use std::sync::Mutex as StdMutex;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use iroh::{RelayMap, Watcher as _, tls::CaTlsConfig};
 use ocservia_command_authorization::{
-    SessionGrantClaimsV1, canonical_session_grant_v1, state_update_operation_id,
-    verification_key_id,
+    SessionGrantClaimsV1, canonical_session_grant_v1, verification_key_id,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    ArtifactGrantV1, ArtifactGrantVersion, CommandAuthorizationProof, CommandAuthorizationVersion,
-    CommandDeliveryMode, GroupObservation, PrivdReceiptVersion, PrivdResultReceiptV1,
-    PrivilegedCommandKind, PrivilegedResultKind, SealedSecretPurpose, SealedSecretVersion,
-    SealingKeyDescriptorV1, SemanticPayloadHashVersion, ServiceReload, SessionGrantV1,
-    SessionGrantVersion, SyntheticNoop, UserObservation,
+    ArtifactGrantV1, ArtifactPayload, CommandAuthorizationProof, CommandDeliveryMode,
+    GroupObservation, PrivdResultReceiptV1, PrivilegedCommandKind, PrivilegedResultKind,
+    SealedSecretPurpose, SealingKeyDescriptorV1, SemanticPayloadHashVersion, ServiceReload,
+    SessionGrantV1, SyntheticNoop, UserObservation,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     AuthorizeSessionRequest, CheckEndpointRequest, CheckEndpointResponse, ListNodeTrustRequest,
     ListNodeTrustResponse, NodeTrustBinding, ValidateEnrollmentRequest, ValidateEnrollmentResponse,
     trust_service_server::{TrustService, TrustServiceServer},
 };
-use ocservia_privd_attestation::{key_id, sign_receipt, verify_receipt};
-use ocservia_test_support::{FenceSpec, keyring, sign_fence_binding, ts, unix_seconds};
-use sha2::{Digest as _, Sha256};
+use ocservia_privd_attestation::{key_id, result_payload_cbor_hash, sign_receipt, verify_receipt};
+use ocservia_test_support::{keyring, ts, unix_seconds};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::oneshot,
@@ -56,8 +54,10 @@ fn test_service_with_policy(event_capacity: usize, policy: IdentityPolicy) -> Ir
 struct TestTrustService {
     signing_key: SigningKey,
     bindings: Vec<(EndpointId, Vec<u8>, NodeTrustState, u64)>,
-    override_fence: Option<ConnectionFenceV2>,
+    override_session_ttl: Option<i64>,
+    override_epoch: Option<u64>,
     next_epoch: AtomicU64,
+    authorized_connection: StdMutex<Option<Uuid>>,
 }
 
 #[tonic::async_trait]
@@ -79,7 +79,14 @@ impl TrustService for TestTrustService {
                     == request.endpoint_id.as_slice()
                     && node == &request.node_id)
         );
-        assert!(request.owner_epoch > 0 && request.connection_id.len() == 16);
+        assert!(request.session_epoch > 0 && request.connection_id.len() == 16);
+        assert_eq!(
+            *self
+                .authorized_connection
+                .lock()
+                .expect("connection ID lock"),
+            Some(Uuid::from_slice(&request.connection_id).expect("audit connection ID"))
+        );
         Ok(Response::new(
             ocservia_contracts::generated::ocserv::platform::agent::v1::VpnAuditReceipt {
                 event_ids: request
@@ -118,6 +125,14 @@ impl TrustService for TestTrustService {
         request: Request<AuthorizeSessionRequest>,
     ) -> Result<Response<SessionHandshakeResponse>, Status> {
         let req = request.into_inner();
+        let connection_id = Uuid::from_slice(&req.connection_id)
+            .ok()
+            .filter(|id| id.get_version_num() == 7)
+            .ok_or_else(|| Status::invalid_argument("connection_id invalid"))?;
+        *self
+            .authorized_connection
+            .lock()
+            .expect("connection ID lock") = Some(connection_id);
         let hs = req
             .handshake
             .ok_or_else(|| Status::invalid_argument("handshake missing"))?;
@@ -135,46 +150,42 @@ impl TrustService for TestTrustService {
         caps.sort();
         caps.dedup();
         let now = unix_seconds();
+        let ttl = self.override_session_ttl.unwrap_or(300);
+        let session_epoch = self
+            .override_epoch
+            .unwrap_or_else(|| self.next_epoch.fetch_add(1, Ordering::Relaxed));
         let kid = verification_key_id(&self.signing_key.verifying_key());
         let claims = SessionGrantClaimsV1 {
-            version: u32::try_from(i32::from(SessionGrantVersion::V1))
-                .map_err(|_| Status::internal("v"))?,
+            version: 1,
             key_id: kid.clone(),
             protocol_major: PROTOCOL_MAJOR,
             protocol_minor: PROTOCOL_MINOR,
             node_id,
             endpoint_id: ep_id,
             authorization_revision: 1,
+            session_epoch,
             negotiated_capabilities: caps.clone(),
             issued_at_seconds: now - 1,
             issued_at_nanos: 0,
-            expires_at_seconds: now + 300,
+            expires_at_seconds: now + ttl,
             expires_at_nanos: 0,
         };
         let canonical =
             canonical_session_grant_v1(&claims).map_err(|_| Status::internal("canonical grant"))?;
         let session_grant = SessionGrantV1 {
-            version: SessionGrantVersion::V1.into(),
+            version: 1,
             key_id: kid,
             protocol_major: PROTOCOL_MAJOR,
             protocol_minor: PROTOCOL_MINOR,
             node_id: node_id.to_vec(),
             endpoint_id: ep_id.to_vec(),
             authorization_revision: 1,
+            session_epoch,
             negotiated_capabilities: caps.clone(),
             issued_at: Some(ts(claims.issued_at_seconds, 0)),
             expires_at: Some(ts(claims.expires_at_seconds, 0)),
             signature: self.signing_key.sign(&canonical).to_bytes().to_vec(),
         };
-        let fence = self.override_fence.clone().unwrap_or_else(|| {
-            let mut term = FenceTerm::new(
-                node_id,
-                ep_id,
-                self.next_epoch.fetch_add(1, Ordering::Relaxed),
-            );
-            term.capabilities.clone_from(&caps);
-            signed_fence(&self.signing_key, &term, 300)
-        });
         Ok(Response::new(SessionHandshakeResponse {
             result: HandshakeResult::Accepted.into(),
             protocol_major: PROTOCOL_MAJOR,
@@ -183,7 +194,6 @@ impl TrustService for TestTrustService {
             controller_version: "test".into(),
             negotiated_capabilities: caps,
             session_grant: Some(session_grant),
-            connection_fence: Some(fence),
         }))
     }
 
@@ -215,15 +225,18 @@ impl TrustService for TestTrustService {
 async fn test_trust_with_options(
     signing_key: SigningKey,
     bindings: Vec<(EndpointId, Vec<u8>, NodeTrustState, u64)>,
-    override_fence: Option<ConnectionFenceV2>,
+    override_session_ttl: Option<i64>,
+    override_epoch: Option<u64>,
 ) -> TrustAuthority {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind trust");
     let addr = listener.local_addr().expect("addr");
     let svc = Arc::new(TestTrustService {
         signing_key,
         bindings,
-        override_fence,
+        override_session_ttl,
+        override_epoch,
         next_epoch: AtomicU64::new(1),
+        authorized_connection: StdMutex::new(None),
     });
     tokio::spawn(
         tonic::transport::Server::builder()
@@ -238,15 +251,12 @@ async fn test_trust_with_options(
     TrustAuthority::new(ch)
 }
 
-async fn test_trust_for_key(
-    key: &SecretKey,
-    hs: &SessionHandshake,
-    override_fence: Option<ConnectionFenceV2>,
-) -> TrustAuthority {
+async fn test_trust_for_key(key: &SecretKey, hs: &SessionHandshake) -> TrustAuthority {
     test_trust_with_options(
         controller_keyring().0,
         vec![(key.public(), hs.node_id.clone(), NodeTrustState::Active, 1)],
-        override_fence,
+        None,
+        None,
     )
     .await
 }
@@ -326,13 +336,13 @@ impl RestartableTcpProxy {
 fn sealing_keys() -> Vec<SealingKeyDescriptorV1> {
     vec![
         SealingKeyDescriptorV1 {
-            version: SealedSecretVersion::V1 as i32,
+            version: 1,
             purpose: SealedSecretPurpose::UserPassword as i32,
             key_id: "fixture-user-key-v1".into(),
             public_key_sha256: vec![0x11; 32],
         },
         SealingKeyDescriptorV1 {
-            version: SealedSecretVersion::V1 as i32,
+            version: 1,
             purpose: SealedSecretPurpose::CertificateP12Password as i32,
             key_id: "fixture-p12-key-v1".into(),
             public_key_sha256: vec![0x22; 32],
@@ -348,7 +358,7 @@ fn handshake(key: &SecretKey) -> SessionHandshake {
         controller_version: String::new(),
         node_id: Uuid::now_v7().as_bytes().to_vec(),
         endpoint_id: key.public().as_bytes().to_vec(),
-        capabilities: vec!["ocserv.fencing.v2".into(), "ocserv.status.read".into()],
+        capabilities: vec!["ocserv.status.read".into()],
         ocserv_version: "1.3".into(),
         os_release: "test".into(),
         boot_id: "boot".into(),
@@ -384,13 +394,13 @@ fn command_envelope(node_id: &[u8], traceparent: &str, reason: String) -> Vec<u8
         required_capability: "ocserv.status.read".into(),
         reason,
         authorization: Some(CommandAuthorizationProof {
-            version: CommandAuthorizationVersion::V1.into(),
+            version: 1,
             key_id: "ed25519-sha256:test-transport-relay-only".into(),
             signature: RELAYED_AUTHORIZATION_SIGNATURE.to_vec(),
         }),
         delivery_mode: CommandDeliveryMode::ExecuteOrReplay.into(),
         payload: Some(command_envelope::Payload::ServiceReload(ServiceReload {})),
-        semantic_payload_hash_version: SemanticPayloadHashVersion::V1 as i32,
+        semantic_payload_hash_version: SemanticPayloadHashVersion::V2 as i32,
         semantic_payload_sha256: vec![0x11; 32],
         operation_id: Uuid::now_v7().as_bytes().to_vec(),
         ..CommandEnvelope::default()
@@ -422,12 +432,12 @@ async fn send_handshake(conn: &Connection, hs: &SessionHandshake) -> SessionHand
 
 fn privileged_command_result(cmd: &CommandEnvelope, include_receipt: bool) -> CommandResult {
     let now = now_timestamp();
-    let result_bytes = b"completed".to_vec();
+    let result_bytes = Vec::new();
     let key = SigningKey::from_bytes(&[7; 32]);
     let proof = include_receipt.then(|| {
         sign_receipt(
             PrivdResultReceiptV1 {
-                receipt_version: PrivdReceiptVersion::V1.into(),
+                receipt_version: 1,
                 node_id: cmd.node_id.clone(),
                 privd_attestation_key_id: key_id(&key.verifying_key()),
                 command_id: cmd.command_id.clone(),
@@ -438,9 +448,13 @@ fn privileged_command_result(cmd: &CommandEnvelope, include_receipt: bool) -> Co
                 command_kind: PrivilegedCommandKind::ServiceReload.into(),
                 result_kind: PrivilegedResultKind::Mutation.into(),
                 terminal_state: CommandResultState::Succeeded.into(),
-                result_bytes_sha256: Sha256::digest(&result_bytes).to_vec(),
-                error_code_sha256: Sha256::digest([]).to_vec(),
-                effect_record_id: Uuid::now_v7().as_bytes().to_vec(),
+                result_cbor_sha256: result_payload_cbor_hash(
+                    PrivilegedResultKind::Mutation,
+                    &result_bytes,
+                )
+                .expect("result cbor hash")
+                .to_vec(),
+                error_code: String::new(),
                 effect_sequence: 1,
                 accepted_at: Some(now),
                 completed_at: Some(now),
@@ -566,149 +580,33 @@ async fn last_seen(
         .last_seen
 }
 
-struct FenceTerm {
-    node_id: [u8; 16],
-    endpoint_id: [u8; 32],
-    owner_instance_id: [u8; 16],
-    owner_incarnation: u64,
-    owner_epoch: u64,
-    fence_id: [u8; 16],
-    connection_id: [u8; 16],
-    authorization_revision: u64,
-    capabilities: Vec<String>,
-}
-
-impl FenceTerm {
-    fn new(node_id: [u8; 16], endpoint_id: [u8; 32], owner_epoch: u64) -> Self {
-        Self {
-            node_id,
-            endpoint_id,
-            owner_instance_id: *Uuid::now_v7().as_bytes(),
-            owner_incarnation: 1,
-            owner_epoch,
-            fence_id: *Uuid::now_v7().as_bytes(),
-            connection_id: *Uuid::now_v7().as_bytes(),
-            authorization_revision: 1,
-            capabilities: vec!["ocserv.fencing.v2".into(), "ocserv.service.reload".into()],
-        }
-    }
-
-    fn supersede(&mut self) {
-        self.owner_epoch += 1;
-        self.fence_id = *Uuid::now_v7().as_bytes();
-        self.connection_id = *Uuid::now_v7().as_bytes();
-    }
-
-    fn spec(&self) -> FenceSpec {
-        FenceSpec::new(self.node_id, self.endpoint_id, self.owner_epoch)
-            .authority(self.authorization_revision)
-            .capabilities(self.capabilities.clone())
-            .ids(
-                self.fence_id,
-                self.owner_instance_id,
-                self.owner_incarnation,
-                self.connection_id,
-            )
-    }
-}
-
-fn signed_fence(key: &SigningKey, term: &FenceTerm, lease_seconds: i64) -> ConnectionFenceV2 {
-    signed_fence_at(key, term, 0, lease_seconds)
-}
-
-fn signed_fence_at(
-    key: &SigningKey,
-    term: &FenceTerm,
-    issued_offset: i64,
-    lease_offset: i64,
-) -> ConnectionFenceV2 {
-    let issued = unix_seconds() + issued_offset;
-    let lease = unix_seconds() + lease_offset;
-    term.spec()
-        .issued(issued, 0)
-        .lease(lease, 0)
-        .expires(lease.max(issued) + 300, 0)
-        .sign(key)
-}
-
-fn signed_fence_until(
-    key: &SigningKey,
-    term: &FenceTerm,
-    lease_until: SystemTime,
-) -> ConnectionFenceV2 {
-    let lease = prost_types::Timestamp::from(lease_until);
-    let issued = prost_types::Timestamp::from(SystemTime::now() - Duration::from_mins(1));
-    term.spec()
-        .issued(
-            issued.seconds,
-            u32::try_from(issued.nanos.max(0)).expect("n"),
-        )
-        .lease(lease.seconds, u32::try_from(lease.nanos.max(0)).expect("n"))
-        .expires(lease.seconds.max(issued.seconds) + 300, 0)
-        .sign(key)
-}
-
-fn bind_op(
-    key: &SigningKey,
-    fence: &ConnectionFenceV2,
-    kind: FenceOperationKind,
-    op_id: [u8; 16],
-    cap: &str,
-) -> FenceBindingV2 {
-    let now = unix_seconds();
-    sign_fence_binding(key, fence, kind, op_id, cap, (now, 0), (now + 300, 0))
-}
-
 fn state_update_req(
-    key: &SigningKey,
-    fence: &ConnectionFenceV2,
     node_id: [u8; 16],
     endpoint_id: [u8; 32],
     state: NodeTrustState,
     revision: u64,
     reason: &str,
 ) -> UpdateNodeTrustRequest {
-    let op_id = state_update_operation_id(&node_id, &endpoint_id, state as u32, revision, reason);
     UpdateNodeTrustRequest {
         node_id: node_id.to_vec(),
         endpoint_id: endpoint_id.to_vec(),
         state: state.into(),
         reason: reason.into(),
         revision,
-        fence_binding: Some(bind_op(
-            key,
-            fence,
-            FenceOperationKind::StateUpdate,
-            op_id,
-            "ocserv.fencing.v2",
-        )),
-        operation_id: op_id.to_vec(),
     }
 }
 
-fn close_node_req(
-    key: &SigningKey,
-    fence: &ConnectionFenceV2,
-    node_id: [u8; 16],
-    reason: &str,
-) -> CloseNodeRequest {
+fn close_node_req(node_id: [u8; 16], reason: &str) -> CloseNodeRequest {
     CloseNodeRequest {
         node_id: node_id.to_vec(),
         reason: reason.into(),
-        fence_binding: Some(bind_op(
-            key,
-            fence,
-            FenceOperationKind::ConnectionClose,
-            node_id,
-            "ocserv.fencing.v2",
-        )),
     }
 }
 
 fn shape_valid_grant(node_id: [u8; 16], artifact_id: [u8; 16]) -> ArtifactGrantV1 {
     let now = now_timestamp();
     ArtifactGrantV1 {
-        version: ArtifactGrantVersion::V1.into(),
+        version: 1,
         key_id: "ed25519-sha256:test-relay-only".into(),
         node_id: node_id.to_vec(),
         artifact_id: artifact_id.to_vec(),
@@ -725,36 +623,17 @@ fn shape_valid_grant(node_id: [u8; 16], artifact_id: [u8; 16]) -> ArtifactGrantV
     }
 }
 
-async fn register_fence(
-    service: &IrohTransportService,
-    fence: &ConnectionFenceV2,
-) -> RegisterOwnerFenceResponse {
-    service
-        .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-            fence: Some(fence.clone()),
-        }))
-        .await
-        .expect("register fence")
-        .into_inner()
-}
-
-async fn fenced_agent_session(
+async fn agent_session_with_options(
     service: &IrohTransportService,
     signing_key: &SigningKey,
     node_id: [u8; 16],
-    owner_epoch: u64,
-) -> (FenceTerm, ConnectionFenceV2, Router, Endpoint, Connection) {
+    override_session_ttl: Option<i64>,
+    override_epoch: Option<u64>,
+) -> (SecretKey, SessionHandshake, Router, Endpoint, Connection) {
     let agent_key = SecretKey::generate();
     let mut hs = handshake(&agent_key);
     hs.node_id = node_id.to_vec();
-    hs.capabilities = vec![
-        "ocserv.fencing.v2".into(),
-        "ocserv.service.reload".into(),
-        "ocserv.status.read".into(),
-    ];
-    let mut term = FenceTerm::new(node_id, *agent_key.public().as_bytes(), owner_epoch);
-    term.capabilities.clone_from(&hs.capabilities);
-    let fence = signed_fence(signing_key, &term, 120);
+    hs.capabilities = vec!["ocserv.service.reload".into(), "ocserv.status.read".into()];
     let trust = test_trust_with_options(
         signing_key.clone(),
         vec![(
@@ -763,7 +642,8 @@ async fn fenced_agent_session(
             NodeTrustState::Active,
             1,
         )],
-        Some(fence.clone()),
+        override_session_ttl,
+        override_epoch,
     )
     .await;
     let router = test_router(
@@ -775,7 +655,7 @@ async fn fenced_agent_session(
     )
     .await;
     let client = Endpoint::builder(presets::Minimal)
-        .secret_key(agent_key)
+        .secret_key(agent_key.clone())
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await
@@ -789,29 +669,15 @@ async fn fenced_agent_session(
         i32::from(HandshakeResult::Accepted)
     );
     wait_until_registered(service, &hs.node_id).await;
-    (term, fence, router, client, conn)
+    (agent_key, hs, router, client, conn)
 }
 
-fn fenced_command_envelope(
-    node_id: &[u8],
-    traceparent: &str,
-    fence: &ConnectionFenceV2,
-    binding: &FenceBindingV2,
-) -> Vec<u8> {
-    let mut cmd =
-        CommandEnvelope::decode(command_envelope(node_id, traceparent, String::new()).as_slice())
-            .expect("decode");
-    cmd.connection_fence = Some(fence.clone());
-    cmd.fence_binding = Some(binding.clone());
-    cmd.encode_to_vec()
-}
-
-fn binding_op_id(bytes: &[u8]) -> [u8; 16] {
-    CommandEnvelope::decode(bytes)
-        .expect("decode")
-        .command_id
-        .try_into()
-        .expect("cmd id")
+async fn agent_session(
+    service: &IrohTransportService,
+    signing_key: &SigningKey,
+    node_id: [u8; 16],
+) -> (SecretKey, SessionHandshake, Router, Endpoint, Connection) {
+    agent_session_with_options(service, signing_key, node_id, None, None).await
 }
 
 fn telemetry_event(node_id: &[u8], bytes: usize) -> TransportEvent {
@@ -882,7 +748,7 @@ fn policy_enrollment_and_rate_unit_invariants() {
         ocserv_version: "test".into(),
         boot_id: "boot".into(),
         agent_instance_id: Uuid::now_v7().as_bytes().to_vec(),
-        capabilities: vec!["ocserv.fencing.v2".into(), "ocserv.status.read".into()],
+        capabilities: vec!["ocserv.status.read".into()],
         environment: "test".into(),
         nonce: vec![0; 16],
         time: Some(now_timestamp()),
@@ -948,8 +814,7 @@ fn handshake_command_receipt_queue_and_artifact_deadline_invariants() {
         Some("receipt_missing")
     );
     let mut bad_ver = privileged_command_result(&cmd, true);
-    bad_ver.privileged_result_proof.as_mut().expect("p").version =
-        PrivdReceiptVersion::Unspecified.into();
+    bad_ver.privileged_result_proof.as_mut().expect("p").version = 0;
     assert_eq!(
         privileged_result_proof_error(&cmd, &bad_ver),
         Some("receipt_invalid")
@@ -1037,7 +902,6 @@ fn handshake_command_receipt_queue_and_artifact_deadline_invariants() {
             controller_version: "test".into(),
             negotiated_capabilities: vec!["ocserv.status.read".into()],
             session_grant: None,
-            connection_fence: None,
         };
         assert!(validate_negotiated_session(&hs, key.public(), &resp).is_err());
     }
@@ -1141,72 +1005,19 @@ fn enrollment_identity_churn_refuses_new_identity_without_evicting_oldest() {
     );
 }
 
-#[test]
-fn fence_registration_decision_matrix() {
-    let node = *Uuid::now_v7().as_bytes();
-    let ep = [1_u8; 32];
-    let mk = |t: &FenceTerm| RegisteredFence {
-        verified: ocservia_command_authorization::VerifiedConnectionFenceV2 {
-            fence_id: t.fence_id,
-            owner_instance_id: t.owner_instance_id,
-            owner_incarnation: t.owner_incarnation,
-            owner_epoch: t.owner_epoch,
-            connection_id: t.connection_id,
-            authorization_revision: t.authorization_revision,
-            capabilities: t.capabilities.clone(),
-            lease_until_seconds: unix_now() + 30,
-            lease_until_nanos: 0,
-            expires_at_seconds: unix_now() + 300,
-            expires_at_nanos: 0,
-        },
-        fence: ConnectionFenceV2::default(),
-        endpoint_id: ep,
-    };
-    let mut term = FenceTerm::new(node, ep, 5);
-    let base = mk(&term);
-    assert_eq!(
-        fence_registration_decision(None, &base),
-        FenceRegistration::Apply
-    );
-    assert_eq!(
-        fence_registration_decision(Some(&base), &base),
-        FenceRegistration::Refresh
-    );
-    term.supersede();
-    let higher = mk(&term);
-    assert_eq!(
-        fence_registration_decision(Some(&base), &higher),
-        FenceRegistration::Apply
-    );
-    assert_eq!(
-        fence_registration_decision(Some(&higher), &base),
-        FenceRegistration::Stale
-    );
-    let mut collision = higher.clone();
-    collision.verified.fence_id = *Uuid::now_v7().as_bytes();
-    assert_eq!(
-        fence_registration_decision(Some(&higher), &collision),
-        FenceRegistration::EpochCollision
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Pinned security-acceptance & budget tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn trust_update_reports_stale_and_rejects_tombstone_reactivation() {
-    let (key, kr) = controller_keyring();
+    let (_, kr) = controller_keyring();
     let service = IrohTransportService::new(8, IdentityPolicy::default(), kr);
     let ep = SecretKey::generate().public();
     let node_id = *Uuid::now_v7().as_bytes();
-    let fence = signed_fence(&key, &FenceTerm::new(node_id, *ep.as_bytes(), 1), 300);
-    register_fence(&service, &fence).await;
 
     let apply = |state: NodeTrustState, rev: u64| {
         let req = state_update_req(
-            &key,
-            &fence,
             node_id,
             *ep.as_bytes(),
             state,
@@ -1388,7 +1199,7 @@ async fn router_restart_retains_identity_and_direct_connectivity() {
 
     for _ in 0..2 {
         let service = test_service(8);
-        let trust = test_trust_for_key(&agent_key, &hs, None).await;
+        let trust = test_trust_for_key(&agent_key, &hs).await;
         let router = test_router(
             controller_key.clone(),
             RelayMode::Disabled,
@@ -1425,7 +1236,7 @@ async fn newer_authority_revision_closes_the_retained_session() {
     let hs = handshake(&agent_key);
     let policy = identity_policy(&agent_key, &hs);
     let service = test_service_with_policy(8, policy.clone());
-    let trust = test_trust_for_key(&agent_key, &hs, None).await;
+    let trust = test_trust_for_key(&agent_key, &hs).await;
     let router = test_router(
         SecretKey::generate(),
         RelayMode::Disabled,
@@ -1462,11 +1273,7 @@ async fn newer_authority_revision_closes_the_retained_session() {
         )
     );
 
-    let (signing_key, _) = controller_keyring();
-    let fence = resp.connection_fence.expect("fence");
     let req = state_update_req(
-        &signing_key,
-        &fence,
         meta.node_id.as_slice().try_into().expect("node"),
         *agent_key.public().as_bytes(),
         NodeTrustState::Active,
@@ -1625,7 +1432,7 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
         SecretKey::generate(),
         RelayMode::Disabled,
         IdentityPolicy::default(),
-        test_trust_with_options(controller_keyring().0, Vec::new(), None).await,
+        test_trust_with_options(controller_keyring().0, Vec::new(), None, None).await,
         &s0,
     )
     .await;
@@ -1657,9 +1464,9 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
         SecretKey::generate(),
         RelayMode::Disabled,
         // The Controller has committed the endpoint, but transportd has
-        // neither a local binding nor an owner fence for its first session.
+        // no local binding for its first session yet.
         IdentityPolicy::default(),
-        test_trust_for_key(&agent_key, &hs, None).await,
+        test_trust_for_key(&agent_key, &hs).await,
         &service,
         true,
         Vec::new(),
@@ -1711,7 +1518,6 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
                 username: max_name("u", i),
                 enabled: true,
                 revision: 1,
-                fingerprint_sha256: vec![1; 32],
             })
             .collect(),
         groups: (0..768)
@@ -1723,7 +1529,6 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
                     Vec::new()
                 },
                 revision: 1,
-                fingerprint_sha256: vec![2; 32],
             })
             .collect(),
         ..TelemetryBatch::default()
@@ -1784,7 +1589,7 @@ async fn router_security_telemetry_stream_stalled_handshake_and_replacement() {
             shared: s2.shared.clone(),
             policy: identity_policy(&agent_key, &hs2),
             kind: ProtocolKind::Agent,
-            trust: test_trust_for_key(&agent_key, &hs2, None).await,
+            trust: test_trust_for_key(&agent_key, &hs2).await,
             handshake_timeout: Duration::from_millis(500),
         },
     )
@@ -1840,7 +1645,7 @@ async fn command_responses_are_published_with_negotiated_limits() {
         SecretKey::generate(),
         RelayMode::Disabled,
         identity_policy(&agent_key, &hs),
-        test_trust_for_key(&agent_key, &hs, None).await,
+        test_trust_for_key(&agent_key, &hs).await,
         &service,
     )
     .await;
@@ -1867,21 +1672,6 @@ async fn command_responses_are_published_with_negotiated_limits() {
     assert_eq!(meta.negotiated_capabilities, hs.capabilities);
 
     let (signing_key, _) = controller_keyring();
-    let session_fence = resp.connection_fence.expect("fence");
-    let fenced_cmd = |tp: &str| {
-        let bare = command_envelope(&hs.node_id, tp, String::new());
-        let b = bind_op(
-            &signing_key,
-            &session_fence,
-            FenceOperationKind::Command,
-            binding_op_id(&bare),
-            "ocserv.status.read",
-        );
-        let mut d = CommandEnvelope::decode(bare.as_slice()).expect("dec");
-        d.connection_fence = Some(session_fence.clone());
-        d.fence_binding = Some(b);
-        d.encode_to_vec()
-    };
 
     // Unnegotiated capability, stale revision, expired session grant, oversized frame all rejected before transport.
     let mut unapproved = CommandEnvelope::decode(
@@ -1924,7 +1714,7 @@ async fn command_responses_are_published_with_negotiated_limits() {
         let mut conns = service.shared.inner.connections.lock().await;
         let reg = conns.get_mut(&hs.node_id).expect("s");
         reg.authorization_revision = 0;
-        reg.session_expires_at = Some(SystemTime::UNIX_EPOCH);
+        reg.session_expires_at = SystemTime::UNIX_EPOCH;
     }
     assert_eq!(
         service
@@ -1945,7 +1735,7 @@ async fn command_responses_are_published_with_negotiated_limits() {
         .await
         .get_mut(&hs.node_id)
         .expect("s")
-        .session_expires_at = None;
+        .session_expires_at = SystemTime::now() + Duration::from_mins(5);
 
     let tp = new_traceparent();
     let baseline = last_seen(&service, &hs.node_id).await;
@@ -1978,7 +1768,7 @@ async fn command_responses_are_published_with_negotiated_limits() {
         .await
         .expect("w")
         .into_inner();
-    let cmd_bytes = fenced_cmd(&tp);
+    let cmd_bytes = command_envelope(&hs.node_id, &tp, String::new());
     let sent = CommandEnvelope::decode(cmd_bytes.as_slice()).expect("dec");
     service
         .send_command(Request::new(SendCommandRequest {
@@ -1996,7 +1786,7 @@ async fn command_responses_are_published_with_negotiated_limits() {
             CommandResultState::try_from(res.state).expect("s"),
             res.result.as_slice()
         ),
-        (CommandResultState::Succeeded, b"completed".as_slice())
+        (CommandResultState::Succeeded, [].as_slice())
     );
     let receipt = verify_receipt(
         res.privileged_result_proof.as_ref().expect("proof"),
@@ -2018,8 +1808,10 @@ async fn command_responses_are_published_with_negotiated_limits() {
         )
     );
     assert_eq!(
-        receipt.result_bytes_sha256,
-        Sha256::digest(b"completed").to_vec()
+        receipt.result_cbor_sha256,
+        result_payload_cbor_hash(PrivilegedResultKind::Mutation, &[])
+            .expect("cbor hash")
+            .to_vec()
     );
     assert_ne!(last_seen(&service, &hs.node_id).await, baseline);
 
@@ -2038,7 +1830,7 @@ async fn command_responses_are_published_with_negotiated_limits() {
     ] {
         let trace = new_traceparent();
         let task = tokio::spawn(respond_command(conn.clone(), reply));
-        let bytes = fenced_cmd(&trace);
+        let bytes = command_envelope(&hs.node_id, &trace, String::new());
         let expected = CommandEnvelope::decode(bytes.as_slice()).expect("dec");
         service
             .send_command(Request::new(SendCommandRequest {
@@ -2089,7 +1881,7 @@ async fn relay_only_connection_and_disabled_relay_failure() {
         SecretKey::generate(),
         RelayMode::Custom(relay_map.clone()),
         identity_policy(&agent_key, &hs),
-        test_trust_for_key(&agent_key, &hs, None).await,
+        test_trust_for_key(&agent_key, &hs).await,
         &service,
         false,
         roots.clone(),
@@ -2160,16 +1952,6 @@ async fn relay_only_connection_and_disabled_relay_failure() {
 }
 
 #[tokio::test]
-async fn malformed_relay_batches_preserve_receive_progress() {
-    iroh::test_utils::assert_relay_receive_progress().await;
-}
-
-#[test]
-fn relay_mapping_bounds_preserve_live_addresses() {
-    iroh::test_utils::assert_relay_mapping_bounds();
-}
-
-#[tokio::test]
 async fn single_relay_recovers_without_replacing_endpoint() {
     let (_, roots, relay) = private_tls_relay().await;
     let relay_addr = relay.https_addr().expect("addr");
@@ -2183,7 +1965,7 @@ async fn single_relay_recovers_without_replacing_endpoint() {
         SecretKey::generate(),
         RelayMode::Custom(map.clone()),
         identity_policy(&agent_key, &hs),
-        test_trust_for_key(&agent_key, &hs, None).await,
+        test_trust_for_key(&agent_key, &hs).await,
         &service,
         false,
         roots.clone(),
@@ -2249,7 +2031,7 @@ async fn relay_and_direct_paths_converge_to_direct() {
         SecretKey::generate(),
         RelayMode::Custom(relay_map.clone()),
         identity_policy(&agent_key, &hs),
-        test_trust_for_key(&agent_key, &hs, None).await,
+        test_trust_for_key(&agent_key, &hs).await,
         roots.clone(),
         &service,
     )
@@ -2304,46 +2086,38 @@ async fn relay_and_direct_paths_converge_to_direct() {
 }
 
 // ---------------------------------------------------------------------------
-// Artifact streaming, fence carriers, cancel & expiry
+// Artifact unary fetch/consume, cancel & grant expiry
 // ---------------------------------------------------------------------------
 
-type EventStreamOf<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
-type AgentFetch = (
-    EventStreamOf<ArtifactChunk>,
+type StalledArtifactFetch = (
+    JoinHandle<Result<Response<ArtifactPayload>, Status>>,
     iroh::endpoint::SendStream,
     iroh::endpoint::RecvStream,
     [u8; 16],
     (Router, Endpoint, Connection),
 );
 
-async fn stalled_artifact_fetch(service: &IrohTransportService, ttl: Duration) -> AgentFetch {
+async fn stalled_artifact_fetch(
+    service: &IrohTransportService,
+    ttl: Duration,
+) -> StalledArtifactFetch {
     let (key, _) = controller_keyring();
     let node_id = *Uuid::now_v7().as_bytes();
-    let (_term, fence, router, client, conn) =
-        fenced_agent_session(service, &key, node_id, 61).await;
-    register_fence(service, &fence).await;
+    let (_agent_key, _hs, router, client, conn) = agent_session(service, &key, node_id).await;
     let art_id = *Uuid::now_v7().as_bytes();
-    let binding = bind_op(
-        &key,
-        &fence,
-        FenceOperationKind::Artifact,
-        art_id,
-        "ocserv.fencing.v2",
-    );
     let mut grant = shape_valid_grant(node_id, art_id);
     grant.expires_at = Some((SystemTime::now() + ttl).into());
-    let fetched = service
-        .fetch_artifact(Request::new(FetchArtifactRequest {
+    let svc = service.clone();
+    let fetch_task = tokio::spawn(async move {
+        svc.fetch_artifact(Request::new(FetchArtifactRequest {
             node_id: node_id.to_vec(),
             artifact_id: art_id.to_vec(),
             purpose: "certificate_p12".into(),
             max_bytes: 32,
             grant: Some(grant),
-            fence_binding: Some(binding),
         }))
         .await
-        .expect("fetch")
-        .into_inner();
+    });
     let (send, mut recv) = tokio::time::timeout(Duration::from_secs(5), conn.accept_bi())
         .await
         .expect("t")
@@ -2352,7 +2126,7 @@ async fn stalled_artifact_fetch(service: &IrohTransportService, ttl: Duration) -
     recv.read_exact(&mut hdr).await.expect("hdr");
     let mut body = vec![0_u8; (u32::from_be_bytes(hdr) & !ARTIFACT_FETCH_FRAME) as usize];
     recv.read_exact(&mut body).await.expect("body");
-    (fetched, send, recv, art_id, (router, client, conn))
+    (fetch_task, send, recv, art_id, (router, client, conn))
 }
 
 async fn assert_artifact_stream_aborted(send: &mut iroh::endpoint::SendStream) {
@@ -2364,7 +2138,7 @@ async fn assert_artifact_stream_aborted(send: &mut iroh::endpoint::SendStream) {
 }
 
 #[tokio::test]
-async fn artifact_fence_verification_and_carrier_forwarding() {
+async fn artifact_grant_validation_and_unary_forwarding() {
     // Unsigned artifact requests fail before connection lookup.
     let s0 = test_service(8);
     let n0 = Uuid::now_v7();
@@ -2376,7 +2150,6 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
             purpose: "certificate_p12".into(),
             max_bytes: 32,
             grant: None,
-            fence_binding: None,
         }))
         .await
     else {
@@ -2390,7 +2163,6 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
             sha256: vec![0; 32],
             size: 32,
             confirm_only: false,
-            fence_binding: None,
         }))
         .await
         .expect_err("unsigned consume")
@@ -2398,63 +2170,28 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
         tonic::Code::PermissionDenied
     );
 
-    // Acceptance waits for fence verification; refreshed wire proof crosses agent boundary on fetch & consume.
+    // Unary fetch & consume forward signed grants and verify agent responses.
     let (key, kr) = controller_keyring();
     let node_id = *Uuid::now_v7().as_bytes();
     let service = IrohTransportService::new(8, IdentityPolicy::default(), kr);
-    let (term, _hs_fence, _router, _client, conn) =
-        fenced_agent_session(&service, &key, node_id, 58).await;
-    let expired_hs = signed_fence_at(&key, &term, -10, -1);
-    let exp_verified = service
-        .shared
-        .keyring()
-        .verify_connection_fence_v2_at(&expired_hs, &term.node_id, &term.endpoint_id, unix_now(), 0)
-        .expect("v");
-    service
-        .shared
-        .inner
-        .connections
-        .lock()
-        .await
-        .get_mut(node_id.as_slice())
-        .expect("s")
-        .fence = Arc::new(RegisteredFence {
-        verified: exp_verified,
-        fence: expired_hs.clone(),
-        endpoint_id: term.endpoint_id,
-    });
-    let fence = signed_fence(&key, &term, 60);
-    register_fence(&service, &fence).await;
+    let (_agent_key, _hs, router, client, conn) = agent_session(&service, &key, node_id).await;
 
     let art_id = *Uuid::now_v7().as_bytes();
     let grant = shape_valid_grant(node_id, art_id);
-    let fetch_binding = bind_op(
-        &key,
-        &fence,
-        FenceOperationKind::Artifact,
-        art_id,
-        "ocserv.fencing.v2",
-    );
-    let mut pending = service.fetch_artifact(Request::new(FetchArtifactRequest {
-        node_id: node_id.to_vec(),
-        artifact_id: art_id.to_vec(),
-        purpose: "certificate_p12".into(),
-        max_bytes: 32,
-        grant: Some(grant.clone()),
-        fence_binding: Some(fetch_binding.clone()),
-    }));
-    let lock = service.shared.inner.fences.lock().await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut pending)
+    let fetch_task = tokio::spawn({
+        let svc = service.clone();
+        let g = grant.clone();
+        async move {
+            svc.fetch_artifact(Request::new(FetchArtifactRequest {
+                node_id: node_id.to_vec(),
+                artifact_id: art_id.to_vec(),
+                purpose: "certificate_p12".into(),
+                max_bytes: 32,
+                grant: Some(g),
+            }))
             .await
-            .is_err()
-    );
-    drop(lock);
-    let mut fetched = tokio::time::timeout(Duration::from_secs(5), pending)
-        .await
-        .expect("t")
-        .expect("ok")
-        .into_inner();
+        }
+    });
 
     let (mut fsend, mut frecv) = tokio::time::timeout(Duration::from_secs(5), conn.accept_bi())
         .await
@@ -2466,20 +2203,17 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
     let mut body = vec![0_u8; (u32::from_be_bytes(hdr) & !ARTIFACT_FETCH_FRAME) as usize];
     frecv.read_exact(&mut body).await.expect("b");
     let fwd = ArtifactFetchRequest::decode(body.as_slice()).expect("dec");
-    assert_eq!(fwd.connection_fence.as_ref(), Some(&fence));
-    assert_ne!(fwd.connection_fence.as_ref(), Some(&expired_hs));
-    assert_eq!(fwd.fence_binding.as_ref(), Some(&fetch_binding));
-    let chunk = ArtifactChunk {
+    assert_eq!(fwd.grant.as_ref(), Some(&grant));
+    let payload = ArtifactPayload {
         artifact_id: art_id.to_vec(),
-        offset: 0,
-        data: vec![1],
-        eof: true,
-        sha256: vec![0; 32],
-    }
-    .encode_to_vec();
-    write_frame_bytes(&mut fsend, &chunk).await;
+        data: vec![1, 2, 3],
+        sha256: vec![0xaa; 32],
+    };
+    write_frame_bytes(&mut fsend, &payload.encode_to_vec()).await;
     fsend.finish().expect("fin");
-    assert!(fetched.next().await.expect("item").is_ok());
+    let fetched = fetch_task.await.expect("join").expect("ok").into_inner();
+    assert_eq!(fetched.data, vec![1, 2, 3]);
+    assert_eq!(fetched.sha256, vec![0xaa; 32]);
     assert!(
         tokio::time::timeout(Duration::from_secs(5), fsend.stopped())
             .await
@@ -2489,17 +2223,9 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
     );
 
     let grant_id: [u8; 16] = grant.grant_id.as_slice().try_into().expect("gid");
-    let consume_binding = bind_op(
-        &key,
-        &fence,
-        FenceOperationKind::Artifact,
-        grant_id,
-        "ocserv.fencing.v2",
-    );
     let consume_task = tokio::spawn({
         let svc = service.clone();
         let g = grant.clone();
-        let cb = consume_binding.clone();
         async move {
             svc.consume_artifact(Request::new(ConsumeArtifactRequest {
                 node_id: node_id.to_vec(),
@@ -2507,7 +2233,6 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
                 sha256: vec![0x11; 32],
                 size: 32,
                 confirm_only: false,
-                fence_binding: Some(cb),
             }))
             .await
         }
@@ -2521,10 +2246,7 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
     let mut cbody = vec![0_u8; (u32::from_be_bytes(hdr) & !ARTIFACT_CONSUME_FRAME) as usize];
     crecv.read_exact(&mut cbody).await.expect("b");
     let cfwd = AgentArtifactConsumeRequest::decode(cbody.as_slice()).expect("dec");
-    assert_eq!(
-        (cfwd.connection_fence.as_ref(), cfwd.fence_binding.as_ref()),
-        (Some(&fence), Some(&consume_binding))
-    );
+    assert_eq!(cfwd.grant.as_ref(), Some(&grant));
     let cresp = AgentArtifactConsumeResponse {
         artifact_id: art_id.to_vec(),
         grant_id: grant_id.to_vec(),
@@ -2534,7 +2256,8 @@ async fn artifact_fence_verification_and_carrier_forwarding() {
     write_frame_bytes(&mut csend, &cresp).await;
     csend.finish().expect("fin");
     consume_task.await.expect("join").expect("ok");
-    service.begin_shutdown().await;
+    shutdown(&service, router).await.expect("shut");
+    client.close().await;
 }
 
 #[tokio::test]
@@ -2542,506 +2265,186 @@ async fn artifact_cancel_and_grant_expiry_abort_stalled_streams() {
     let (_, kr) = controller_keyring();
     let service = IrohTransportService::new(8, IdentityPolicy::default(), kr);
 
-    // Cancel before first chunk.
-    let (fetched, mut send, _recv, _, (_r1, _c1, conn1)) =
+    // Consumer cancellation aborts stalled stream without closing the session connection.
+    let (fetch_task, mut send, _recv, _, (r1, c1, conn1)) =
         stalled_artifact_fetch(&service, Duration::from_mins(1)).await;
-    drop(fetched);
+    fetch_task.abort();
+    let _ = fetch_task.await;
     assert_artifact_stream_aborted(&mut send).await;
     assert!(conn1.close_reason().is_none());
 
-    // Cancel after first chunk.
-    let (mut fetched, mut send, _recv, art_id, (_r2, _c2, conn2)) =
-        stalled_artifact_fetch(&service, Duration::from_mins(1)).await;
-    let chunk = ArtifactChunk {
-        artifact_id: art_id.to_vec(),
-        offset: 0,
-        data: vec![1],
-        eof: false,
-        sha256: Vec::new(),
-    }
-    .encode_to_vec();
-    write_frame_bytes(&mut send, &chunk).await;
-    fetched.next().await.expect("first").expect("ok");
-    drop(fetched);
-    assert_artifact_stream_aborted(&mut send).await;
-    assert!(conn2.close_reason().is_none());
-
     // Grant expiry aborts stalled stream with DeadlineExceeded.
-    let (mut fetched, mut send, _recv, _, (_r3, _c3, conn3)) =
+    let (fetch_task, mut send, _recv, _, (r2, c2, conn2)) =
         stalled_artifact_fetch(&service, Duration::from_secs(1)).await;
-    let err = tokio::time::timeout(Duration::from_secs(5), fetched.next())
+    let err = tokio::time::timeout(Duration::from_secs(5), fetch_task)
         .await
         .expect("t")
-        .expect("item")
+        .expect("join")
         .expect_err("exp");
     assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
     assert_artifact_stream_aborted(&mut send).await;
-    assert!(conn3.close_reason().is_none());
+    assert!(conn2.close_reason().is_none());
 
     service.begin_shutdown().await;
+    let _ = r1.shutdown().await;
+    let _ = r2.shutdown().await;
+    c1.close().await;
+    c2.close().await;
 }
 
 // ---------------------------------------------------------------------------
-// Connection-owner fence enforcement & recovery
+// Session epoch monotonicity, expiry & admin close/revoke semantics
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn fenced_command_dispatch_takeover_and_registration_boundaries() {
+async fn session_epoch_monotonicity_supersession_and_expiry() {
     let (key, kr) = controller_keyring();
     let node_id = *Uuid::now_v7().as_bytes();
-    let service = IrohTransportService::new(8, IdentityPolicy::default(), kr);
-    let (mut term, fence, _router, _client, _conn) =
-        fenced_agent_session(&service, &key, node_id, 41).await;
-    let first = register_fence(&service, &fence).await;
-    assert_eq!(
-        (first.disposition, first.retained_epoch),
-        (i32::from(OwnerFenceDisposition::Refreshed), 41)
-    );
-
-    // Bare command, misbound command ID, and unheld capability all rejected.
-    let bare = command_envelope(&node_id, &new_traceparent(), String::new());
-    let other_id = binding_op_id(&command_envelope(
-        &node_id,
-        &new_traceparent(),
-        String::new(),
-    ));
-    let this_id = binding_op_id(&bare);
-    let misbound = fenced_command_envelope(
-        &node_id,
-        &new_traceparent(),
-        &fence,
-        &bind_op(
-            &key,
-            &fence,
-            FenceOperationKind::Command,
-            other_id,
-            "ocserv.service.reload",
-        ),
-    );
-    let unheld = fenced_command_envelope(
-        &node_id,
-        &new_traceparent(),
-        &fence,
-        &bind_op(
-            &key,
-            &fence,
-            FenceOperationKind::Command,
-            this_id,
-            "ocserv.tenant.admin",
-        ),
-    );
-    for env in [bare, misbound, unheld] {
-        assert_eq!(
-            service
-                .send_command(Request::new(SendCommandRequest {
-                    node_id: node_id.to_vec(),
-                    command_envelope: env
-                }))
-                .await
-                .expect_err("rej")
-                .code(),
-            tonic::Code::PermissionDenied
-        );
-    }
-
-    // Same term refresh succeeds; higher epoch takeover retires live session, rejects stale & collision.
-    let refreshed = register_fence(&service, &signed_fence(&key, &term, 60)).await;
-    assert_eq!(
-        (refreshed.disposition, refreshed.retained_epoch),
-        (i32::from(OwnerFenceDisposition::Refreshed), 41)
-    );
-    term.supersede();
-    let takeover = register_fence(&service, &signed_fence(&key, &term, 30)).await;
-    assert_eq!(
-        (takeover.disposition, takeover.retained_epoch),
-        (i32::from(OwnerFenceDisposition::Applied), 42)
-    );
-    assert!(
-        service
-            .shared
-            .inner
-            .connections
-            .lock()
-            .await
-            .get(node_id.as_slice())
-            .is_none()
-    );
-
-    let stale_cmd = fenced_command_envelope(
-        &node_id,
-        &new_traceparent(),
-        &fence,
-        &bind_op(
-            &key,
-            &fence,
-            FenceOperationKind::Command,
-            this_id,
-            "ocserv.service.reload",
-        ),
-    );
-    let err = service
-        .send_command(Request::new(SendCommandRequest {
-            node_id: node_id.to_vec(),
-            command_envelope: stale_cmd,
-        }))
-        .await
-        .expect_err("stale");
-    assert!(matches!(
-        err.code(),
-        tonic::Code::PermissionDenied | tonic::Code::Unavailable
-    ));
-
-    let stale_reg = register_fence(
-        &service,
-        &signed_fence(&key, &FenceTerm::new(node_id, term.endpoint_id, 41), 30),
-    )
-    .await;
-    assert_eq!(
-        (stale_reg.disposition, stale_reg.retained_epoch),
-        (i32::from(OwnerFenceDisposition::Stale), 42)
-    );
-    assert_eq!(
-        service
-            .get_owner_fence(Request::new(GetOwnerFenceRequest {
-                node_id: node_id.to_vec()
-            }))
-            .await
-            .expect("get")
-            .into_inner()
-            .fence
-            .expect("f")
-            .owner_epoch,
-        42
-    );
-    assert_eq!(
-        service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(signed_fence(
-                    &key,
-                    &FenceTerm::new(node_id, term.endpoint_id, 42),
-                    30
-                ))
-            }))
-            .await
-            .expect_err("collision")
-            .code(),
-        tonic::Code::InvalidArgument
-    );
-
-    // Expired lease, unknown key, and nanosecond lease boundaries.
-    let n2 = *Uuid::now_v7().as_bytes();
-    let ep2 = [9_u8; 32];
-    assert_eq!(
-        service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(signed_fence_at(
-                    &key,
-                    &FenceTerm::new(n2, ep2, 3),
-                    -120,
-                    -30
-                ))
-            }))
-            .await
-            .expect_err("exp")
-            .code(),
-        tonic::Code::FailedPrecondition
-    );
-    assert_eq!(
-        service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(signed_fence(
-                    &SigningKey::from_bytes(&[11; 32]),
-                    &FenceTerm::new(n2, ep2, 4),
-                    30
-                ))
-            }))
-            .await
-            .expect_err("key")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-    assert_eq!(
-        service
-            .get_owner_fence(Request::new(GetOwnerFenceRequest {
-                node_id: n2.to_vec()
-            }))
-            .await
-            .expect_err("404")
-            .code(),
-        tonic::Code::NotFound
-    );
-
-    let frac_ok = register_fence(
-        &service,
-        &signed_fence_until(
-            &key,
-            &FenceTerm::new(n2, ep2, 9),
-            SystemTime::now() + Duration::from_millis(400),
-        ),
-    )
-    .await;
-    assert_eq!(
-        frac_ok.disposition,
-        i32::from(OwnerFenceDisposition::Applied)
-    );
-    assert_eq!(
-        service
-            .register_owner_fence(Request::new(RegisterOwnerFenceRequest {
-                fence: Some(signed_fence_until(
-                    &key,
-                    &FenceTerm::new(n2, ep2, 10),
-                    SystemTime::now() - Duration::from_millis(150)
-                ))
-            }))
-            .await
-            .expect_err("sub-s exp")
-            .code(),
-        tonic::Code::FailedPrecondition
-    );
-    service.begin_shutdown().await;
-}
-
-#[tokio::test]
-async fn owner_lease_expiry_closes_and_refresh_preserves_agent_session() {
-    let (key, kr) = controller_keyring();
-    let service = IrohTransportService::new(8, IdentityPolicy::default(), kr);
-
-    // Short lease expires and closes session without new command.
-    let n1 = *Uuid::now_v7().as_bytes();
-    let (t1, _, _r1, _c1, conn1) = fenced_agent_session(&service, &key, n1, 7).await;
-    register_fence(&service, &signed_fence(&key, &t1, 2)).await;
-    tokio::time::timeout(Duration::from_secs(5), conn1.closed())
-        .await
-        .expect("expired closes");
-
-    // Refreshing the same term outlives the initial short handshake snapshot.
-    let n2 = *Uuid::now_v7().as_bytes();
-    let (t2, _, _r2, _c2, conn2) = fenced_agent_session(&service, &key, n2, 7).await;
-    let short = signed_fence(&key, &t2, 2);
-    service
-        .shared
-        .inner
-        .connections
-        .lock()
-        .await
-        .get_mut(n2.as_slice())
-        .expect("s")
-        .fence = Arc::new(RegisteredFence {
-        verified: service
-            .shared
-            .keyring()
-            .verify_connection_fence_v2_at(&short, &t2.node_id, &t2.endpoint_id, unix_now(), 0)
-            .expect("v"),
-        fence: short.clone(),
-        endpoint_id: t2.endpoint_id,
-    });
-    register_fence(&service, &short).await;
-    register_fence(&service, &signed_fence(&key, &t2, 120)).await;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), conn2.closed())
-            .await
-            .is_err()
-    );
-    service.begin_shutdown().await;
-}
-
-#[tokio::test]
-async fn fenced_admin_operations_binding_and_lost_ack_recovery() {
-    let (key, kr) = controller_keyring();
-    let service = IrohTransportService::new(8, IdentityPolicy::default(), kr);
-
-    // Fenceless close/state-update/send_command fail closed.
-    let unreg = *Uuid::now_v7().as_bytes();
-    assert_eq!(
-        service
-            .send_command(Request::new(SendCommandRequest {
-                node_id: unreg.to_vec(),
-                command_envelope: command_envelope(&unreg, &new_traceparent(), String::new())
-            }))
-            .await
-            .expect_err("unavail")
-            .code(),
-        tonic::Code::Unavailable
-    );
-    assert_eq!(
-        service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id: unreg.to_vec(),
-                reason: "close".into(),
-                fence_binding: None
-            }))
-            .await
-            .expect_err("close")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-    assert_eq!(
-        service
-            .update_node_trust(Request::new(UpdateNodeTrustRequest {
-                node_id: unreg.to_vec(),
-                endpoint_id: SecretKey::generate().public().as_bytes().to_vec(),
-                state: NodeTrustState::Active.into(),
-                reason: "fenceless".into(),
-                revision: 2,
-                fence_binding: None,
-                operation_id: Vec::new(),
-            }))
-            .await
-            .expect_err("trust")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-
-    // Registered fence rejects bindingless fetch/consume/confirm/close/state-update, wrong kind, foreign term, and carrier tampering.
-    let n1 = *Uuid::now_v7().as_bytes();
-    let (t1, f1, _r1, _c1, _conn1) = fenced_agent_session(&service, &key, n1, 15).await;
-    register_fence(&service, &f1).await;
-    let art = *Uuid::now_v7().as_bytes();
-    let grant = shape_valid_grant(n1, art);
-    assert!(matches!(
-        service.fetch_artifact(Request::new(FetchArtifactRequest { node_id: n1.to_vec(), artifact_id: art.to_vec(), purpose: "certificate_p12".into(), max_bytes: 32, grant: Some(grant.clone()), fence_binding: None })).await,
-        Err(s) if s.code() == tonic::Code::PermissionDenied
-    ));
-    for confirm_only in [false, true] {
-        assert_eq!(
-            service
-                .consume_artifact(Request::new(ConsumeArtifactRequest {
-                    node_id: n1.to_vec(),
-                    grant: Some(grant.clone()),
-                    sha256: vec![0x11; 32],
-                    size: 32,
-                    confirm_only,
-                    fence_binding: None
-                }))
-                .await
-                .expect_err("c")
-                .code(),
-            tonic::Code::PermissionDenied
-        );
-    }
-    assert_eq!(
-        service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id: n1.to_vec(),
-                reason: "c".into(),
-                fence_binding: None
-            }))
-            .await
-            .expect_err("cl")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-    assert_eq!(
-        service
-            .close_node(Request::new(CloseNodeRequest {
-                node_id: n1.to_vec(),
-                reason: "c".into(),
-                fence_binding: Some(bind_op(
-                    &key,
-                    &f1,
-                    FenceOperationKind::StateUpdate,
-                    n1,
-                    "ocserv.fencing.v2"
-                )),
-            }))
-            .await
-            .expect_err("wrong kind")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-    let op_id = state_update_operation_id(
-        &n1,
-        &t1.endpoint_id,
-        NodeTrustState::Active as u32,
-        4,
-        "carrier",
-    );
-    assert_eq!(
-        service
-            .update_node_trust(Request::new(UpdateNodeTrustRequest {
-                node_id: n1.to_vec(),
-                endpoint_id: t1.endpoint_id.to_vec(),
-                state: NodeTrustState::Active.into(),
-                reason: "carrier".into(),
-                revision: 4,
-                fence_binding: None,
-                operation_id: op_id.to_vec(),
-            }))
-            .await
-            .expect_err("bl")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-    let foreign_f = signed_fence(&key, &FenceTerm::new(n1, t1.endpoint_id, 99), 30);
-    assert_eq!(
-        service
-            .update_node_trust(Request::new(state_update_req(
-                &key,
-                &foreign_f,
-                n1,
-                t1.endpoint_id,
-                NodeTrustState::Revoked,
-                3,
-                "stale"
-            )))
-            .await
-            .expect_err("foreign")
-            .code(),
-        tonic::Code::PermissionDenied
-    );
-    let carrier_b = bind_op(
-        &key,
-        &f1,
-        FenceOperationKind::StateUpdate,
-        op_id,
-        "ocserv.fencing.v2",
-    );
-    let mut flipped_ep = t1.endpoint_id;
-    flipped_ep[0] ^= 1;
-    for (ep, st, rev, rsn) in [
-        (flipped_ep, NodeTrustState::Active, 4, "carrier"),
-        (t1.endpoint_id, NodeTrustState::Revoked, 4, "carrier"),
-        (t1.endpoint_id, NodeTrustState::Active, 5, "carrier"),
-        (t1.endpoint_id, NodeTrustState::Active, 4, "different"),
-    ] {
-        let tid = state_update_operation_id(&n1, &ep, st as u32, rev, rsn);
-        let code = service
-            .update_node_trust(Request::new(UpdateNodeTrustRequest {
-                node_id: n1.to_vec(),
-                endpoint_id: ep.to_vec(),
-                state: st.into(),
-                reason: rsn.into(),
-                revision: rev,
-                fence_binding: Some(carrier_b.clone()),
-                operation_id: tid.to_vec(),
-            }))
-            .await
-            .expect_err("tamper")
-            .code();
-        assert!(matches!(
-            code,
-            tonic::Code::PermissionDenied | tonic::Code::InvalidArgument
-        ));
-    }
-
-    // Owner-bound close emits Disconnected with owner term; retry after lost ack returns NOT_FOUND.
+    let service = IrohTransportService::new(16, IdentityPolicy::default(), kr);
     let mut events = service
         .watch_events(Request::new(WatchEventsRequest {
             after_event_id: Vec::new(),
         }))
         .await
-        .expect("w")
+        .expect("watch")
         .into_inner();
-    let close_req = close_node_req(&key, &f1, n1, "operator close");
+
+    // First session registers at epoch 5.
+    let (agent_key, hs, r1, c1, conn1) =
+        agent_session_with_options(&service, &key, node_id, None, Some(5)).await;
+    let conn1_ev = next_event(&mut events, TransportEventType::Connected).await;
+    assert_eq!(conn1_ev.session_epoch, 5);
+    assert_eq!(conn1_ev.connection_id.len(), 16);
+
+    // Equal or lower session_epoch handshake is rejected and does not disturb the live connection.
+    for stale_epoch in [5_u64, 4_u64] {
+        let stale_trust = test_trust_with_options(
+            key.clone(),
+            vec![(
+                agent_key.public(),
+                hs.node_id.clone(),
+                NodeTrustState::Active,
+                1,
+            )],
+            None,
+            Some(stale_epoch),
+        )
+        .await;
+        let stale_router = test_router(
+            SecretKey::generate(),
+            RelayMode::Disabled,
+            identity_policy(&agent_key, &hs),
+            stale_trust,
+            &service,
+        )
+        .await;
+        let stale_client = Endpoint::builder(presets::Minimal)
+            .secret_key(agent_key.clone())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("client");
+        let stale_conn = stale_client
+            .connect(stale_router.endpoint().addr(), AGENT_ALPN)
+            .await
+            .expect("connect");
+        let (mut send, _recv) = stale_conn.open_bi().await.expect("open hs");
+        write_frame_bytes(&mut send, &hs.encode_to_vec()).await;
+        send.finish().expect("finish hs");
+        tokio::time::timeout(Duration::from_secs(3), stale_conn.closed())
+            .await
+            .expect("stale epoch connection closes");
+        assert!(conn1.close_reason().is_none());
+        let _ = stale_router.shutdown().await;
+        stale_client.close().await;
+    }
+
+    // Higher session_epoch supersedes conn1 and emits Disconnected(epoch 5) before Connected(epoch 6).
+    let higher_trust = test_trust_with_options(
+        key.clone(),
+        vec![(
+            agent_key.public(),
+            hs.node_id.clone(),
+            NodeTrustState::Active,
+            1,
+        )],
+        None,
+        Some(6),
+    )
+    .await;
+    let r2 = test_router(
+        SecretKey::generate(),
+        RelayMode::Disabled,
+        identity_policy(&agent_key, &hs),
+        higher_trust,
+        &service,
+    )
+    .await;
+    let conn2 = c1
+        .connect(r2.endpoint().addr(), AGENT_ALPN)
+        .await
+        .expect("connect 2");
+    assert_eq!(
+        send_handshake(&conn2, &hs).await.result,
+        i32::from(HandshakeResult::Accepted)
+    );
+    let disc_ev = next_event(&mut events, TransportEventType::Disconnected).await;
+    let conn2_ev = next_event(&mut events, TransportEventType::Connected).await;
+    assert_eq!(
+        (disc_ev.connection_id.as_slice(), disc_ev.session_epoch),
+        (conn1_ev.connection_id.as_slice(), 5)
+    );
+    assert_eq!(conn2_ev.session_epoch, 6);
+    assert_ne!(conn2_ev.connection_id, disc_ev.connection_id);
+    tokio::time::timeout(Duration::from_secs(2), conn1.closed())
+        .await
+        .expect("superseded connection closes");
+    drop(conn2);
+    let _ = r1.shutdown().await;
+    let _ = r2.shutdown().await;
+    c1.close().await;
+
+    // Session grant expiry monitor closes the connection automatically when the grant expires.
+    let exp_node = *Uuid::now_v7().as_bytes();
+    let (_k, _hs, r3, c3, conn3) =
+        agent_session_with_options(&service, &key, exp_node, Some(1), Some(1)).await;
+    tokio::time::timeout(Duration::from_secs(5), conn3.closed())
+        .await
+        .expect("expired session closes");
+    shutdown(&service, r3).await.expect("shut");
+    c3.close().await;
+}
+
+#[tokio::test]
+async fn close_node_and_revoke_emit_expected_events_and_retry_status() {
+    let (key, kr) = controller_keyring();
+    let service = IrohTransportService::new(16, IdentityPolicy::default(), kr);
+    let mut events = service
+        .watch_events(Request::new(WatchEventsRequest {
+            after_event_id: Vec::new(),
+        }))
+        .await
+        .expect("watch")
+        .into_inner();
+
+    // close_node emits Disconnected with connection_id + session_epoch; retry returns NotFound.
+    let n1 = *Uuid::now_v7().as_bytes();
+    let (_k1, _hs1, r1, c1, conn1) =
+        agent_session_with_options(&service, &key, n1, None, Some(11)).await;
+    let conn1_ev = next_event(&mut events, TransportEventType::Connected).await;
+    let close_req = close_node_req(n1, "operator close");
     service
         .close_node(Request::new(close_req.clone()))
         .await
         .expect("close");
     let disc = next_event(&mut events, TransportEventType::Disconnected).await;
     assert_eq!(
-        (disc.node_id, disc.connection_id, disc.owner_epoch),
-        (n1.to_vec(), t1.connection_id.to_vec(), t1.owner_epoch)
+        (disc.node_id, disc.connection_id, disc.session_epoch),
+        (n1.to_vec(), conn1_ev.connection_id, 11)
     );
+    tokio::time::timeout(Duration::from_secs(2), conn1.closed())
+        .await
+        .expect("conn1 closed");
     assert_eq!(
         service
             .close_node(Request::new(close_req))
@@ -3060,31 +2463,28 @@ async fn fenced_admin_operations_binding_and_lost_ack_recovery() {
             .code(),
         tonic::Code::NotFound
     );
+    let _ = r1.shutdown().await;
+    c1.close().await;
 
-    // Revoke retry after lost ack succeeds under same live fence, rejects changed carrier, fails after fence expiry.
+    // Revoke closes live connection and is idempotent on retry.
     let n2 = *Uuid::now_v7().as_bytes();
-    let (t2, f2, r2, c2, conn2) = fenced_agent_session(&service, &key, n2, 12).await;
-    register_fence(&service, &f2).await;
+    let (k2, _hs2, r2, c2, conn2) = agent_session(&service, &key, n2).await;
     let revoke = state_update_req(
-        &key,
-        &f2,
         n2,
-        t2.endpoint_id,
+        *k2.public().as_bytes(),
         NodeTrustState::Revoked,
         3,
         "revoke",
     );
-    drop(
-        service
-            .update_node_trust(Request::new(revoke.clone()))
-            .await
-            .expect("apply revoke"),
-    );
+    service
+        .update_node_trust(Request::new(revoke.clone()))
+        .await
+        .expect("apply revoke");
     tokio::time::timeout(Duration::from_secs(2), conn2.closed())
         .await
         .expect("closed");
     let retry = service
-        .update_node_trust(Request::new(revoke.clone()))
+        .update_node_trust(Request::new(revoke))
         .await
         .expect("retry")
         .into_inner();
@@ -3100,45 +2500,14 @@ async fn fenced_admin_operations_binding_and_lost_ack_recovery() {
             i32::from(NodeTrustState::Revoked)
         )
     );
-    let mut changed = revoke.clone();
-    changed.reason = "another".into();
     assert_eq!(
         service
-            .update_node_trust(Request::new(changed))
-            .await
-            .expect_err("mismatch")
-            .code(),
-        tonic::Code::InvalidArgument
-    );
-    assert_eq!(
-        service
-            .close_node(Request::new(close_node_req(&key, &f2, n2, "revoke")))
+            .close_node(Request::new(close_node_req(n2, "revoke")))
             .await
             .expect_err("absent")
             .code(),
         tonic::Code::NotFound
     );
-    Arc::make_mut(
-        service
-            .shared
-            .inner
-            .fences
-            .lock()
-            .await
-            .get_mut(n2.as_slice())
-            .expect("f"),
-    )
-    .verified
-    .lease_until_seconds = 0;
-    assert_eq!(
-        service
-            .update_node_trust(Request::new(revoke))
-            .await
-            .expect_err("exp")
-            .code(),
-        tonic::Code::FailedPrecondition
-    );
-
     shutdown(&service, r2).await.expect("shut");
     c2.close().await;
 }
@@ -3173,6 +2542,7 @@ async fn restored_trust_snapshot_blocks_revoked_endpoint_without_operation_histo
         let trust = test_trust_with_options(
             controller_keyring().0,
             vec![(ep, node.clone(), state, 3)],
+            None,
             None,
         )
         .await;

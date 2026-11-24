@@ -35,7 +35,7 @@ trap 'exit 143' TERM
 # final test image adds real Ocserv/OpenSSL, not a transport or Agent stub.
 WORKFLOW_IMAGE=ocservia-database-e2e-workflow:e2e
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
-  : "${SINGLE_AGENT_ARCHIVE:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
+  : "${SINGLE_AGENT_DEB:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
   [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]
   WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
 else
@@ -56,14 +56,15 @@ COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platf
 POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
   POSTGRES_IMAGE=postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
-  MOUNTS=(-v "$(dirname "${SINGLE_AGENT_ARCHIVE}"):/published:ro")
-  ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_ARCHIVE=/published/$(basename "${SINGLE_AGENT_ARCHIVE}")" \
+  MOUNTS=(-v "$(dirname "${SINGLE_AGENT_DEB}"):/published:ro")
+  ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_DEB=/published/$(basename "${SINGLE_AGENT_DEB}")" \
     -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")
   # shellcheck disable=SC2016 # Expanded only inside the disposable container.
   COMMAND=(bash -euo pipefail -c '
-    package="$(bash /workspace/scripts/verify-agent-package.sh "$PUBLISHED_AGENT_ARCHIVE" "$(cut -d " " -f 1 "$PUBLISHED_AGENT_ARCHIVE.sha256")")"
+    package="$(mktemp -d)"
+    dpkg-deb -x "$PUBLISHED_AGENT_DEB" "$package"
     for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
-      install -o root -g root -m 0755 "$package/rust/target/release/$binary" "/usr/local/bin/$binary"
+      install -o root -g root -m 0755 "$package/usr/libexec/ocservia/$binary" "/usr/local/bin/$binary"
       "/usr/local/bin/$binary" --version
     done > /artifacts/published-binaries.txt
     dpkg-query -W ocserv openssl libc6

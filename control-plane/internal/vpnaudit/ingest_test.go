@@ -19,12 +19,12 @@ func TestVpnAuditCommitAndReplay(t *testing.T) {
 	ws := testfixture.InsertWorkspace(t, ctx, pool, "Audit", "vpn")
 	node, ep := testfixture.InsertActiveNode(t, ctx, pool, ws, "audit")
 	conn := uuid.New()
-	testutil.Exec(t, ctx, pool, `INSERT INTO connection_owner_fencing(node_id,owner_instance_id,owner_incarnation,connection_id,owner_epoch,lease_until) VALUES($1,$2,1,$3,1,now()+interval '1 hour')`, node[:], uuid.New(), conn[:])
+	testutil.Exec(t, ctx, pool, `INSERT INTO connection_owner_fencing(node_id,connection_id,session_epoch,active) VALUES($1,$2,1,true)`, node[:], conn[:])
 	at := time.Now().UnixMilli()
 	usage := uint64(1048576)
 	start := &agent.VpnAuditRecord{EventId: uuid.NewString(), EventType: "connect", SessionId: "42", Username: "alice", ClientIp: "192.0.2.4", VpnIp: "10.0.1.2", ConnectedMs: at, ObservedMs: at}
 	flow := &agent.VpnAuditRecord{EventId: uuid.NewString(), EventType: "flow", SessionId: "42", Username: "alice", ClientIp: "192.0.2.4", VpnIp: "10.0.1.2", ConnectedMs: at, ObservedMs: at, FlowStartedMs: at, DestinationIp: "203.0.113.2", Protocol: "udp", BytesOut: &usage}
-	request := &wire.StoreVpnAuditRequest{NodeId: node[:], EndpointId: ep[:], ConnectionId: conn[:], OwnerEpoch: 1, Batch: &agent.VpnAuditBatch{Records: []*agent.VpnAuditRecord{start, flow}}}
+	request := &wire.StoreVpnAuditRequest{NodeId: node[:], EndpointId: ep[:], ConnectionId: conn[:], SessionEpoch: 1, Batch: &agent.VpnAuditBatch{Records: []*agent.VpnAuditRecord{start, flow}}}
 	backend := postgres.WrapPool(pool)
 	for range 2 {
 		receipt, err := vpnaudit.Ingest(ctx, backend, request)
@@ -66,7 +66,7 @@ func TestVpnAuditCommitAndReplay(t *testing.T) {
 		t.Fatal("foreign endpoint acknowledged")
 	}
 	request.EndpointId = ep[:]
-	request.OwnerEpoch = 2
+	request.SessionEpoch = 2
 	if _, err := vpnaudit.Ingest(ctx, backend, request); err == nil {
 		t.Fatal("expired fence accepted")
 	}
@@ -78,10 +78,10 @@ func BenchmarkVpnAuditBatch(b *testing.B) {
 	workspace := testfixture.InsertWorkspace(b, ctx, pool, "Audit benchmark", "audit-bench")
 	node, endpoint := testfixture.InsertActiveNode(b, ctx, pool, workspace, "flow-bench")
 	conn := uuid.New()
-	testutil.Exec(b, ctx, pool, `INSERT INTO connection_owner_fencing(node_id,owner_instance_id,owner_incarnation,connection_id,owner_epoch,lease_until) VALUES($1,$2,1,$3,1,now()+interval '1 hour')`, node[:], uuid.New(), conn[:])
+	testutil.Exec(b, ctx, pool, `INSERT INTO connection_owner_fencing(node_id,connection_id,session_epoch,active) VALUES($1,$2,1,true)`, node[:], conn[:])
 	backend := postgres.WrapPool(pool)
 	at := time.Now().UnixMilli()
-	request := &wire.StoreVpnAuditRequest{NodeId: node[:], EndpointId: endpoint[:], ConnectionId: conn[:], OwnerEpoch: 1, Batch: &agent.VpnAuditBatch{}}
+	request := &wire.StoreVpnAuditRequest{NodeId: node[:], EndpointId: endpoint[:], ConnectionId: conn[:], SessionEpoch: 1, Batch: &agent.VpnAuditBatch{}}
 	for range 32 {
 		request.Batch.Records = append(request.Batch.Records, &agent.VpnAuditRecord{EventType: "flow", SessionId: "1", Username: "bench", ClientIp: "192.0.2.1", VpnIp: "10.0.0.3", ConnectedMs: at, ObservedMs: at, FlowStartedMs: at, DestinationIp: "203.0.113.12", Protocol: "udp"})
 	}

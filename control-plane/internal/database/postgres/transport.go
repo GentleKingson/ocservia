@@ -2,9 +2,9 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	transportstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
@@ -13,7 +13,7 @@ type transportEventStore struct{ database.Tx }
 
 func (t *transaction) TransportEventStore() transportstore.Store { return transportEventStore{t} }
 
-func (s transportEventStore) EnsureWorkspace(ctx context.Context, id uuid.UUID, slug string, at value.Timestamp) (uuid.UUID, error) {
+func (s transportEventStore) EnsureWorkspace(ctx context.Context, id uuid.UUID, slug string, at time.Time) (uuid.UUID, error) {
 	err := s.QueryRow(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Local simulator',$2,$3,$3) ON CONFLICT(slug) DO UPDATE SET slug=EXCLUDED.slug RETURNING id`, id, slug, at).Scan(&id)
 	return id, err
 }
@@ -106,7 +106,7 @@ func (s transportEventStore) UnknownDispatched(ctx context.Context) error {
 	return err
 }
 
-func (s transportEventStore) DisconnectNode(ctx context.Context, node transportstore.GapNode, event uuid.UUID, at value.Timestamp) error {
+func (s transportEventStore) DisconnectNode(ctx context.Context, node transportstore.GapNode, event uuid.UUID, at time.Time) error {
 	n, err := s.Exec(ctx, `UPDATE nodes SET status='offline',updated_at=$2,version=version+1 WHERE id=$1 AND status='active'`, node.ID, at)
 	if err != nil || n == 0 {
 		return err
@@ -172,11 +172,11 @@ func (s transportIngressStore) InsertEvent(ctx context.Context, v transportstore
 	n, err := s.Exec(ctx, `INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload)VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(event_id) DO NOTHING`, v.ID, v.NodeID, v.Type, v.At, v.Traceparent, v.Payload)
 	return n != 0, err
 }
-func (s transportIngressStore) NodeStatus(ctx context.Context, node uuid.UUID, state string, at value.Timestamp) error {
+func (s transportIngressStore) NodeStatus(ctx context.Context, node uuid.UUID, state string, at time.Time) error {
 	_, err := s.Exec(ctx, `UPDATE nodes SET status=$2,updated_at=$3,version=version+1 WHERE id=$1 AND status IN ('active','offline') AND status IS DISTINCT FROM $2`, node, state, at)
 	return err
 }
-func (s transportIngressStore) SimulationOutcome(ctx context.Context, node uuid.UUID, state, traceparent string, disconnected bool, at value.Timestamp) error {
+func (s transportIngressStore) SimulationOutcome(ctx context.Context, node uuid.UUID, state, traceparent string, disconnected bool, at time.Time) error {
 	if disconnected {
 		_, err := s.Exec(ctx, `UPDATE operations o SET state='unknown',updated_at=$2,version=version+1 FROM local_slice_jobs j WHERE o.id=j.operation_id AND o.node_id=$1 AND j.dispatched_at IS NOT NULL AND o.state NOT IN ('succeeded','failed','expired','rolled_back','superseded')`, node, at)
 		return err
@@ -196,7 +196,7 @@ func (s transportIngressStore) QuarantineAlert(ctx context.Context, id, workspac
 	_, err := s.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,node_id,resource_type,resource_id,created_at)VALUES($1,$2,'high','transport_event.permanent_invalid',$3,'transport_event',$4,$5)`, id, workspace, v.NodeID, v.EventID, v.At)
 	return err
 }
-func (s transportIngressStore) AdvanceCursor(ctx context.Context, event uuid.UUID, at value.Timestamp) error {
+func (s transportIngressStore) AdvanceCursor(ctx context.Context, event uuid.UUID, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO transport_event_cursor(singleton,event_id,valid,updated_at)VALUES(true,$1,true,$2) ON CONFLICT(singleton) DO UPDATE SET event_id=EXCLUDED.event_id,valid=true,updated_at=EXCLUDED.updated_at`, event, at)
 	return err
 }

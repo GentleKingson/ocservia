@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ResponseError, type Workspace } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { Workspace } from "@/api/models";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 

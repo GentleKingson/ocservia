@@ -15,9 +15,8 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
+	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
@@ -47,7 +46,7 @@ type EnforcementCleanupError struct {
 	Username      string
 	PolicyVersion int64
 	Cause         string
-	PeriodStart   value.Timestamp
+	PeriodStart   time.Time
 	Err           error
 }
 
@@ -58,20 +57,20 @@ func (e *EnforcementCleanupError) Error() string {
 func (e *EnforcementCleanupError) Unwrap() error { return e.Err }
 
 type Policy struct {
-	NodeID          uuid.UUID        `json:"node_id"`
-	Username        string           `json:"username"`
-	QuotaPeriod     string           `json:"quota_period"`
-	QuotaDirection  string           `json:"quota_direction"`
-	QuotaBytes      int64            `json:"quota_bytes"`
-	ExpiresAt       *value.Timestamp `json:"expires_at,omitempty"`
-	Version         int64            `json:"version"`
-	PeriodStart     value.Timestamp  `json:"period_start"`
-	ObservedRXBytes int64            `json:"observed_rx_bytes"`
-	ObservedTXBytes int64            `json:"observed_tx_bytes"`
-	ObservedAt      *value.Timestamp `json:"observed_at,omitempty"`
-	Exceeded        bool             `json:"exceeded"`
-	Expired         bool             `json:"expired"`
-	Convergence     string           `json:"convergence"`
+	NodeID          uuid.UUID  `json:"node_id"`
+	Username        string     `json:"username"`
+	QuotaPeriod     string     `json:"quota_period"`
+	QuotaDirection  string     `json:"quota_direction"`
+	QuotaBytes      int64      `json:"quota_bytes"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	Version         int64      `json:"version"`
+	PeriodStart     time.Time  `json:"period_start"`
+	ObservedRXBytes int64      `json:"observed_rx_bytes"`
+	ObservedTXBytes int64      `json:"observed_tx_bytes"`
+	ObservedAt      *time.Time `json:"observed_at,omitempty"`
+	Exceeded        bool       `json:"exceeded"`
+	Expired         bool       `json:"expired"`
+	Convergence     string     `json:"convergence"`
 }
 
 type PolicyRequest struct {
@@ -116,7 +115,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		return Policy{}, false, err
 	}
 	request.Username = strings.TrimSpace(request.Username)
-	hash := policyHash(request)
+	digest := policyDigest(request)
 	tx, err := s.backend.Begin(ctx, database.ReadCommitted)
 	if err != nil {
 		return Policy{}, false, err
@@ -138,7 +137,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 	}
 	receipt, err := store.Mutation(ctx, workspaceID, request.IdempotencyKey)
 	if err == nil {
-		if !slices.Equal(receipt.Hash, hash[:]) {
+		if !digest.Matches(receipt.Hash) {
 			return Policy{}, false, ErrIdempotencyConflict
 		}
 		policy, readErr := readPolicy(ctx, store, request.NodeID, request.Username, s.now())
@@ -162,25 +161,14 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 	if currentVersion != request.ExpectedVersion {
 		return Policy{}, false, ErrVersionConflict
 	}
-	now := s.now()
-	at, err := value.FromTime(now)
-	if err != nil {
-		return Policy{}, false, err
-	}
-	var expires value.Timestamp
-	if request.ExpiresAt != nil {
-		expires, err = value.FromTime(*request.ExpiresAt)
-		if err != nil {
-			return Policy{}, false, ErrInvalidRequest
-		}
-	}
+	now := s.now().UTC()
 	nextVersion := currentVersion + 1
-	err = store.PutPolicy(ctx, userstore.Policy{NodeID: request.NodeID, Username: request.Username, QuotaPeriod: request.QuotaPeriod, QuotaDirection: request.QuotaDirection, QuotaBytes: request.QuotaBytes, ExpiresAt: expires, Version: nextVersion, CreatedAt: at, UpdatedAt: at})
+	err = store.PutPolicy(ctx, userstore.Policy{NodeID: request.NodeID, Username: request.Username, QuotaPeriod: request.QuotaPeriod, QuotaDirection: request.QuotaDirection, QuotaBytes: request.QuotaBytes, ExpiresAt: request.ExpiresAt, Version: nextVersion, CreatedAt: now, UpdatedAt: now})
 	if err != nil {
 		return Policy{}, false, err
 	}
 	mutationID := s.newID()
-	if err := store.InsertMutation(ctx, userstore.Mutation{ID: mutationID, WorkspaceID: workspaceID, NodeID: request.NodeID, Username: request.Username, IdempotencyKey: request.IdempotencyKey, Hash: hash[:], Version: nextVersion, At: at}); err != nil {
+	if err := store.InsertMutation(ctx, userstore.Mutation{ID: mutationID, WorkspaceID: workspaceID, NodeID: request.NodeID, Username: request.Username, IdempotencyKey: request.IdempotencyKey, Hash: digest.Current[:], Version: nextVersion, At: now}); err != nil {
 		return Policy{}, false, err
 	}
 	after, _ := json.Marshal(map[string]any{"quota_period": request.QuotaPeriod, "quota_direction": request.QuotaDirection, "quota_bytes": request.QuotaBytes, "expires_at": request.ExpiresAt, "version": nextVersion})
@@ -204,14 +192,7 @@ func (s *Service) GetPolicy(ctx context.Context, nodeID uuid.UUID, username stri
 }
 
 func readPolicy(ctx context.Context, store userstore.Store, nodeID uuid.UUID, username string, now time.Time) (Policy, error) {
-	month, err := value.FromTime(monthStart(now))
-	if err != nil {
-		return Policy{}, err
-	}
-	at, err := value.FromTime(now)
-	if err != nil {
-		return Policy{}, err
-	}
+	month := monthStart(now)
 	v, err := store.Policy(ctx, nodeID, username, month)
 	if errors.Is(err, database.ErrNotFound) {
 		return Policy{}, ErrNotFound
@@ -219,15 +200,9 @@ func readPolicy(ctx context.Context, store userstore.Store, nodeID uuid.UUID, us
 	if err != nil {
 		return Policy{}, err
 	}
-	policy := Policy{NodeID: nodeID, Username: username, QuotaPeriod: v.QuotaPeriod, QuotaDirection: v.QuotaDirection, QuotaBytes: v.QuotaBytes, Version: v.Version, PeriodStart: v.PeriodStart, ObservedRXBytes: v.ObservedRXBytes, ObservedTXBytes: v.ObservedTXBytes}
-	if v.ExpiresAt.Valid {
-		policy.ExpiresAt = &v.ExpiresAt
-	}
-	if v.ObservedAt.Valid {
-		policy.ObservedAt = &v.ObservedAt
-	}
+	policy := Policy{NodeID: nodeID, Username: username, QuotaPeriod: v.QuotaPeriod, QuotaDirection: v.QuotaDirection, QuotaBytes: v.QuotaBytes, ExpiresAt: v.ExpiresAt, Version: v.Version, PeriodStart: v.PeriodStart, ObservedRXBytes: v.ObservedRXBytes, ObservedTXBytes: v.ObservedTXBytes, ObservedAt: v.ObservedAt}
 	policy.Exceeded = quotaValue(policy.QuotaDirection, policy.ObservedRXBytes, policy.ObservedTXBytes) >= policy.QuotaBytes && policy.QuotaPeriod != "none"
-	policy.Expired = v.ExpiresAt.Valid && v.ExpiresAt.Micros <= at.Micros
+	policy.Expired = v.ExpiresAt != nil && !v.ExpiresAt.After(now)
 	triggerPending := (policy.Exceeded || policy.Expired) && v.DesiredEnabled
 	observedMatches := v.ObservedEnabled != nil && v.ObservedRevision != nil && *v.ObservedEnabled == v.DesiredEnabled && *v.ObservedRevision == v.DesiredRevision
 	switch {
@@ -245,16 +220,9 @@ func readPolicy(ctx context.Context, store userstore.Store, nodeID uuid.UUID, us
 	return policy, nil
 }
 
-// RunOnce compensates missed expiry/quota scans under fenced leadership and
-// submits at most the configured global command limit.
+// RunOnce compensates missed expiry/quota scans and submits at most the
+// configured global command limit.
 func (s *Service) RunOnce(ctx context.Context) error {
-	if fence := coordination.FenceFromContext(ctx); fence != nil {
-		// Under fenced scheduling the leadership session replaces the
-		// per-tick lease; every write below is fenced transactionally.
-		if err := s.withStore(ctx, func(userstore.Store) error { return nil }); err != nil {
-			return err
-		}
-	}
 	var active int
 	if err := s.withStore(ctx, func(store userstore.Store) (err error) { active, err = store.ActiveOperations(ctx); return }); err != nil {
 		return err
@@ -277,17 +245,10 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	if limit <= 0 {
 		return 0, nil
 	}
-	now, err := value.FromTime(s.now())
-	if err != nil {
-		return 0, err
-	}
-	monthTime := monthStart(s.now())
-	month, err := value.FromTime(monthTime)
-	if err != nil {
-		return 0, err
-	}
+	now := s.now().UTC()
+	month := monthStart(now)
 	var candidates []userstore.Candidate
-	err = s.withStore(ctx, func(store userstore.Store) (err error) {
+	err := s.withStore(ctx, func(store userstore.Store) (err error) {
 		candidates, err = store.ResetCandidates(ctx, now, month, limit)
 		return
 	})
@@ -296,7 +257,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	}
 	processed := 0
 	for _, item := range candidates {
-		key := operationIdempotencyKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), monthTime.Format(time.RFC3339))
+		key := operationIdempotencyKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), month.Format(time.RFC3339))
 		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
 		}
@@ -319,12 +280,12 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: stableTraceparent(key)})
+		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: tracecontext.NewTraceparent()})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) {
+			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) || errors.Is(mutateErr, userstate.ErrCapabilityMissing) {
 				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
 					return 0, err
 				}
@@ -346,17 +307,13 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 	return processed, nil
 }
 
-// A scheduler transaction commits only after checking its leadership term.
 func (s *Service) withStore(ctx context.Context, change func(userstore.Store) error) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := userstore.From(tx)
 		if err != nil {
 			return err
 		}
-		if err := change(store); err != nil {
-			return err
-		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return change(store)
 	})
 }
 
@@ -370,9 +327,6 @@ func (s *Service) cleanupEnforcement(ctx context.Context, item userstore.Candida
 }
 
 func commit(ctx context.Context, tx database.Tx) error {
-	if err := coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx)); err != nil {
-		return err
-	}
 	return tx.Commit(ctx)
 }
 
@@ -380,16 +334,10 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
-	now, err := value.FromTime(s.now())
-	if err != nil {
-		return 0, err
-	}
-	month, err := value.FromTime(monthStart(s.now()))
-	if err != nil {
-		return 0, err
-	}
+	now := s.now().UTC()
+	month := monthStart(now)
 	var candidates []userstore.Candidate
-	err = s.withStore(ctx, func(store userstore.Store) (err error) {
+	err := s.withStore(ctx, func(store userstore.Store) (err error) {
 		candidates, err = store.EnforcementCandidates(ctx, now, month, limit)
 		return
 	})
@@ -398,12 +346,8 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	}
 	processed := 0
 	for _, item := range candidates {
-		period, err := item.PeriodStart.Time()
-		if err != nil {
-			return 0, err
-		}
-		key := operationIdempotencyKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, period.Format(time.RFC3339))
-		trace := stableTraceparent(key)
+		key := operationIdempotencyKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, item.PeriodStart.UTC().Format(time.RFC3339))
+		trace := tracecontext.NewTraceparent()
 		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
 		}
@@ -431,7 +375,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil
 			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) {
+			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) || errors.Is(mutateErr, userstate.ErrCapabilityMissing) {
 				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
 					return 0, err
 				}
@@ -491,14 +435,18 @@ func validatePolicyRequest(request PolicyRequest) error {
 	return nil
 }
 
-func policyHash(request PolicyRequest) [32]byte {
-	encoded, _ := json.Marshal(struct {
+func policyDigest(request PolicyRequest) idempotency.Digest {
+	intent := struct {
 		NodeID                      uuid.UUID `json:"node_id"`
 		Username, Period, Direction string
 		Bytes, Version              int64
 		Expires                     *time.Time
-	}{request.NodeID, request.Username, request.QuotaPeriod, request.QuotaDirection, request.QuotaBytes, request.ExpectedVersion, request.ExpiresAt})
-	return sha256.Sum256(encoded)
+	}{request.NodeID, request.Username, request.QuotaPeriod, request.QuotaDirection, request.QuotaBytes, request.ExpectedVersion, request.ExpiresAt}
+	return idempotency.New("user-policy", struct {
+		Intent                      any
+		ActorIdentity, ActorSession uuid.UUID
+		Reason                      string
+	}{intent, request.ActorIdentityID, request.ActorSessionID, request.Reason})
 }
 
 func quotaValue(direction string, rx, tx int64) int64 {
@@ -524,12 +472,6 @@ func operationIdempotencyKey(parts ...string) string {
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	// Keep the persisted prefix so scheduler retries replay existing operations.
 	return "i14-" + hex.EncodeToString(digest[:])
-}
-
-func stableTraceparent(seed string) string {
-	trace := sha256.Sum256([]byte("trace:" + seed))
-	span := sha256.Sum256([]byte("span:" + seed))
-	return "00-" + hex.EncodeToString(trace[:16]) + "-" + hex.EncodeToString(span[:8]) + "-01"
 }
 
 func optionalUUID(id uuid.UUID) *uuid.UUID {

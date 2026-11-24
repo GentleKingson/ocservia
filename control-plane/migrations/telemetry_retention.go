@@ -15,7 +15,7 @@ import (
 // migration owner connection and advisory lock. Concurrent detach must run
 // on the connection outside a transaction block.
 func PruneTelemetryPartitions(ctx context.Context, pool *pgxpool.Pool) error {
-	return withMigrationConnection(ctx, pool, func(conn *pgxpool.Conn) error {
+	return withMigrationConnection(ctx, pool, func(conn *pgx.Conn) error {
 		var owner bool
 		if err := conn.QueryRow(ctx, `SELECT pg_has_role(relowner,'USAGE') FROM pg_class WHERE oid='public.telemetry_samples'::regclass`).Scan(&owner); err != nil {
 			return err
@@ -74,12 +74,16 @@ func PruneTelemetryPartitions(ctx context.Context, pool *pgxpool.Pool) error {
 	})
 }
 
-func finishTelemetryRetirement(ctx context.Context, conn *pgxpool.Conn, name, child string, oid uint32, start time.Time) error {
+func finishTelemetryRetirement(ctx context.Context, conn *pgx.Conn, name, child string, oid uint32, start time.Time) error {
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer rollbackMigration(tx)
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
 	if _, err := tx.Exec(ctx, `SET LOCAL TimeZone TO 'UTC'`); err != nil {
 		return err
 	}

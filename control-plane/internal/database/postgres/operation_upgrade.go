@@ -13,13 +13,13 @@ func (s operationStore) LockRolloutClaim(ctx context.Context, rollout, workspace
 	return
 }
 
-func (s operationStore) UpgradeNode(ctx context.Context, node uuid.UUID) (workspace uuid.UUID, architecture, observedVersion string, err error) {
-	err = s.QueryRow(ctx, `SELECT n.workspace_id,COALESCE(o.architecture,''),COALESCE(o.agent_version,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, node).Scan(&workspace, &architecture, &observedVersion)
+func (s operationStore) UpgradeNode(ctx context.Context, node uuid.UUID) (workspace uuid.UUID, architecture, osRelease string, err error) {
+	err = s.QueryRow(ctx, `SELECT n.workspace_id,COALESCE(o.architecture,''),COALESCE(o.os_release,'') FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1`, node).Scan(&workspace, &architecture, &osRelease)
 	return
 }
 
 func (s operationStore) LockAgentObservation(ctx context.Context, node uuid.UUID) (v operationstore.AgentObservation, err error) {
-	err = s.QueryRow(ctx, `SELECT architecture,agent_version,last_heartbeat_at FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, node).Scan(&v.Architecture, &v.AgentVersion, &v.LastHeartbeatAt)
+	err = s.QueryRow(ctx, `SELECT architecture,agent_version,os_release,last_heartbeat_at FROM node_observed_snapshots WHERE node_id=$1 FOR UPDATE`, node).Scan(&v.Architecture, &v.AgentVersion, &v.OSRelease, &v.LastHeartbeatAt)
 	return
 }
 
@@ -35,10 +35,10 @@ func (s operationStore) HasActiveUpgrade(ctx context.Context, node uuid.UUID) (v
 
 func (s operationStore) RolloutObservation(ctx context.Context, node, workspace uuid.UUID) (v operationstore.RolloutObservation, err error) {
 	v.NodeID = node
-	err = s.QueryRow(ctx, `SELECT n.status,COALESCE(o.architecture,''),COALESCE(o.agent_version,''),o.last_heartbeat_at,
+	err = s.QueryRow(ctx, `SELECT n.status,COALESCE(o.architecture,''),COALESCE(o.agent_version,''),COALESCE(o.os_release,''),o.last_heartbeat_at,
 		EXISTS(SELECT 1 FROM node_capabilities c WHERE c.node_id=n.id AND c.capability IN ('ocserv.agent.upgrade.v1','ocserv.agent.upgrade.v2') AND c.approved=true),
 		EXISTS(SELECT 1 FROM agent_upgrade_operations u WHERE u.node_id=n.id AND u.completed_at IS NULL AND u.state IN ('queued','accepted','running','unknown'))
-		FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1 AND n.workspace_id=$2`, node, workspace).Scan(&v.Status, &v.Architecture, &v.AgentVersion, &v.LastHeartbeatAt, &v.CapabilityOK, &v.UpgradeActive)
+		FROM nodes n LEFT JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.id=$1 AND n.workspace_id=$2`, node, workspace).Scan(&v.Status, &v.Architecture, &v.AgentVersion, &v.OSRelease, &v.LastHeartbeatAt, &v.CapabilityOK, &v.UpgradeActive)
 	return
 }
 

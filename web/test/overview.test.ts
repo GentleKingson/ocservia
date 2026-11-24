@@ -4,11 +4,10 @@ import type {
   OperationPage,
   PlatformEvent,
   PlatformEventPage,
-} from "@ocservia/api-client";
+} from "@/api/models";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getWorkspace, workspaceContext } from "../src/api/workspace";
 import { listEvents, platformEventsEvent } from "../src/api/events";
 import { listNodes } from "../src/api/nodes";
 import { listOperations, operationSummary } from "../src/api/operations";
@@ -19,11 +18,6 @@ import {
   sourceValue,
 } from "../src/features/overview/source-state";
 
-vi.mock("../src/api/workspace", async (original) => ({
-  ...(await original<typeof import("../src/api/workspace")>()),
-  getWorkspace: vi.fn().mockResolvedValue({ id: "workspace" }),
-  workspaceContext: vi.fn().mockReturnValue({ id: "workspace", generation: 1 }),
-}));
 vi.mock("../src/api/events", () => ({
   listEvents: vi.fn(),
   platformEventsEvent: "ocservia:platform-events",
@@ -98,16 +92,7 @@ describe("operational overview", () => {
     vi.stubGlobal("window", new EventTarget());
     setActivePinia(createPinia());
     vi.resetAllMocks();
-    vi.mocked(getWorkspace).mockResolvedValue({
-      id: "workspace",
-      name: "Workspace",
-      slug: "workspace",
-      version: 1,
-    });
-    vi.mocked(workspaceContext).mockReturnValue({
-      id: "workspace",
-      generation: 1,
-    });
+
     vi.mocked(listOperations).mockResolvedValue(operationPage([]));
     vi.mocked(operationSummary).mockResolvedValue({ active: 0, unknown: 0 });
     vi.mocked(listEvents).mockResolvedValue(eventPage([]));
@@ -118,10 +103,6 @@ describe("operational overview", () => {
   });
 
   afterEach(() => {
-    vi.mocked(workspaceContext).mockReturnValue({
-      id: "workspace",
-      generation: 1,
-    });
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });

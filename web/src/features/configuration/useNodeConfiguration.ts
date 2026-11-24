@@ -1,8 +1,4 @@
-import type {
-  ConfigPlan,
-  NodeObservedState,
-  Operation,
-} from "@ocservia/api-client";
+import type { ConfigPlan, NodeObservedState, Operation } from "@/api/models";
 import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   applyConfigPlan,
@@ -20,12 +16,11 @@ import {
   waitForNodePoll,
   type NodeWorkflowContext,
 } from "../node-workflow";
-import type { WorkspaceContext } from "../../api/workspace";
 
 interface ConfigurationInputs {
   currentNode: Readonly<Ref<NodeObservedState | undefined>>;
   readReady: Readonly<Ref<boolean>>;
-  workspaceContext: () => WorkspaceContext;
+  workspaceId: () => string | undefined;
   trackOperation: (id: string) => Promise<void>;
   t: (key: string) => string;
 }
@@ -33,7 +28,7 @@ interface ConfigurationInputs {
 export function useNodeConfiguration({
   currentNode,
   readReady,
-  workspaceContext,
+  workspaceId,
   trackOperation,
   t,
 }: ConfigurationInputs) {
@@ -41,7 +36,6 @@ export function useNodeConfiguration({
   const configPlanSource = ref<{
     nodeId: string;
     revision: number;
-    workspace: WorkspaceContext;
   }>();
   const currentConfigRevision = computed(() => {
     if (!readReady.value) return undefined;
@@ -54,14 +48,11 @@ export function useNodeConfiguration({
   });
   const canSubmitConfigPlan = computed(() => {
     const source = configPlanSource.value;
-    const workspace = workspaceContext();
     return Boolean(
       configDialog.value &&
       source &&
       currentConfigRevision.value !== undefined &&
-      source.nodeId === currentNode.value?.id &&
-      source.workspace.id === workspace.id &&
-      source.workspace.generation === workspace.generation,
+      source.nodeId === currentNode.value?.id,
     );
   });
   const configPlan = ref<ConfigPlan>();
@@ -84,7 +75,7 @@ export function useNodeConfiguration({
   const configWorkflow = createNodeWorkflow(
     () => currentNode.value?.id,
     () => configDialog.value,
-    workspaceContext,
+    workspaceId,
   );
   let configContext: NodeWorkflowContext | undefined;
 
@@ -118,7 +109,6 @@ export function useNodeConfiguration({
     configPlanSource.value = {
       nodeId: node.id,
       revision,
-      workspace: context.workspace,
     };
     configDialog.value = true;
     configPlan.value = undefined;
@@ -141,7 +131,7 @@ export function useNodeConfiguration({
       if (!configWorkflow.isCurrent(context)) return;
       if (
         plan.nodeId !== context.nodeId ||
-        plan.workspaceId !== context.workspace.id
+        plan.workspaceId !== context.workspaceId
       )
         return;
       await pollConfigPlan(context, plan);
@@ -163,7 +153,7 @@ export function useNodeConfiguration({
     } catch (error) {
       if (configWorkflow.isCurrent(context))
         configError.value =
-          error instanceof Error ? error.message : t("configPlanFailed");
+          (error instanceof Error && error.message) || t("configPlanFailed");
     } finally {
       if (configWorkflow.isCurrent(context)) configLoading.value = false;
     }
@@ -194,16 +184,13 @@ export function useNodeConfiguration({
   async function submitConfigPlan(): Promise<void> {
     const source = configPlanSource.value;
     const context = configContext;
-    const workspace = workspaceContext();
     if (
       !source ||
       !context ||
       !configWorkflow.isCurrent(context) ||
       configLoading.value ||
       !canSubmitConfigPlan.value ||
-      !configReason.value.trim() ||
-      source.workspace.id !== workspace.id ||
-      source.workspace.generation !== workspace.generation
+      !configReason.value.trim()
     )
       return;
     const ticket = beginNodeMutation(context, "config");
@@ -260,7 +247,7 @@ export function useNodeConfiguration({
     } catch (error) {
       if (!configWorkflow.isCurrent(context)) return;
       configError.value =
-        error instanceof Error ? error.message : t("configPlanFailed");
+        (error instanceof Error && error.message) || t("configPlanFailed");
     } finally {
       finishNodeMutation(ticket);
       if (configWorkflow.isCurrent(context)) configLoading.value = false;
@@ -297,7 +284,7 @@ export function useNodeConfiguration({
     } catch (error) {
       if (!configWorkflow.isCurrent(context)) return;
       configError.value =
-        error instanceof Error ? error.message : t("configApplyFailed");
+        (error instanceof Error && error.message) || t("configApplyFailed");
     } finally {
       finishNodeMutation(ticket);
       if (configWorkflow.isCurrent(context)) configLoading.value = false;

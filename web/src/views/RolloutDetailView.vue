@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ArrowLeft } from "@lucide/vue";
-import { ResponseError, type AgentRolloutNode } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { AgentRolloutNode } from "@/api/models";
 import {
   computed,
   onBeforeUnmount,
@@ -17,12 +18,7 @@ import {
   resumeAgentRollout,
   type RolloutDetail,
 } from "../api/agents";
-import {
-  getWorkspace,
-  sameWorkspaceContext,
-  workspaceContext,
-  type WorkspaceContext,
-} from "../api/workspace";
+import { getWorkspaceId } from "../api/workspace";
 import DataState from "../components/common/DataState.vue";
 import PageHeader from "../components/common/PageHeader.vue";
 import SectionCard from "../components/common/SectionCard.vue";
@@ -34,7 +30,10 @@ import {
 } from "../features/operations/state-tone";
 
 import { createReadRequest } from "../shared/read-request";
-import { createForegroundRefresh } from "../shared/foreground-refresh";
+import {
+  createForegroundRefresh,
+  isPageActive,
+} from "../shared/foreground-refresh";
 
 const route = useRoute();
 const { t } = useI18n();
@@ -49,14 +48,19 @@ const resumeError = ref("");
 const resumeBlocked = ref(false);
 const reads = createReadRequest();
 let sequence = 0;
-let loadedContext: WorkspaceContext | undefined;
 
 const activeStates = new Set(["queued", "running", "paused"]);
-const foregroundRefresh = createForegroundRefresh(async () => {
-  if (rollout.value === undefined || activeStates.has(rollout.value.state)) {
-    await refresh();
-  }
-}, 2000);
+const foregroundRefresh = createForegroundRefresh(
+  async () => {
+    if (rollout.value === undefined || activeStates.has(rollout.value.state)) {
+      await refresh();
+    }
+  },
+  2000,
+  () => {
+    reads.cancel();
+  },
+);
 
 const exclusions = computed(() => rollout.value?.excluded ?? []);
 
@@ -105,25 +109,17 @@ const batches = computed(() => {
 
 const remaining = computed(() => totals.value.remaining);
 
-// Every read and resume belongs to one route rollout in one workspace
-// generation; a newer ticket makes all older results inert.
+// Invalidate outstanding reads and resumes when the route changes.
 function invalidate(): void {
   sequence += 1;
   reads.cancel();
 }
 
-function current(context: WorkspaceContext, ticket: number): boolean {
-  return (
-    sequence === ticket && sameWorkspaceContext(workspaceContext(), context)
-  );
-}
-
-// A different rollout or workspace never shows the previous resource or its
+// A different rollout never shows the previous resource or its
 // resume action, and reads directly so it never waits behind an older read.
 function reload(): void {
   invalidate();
   rollout.value = undefined;
-  loadedContext = undefined;
   loading.value = true;
   unavailable.value = false;
   notFound.value = false;
@@ -137,63 +133,61 @@ function reload(): void {
 
 async function refresh(): Promise<void> {
   // A read started before the resume response could restore the old state.
-  if (resuming.value) return;
+  if (resuming.value || !isPageActive()) return;
   const rolloutId = String(route.params.rolloutId ?? "");
   if (!rolloutId) return;
   const request = reads.begin();
-  let context: WorkspaceContext | undefined;
   try {
-    await getWorkspace();
+    const workspaceId = await getWorkspaceId();
     if (!request.current()) return;
-    context = workspaceContext();
     const value = await getAgentRollout(rolloutId, request.signal);
-    if (!request.current(context)) return;
-    if (value.id !== rolloutId || value.workspaceId !== context.id)
+    if (!request.current()) return;
+    if (value.id !== rolloutId || value.workspaceId !== workspaceId)
       throw new Error("rollout outside the requested workspace");
-    loadedContext = context;
     rollout.value = value;
     unavailable.value = false;
     notFound.value = false;
     resumeBlocked.value = false;
-    if (!activeStates.has(value.state)) foregroundRefresh.stop();
   } catch (cause) {
-    if (!request.current(context)) return;
-    notFound.value =
-      cause instanceof ResponseError && cause.response.status === 404;
+    if (!request.current()) return;
+    const status = cause instanceof ResponseError ? cause.response.status : 0;
+    if (!(cause instanceof TypeError) && status < 500)
+      rollout.value = undefined;
+    notFound.value = status === 404;
     unavailable.value = !notFound.value;
   } finally {
     if (request.finish()) {
       loading.value = false;
+      if (rollout.value && !activeStates.has(rollout.value.state))
+        foregroundRefresh.stop();
     }
   }
 }
 
 async function resume(): Promise<void> {
   const value = rollout.value;
-  const context = loadedContext;
-  if (!value || !context || resuming.value || resumeBlocked.value) return;
+  if (!value || unavailable.value || resuming.value || resumeBlocked.value)
+    return;
   invalidate();
   const ticket = sequence;
-  if (!current(context, ticket)) return;
   resuming.value = true;
   resumeError.value = "";
   try {
     const result = await resumeAgentRollout(value.id);
-    if (!current(context, ticket)) return;
-    if (result.id !== value.id || result.workspaceId !== context.id)
+    if (ticket !== sequence) return;
+    if (result.id !== value.id || result.workspaceId !== value.workspaceId)
       throw new Error(t("rolloutResumeUnconfirmed"));
     rollout.value = result;
     if (!activeStates.has(result.state)) foregroundRefresh.stop();
     else foregroundRefresh.start(false);
   } catch (cause) {
-    if (!current(context, ticket)) return;
+    if (ticket !== sequence) return;
     // A lost POST response is not permission to send the resume again; only
     // a fresh read of the server state re-enables the action.
     resumeBlocked.value = true;
     resumeError.value =
-      cause instanceof ResponseError
-        ? cause.message
-        : t("rolloutResumeUnconfirmed");
+      (cause instanceof ResponseError && cause.message) ||
+      t("rolloutResumeUnconfirmed");
     resuming.value = false;
     foregroundRefresh.request();
   } finally {
@@ -239,11 +233,18 @@ onBeforeUnmount(() => {
       :message="$t('rolloutNotFound')"
     />
     <DataState
-      v-else-if="unavailable || !rollout"
+      v-else-if="!rollout"
       kind="error"
       :message="$t('rolloutUnavailable')"
     />
     <template v-else>
+      <p
+        v-if="unavailable"
+        class="m-0 mb-3 text-sm text-amber-800"
+        role="status"
+      >
+        {{ $t("overviewStaleSource") }}
+      </p>
       <section
         class="bg-card border-border mb-6 rounded-xl border p-4 shadow-xs md:p-5"
         :aria-label="$t('rollingUpgrade')"
@@ -312,7 +313,7 @@ onBeforeUnmount(() => {
         </div>
         <Button
           type="button"
-          :disabled="resuming || resumeBlocked"
+          :disabled="unavailable || resuming || resumeBlocked"
           @click="resume"
         >
           {{ $t("resumeRollout") }}

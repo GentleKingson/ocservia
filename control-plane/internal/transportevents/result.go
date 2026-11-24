@@ -5,13 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -43,7 +44,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		return invalidCommandResult("command result completed_at exceeds clock skew bound")
 	}
 	errorCodeValue := result.GetErrorCode()
-	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !value.ValidText(errorCodeValue, 128)) {
+	if len(result.GetResult()) > 1<<20 || (errorCodeValue != "" && !validText(errorCodeValue, 128)) {
 		return invalidCommandResult("command result field is invalid")
 	}
 	state := ""
@@ -63,14 +64,8 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	if err != nil {
 		return err
 	}
-	at, err := value.FromTime(observedAt)
-	if err != nil {
-		return err
-	}
-	completed, err := value.FromTime(completedTime)
-	if err != nil {
-		return err
-	}
+	at := observedAt.UTC()
+	completed := completedTime.UTC()
 	stored, err := store.LoadCommand(ctx, commandID, nodeID)
 	if errors.Is(err, database.ErrNotFound) {
 		return invalidCommandResult("command result does not match a dispatched command")
@@ -96,12 +91,10 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	}
 	payloadHash := resultBytesOrNull(result.GetPayloadSha256())
 	hashVersion := int16(result.GetSemanticPayloadHashVersion())
-	var accepted value.Timestamp
+	var accepted *time.Time
 	if acceptedAt := result.GetAcceptedAt(); acceptedAt != nil {
-		accepted, err = value.FromTime(acceptedAt.AsTime())
-		if err != nil {
-			return err
-		}
+		t := acceptedAt.AsTime().UTC()
+		accepted = &t
 	}
 	errorCode := resultText(result.GetErrorCode())
 	resultBytes := result.GetResult()
@@ -132,7 +125,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		return invalidCommandResult("command result contradicts a terminal state")
 	}
 	if verification.Verified() {
-		existingCommandID, existingReceipt, err := store.Receipt(ctx, verification.KeyID, verification.EffectRecordID, verification.EffectSequence)
+		existingCommandID, existingReceipt, err := store.Receipt(ctx, verification.KeyID, verification.EffectSequence)
 		if err == nil {
 			if existingCommandID == commandID && bytes.Equal(existingReceipt, verification.ReceiptSHA256) {
 				return nil
@@ -150,8 +143,8 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 		PayloadHash: payloadHash, HashVersion: hashVersion, State: state, Bytes: resultBytes, ErrorCode: errorCode,
 		AcceptedAt: accepted, CompletedAt: completed, Replayed: result.GetReplayed(),
 		VerificationStatus: verification.Status, FailureReason: resultText(verification.FailureReason), KeyID: resultText(verification.KeyID),
-		EffectRecordID: resultBytesOrNull(verification.EffectRecordID), EffectSequence: resultSequence(verification.EffectSequence),
-		ReceiptHash: resultBytesOrNull(verification.ReceiptSHA256), Proof: resultBytesOrNull(verification.EncodedProof),
+		EffectSequence: resultSequence(verification.EffectSequence),
+		ReceiptHash:    resultBytesOrNull(verification.ReceiptSHA256), Proof: resultBytesOrNull(verification.EncodedProof),
 	}); err != nil {
 		return fmt.Errorf("persist Agent command result: %w", err)
 	}
@@ -266,27 +259,13 @@ func scheduleCommandRecovery(ctx context.Context, store resultstore.ResultStore,
 	if err != nil {
 		return err
 	}
-	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && command.ExpiresAt.Valid {
-		deadline, err := command.ExpiresAt.Time()
-		if err != nil {
-			return err
-		}
-		if deadline.After(expiresAt) {
-			expiresAt = deadline
-		}
+	if mode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY && command.ExpiresAt.After(expiresAt) {
+		expiresAt = command.ExpiresAt
 	}
 	if !expiresAt.After(observedAt) {
 		payload = nil
 	}
-	expiry, err := value.FromTime(expiresAt)
-	if err != nil {
-		return err
-	}
-	at, err := value.FromTime(observedAt)
-	if err != nil {
-		return err
-	}
-	return store.ScheduleRecovery(ctx, commandID, payload, expiry, at, receiptFailed)
+	return store.ScheduleRecovery(ctx, commandID, payload, expiresAt.UTC(), observedAt.UTC(), receiptFailed)
 }
 
 func fixedHostEffect(envelope *agentv1.CommandEnvelope) bool {
@@ -316,4 +295,8 @@ func resultSequence(v uint64) *int64 {
 	}
 	n := int64(v)
 	return &n
+}
+
+func validText(s string, maxBytes int) bool {
+	return s != "" && len(s) <= maxBytes && utf8.ValidString(s) && strings.IndexByte(s, 0) < 0
 }

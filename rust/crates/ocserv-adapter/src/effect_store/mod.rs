@@ -22,7 +22,7 @@ pub(super) use self::hmac::{
     authenticate_record,
 };
 
-use self::hmac::authenticate_store_identity;
+use self::hmac::{authenticate_store_identity, verify_mac};
 
 #[derive(Debug)]
 pub(super) struct EffectStore {
@@ -136,6 +136,7 @@ impl EffectStore {
         store.ensure_authorized_schema()?;
         store.ensure_artifact_schema()?;
         store.ensure_owner_fence_schema()?;
+        store.ensure_receipt_sequence_schema()?;
         store.validate_identity()?;
         Ok(store)
     }
@@ -220,13 +221,12 @@ impl EffectStore {
                    certificate_version INTEGER NOT NULL CHECK(certificate_version > 0),
                    operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
                    content_sha256 BLOB NOT NULL CHECK(length(content_sha256)=32),
-                   content_size INTEGER NOT NULL CHECK(content_size BETWEEN 0 AND 67108864),
+                   content_size INTEGER NOT NULL CHECK(content_size BETWEEN 0 AND 262144),
                    artifact_expires_at INTEGER NOT NULL,
                    state TEXT NOT NULL CHECK(state IN ('prepared','available','leased','consumed','expired','revoked')),
                    active_grant_id BLOB CHECK(active_grant_id IS NULL OR length(active_grant_id)=16),
                    active_subject TEXT NOT NULL CHECK(length(active_subject) <= 256),
                    grant_expires_at INTEGER,
-                   active_offset INTEGER NOT NULL CHECK(active_offset BETWEEN 0 AND content_size),
                    record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
                    updated_at INTEGER NOT NULL,
                    CHECK((state='leased' AND active_grant_id IS NOT NULL AND grant_expires_at IS NOT NULL AND length(active_subject)>0) OR state<>'leased'),
@@ -253,6 +253,19 @@ impl EffectStore {
             .map_err(sqlite_io)
     }
 
+    fn ensure_receipt_sequence_schema(&self) -> Result<(), AdapterError> {
+        self.connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS receipt_sequence (
+                   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                   last_sequence INTEGER NOT NULL CHECK(last_sequence > 0),
+                   record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
+                   updated_at INTEGER NOT NULL
+                 ) STRICT;",
+            )
+            .map_err(sqlite_io)
+    }
+
     fn validate_identity(&self) -> Result<(), AdapterError> {
         let (store_id, identity_hmac): (Vec<u8>, Vec<u8>) = self
             .connection
@@ -268,7 +281,10 @@ impl EffectStore {
         let identity_hmac: [u8; 32] = identity_hmac
             .try_into()
             .map_err(|_| AdapterError::InvalidResource)?;
-        if authenticate_store_identity(&self.hmac_key, &store_id) != identity_hmac {
+        if !verify_mac(
+            &authenticate_store_identity(&self.hmac_key, &store_id),
+            &identity_hmac,
+        ) {
             return Err(AdapterError::InvalidResource);
         }
         Ok(())

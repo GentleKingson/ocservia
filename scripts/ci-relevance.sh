@@ -65,9 +65,13 @@ classify_path() {
     scripts/ci-tools-check.sh)
       for suite in guards release source-style contracts; do tools_suite "${suite}"; done ;;
     scripts/ci-go-cache-key.sh) run_go=true; tools_suite guards ;;
+    scripts/*required-go-tests*)
+      run_database=true; tools_suite guards ;;
+    scripts/go-test-environment.sh)
+      run_go=true; run_database=true; tools_suite guards ;;
     .github/workflows/ci.yml|.github/workflows/security.yml|\
     .tool-versions|.nvmrc|.node-version|Makefile|\
-    scripts/ci-*|scripts/*required-go-tests*|scripts/go-test-environment.sh|\
+    scripts/ci-*|\
     scripts/test-ci-relevance.sh|scripts/test-toolchain-consistency.sh|\
     scripts/test-workflow-contracts.py|scripts/check-public-repository.sh|\
     scripts/license-check.sh|scripts/test.sh|scripts/verify.sh)
@@ -88,7 +92,8 @@ classify_path() {
     rust/agent-build.Dockerfile|rust/transportd.Dockerfile|\
     scripts/buildx-cache.sh|\
     scripts/security-check.sh|scripts/secret-scan.toml|scripts/test-secret-scan-config-runtime.sh|\
-    scripts/release-quick-acceptance.sh|scripts/resilience-capacity*.sh|scripts/security-acceptance-*|\
+    scripts/release-quick-acceptance.sh|scripts/release_evidence.py|scripts/test-release-evidence.py|\
+    scripts/resilience-capacity*.sh|scripts/security-acceptance-*|\
     scripts/perf-bench.sh)
       tools_suite release ;;
 
@@ -107,13 +112,14 @@ classify_path() {
       run_go=true; run_database=true ;;
 
     # Web, Rust, Go and Signer modules.
-    web/package.json) run_web=true; tools_suite guards ;;
+    web/package.json|web/playwright.Dockerfile) run_web=true; tools_suite guards ;;
+    web/e2e/*|web/test/run-auth-browser.mjs) run_web=true; tools_suite guards ;;
     web/*|scripts/web-check.sh|scripts/e2e.sh) run_web=true ;;
     rust/rust-toolchain.toml) run_rust=true; tools_suite guards ;;
     rust/*|scripts/rust-check.sh|scripts/agent-boundary-check.sh|\
     scripts/check-agent-storage.sh|scripts/native-ocserv-integration.sh)
       run_rust=true ;;
-    control-plane/go.mod|go.work*)
+    control-plane/go.mod|go.work*|control-plane/*_test.go)
       run_go=true; run_database=true; tools_suite guards ;;
     control-plane/cmd/*|control-plane/migrations/*|control-plane/internal/*|control-plane/go.*)
       run_go=true; run_database=true ;;
@@ -129,8 +135,7 @@ classify_path() {
     deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|\
     scripts/prepare-bootstrap-release-assets.sh|\
-    scripts/package-agent.sh|scripts/verify-agent-package.sh|\
-    scripts/test-installer-common.sh|scripts/test-managed-node-install.sh|scripts/test-node-bootstrap.py|\
+    scripts/test-installer-common.sh|scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
     scripts/test-controller-host-bootstrap.sh|scripts/test-controller-lifecycle.sh|\
     scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-vpn-audit.py)
@@ -138,13 +143,15 @@ classify_path() {
 
     # Broader release/installer/packaging/deployment paths.
     .github/workflows/release*.yml)
-      tools_suite guards; tools_suite release; run_installers=true ;;
+      tools_suite guards; tools_suite release ;;
+    deploy/systemd/*)
+      run_rust=true; tools_suite release; run_installers=true ;;
     install.env.example|\
-    scripts/*release*|scripts/*controller*|scripts/*agent-upgrade*|\
-    scripts/build-agent-binaries.sh|scripts/install-agent.sh|scripts/upgrade-agent.sh|\
-    scripts/rollback-agent.sh|scripts/uninstall-agent.sh|scripts/agent-package-smoke.sh|\
+    scripts/*release*|scripts/*controller*|\
+    scripts/build-agent-binaries.sh|\
     scripts/package-native-agent.sh|scripts/verify-bootstrap-endpoint.sh|\
-    deploy/package/*|deploy/systemd/*|deploy/bootstrap/*|deploy/managed-node/*|\
+    deploy/lib/quick-materials.sh|\
+    deploy/package/*|deploy/bootstrap/*|deploy/managed-node/*|\
     deploy/production/*|deploy/prepare-transport-runtime.sh)
       tools_suite release; run_installers=true ;;
 
@@ -162,12 +169,12 @@ classify_path() {
   # Orthogonal checks independent of each file's primary behavior suite.
   case "${path}" in
     scripts/*.sh|scripts/*.py|deploy/*.sh|deploy/*.py|\
-    deploy/bootstrap/install-controller|deploy/bootstrap/install-node|\
+    deploy/bootstrap/install-node|\
     deploy/database-e2e/systemctl|deploy/managed-node/vpn-session-hook)
       tools_suite source-style ;;
   esac
   case "${path}" in
-    scripts/generate-controller-release-manifest.mjs|scripts/redact-release-upgrade-log.mjs|\
+    scripts/redact-release-upgrade-log.mjs|\
     scripts/release-business-browser.mjs|scripts/test-release-upgrade.mjs|\
     .github/actions/build-cache-credentials/index.js)
       run_web=true ;;
@@ -185,7 +192,7 @@ classify_path() {
       select_controller_images gateway ;;
     control-plane/*|THIRD_PARTY_NOTICES.md) select_controller_images control ;;
     signer/*|deploy/production/signer.Dockerfile) select_controller_images signer ;;
-    rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/vendor/*|rust/crates/*|\
+    rust/Cargo.toml|rust/Cargo.lock|rust/rust-toolchain.toml|rust/.cargo/*|rust/crates/*|\
     rust/transportd.Dockerfile|deploy/production/transportd-relays.sh|deploy/prepare-transport-runtime.sh)
       select_controller_images transport ;;
     deploy/production/backup.Dockerfile|deploy/production/backup-entrypoint.sh|scripts/postgres-backup.sh)

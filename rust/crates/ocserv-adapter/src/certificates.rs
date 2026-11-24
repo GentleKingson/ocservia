@@ -1,10 +1,9 @@
 use super::{
-    ARTIFACT_CHUNK_BYTES, Adapter, AdapterError, ArtifactData, ArtifactLeaseIdentity,
-    CertificateArtifactResult, CertificateCsrResult, CertificateRevokeResult, Digest, Duration,
-    EffectStore, HashSet, MAX_ARTIFACT_BYTES, MetadataExt, MutationResult, OpenOptionsExt, Path,
-    PermissionsExt, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion, Sha256, StagingFile,
-    StdOpenOptions, SystemTime, Uuid, Write, Zeroizing, atomic_replace, effect_now, io,
-    sync_directory, valid_dns_name,
+    Adapter, AdapterError, ArtifactData, ArtifactLeaseIdentity, CertificateArtifactResult,
+    CertificateCsrResult, CertificateRevokeResult, Digest, Duration, HashSet, MAX_ARTIFACT_BYTES,
+    MetadataExt, MutationResult, OpenOptionsExt, Path, PermissionsExt, SealedSecretPurpose,
+    SealedSecretV1, Sha256, StagingFile, StdOpenOptions, SystemTime, Uuid, Write, Zeroizing,
+    atomic_replace, effect_now, io, sync_directory, valid_dns_name,
 };
 
 impl Adapter {
@@ -171,8 +170,9 @@ impl Adapter {
             return Err(AdapterError::InvalidRequest);
         }
         let _guard = self.certificate_artifact_lock.lock().await;
-        let artifact_ids = EffectStore::open_for_mutation(&self.resources)?
-            .revoke_certificate_artifacts(id.as_bytes())?;
+        let artifact_ids = self.with_effect_store(true, |store| {
+            store.revoke_certificate_artifacts(id.as_bytes())
+        })?;
         let artifact_dir = self.resources.certificate_key_dir.join("artifacts");
         for artifact_id in artifact_ids {
             let artifact = Uuid::from_bytes(artifact_id);
@@ -246,8 +246,7 @@ impl Adapter {
             || certificate_version == 0
             || certificate_chain_pem.len() < 64
             || certificate_chain_pem.len() > 256 * 1024
-            || SealedSecretVersion::try_from(sealed_password.version).ok()
-                != Some(SealedSecretVersion::V1)
+            || sealed_password.version != 1
             || SealedSecretPurpose::try_from(sealed_password.purpose).ok()
                 != Some(SealedSecretPurpose::CertificateP12Password)
             || sealed_password.ciphertext.len() < 32
@@ -290,35 +289,37 @@ impl Adapter {
         let chain_path = artifact_dir.join(format!(".{artifact}.chain.pem"));
         let staging_path = artifact_dir.join(format!(".{artifact}.p12"));
         let output_path = artifact_dir.join(format!("{artifact}.p12"));
-        let mut effect_store = EffectStore::open_for_mutation(&self.resources)?;
-        effect_store.prepare_artifact(
-            artifact.as_bytes(),
-            certificate.as_bytes(),
-            certificate_version,
-            operation.as_bytes(),
-            artifact_expires_at_unix_seconds,
-        )?;
-        let artifact_registered = effect_store.artifact_is_registered(
-            artifact.as_bytes(),
-            certificate.as_bytes(),
-            certificate_version,
-            operation.as_bytes(),
-            artifact_expires_at_unix_seconds,
-        )?;
-        drop(effect_store);
+        let artifact_registered = self.with_effect_store(true, |effect_store| {
+            effect_store.prepare_artifact(
+                artifact.as_bytes(),
+                certificate.as_bytes(),
+                certificate_version,
+                operation.as_bytes(),
+                artifact_expires_at_unix_seconds,
+            )?;
+            effect_store.artifact_is_registered(
+                artifact.as_bytes(),
+                certificate.as_bytes(),
+                certificate_version,
+                operation.as_bytes(),
+                artifact_expires_at_unix_seconds,
+            )
+        })?;
         let password = self.decrypt_p12_password(sealed_password).await?;
         let register = |data: &[u8]| {
             let digest = Sha256::digest(data).to_vec();
             let size = u64::try_from(data.len()).map_err(|_| AdapterError::OutputLimit)?;
-            EffectStore::open_for_mutation(&self.resources)?.register_artifact(
-                artifact_id,
-                certificate_id,
-                certificate_version,
-                operation_id,
-                &digest,
-                size,
-                artifact_expires_at_unix_seconds,
-            )?;
+            self.with_effect_store(true, |store| {
+                store.register_artifact(
+                    artifact_id,
+                    certificate_id,
+                    certificate_version,
+                    operation_id,
+                    &digest,
+                    size,
+                    artifact_expires_at_unix_seconds,
+                )
+            })?;
             Ok(CertificateArtifactResult {
                 certificate_id: certificate_id.to_vec(),
                 artifact_id: artifact_id.to_vec(),
@@ -494,8 +495,8 @@ impl Adapter {
         }
     }
 
-    /// Reads one fixed-size artifact chunk only while the exact signed grant
-    /// owns the durable root-side lease.
+    /// Reads the complete bounded artifact once under the exact signed grant
+    /// that acquires the durable root-side lease.
     ///
     /// # Errors
     ///
@@ -504,19 +505,14 @@ impl Adapter {
     pub async fn artifact_read(
         &self,
         identity: ArtifactLeaseIdentity<'_>,
-        offset: u64,
     ) -> Result<ArtifactData, AdapterError> {
-        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        use tokio::io::AsyncReadExt as _;
 
         let _guard = self.certificate_artifact_lock.lock().await;
-        let mut store = EffectStore::open_for_mutation(&self.resources)?;
-        let record = store.lease_artifact(identity)?;
-        if offset != record.active_offset || offset > record.content_size {
-            return Err(AdapterError::InvalidRequest);
-        }
+        let record = self.with_effect_store(true, |store| store.lease_artifact(identity))?;
         let total_size =
             usize::try_from(record.content_size).map_err(|_| AdapterError::InvalidResource)?;
-        if total_size > MAX_ARTIFACT_BYTES {
+        if total_size == 0 || total_size > MAX_ARTIFACT_BYTES {
             return Err(AdapterError::InvalidResource);
         }
         let artifact = Uuid::from_bytes(record.artifact_id);
@@ -535,7 +531,7 @@ impl Adapter {
         {
             return Err(AdapterError::InvalidResource);
         }
-        let mut file = tokio::fs::File::open(&path)
+        let file = tokio::fs::File::open(&path)
             .await
             .map_err(AdapterError::Io)?;
         let fd_meta = file.metadata().await.map_err(AdapterError::Io)?;
@@ -548,58 +544,21 @@ impl Adapter {
             return Err(AdapterError::InvalidResource);
         }
 
-        let start = usize::try_from(offset).map_err(|_| AdapterError::InvalidRequest)?;
-        let end = start.saturating_add(ARTIFACT_CHUNK_BYTES).min(total_size);
-        let chunk_len = end - start;
-        let mut chunk = Vec::with_capacity(chunk_len);
-
-        if offset == 0 {
-            // Stream-verify full file SHA-256 on lease start while keeping only
-            // the first chunk (<= 256 KiB) in memory.
-            let mut hasher = Sha256::new();
-            let mut buf = vec![0_u8; 64 * 1024].into_boxed_slice();
-            let mut total_read = 0_usize;
-            loop {
-                let n = file.read(&mut buf).await.map_err(AdapterError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                total_read = total_read
-                    .checked_add(n)
-                    .ok_or(AdapterError::InvalidResource)?;
-                if total_read > MAX_ARTIFACT_BYTES || total_read > total_size {
-                    return Err(AdapterError::InvalidResource);
-                }
-                hasher.update(&buf[..n]);
-                if chunk.len() < chunk_len {
-                    let take = (chunk_len - chunk.len()).min(n);
-                    chunk.extend_from_slice(&buf[..take]);
-                }
-            }
-            if total_read != total_size || hasher.finalize().as_slice() != record.content_sha256 {
-                return Err(AdapterError::InvalidResource);
-            }
-        } else {
-            file.seek(io::SeekFrom::Start(offset))
-                .await
-                .map_err(AdapterError::Io)?;
-            chunk.resize(chunk_len, 0);
-            file.read_exact(&mut chunk)
-                .await
-                .map_err(AdapterError::Io)?;
+        let mut data = Vec::with_capacity(total_size);
+        let max_read =
+            u64::try_from(MAX_ARTIFACT_BYTES + 1).map_err(|_| AdapterError::OutputLimit)?;
+        file.take(max_read)
+            .read_to_end(&mut data)
+            .await
+            .map_err(AdapterError::Io)?;
+        if data.len() != total_size || Sha256::digest(&data).as_slice() != record.content_sha256 {
+            return Err(AdapterError::InvalidResource);
         }
 
-        store.advance_artifact(
-            identity,
-            offset,
-            u64::try_from(end).map_err(|_| AdapterError::OutputLimit)?,
-        )?;
         Ok(ArtifactData {
             artifact_id: record.artifact_id.to_vec(),
             grant_id: identity.grant_id.to_vec(),
-            offset,
-            data: chunk,
-            eof: end == total_size,
+            data,
             sha256: record.content_sha256.to_vec(),
         })
     }
@@ -617,8 +576,7 @@ impl Adapter {
         size: u64,
     ) -> Result<MutationResult, AdapterError> {
         let _guard = self.certificate_artifact_lock.lock().await;
-        EffectStore::open_for_mutation(&self.resources)?
-            .consume_artifact(identity, sha256, size)?;
+        self.with_effect_store(true, |store| store.consume_artifact(identity, sha256, size))?;
         let artifact =
             Uuid::from_slice(identity.artifact_id).map_err(|_| AdapterError::InvalidRequest)?;
         let path = self
@@ -656,8 +614,9 @@ impl Adapter {
         size: u64,
     ) -> Result<MutationResult, AdapterError> {
         let _guard = self.certificate_artifact_lock.lock().await;
-        let consumed = EffectStore::open_for_mutation(&self.resources)?
-            .confirm_artifact_consumed(identity, sha256, size)?;
+        let consumed = self.with_effect_store(true, |store| {
+            store.confirm_artifact_consumed(identity, sha256, size)
+        })?;
         Ok(MutationResult { applied: consumed })
     }
 }
@@ -690,9 +649,11 @@ impl Adapter {
         if !hardened.is_dir() || hardened.file_type().is_symlink() || hardened.mode() & 0o077 != 0 {
             return Err(AdapterError::InvalidResource);
         }
-        let mut store = EffectStore::open_for_mutation(&self.resources)?;
-        let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
-        let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
+        let (terminal, tracked) = self.with_effect_store(true, |store| {
+            let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
+            let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
+            Ok((terminal, tracked))
+        })?;
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

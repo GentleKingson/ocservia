@@ -1,29 +1,27 @@
-// Package semanticpayload computes the versioned canonical semantic hash for
-// command envelopes, shared by the transportevents and operations packages.
+// Package semanticpayload computes the canonical RFC 8949 Core Deterministic CBOR
+// semantic hash for command envelopes, shared by transportevents and operations.
 package semanticpayload
 
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"net"
 	"slices"
 	"strings"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"golang.org/x/mod/semver"
 )
 
+const domainSeparatorV2 = "ocservia.command.semantic-hash.cbor.v2\x00"
+
 // ValidateVersion rejects hash algorithms that this binary cannot verify.
-//
-// The version is part of the durable command identity and must never silently
-// fall back to the legacy algorithm when a newer value is received.
 func ValidateVersion(version agentv1.SemanticPayloadHashVersion) error {
 	switch version {
 	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED,
-		agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
 		agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
 		return nil
 	default:
@@ -31,95 +29,203 @@ func ValidateVersion(version agentv1.SemanticPayloadHashVersion) error {
 	}
 }
 
-// domainSeparatorV1 is the ASCII label plus NUL terminator defined by
-// docs/development/command-semantic-hash-v1.md.
-var domainSeparatorV1 = []byte("ocservia.command.semantic-hash.v1\x00")
-var domainSeparatorV2 = []byte("ocservia.command.semantic-hash.v2\x00")
-
-// HashV1 computes the versioned canonical semantic hash (v1) for a reconcilable
-// command envelope.
-//
-// The preimage is hand-specified canonical bytes, never Protobuf wire encoding,
-// so it is stable across Go and Rust regardless of unknown-field retention.
-// Only explicitly mapped typed payloads are reconcilable; other payload types
-// (including SimulationProbe) return an error.
-func HashV1(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
-	return hash(envelope, agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1)
+type cborEnvelope struct {
+	NodeID           []byte `cbor:"node_id"`
+	ExpectedRevision uint64 `cbor:"expected_revision"`
+	PayloadKind      uint32 `cbor:"payload_kind"`
+	Payload          any    `cbor:"payload"`
 }
 
-// HashV2 binds the authorization revision and the independent ConfigPlan
-// expected revision without changing the frozen v1 layout.
+type cborEmpty struct{}
+
+type cborEcho struct {
+	Message string `cbor:"message"`
+}
+
+type cborSession struct {
+	SessionID string `cbor:"session_id"`
+	BootID    string `cbor:"boot_id"`
+}
+
+type cborIPBan struct {
+	IP string `cbor:"ip"`
+}
+
+type cborSealedSecret struct {
+	Version    uint32 `cbor:"version"`
+	Purpose    uint32 `cbor:"purpose"`
+	KeyID      string `cbor:"key_id"`
+	Ciphertext []byte `cbor:"ciphertext"`
+}
+
+type cborUserWithSecret struct {
+	Username        string           `cbor:"username"`
+	DesiredRevision uint64           `cbor:"desired_revision"`
+	SealedPassword  cborSealedSecret `cbor:"sealed_password"`
+}
+
+type cborUserToggle struct {
+	Username        string `cbor:"username"`
+	DesiredRevision uint64 `cbor:"desired_revision"`
+}
+
+type cborGroupApply struct {
+	GroupName       string   `cbor:"group_name"`
+	Members         []string `cbor:"members"`
+	DesiredRevision uint64   `cbor:"desired_revision"`
+}
+
+type cborConfigPlan struct {
+	CandidateHash    []byte `cbor:"candidate_hash"`
+	ExpectedRevision uint64 `cbor:"expected_revision"`
+}
+
+type cborConfigApply struct {
+	CandidateHash       []byte `cbor:"candidate_hash"`
+	ExpectedCurrentHash []byte `cbor:"expected_current_hash"`
+	DesiredRevision     uint64 `cbor:"desired_revision"`
+}
+
+type cborCompleteConfigPlan struct {
+	CandidateHash []byte `cbor:"candidate_hash"`
+}
+
+type cborCompleteConfigApply struct {
+	CandidateHash        []byte `cbor:"candidate_hash"`
+	MaterializedHash     []byte `cbor:"materialized_hash"`
+	ExpectedCurrentHash  []byte `cbor:"expected_current_hash"`
+	DesiredRevision      uint64 `cbor:"desired_revision"`
+	PlanID               []byte `cbor:"plan_id"`
+	PlanExpiresAtSeconds int64  `cbor:"plan_expires_at_seconds"`
+	PlanExpiresAtNanos   uint32 `cbor:"plan_expires_at_nanos"`
+}
+
+type cborCertificateCSR struct {
+	CertificateID []byte   `cbor:"certificate_id"`
+	CommonName    string   `cbor:"common_name"`
+	DNSNames      []string `cbor:"dns_names"`
+	KeyBits       uint32   `cbor:"key_bits"`
+}
+
+type cborCertificateP12 struct {
+	CertificateID            []byte           `cbor:"certificate_id"`
+	ArtifactID               []byte           `cbor:"artifact_id"`
+	CertificateChainPEM      []byte           `cbor:"certificate_chain_pem"`
+	SealedPassword           cborSealedSecret `cbor:"sealed_password"`
+	CertificateVersion       uint64           `cbor:"certificate_version"`
+	ArtifactExpiresAtSeconds int64            `cbor:"artifact_expires_at_seconds"`
+	ArtifactExpiresAtNanos   uint32           `cbor:"artifact_expires_at_nanos"`
+}
+
+type cborCertificateRevoke struct {
+	CertificateID      []byte `cbor:"certificate_id"`
+	Reason             string `cbor:"reason"`
+	CertificateVersion uint64 `cbor:"certificate_version"`
+}
+
+type cborAgentUpgrade struct {
+	TargetVersion string `cbor:"target_version"`
+	Architecture  string `cbor:"architecture"`
+	PackageSHA256 []byte `cbor:"package_sha256"`
+}
+
+func nonNilBytes(b []byte) []byte {
+	if len(b) == 0 {
+		return []byte{}
+	}
+	return b
+}
+
+func nonNilStrings(s []string) []string {
+	if len(s) == 0 {
+		return []string{}
+	}
+	return s
+}
+
+// HashV2 computes the canonical RFC 8949 Core Deterministic CBOR semantic hash
+// for a reconcilable command envelope.
 func HashV2(envelope *agentv1.CommandEnvelope) ([sha256.Size]byte, error) {
-	return hash(envelope, agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2)
+	return hashV2(envelope, false)
 }
 
-func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHashVersion) ([sha256.Size]byte, error) {
+func hashV2(envelope *agentv1.CommandEnvelope, normalizedConfig bool) ([sha256.Size]byte, error) {
+	if envelope == nil {
+		return [sha256.Size]byte{}, errors.New("command envelope is missing")
+	}
 	var payloadKind uint32
-	var canonicalPayload []byte
+	var payloadValue any
 	switch envelope.Payload.(type) {
 	case *agentv1.CommandEnvelope_SyntheticNoop:
 		payloadKind = 107
+		payloadValue = cborEmpty{}
 	case *agentv1.CommandEnvelope_SyntheticEcho:
 		payloadKind = 108
-		utf8 := []byte(envelope.GetSyntheticEcho().GetMessage())
-		canonicalPayload = make([]byte, 4+len(utf8))
-		binary.BigEndian.PutUint32(canonicalPayload[:4], uint32(len(utf8)))
-		copy(canonicalPayload[4:], utf8)
+		payloadValue = cborEcho{Message: envelope.GetSyntheticEcho().GetMessage()}
 	case *agentv1.CommandEnvelope_SessionDisconnect:
 		payloadKind = 100
-		canonicalPayload = canonicalStrings(envelope.GetSessionDisconnect().GetSessionId(), envelope.GetSessionDisconnect().GetBootId())
+		p := envelope.GetSessionDisconnect()
+		payloadValue = cborSession{SessionID: p.GetSessionId(), BootID: p.GetBootId()}
 	case *agentv1.CommandEnvelope_ServiceReload:
 		payloadKind = 105
+		payloadValue = cborEmpty{}
 	case *agentv1.CommandEnvelope_ConfigPlan:
 		payloadKind = 103
-		payload := envelope.GetConfigPlan()
-		if len(payload.GetCandidateHash()) != sha256.Size {
+		p := envelope.GetConfigPlan()
+		if len(p.GetCandidateHash()) != sha256.Size {
 			return [sha256.Size]byte{}, errors.New("candidate hash is malformed")
 		}
-		canonicalPayload = append(canonicalPayload, payload.GetCandidateHash()...)
-		if version == agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 {
-			var expected [8]byte
-			binary.BigEndian.PutUint64(expected[:], payload.GetExpectedRevision())
-			canonicalPayload = append(canonicalPayload, expected[:]...)
+		payloadValue = cborConfigPlan{
+			CandidateHash:    p.GetCandidateHash(),
+			ExpectedRevision: p.GetExpectedRevision(),
 		}
 	case *agentv1.CommandEnvelope_ConfigApply:
 		payloadKind = 104
-		payload := envelope.GetConfigApply()
-		if len(payload.GetCandidateHash()) != sha256.Size || len(payload.GetExpectedCurrentHash()) != sha256.Size || payload.GetDesiredRevision() == 0 {
+		p := envelope.GetConfigApply()
+		if len(p.GetCandidateHash()) != sha256.Size || len(p.GetExpectedCurrentHash()) != sha256.Size || p.GetDesiredRevision() == 0 {
 			return [sha256.Size]byte{}, errors.New("configuration apply identity is malformed")
 		}
-		canonicalPayload = append(canonicalPayload, payload.GetCandidateHash()...)
-		canonicalPayload = append(canonicalPayload, payload.GetExpectedCurrentHash()...)
-		var desired [8]byte
-		binary.BigEndian.PutUint64(desired[:], payload.GetDesiredRevision())
-		canonicalPayload = append(canonicalPayload, desired[:]...)
-	case *agentv1.CommandEnvelope_CompleteConfigPlan:
-		payload := envelope.GetCompleteConfigPlan()
-		digest, err := configprofile.Hash(payload.GetCandidate())
-		if version != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || err != nil || !bytes.Equal(digest[:], payload.GetCandidateHash()) || !bytes.Equal(payload.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
-			return [sha256.Size]byte{}, errors.New("complete config plan identity is malformed")
+		payloadValue = cborConfigApply{
+			CandidateHash:       p.GetCandidateHash(),
+			ExpectedCurrentHash: p.GetExpectedCurrentHash(),
+			DesiredRevision:     p.GetDesiredRevision(),
 		}
-		payloadKind, canonicalPayload = 129, append([]byte(nil), digest[:]...)
+	case *agentv1.CommandEnvelope_CompleteConfigPlan:
+		p := envelope.GetCompleteConfigPlan()
+		if !normalizedConfig {
+			digest, err := configprofile.Hash(p.GetCandidate())
+			if err != nil || !bytes.Equal(digest[:], p.GetCandidateHash()) || !bytes.Equal(p.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
+				return [sha256.Size]byte{}, errors.New("complete config plan identity is malformed")
+			}
+		}
+		payloadKind = 129
+		payloadValue = cborCompleteConfigPlan{CandidateHash: p.GetCandidateHash()}
 	case *agentv1.CommandEnvelope_CompleteConfigApply:
-		payload := envelope.GetCompleteConfigApply()
-		digest, err := configprofile.Hash(payload.GetCandidate())
-		expires := payload.GetPlanExpiresAt()
-		if version != agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2 || err != nil || !bytes.Equal(digest[:], payload.GetCandidateHash()) || !bytes.Equal(payload.GetCandidate().GetNodeId(), envelope.GetNodeId()) || len(payload.GetMaterializedHash()) != 32 || len(payload.GetExpectedCurrentHash()) != 32 || payload.GetDesiredRevision() <= payload.GetCandidate().GetExpectedRevision() || len(payload.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || !((len(envelope.GetApprovalId()) == 0 && len(envelope.GetApprovalRequestSha256()) == 0) || (len(envelope.GetApprovalId()) == 16 && len(envelope.GetApprovalRequestSha256()) == 32)) {
+		p := envelope.GetCompleteConfigApply()
+		if !normalizedConfig {
+			digest, err := configprofile.Hash(p.GetCandidate())
+			if err != nil || !bytes.Equal(digest[:], p.GetCandidateHash()) || !bytes.Equal(p.GetCandidate().GetNodeId(), envelope.GetNodeId()) {
+				return [sha256.Size]byte{}, errors.New("complete config apply identity is malformed")
+			}
+		}
+		expires := p.GetPlanExpiresAt()
+		if len(p.GetMaterializedHash()) != 32 || len(p.GetExpectedCurrentHash()) != 32 || p.GetDesiredRevision() <= p.GetCandidate().GetExpectedRevision() || len(p.GetPlanId()) != 16 || expires == nil || !expires.IsValid() || expires.GetNanos() < 0 {
 			return [sha256.Size]byte{}, errors.New("complete config apply identity is malformed")
 		}
 		payloadKind = 130
-		canonicalPayload = append(canonicalPayload, digest[:]...)
-		canonicalPayload = append(canonicalPayload, payload.GetMaterializedHash()...)
-		canonicalPayload = append(canonicalPayload, payload.GetExpectedCurrentHash()...)
-		canonicalPayload = binary.BigEndian.AppendUint64(canonicalPayload, payload.GetDesiredRevision())
-		canonicalPayload = append(canonicalPayload, payload.GetPlanId()...)
-		canonicalPayload = binary.BigEndian.AppendUint64(canonicalPayload, uint64(expires.GetSeconds()))
-		canonicalPayload = binary.BigEndian.AppendUint32(canonicalPayload, uint32(expires.GetNanos()))
-		canonicalPayload = append(canonicalPayload, envelope.GetApprovalId()...)
-		canonicalPayload = append(canonicalPayload, envelope.GetApprovalRequestSha256()...)
+		payloadValue = cborCompleteConfigApply{
+			CandidateHash:        p.GetCandidateHash(),
+			MaterializedHash:     p.GetMaterializedHash(),
+			ExpectedCurrentHash:  p.GetExpectedCurrentHash(),
+			DesiredRevision:      p.GetDesiredRevision(),
+			PlanID:               p.GetPlanId(),
+			PlanExpiresAtSeconds: expires.GetSeconds(),
+			PlanExpiresAtNanos:   uint32(expires.GetNanos()),
+		}
 	case *agentv1.CommandEnvelope_SessionTerminate:
 		payloadKind = 112
-		canonicalPayload = canonicalStrings(envelope.GetSessionTerminate().GetSessionId(), envelope.GetSessionTerminate().GetBootId())
+		p := envelope.GetSessionTerminate()
+		payloadValue = cborSession{SessionID: p.GetSessionId(), BootID: p.GetBootId()}
 	case *agentv1.CommandEnvelope_IpBanRemove:
 		payloadKind = 113
 		ip := envelope.GetIpBanRemove().GetIp()
@@ -127,138 +233,126 @@ func hash(envelope *agentv1.CommandEnvelope, version agentv1.SemanticPayloadHash
 		if parsed == nil || parsed.String() != ip {
 			return [sha256.Size]byte{}, errors.New("IP address is not canonical")
 		}
-		canonicalPayload = canonicalStrings(ip)
+		payloadValue = cborIPBan{IP: ip}
 	case *agentv1.CommandEnvelope_UserCreate:
 		payloadKind = 101
-		payload := envelope.GetUserCreate()
-		secret, err := canonicalSecret(payload.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD)
-		if err != nil || len(payload.GetSealedPassword()) != 0 || payload.GetSecretKeyId() != "" {
+		p := envelope.GetUserCreate()
+		secret, err := validateSealedSecret(p.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD)
+		if err != nil {
 			return [sha256.Size]byte{}, errors.New("user sealed secret is malformed")
 		}
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSealedPasswordV1().GetKeyId()}, secret, payload.GetDesiredRevision())
+		payloadValue = cborUserWithSecret{
+			Username:        p.GetUsername(),
+			DesiredRevision: p.GetDesiredRevision(),
+			SealedPassword:  secret,
+		}
 	case *agentv1.CommandEnvelope_UserDisable:
 		payloadKind = 102
-		payload := envelope.GetUserDisable()
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername()}, nil, payload.GetDesiredRevision())
+		p := envelope.GetUserDisable()
+		payloadValue = cborUserToggle{Username: p.GetUsername(), DesiredRevision: p.GetDesiredRevision()}
 	case *agentv1.CommandEnvelope_UserEnable:
 		payloadKind = 116
-		payload := envelope.GetUserEnable()
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername()}, nil, payload.GetDesiredRevision())
+		p := envelope.GetUserEnable()
+		payloadValue = cborUserToggle{Username: p.GetUsername(), DesiredRevision: p.GetDesiredRevision()}
 	case *agentv1.CommandEnvelope_UserPasswordRotate:
 		payloadKind = 114
-		payload := envelope.GetUserPasswordRotate()
-		secret, err := canonicalSecret(payload.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD)
-		if err != nil || len(payload.GetSealedPassword()) != 0 || payload.GetSecretKeyId() != "" {
+		p := envelope.GetUserPasswordRotate()
+		secret, err := validateSealedSecret(p.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD)
+		if err != nil {
 			return [sha256.Size]byte{}, errors.New("user sealed secret is malformed")
 		}
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetUsername(), payload.GetSealedPasswordV1().GetKeyId()}, secret, payload.GetDesiredRevision())
+		payloadValue = cborUserWithSecret{
+			Username:        p.GetUsername(),
+			DesiredRevision: p.GetDesiredRevision(),
+			SealedPassword:  secret,
+		}
 	case *agentv1.CommandEnvelope_GroupApply:
 		payloadKind = 115
-		payload := envelope.GetGroupApply()
-		values := append([]string{payload.GetGroupName()}, payload.GetMembers()...)
-		canonicalPayload = canonicalStringsAndBytes(values, nil, payload.GetDesiredRevision())
+		p := envelope.GetGroupApply()
+		payloadValue = cborGroupApply{
+			GroupName:       p.GetGroupName(),
+			Members:         nonNilStrings(p.GetMembers()),
+			DesiredRevision: p.GetDesiredRevision(),
+		}
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		payloadKind = 117
-		payload := envelope.GetCertificateCsr()
-		if len(payload.GetCertificateId()) != 16 {
+		p := envelope.GetCertificateCsr()
+		if len(p.GetCertificateId()) != 16 {
 			return [sha256.Size]byte{}, errors.New("certificate ID is malformed")
 		}
-		values := append([]string{payload.GetCommonName()}, payload.GetDnsNames()...)
-		canonicalPayload = canonicalStringsAndBytes(values, payload.GetCertificateId(), uint64(payload.GetKeyBits()))
+		payloadValue = cborCertificateCSR{
+			CertificateID: p.GetCertificateId(),
+			CommonName:    p.GetCommonName(),
+			DNSNames:      nonNilStrings(p.GetDnsNames()),
+			KeyBits:       p.GetKeyBits(),
+		}
 	case *agentv1.CommandEnvelope_CertificateP12:
 		payloadKind = 118
-		payload := envelope.GetCertificateP12()
-		if len(payload.GetCertificateId()) != 16 || len(payload.GetArtifactId()) != 16 {
+		p := envelope.GetCertificateP12()
+		if len(p.GetCertificateId()) != 16 || len(p.GetArtifactId()) != 16 {
 			return [sha256.Size]byte{}, errors.New("certificate artifact identity is malformed")
 		}
-		secret, err := canonicalSecret(payload.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD)
-		expires := payload.GetArtifactExpiresAt()
-		if err != nil || len(payload.GetSealedPassword()) != 0 || payload.GetSecretKeyId() != "" || payload.GetCertificateVersion() == 0 || expires == nil || !expires.IsValid() {
+		secret, err := validateSealedSecret(p.GetSealedPasswordV1(), agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD)
+		expires := p.GetArtifactExpiresAt()
+		if err != nil || p.GetCertificateVersion() == 0 || expires == nil || !expires.IsValid() || expires.GetNanos() < 0 {
 			return [sha256.Size]byte{}, errors.New("certificate P12 binding is malformed")
 		}
-		data := append(append(append([]byte(nil), payload.GetCertificateId()...), payload.GetArtifactId()...), payload.GetCertificateChainPem()...)
-		data = append(data, secret...)
-		var expiry [12]byte
-		binary.BigEndian.PutUint64(expiry[:8], uint64(expires.GetSeconds()))
-		binary.BigEndian.PutUint32(expiry[8:], uint32(expires.GetNanos()))
-		data = append(data, expiry[:]...)
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetSealedPasswordV1().GetKeyId()}, data, payload.GetCertificateVersion())
+		payloadValue = cborCertificateP12{
+			CertificateID:            p.GetCertificateId(),
+			ArtifactID:               p.GetArtifactId(),
+			CertificateChainPEM:      nonNilBytes(p.GetCertificateChainPem()),
+			SealedPassword:           secret,
+			CertificateVersion:       p.GetCertificateVersion(),
+			ArtifactExpiresAtSeconds: expires.GetSeconds(),
+			ArtifactExpiresAtNanos:   uint32(expires.GetNanos()),
+		}
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		payloadKind = 119
-		payload := envelope.GetCertificateRevoke()
-		if len(payload.GetCertificateId()) != 16 || strings.TrimSpace(payload.GetReason()) == "" {
+		p := envelope.GetCertificateRevoke()
+		if len(p.GetCertificateId()) != 16 || strings.TrimSpace(p.GetReason()) == "" {
 			return [sha256.Size]byte{}, errors.New("certificate revoke payload is malformed")
 		}
-		if payload.GetCertificateVersion() == 0 {
+		if p.GetCertificateVersion() == 0 {
 			return [sha256.Size]byte{}, errors.New("certificate revoke version is malformed")
 		}
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetReason()}, payload.GetCertificateId(), payload.GetCertificateVersion())
+		payloadValue = cborCertificateRevoke{
+			CertificateID:      p.GetCertificateId(),
+			Reason:             p.GetReason(),
+			CertificateVersion: p.GetCertificateVersion(),
+		}
 	case *agentv1.CommandEnvelope_AgentUpgrade:
 		payloadKind = 128
-		payload := envelope.GetAgentUpgrade()
-		if !ValidAgentUpgradeTargetVersion(payload.GetTargetVersion()) || len(payload.GetPackageSha256()) != sha256.Size || !ValidAgentUpgradeArchitecture(payload.GetArchitecture()) {
+		p := envelope.GetAgentUpgrade()
+		if !ValidAgentUpgradeTargetVersion(p.GetTargetVersion()) || len(p.GetPackageSha256()) != sha256.Size || !ValidAgentUpgradeArchitecture(p.GetArchitecture()) {
 			return [sha256.Size]byte{}, errors.New("agent upgrade release identity is malformed")
 		}
-		canonicalPayload = canonicalStringsAndBytes([]string{payload.GetTargetVersion(), payload.GetArchitecture()}, payload.GetPackageSha256(), 0)
+		payloadValue = cborAgentUpgrade{
+			TargetVersion: p.GetTargetVersion(),
+			Architecture:  p.GetArchitecture(),
+			PackageSHA256: p.GetPackageSha256(),
+		}
 	default:
 		return [sha256.Size]byte{}, errors.New("command payload type is not reconcilable")
 	}
-	h := sha256.New()
-	switch version {
-	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1:
-		h.Write(domainSeparatorV1)
-	case agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2:
-		h.Write(domainSeparatorV2)
-	default:
-		return [sha256.Size]byte{}, errors.New("semantic payload hash version is unsupported")
-	}
-	h.Write(envelope.GetNodeId())
-	var rev [8]byte
-	binary.BigEndian.PutUint64(rev[:], envelope.GetExpectedRevision())
-	h.Write(rev[:])
-	var kind [4]byte
-	binary.BigEndian.PutUint32(kind[:], payloadKind)
-	h.Write(kind[:])
-	h.Write(canonicalPayload)
-	var out [sha256.Size]byte
-	copy(out[:], h.Sum(nil))
-	return out, nil
+
+	return canonicalcbor.Hash(domainSeparatorV2, cborEnvelope{
+		NodeID:           nonNilBytes(envelope.GetNodeId()),
+		ExpectedRevision: envelope.GetExpectedRevision(),
+		PayloadKind:      payloadKind,
+		Payload:          payloadValue,
+	})
 }
 
-func canonicalSecret(secret *agentv1.SealedSecretV1, purpose agentv1.SealedSecretPurpose) ([]byte, error) {
-	if secret == nil || secret.GetVersion() != agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 || secret.GetPurpose() != purpose || strings.TrimSpace(secret.GetKeyId()) == "" || len(secret.GetCiphertext()) < 32 || len(secret.GetCiphertext()) > 16*1024 {
-		return nil, errors.New("sealed secret is malformed")
+func validateSealedSecret(secret *agentv1.SealedSecretV1, purpose agentv1.SealedSecretPurpose) (cborSealedSecret, error) {
+	if secret == nil || secret.GetVersion() != 1 || secret.GetPurpose() != purpose || strings.TrimSpace(secret.GetKeyId()) == "" || len(secret.GetCiphertext()) < 32 || len(secret.GetCiphertext()) > 16*1024 {
+		return cborSealedSecret{}, errors.New("sealed secret is malformed")
 	}
-	out := make([]byte, 8, 8+len(secret.GetCiphertext()))
-	binary.BigEndian.PutUint32(out[:4], uint32(secret.GetVersion()))
-	binary.BigEndian.PutUint32(out[4:8], uint32(secret.GetPurpose()))
-	return append(out, secret.GetCiphertext()...), nil
-}
-
-func canonicalStringsAndBytes(values []string, value []byte, revision uint64) []byte {
-	out := canonicalStrings(values...)
-	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
-	out = append(out, length[:]...)
-	out = append(out, value...)
-	var encodedRevision [8]byte
-	binary.BigEndian.PutUint64(encodedRevision[:], revision)
-	return append(out, encodedRevision[:]...)
-}
-
-func canonicalStrings(values ...string) []byte {
-	size := 4 * len(values)
-	for _, value := range values {
-		size += len(value)
-	}
-	out := make([]byte, 0, size)
-	for _, value := range values {
-		var length [4]byte
-		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
-		out = append(out, length[:]...)
-		out = append(out, value...)
-	}
-	return out
+	return cborSealedSecret{
+		Version:    secret.GetVersion(),
+		Purpose:    uint32(secret.GetPurpose()),
+		KeyID:      secret.GetKeyId(),
+		Ciphertext: secret.GetCiphertext(),
+	}, nil
 }
 
 // AgentUpgradeArchitectures are the release package architectures of the
@@ -272,35 +366,41 @@ func ValidAgentUpgradeArchitecture(architecture string) bool {
 }
 
 // ValidAgentUpgradeTargetVersion reports whether version is a strict SemVer
-// 2.0.0 version without the Go module "v" prefix. The same grammar is enforced
-// by the Rust agent and privd so the semantic identity stays canonical.
+// 2.0.0 version without the Go module "v" prefix.
 func ValidAgentUpgradeTargetVersion(version string) bool {
 	if len(version) < 5 || len(version) > 128 {
 		return false
 	}
 	core, _, _ := strings.Cut(version, "+")
 	core, _, _ = strings.Cut(core, "-")
-	// x/mod also accepts abbreviated versions; release identities do not.
 	return strings.Count(core, ".") == 2 && semver.IsValid("v"+version)
-}
-
-// PopulateV1 fills the versioned hash fields on a reconcilable command envelope.
-//
-// Non-reconcilable payloads return an error so the caller can decide whether to
-// leave the envelope on the legacy/empty path or reject the command.
-func PopulateV1(envelope *agentv1.CommandEnvelope) error {
-	digest, err := HashV1(envelope)
-	if err != nil {
-		return err
-	}
-	envelope.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1
-	envelope.SemanticPayloadSha256 = digest[:]
-	return nil
 }
 
 // PopulateV2 fills the current semantic identity on a command envelope.
 func PopulateV2(envelope *agentv1.CommandEnvelope) error {
 	digest, err := HashV2(envelope)
+	return populate(envelope, digest, err)
+}
+
+// PopulateConfigV2 binds a validated candidate to an outgoing config command.
+func PopulateConfigV2(envelope *agentv1.CommandEnvelope, candidate configprofile.Normalized) error {
+	profile := candidate.Proto()
+	if !bytes.Equal(profile.GetNodeId(), envelope.GetNodeId()) || len(envelope.GetNodeId()) != 16 {
+		return errors.New("complete config identity is malformed")
+	}
+	switch p := envelope.Payload.(type) {
+	case *agentv1.CommandEnvelope_CompleteConfigPlan:
+		p.CompleteConfigPlan.Candidate, p.CompleteConfigPlan.CandidateHash = profile, candidate.Digest()
+	case *agentv1.CommandEnvelope_CompleteConfigApply:
+		p.CompleteConfigApply.Candidate, p.CompleteConfigApply.CandidateHash = profile, candidate.Digest()
+	default:
+		return errors.New("complete config command required")
+	}
+	digest, err := hashV2(envelope, true)
+	return populate(envelope, digest, err)
+}
+
+func populate(envelope *agentv1.CommandEnvelope, digest [sha256.Size]byte, err error) error {
 	if err != nil {
 		return err
 	}

@@ -159,10 +159,10 @@ request bodies, or raw response headers.
 Ocservia ships with no default administrator password. On a manual
 installation, operators initialize the single Local administrator through a
 separate one-shot command outside the normal install and restart path. A
-Quick installation (`quick-install.sh`) runs the equivalent initialization
+Quick installation (`install.sh --quick`) runs the equivalent initialization
 automatically. It provisions the management workspace using the owner one-shot
-below, generates one random password, and runs `--bootstrap-local-admin` to
-create `initial-admin` and bind it in `workspace_admins`. Its credential is
+below, generates an eight-character random password, and runs `--bootstrap-local-admin` to
+create `admin` and bind it in `workspace_admins`. Its credential is
 stored in the root-only file `/root/ocservia-initial-credentials/admin.txt`.
 Change the password after first login. Do not run the manual procedure below on
 a Quick host, because Quick reruns accept an already-initialized database.
@@ -172,15 +172,20 @@ a Quick host, because Quick reruns accept an already-initialized database.
    [supported database deployment](production-deployment.md#database-support).
    Stop any incompatible older Controllers, then run the installed release's
    one-shot owner migration (`--migrate-only`). That command initializes an
-   empty database from `schema.sql` or applies bounded forward upgrades from
-   `upgrade.sql` against `schema_revisions` (accepting only current-epoch
-   receipts or the fixed `v1.2.0` checkpoint at epoch 1 / revision 0; older
-   databases must upgrade to `v1.2.0` first). Confirm that the migration
+   empty PostgreSQL 18 database and applies the embedded Goose SQL migrations.
+   Confirm that the migration
    process logged `database migrations complete` and exited cleanly, and that
    the Controller is ready. Run the remaining commands from the retained
    release runtime with the same effective exported production settings and
    verified image digests; in Integrated mode, run `compose.sh` as root with
    the Integrated environment exported.
+
+   For candidate deployments, source `scripts/release-common.sh` only in
+   the Bash process that generates the candidate manifest. Run administrator
+   initialization in a separate Bash process and export the image references from
+   the `.current.images` object of `release-history.json` (under `/var/lib/ocservia-controller`
+   by default) before calling Compose. The release helper declares the PostgreSQL
+   and OpenTelemetry image variables read-only in its shell.
 2. Obtain the UUIDv7 of the management workspace. `--bootstrap-local-admin`
    requires an existing workspace, so an authorized database operator must
    provision one first when starting from an empty database. Run the PostgreSQL
@@ -208,7 +213,7 @@ a Quick host, because Quick reruns accept an already-initialized database.
    sudo chown 65534:65532 "${OCSERV_SECRET_DIR}/local-bootstrap-password"
    sudo chmod 0400 "${OCSERV_SECRET_DIR}/local-bootstrap-password"
    deploy/production/compose.sh run --rm --no-deps \
-     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=initial-admin \
+     -e OCSERV_LOCAL_BOOTSTRAP_USERNAME=admin \
      -e OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID='<management-workspace-uuidv7>' \
      -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
      -v "${OCSERV_SECRET_DIR}/local-bootstrap-password:/run/secrets/local-bootstrap-password:ro" \
@@ -217,7 +222,10 @@ a Quick host, because Quick reruns accept an already-initialized database.
 
    Bootstrap creates the Local administrator identity, its credential,
    `workspace_admins` binding, initialization marker, and audit event in one
-   transaction. The password must meet the policy below.
+   transaction. The password must meet the policy below. If the result is
+   uncertain, check the existing workspace and try the original credential
+   before rerunning bootstrap. Reuse the same workspace and credential on a
+   retry.
 4. After success, remove the temporary host password file according to your
    secret-management procedure and verify administrator login.
 
@@ -239,19 +247,15 @@ database UUID function that produces another UUID version).
 
 #### PostgreSQL
 
-Inspect the verified schema journal:
+Inspect the Goose migration history.
 
 ```sql
-SELECT epoch, revision, encode(checksum, 'hex') AS checksum, state, step
-FROM schema_revisions ORDER BY epoch, revision;
+SELECT version_id, is_applied, tstamp
+FROM goose_db_version ORDER BY id;
 ```
 
-Before applying forward SQL, owner initialization validates the supported epoch
-and revision, exact artifact receipts, and live schema structure, refusing
-unknown or modified history (never edit the journal manually). The
-previous-checkpoint window is pinned to `v1.2.0` at epoch 1 / revision 0, and
-Controller readiness checks live read queries and permissions directly without
-consulting legacy migration filename counters.
+The schema owner applies the embedded migrations. Controller startup requires
+the applied Goose version to match the version embedded in its binary.
 
 PostgreSQL stores workspace IDs as `uuid` and timestamps as `timestamptz`. On
 an empty database, create the management workspace:
@@ -307,8 +311,8 @@ sessions before reopening access.
 Bootstrap, managed user creation, self-service password changes, and
 administrator password resets all enforce the same new-password policy:
 
-- Passwords must contain at least 15 Unicode code points and at most 1024 UTF-8
-  bytes; invalid UTF-8 sequences are rejected.
+- Passwords must contain at least eight Unicode code points and at most 1024
+  UTF-8 bytes. Invalid UTF-8 sequences are rejected.
 - Long passphrases, spaces, and arbitrary valid Unicode characters are accepted
   without uppercase, digit, or symbol composition rules or periodic expiration.
 - Each candidate password is checked offline against an embedded list of common
@@ -325,12 +329,12 @@ administrator password resets all enforce the same new-password policy:
   never logged.
 
 Existing stored hashes continue to verify against their original password
-bytes, even if a historical password is shorter than 15 code points or appears
+bytes, even if a historical password is shorter than eight code points or appears
 on a newer blocklist. The login endpoint does not run new-password policy
 checks and returns uniform credential-rejection errors. Any subsequent
 password change or reset must satisfy the current policy. Hashing continues to
 use Argon2id with random salts, fixed PHC parameters and resource limits, and
-dummy verification for unknown users. Length and blocklist checks follow
+dummy verification for unknown users. The blocklist checks follow
 [NIST SP 800-63B-4, section 3.1.1.2](https://pages.nist.gov/800-63-4/sp800-63b.html#passwordver),
 while Unicode normalization remains intentionally omitted so existing hashes
 continue to validate.
@@ -510,7 +514,7 @@ Session endpoints live under `/api/v1` and use `Content-Type: application/json`:
 
 | Endpoint | Body | Success |
 | --- | --- | --- |
-| `POST /auth/login` | `{"username":"initial-admin","password":"..."}` | 204, sets HttpOnly session cookie |
+| `POST /auth/login` | `{"username":"admin","password":"..."}` | 204, sets HttpOnly session cookie |
 | `POST /auth/logout` | `{}` | 204, revokes current session |
 | `GET /auth/session` | empty | 200 session metadata |
 | `POST /auth/change-password` | `{"current_password":"...","new_password":"..."}` | 204, all old sessions revoked; re-login required |

@@ -536,14 +536,9 @@ fn validate_key_file(file: &std::fs::File, expected_uid: u32) -> Result<(), io::
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_wrap)]
 const fn libc_o_nofollow() -> i32 {
-    0x20_000
-}
-
-#[cfg(target_os = "macos")]
-const fn libc_o_nofollow() -> i32 {
-    0x100
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -725,18 +720,11 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocservia_test_support::PrivateTempDir;
     use std::io::Write;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn socket_test_directory() -> PathBuf {
-        static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
-        std::env::current_dir()
-            .expect("current test directory")
-            .join(format!(
-                ".s-{}-{}",
-                std::process::id(),
-                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ))
+    fn socket_test_directory() -> PrivateTempDir {
+        PrivateTempDir::new("s")
     }
 
     #[test]
@@ -855,7 +843,6 @@ mod tests {
     #[tokio::test]
     async fn second_instance_cannot_replace_a_live_socket() {
         let directory = socket_test_directory();
-        std::fs::create_dir(&directory).expect("create test directory");
         let path = directory.join("s");
         let (listener, identity) = bind_socket(&path).expect("bind first socket");
 
@@ -873,13 +860,11 @@ mod tests {
 
         drop(listener);
         remove_socket(&path, identity).expect("remove first socket");
-        std::fs::remove_dir(directory).expect("remove test directory");
     }
 
     #[tokio::test]
     async fn shutdown_does_not_unlink_a_replacement_socket() {
         let directory = socket_test_directory();
-        std::fs::create_dir(&directory).expect("create test directory");
         let path = directory.join("s");
         let (first_listener, first_identity) = bind_socket(&path).expect("bind first socket");
         std::fs::remove_file(&path).expect("remove first socket path");
@@ -897,15 +882,11 @@ mod tests {
         drop(first_listener);
         drop(replacement_listener);
         remove_socket(&path, replacement_identity).expect("remove replacement socket");
-        std::fs::remove_dir(directory).expect("remove test directory");
     }
 
     #[tokio::test]
     async fn transport_server_rejects_a_foreign_peer_uid() {
         let directory = socket_test_directory();
-        std::fs::create_dir(&directory).expect("create test directory");
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .expect("protect test directory");
         let path = directory.join("s");
         let (listener, identity) = bind_socket(&path).expect("bind socket");
         let client = StdUnixStream::connect(&path).expect("connect socket");
@@ -921,15 +902,11 @@ mod tests {
         drop(server);
         drop(listener);
         remove_socket(&path, identity).expect("remove socket");
-        std::fs::remove_dir(directory).expect("remove test directory");
     }
 
     #[tokio::test]
     async fn trust_client_rejects_a_foreign_owned_socket() {
         let directory = socket_test_directory();
-        std::fs::create_dir(&directory).expect("create test directory");
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .expect("protect test directory");
         let path = directory.join("s");
         let (listener, identity) = bind_socket(&path).expect("bind fake trust socket");
         let foreign_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
@@ -942,6 +919,35 @@ mod tests {
         );
         drop(listener);
         remove_socket(&path, identity).expect("remove socket");
-        std::fs::remove_dir(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn nofollow_flag_matches_platform_and_rejects_symlinks() {
+        assert_eq!(
+            libc_o_nofollow(),
+            i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
+        );
+        let directory = socket_test_directory();
+        let real_key = directory.join("real.key");
+        std::fs::write(&real_key, [0x42_u8; 32]).expect("write real key");
+        std::fs::set_permissions(&real_key, std::fs::Permissions::from_mode(0o600))
+            .expect("protect real key");
+        let link_key = directory.join("link.key");
+        std::os::unix::fs::symlink(&real_key, &link_key).expect("symlink key");
+        assert!(
+            load_key(&link_key).is_err(),
+            "symlinked key must be rejected"
+        );
+
+        let real_token = directory.join("real.token");
+        std::fs::write(&real_token, "0123456789abcdef0123456789abcdef").expect("write real token");
+        std::fs::set_permissions(&real_token, std::fs::Permissions::from_mode(0o600))
+            .expect("protect real token");
+        let link_token = directory.join("link.token");
+        std::os::unix::fs::symlink(&real_token, &link_token).expect("symlink token");
+        assert!(
+            read_relay_token(&link_token).is_err(),
+            "symlinked relay token must be rejected"
+        );
     }
 }

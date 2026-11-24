@@ -23,28 +23,24 @@ use ocservia_command_authorization::{
 };
 use ocservia_command_journal::Journal;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandEnvelope, CompleteConfigApply, CompleteConfigPlan, ConnectionFenceV2, EnrollRequest,
-    FenceOperationKind, HandshakeResult, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
-    SealingKeyDescriptorV1, SessionGrantV1, SessionGrantVersion, SessionHandshakeResponse,
-    UserPasswordRotate, command_envelope,
+    CommandEnvelope, CompleteConfigApply, CompleteConfigPlan, EnrollRequest, HandshakeResult,
+    SealedSecretPurpose, SealedSecretV1, SealingKeyDescriptorV1, SessionGrantV1,
+    SessionHandshakeResponse, UserPasswordRotate, command_envelope,
 };
 use ocservia_contracts::session::{
     ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
 };
-use ocservia_test_support::{FenceSpec, keyring, sign_fence_binding, ts};
+use ocservia_test_support::{keyring, ts};
 use uuid::Uuid;
 
-use crate::CONNECTION_FENCING_CAPABILITY;
 use crate::commands::{
     map_external_effect, observe_external_effect_with_reconcile, response_proof,
     settle_privd_response, terminal_privd_error_code,
 };
 use crate::session::{
-    ActiveSessionAuthority, FenceDecision, SessionGrantAuthority,
-    activate_session_connection_fence, fenced_artifact_authority,
-    gate_signed_read_only_stale_diagnostic, negotiate_session_mode,
-    negotiate_session_mode_at_instant, refresh_fence_epoch_floor, session_capabilities,
-    supported_capabilities, verify_fenced_operation,
+    activate_session_epoch, negotiate_session_mode, negotiate_session_mode_at_instant,
+    refresh_fence_epoch_floor, session_capabilities, supported_capabilities,
+    validate_artifact_frame_kind,
 };
 use crate::startup::{
     Config, build_relay_mode, build_sealing_keys, load_controller_command_keys, prepare_enrollment,
@@ -59,7 +55,7 @@ fn only_successful_config_apply_advances_the_applied_revision() {
     use ocservia_command_journal::CommandState;
     use ocservia_contracts::config_profile::APPLY_CAPABILITY;
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-        CommandDeliveryMode, PrivdReceiptVersion, PrivdResultReceiptV1, PrivilegedResultProof,
+        CommandDeliveryMode, PrivdResultReceiptV1, PrivilegedResultProof,
     };
     use ocservia_test_support::{sign_command_envelope_v2, sign_command_v2};
     use prost::Message as _;
@@ -118,9 +114,9 @@ fn only_successful_config_apply_advances_the_applied_revision() {
                 ..ConfigApplyResult::default()
             })),
             privileged_result_proof: Some(PrivilegedResultProof {
-                version: PrivdReceiptVersion::V1.into(),
+                version: 1,
                 receipt_v1: Some(PrivdResultReceiptV1 {
-                    receipt_version: PrivdReceiptVersion::V1.into(),
+                    receipt_version: 1,
                     completed_at: Some(ts(NOW + 1, 0)),
                     ..PrivdResultReceiptV1::default()
                 }),
@@ -174,13 +170,13 @@ impl Drop for TempDir {
 fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
     vec![
         SealingKeyDescriptorV1 {
-            version: SealedSecretVersion::V1 as i32,
+            version: 1,
             purpose: SealedSecretPurpose::UserPassword as i32,
             key_id: "node-key-1".into(),
             public_key_sha256: vec![0x11; 32],
         },
         SealingKeyDescriptorV1 {
-            version: SealedSecretVersion::V1 as i32,
+            version: 1,
             purpose: SealedSecretPurpose::CertificateP12Password as i32,
             key_id: "node-p12-key-1".into(),
             public_key_sha256: vec![0x22; 32],
@@ -190,7 +186,7 @@ fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
 
 fn test_user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
     SealedSecretV1 {
-        version: SealedSecretVersion::V1 as i32,
+        version: 1,
         purpose: SealedSecretPurpose::UserPassword as i32,
         key_id: "node-key-1".into(),
         ciphertext,
@@ -234,19 +230,20 @@ fn signed_handshake_response(
     node_id: &Uuid,
     endpoint_id: &EndpointId,
     authorization_revision: u64,
+    session_epoch: u64,
     capabilities: Vec<String>,
-    connection_fence: Option<ConnectionFenceV2>,
     issued_at: i64,
     expires_at: i64,
 ) -> SessionHandshakeResponse {
     let mut grant = SessionGrantV1 {
-        version: SessionGrantVersion::V1.into(),
+        version: 1,
         key_id: verification_key_id(&signing.verifying_key()),
         protocol_major: 1,
         protocol_minor: 1,
         node_id: node_id.as_bytes().to_vec(),
         endpoint_id: endpoint_id.as_bytes().to_vec(),
         authorization_revision,
+        session_epoch,
         negotiated_capabilities: capabilities.clone(),
         issued_at: Some(ts(issued_at, 0)),
         expires_at: Some(ts(expires_at, 0)),
@@ -263,7 +260,6 @@ fn signed_handshake_response(
         controller_version: "test".into(),
         negotiated_capabilities: capabilities,
         session_grant: Some(grant),
-        connection_fence,
     }
 }
 
@@ -293,242 +289,12 @@ where
 }
 
 #[test]
-fn agent_advertises_connection_owner_fencing_and_read_only_blocks_artifacts() {
-    assert_eq!(
-        supported_capabilities()
-            .iter()
-            .filter(|c| c.as_str() == CONNECTION_FENCING_CAPABILITY)
-            .count(),
-        1
-    );
-    let authority = ActiveSessionAuthority::SignedReadOnlyV11(SessionGrantAuthority {
-        negotiated_capabilities: ["ocserv.status.read".to_owned()].into_iter().collect(),
-        authorization_revision: 3,
-        expires_at_unix_seconds: 1_700_000_300,
-    });
+fn artifact_frame_kind_validation_accepts_fetch_and_consume_only() {
     for frame in [ARTIFACT_FETCH_FRAME | 32, ARTIFACT_CONSUME_FRAME | 32] {
-        assert!(fenced_artifact_authority(&authority, frame).is_err());
+        validate_artifact_frame_kind(frame).expect("valid artifact frame");
     }
-}
-
-#[test]
-fn signed_read_only_stale_diagnostic_never_advances_the_floor() {
-    let signing = test_key();
-    let kr = keyring(&signing);
-    let node = Uuid::now_v7();
-    let ep = test_endpoint();
-    let cmd = [5_u8; 16];
-    let stale = FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 7).sign(&signing);
-    assert!(matches!(
-        gate_signed_read_only_stale_diagnostic(&kr, 8, &node, &ep, &stale, &cmd, NOW, 0)
-            .expect("classified"),
-        FenceDecision::RejectedStaleOwnerEpoch
-    ));
-    for f in [
-        FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 8).sign(&signing),
-        FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 9).sign(&signing),
-        FenceSpec::new(*Uuid::now_v7().as_bytes(), *ep.as_bytes(), 7).sign(&signing),
-    ] {
-        assert!(
-            gate_signed_read_only_stale_diagnostic(&kr, 8, &node, &ep, &f, &cmd, NOW, 0).is_err()
-        );
-    }
-}
-
-#[test]
-fn fenced_operation_requires_the_active_term_and_never_advances_the_floor() {
-    let signing = test_key();
-    let kr = keyring(&signing);
-    let node = Uuid::now_v7();
-    let ep = test_endpoint();
-    let caps = [CONNECTION_FENCING_CAPABILITY, "synthetic.noop"];
-    let grant = SessionGrantAuthority {
-        negotiated_capabilities: caps.iter().map(|s| (*s).to_owned()).collect(),
-        authorization_revision: 3,
-        expires_at_unix_seconds: 1_700_000_300,
-    };
-    let cmd = [5_u8; 16];
-    let base = || {
-        FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 8)
-            .authority(3)
-            .capabilities(caps)
-    };
-    let active = base().lease(NOW, 100).sign(&signing);
-    let active_verified = kr
-        .verify_connection_fence_v2_at(&active, node.as_bytes(), ep.as_bytes(), NOW, 0)
-        .expect("active fence");
-    let binding = sign_fence_binding(
-        &signing,
-        &active,
-        FenceOperationKind::Command,
-        cmd,
-        "synthetic.noop",
-        (1_700_000_000, 0),
-        (1_700_000_300, 0),
-    );
-    let verify =
-        |f: Option<&ConnectionFenceV2>,
-         b: Option<&ocservia_contracts::generated::ocserv::platform::agent::v1::FenceBindingV2>,
-         kind: FenceOperationKind,
-         op: &[u8; 16],
-         cap: &str,
-         nanos: u32| {
-            verify_fenced_operation(
-                &kr,
-                &grant,
-                &active_verified,
-                8,
-                &node,
-                &ep,
-                f,
-                b,
-                kind,
-                op,
-                cap,
-                NOW,
-                nanos,
-            )
-        };
-
-    // Exact nanosecond boundaries for lease, proof expiry, and binding expiry.
-    verify(
-        Some(&active),
-        Some(&binding),
-        FenceOperationKind::Command,
-        &cmd,
-        "synthetic.noop",
-        99,
-    )
-    .expect("live 1ns before lease");
-    assert!(
-        verify(
-            Some(&active),
-            Some(&binding),
-            FenceOperationKind::Command,
-            &cmd,
-            "synthetic.noop",
-            100
-        )
-        .is_err()
-    );
-
-    let proof_boundary = base().lease(NOW, 100).expires(NOW, 100).sign(&signing);
-    verify(
-        Some(&proof_boundary),
-        Some(&binding),
-        FenceOperationKind::Command,
-        &cmd,
-        "synthetic.noop",
-        99,
-    )
-    .expect("live 1ns before proof expiry");
-    assert!(
-        verify(
-            Some(&proof_boundary),
-            Some(&binding),
-            FenceOperationKind::Command,
-            &cmd,
-            "synthetic.noop",
-            100
-        )
-        .is_err()
-    );
-
-    let live_refresh = base().lease(NOW + 1, 0).sign(&signing);
-    let binding_boundary = sign_fence_binding(
-        &signing,
-        &active,
-        FenceOperationKind::Command,
-        cmd,
-        "synthetic.noop",
-        (1_700_000_000, 0),
-        (NOW, 100),
-    );
-    verify(
-        Some(&live_refresh),
-        Some(&binding_boundary),
-        FenceOperationKind::Command,
-        &cmd,
-        "synthetic.noop",
-        99,
-    )
-    .expect("live 1ns before binding expiry");
-    assert!(
-        verify(
-            Some(&live_refresh),
-            Some(&binding_boundary),
-            FenceOperationKind::Command,
-            &cmd,
-            "synthetic.noop",
-            100
-        )
-        .is_err()
-    );
-
-    // Missing carrier, successor epoch, and different immutable term all fail closed.
-    let higher = FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 9)
-        .authority(3)
-        .capabilities(caps)
-        .sign(&signing);
-    let higher_b = sign_fence_binding(
-        &signing,
-        &higher,
-        FenceOperationKind::Command,
-        cmd,
-        "synthetic.noop",
-        (1_700_000_000, 0),
-        (1_700_000_300, 0),
-    );
-    let diff = base().ids([9; 16], [2; 16], 1, [4; 16]).sign(&signing);
-    let diff_b = sign_fence_binding(
-        &signing,
-        &diff,
-        FenceOperationKind::Command,
-        cmd,
-        "synthetic.noop",
-        (1_700_000_000, 0),
-        (1_700_000_300, 0),
-    );
-    for (f, b) in [
-        (None, Some(&binding)),
-        (Some(&active), None),
-        (Some(&higher), Some(&higher_b)),
-        (Some(&diff), Some(&diff_b)),
-    ] {
-        assert!(verify(f, b, FenceOperationKind::Command, &cmd, "synthetic.noop", 0).is_err());
-    }
-
-    // Artifact binding grounded in active term, cannot replay for another op.
-    let art_id = [6_u8; 16];
-    let art_b = sign_fence_binding(
-        &signing,
-        &active,
-        FenceOperationKind::Artifact,
-        art_id,
-        CONNECTION_FENCING_CAPABILITY,
-        (1_700_000_000, 0),
-        (1_700_000_300, 0),
-    );
-    verify(
-        Some(&active),
-        Some(&art_b),
-        FenceOperationKind::Artifact,
-        &art_id,
-        CONNECTION_FENCING_CAPABILITY,
-        99,
-    )
-    .expect("artifact binding accepted");
-    assert!(
-        verify(
-            Some(&active),
-            Some(&art_b),
-            FenceOperationKind::Artifact,
-            &[7; 16],
-            CONNECTION_FENCING_CAPABILITY,
-            99
-        )
-        .is_err()
-    );
+    assert!(validate_artifact_frame_kind(32).is_err());
+    assert!(validate_artifact_frame_kind((1 << 30) | 32).is_err());
 }
 
 #[test]
@@ -537,12 +303,9 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
     let kr = keyring(&signing);
     let node = Uuid::now_v7();
     let ep = test_endpoint();
-    let caps = vec![
-        CONNECTION_FENCING_CAPABILITY.to_owned(),
-        "synthetic.noop".to_owned(),
-    ];
+    let caps = vec!["synthetic.noop".to_owned()];
 
-    // Overlapping journal processes: successor raises floor, old session retires before dispatch.
+    // Overlapping journal processes: successor raises floor, old cached floor refreshes.
     let dir = TempDir::new("floor-overlap");
     let jpath = dir.join("journal.db");
     let active_agent = Journal::open(&jpath).expect("active");
@@ -558,80 +321,32 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
     );
     refresh_fence_epoch_floor(&active_agent, &mut cached).expect("refresh");
     assert_eq!(cached, 10);
-
-    let old_fence = FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 5)
-        .authority(3)
-        .capabilities(caps.clone())
-        .sign(&signing);
-    let old_verified = kr
-        .verify_connection_fence_v2_at(&old_fence, node.as_bytes(), ep.as_bytes(), NOW, 0)
-        .expect("old");
-    let cmd = [5_u8; 16];
-    let old_b = sign_fence_binding(
-        &signing,
-        &old_fence,
-        FenceOperationKind::Command,
-        cmd,
-        "synthetic.noop",
-        (1_700_000_000, 0),
-        (1_700_000_300, 0),
-    );
-    let grant = SessionGrantAuthority {
-        negotiated_capabilities: caps.iter().cloned().collect(),
-        authorization_revision: 3,
-        expires_at_unix_seconds: 1_700_000_300,
-    };
-    assert!(
-        verify_fenced_operation(
-            &kr,
-            &grant,
-            &old_verified,
-            cached,
-            &node,
-            &ep,
-            Some(&old_fence),
-            Some(&old_b),
-            FenceOperationKind::Command,
-            &cmd,
-            "synthetic.noop",
-            NOW,
-            0,
-        )
-        .is_err()
-    );
     assert_eq!(active_agent.owner_fence_epoch_floor().expect("floor"), 10);
     drop((successor, active_agent));
 
-    // Handshake persists new epoch before activation and rejects replay across reopen.
-    let dir2 = TempDir::new("handshake-fence");
+    // Handshake persists new session_epoch before activation and rejects replay across reopen.
+    let dir2 = TempDir::new("handshake-epoch");
     let jpath2 = dir2.join("journal.db");
     let mut journal = Journal::open(&jpath2).expect("journal");
     journal.raise_owner_fence_epoch_floor(7).expect("preseed");
     let mut floor = 7_u64;
-    let fence = FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 8)
-        .authority(3)
-        .capabilities(caps.clone())
-        .lease(NOW, 100)
-        .sign(&signing);
     let resp = signed_handshake_response(
         &signing,
         &node,
         &ep,
         3,
+        8,
         caps,
-        Some(fence),
         1_700_000_000,
         1_700_000_300,
     );
-    let mode =
-        negotiate_session_mode_at_instant(&resp, &supported_capabilities(), node, ep, &kr, NOW, 0)
-            .expect("mode");
-    assert!(
-        matches!(&mode, ActiveSessionAuthority::FencedV11 { connection_fence, .. } if connection_fence.owner_epoch == 8)
-    );
-    activate_session_connection_fence(&mode, &mut journal, &mut floor, NOW, 99).expect("activate");
+    let authority =
+        negotiate_session_mode_at_instant(&resp, &supported_capabilities(), node, ep, &kr, NOW)
+            .expect("authority");
+    assert_eq!(authority.session_epoch, 8);
+    activate_session_epoch(&authority, &mut journal, &mut floor).expect("activate");
     assert_eq!(floor, 8);
-    assert!(activate_session_connection_fence(&mode, &mut journal, &mut floor, NOW, 99).is_err());
+    assert!(activate_session_epoch(&authority, &mut journal, &mut floor).is_err());
     drop(journal);
     assert_eq!(
         Journal::open(&jpath2)
@@ -640,215 +355,75 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
             .expect("f"),
         8
     );
-
-    // Proof expiry exact nanosecond boundary on negotiate + activate.
-    let boundary_caps = vec![CONNECTION_FENCING_CAPABILITY.to_owned()];
-    let b_fence = FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 1)
-        .authority(3)
-        .capabilities(boundary_caps.clone())
-        .lease(NOW, 100)
-        .expires(NOW, 100)
-        .sign(&signing);
-    let b_resp = signed_handshake_response(
-        &signing,
-        &node,
-        &ep,
-        3,
-        boundary_caps,
-        Some(b_fence),
-        1_700_000_000,
-        1_700_000_300,
-    );
-    let b_mode = negotiate_session_mode_at_instant(
-        &b_resp,
-        &supported_capabilities(),
-        node,
-        ep,
-        &kr,
-        NOW,
-        99,
-    )
-    .expect("live 1ns before expiry");
-    assert!(
-        negotiate_session_mode_at_instant(
-            &b_resp,
-            &supported_capabilities(),
-            node,
-            ep,
-            &kr,
-            NOW,
-            100
-        )
-        .is_err()
-    );
-    let dir3 = TempDir::new("proof-boundary");
-    let mut j3 = Journal::open(&dir3.join("journal.db")).expect("j3");
-    let mut f3 = 0_u64;
-    assert!(activate_session_connection_fence(&b_mode, &mut j3, &mut f3, NOW, 100).is_err());
-    assert_eq!((f3, j3.owner_fence_epoch_floor().expect("f3")), (0, 0));
 }
 
 #[test]
-fn fenced_handshake_failures_do_not_advance_the_durable_epoch() {
+fn invalid_session_handshakes_do_not_advance_the_durable_epoch() {
     let signing = test_key();
     let kr = keyring(&signing);
     let node = Uuid::now_v7();
     let ep = test_endpoint();
-    let caps = vec![
-        CONNECTION_FENCING_CAPABILITY.to_owned(),
-        "synthetic.noop".to_owned(),
-    ];
-    let mk_fence = |epoch: u64| {
-        FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), epoch)
-            .authority(3)
-            .capabilities(caps.clone())
-    };
-    let mk_resp = |f: Option<ConnectionFenceV2>| {
+    let caps = vec!["synthetic.noop".to_owned()];
+    let mk_resp = |epoch: u64, issued: i64, expires: i64| {
         signed_handshake_response(
             &signing,
             &node,
             &ep,
             3,
+            epoch,
             caps.clone(),
-            f,
-            1_700_000_000,
-            1_700_000_300,
+            issued,
+            expires,
         )
     };
-    let non_fencing = vec!["synthetic.noop".to_owned()];
-    let mut bad_sig = mk_fence(11).sign(&signing);
-    bad_sig.signature[0] ^= 1;
+    let mut bad_sig = mk_resp(11, 1_700_000_000, 1_700_000_300);
+    bad_sig.session_grant.as_mut().expect("grant").signature[0] ^= 1;
 
     let cases = vec![
-        ("missing fence", mk_resp(None)),
-        (
-            "mutation without fencing",
-            signed_handshake_response(
-                &signing,
-                &node,
-                &ep,
-                3,
-                non_fencing.clone(),
-                None,
-                1_700_000_000,
-                1_700_000_300,
-            ),
-        ),
-        (
-            "unexpected fence",
-            signed_handshake_response(
-                &signing,
-                &node,
-                &ep,
-                3,
-                non_fencing.clone(),
-                Some(
-                    FenceSpec::new(*node.as_bytes(), *ep.as_bytes(), 11)
-                        .authority(3)
-                        .capabilities(non_fencing)
-                        .sign(&signing),
-                ),
-                1_700_000_000,
-                1_700_000_300,
-            ),
-        ),
-        ("lower epoch", mk_resp(Some(mk_fence(9).sign(&signing)))),
-        ("equal epoch", mk_resp(Some(mk_fence(10).sign(&signing)))),
-        (
-            "expired proof",
-            mk_resp(Some(
-                mk_fence(11).lease(NOW, 0).expires(NOW, 0).sign(&signing),
-            )),
-        ),
-        (
-            "expired lease",
-            mk_resp(Some(mk_fence(11).lease(NOW, 99).sign(&signing))),
-        ),
-        ("bad signature", mk_resp(Some(bad_sig))),
-        (
-            "revision mismatch",
-            mk_resp(Some(mk_fence(11).authority(4).sign(&signing))),
-        ),
-        (
-            "capability mismatch",
-            mk_resp(Some(
-                mk_fence(11)
-                    .capabilities([CONNECTION_FENCING_CAPABILITY])
-                    .sign(&signing),
-            )),
-        ),
+        ("lower epoch", mk_resp(9, 1_700_000_000, 1_700_000_300)),
+        ("equal epoch", mk_resp(10, 1_700_000_000, 1_700_000_300)),
+        ("expired grant", mk_resp(11, 1_700_000_000, NOW)),
+        ("bad signature", bad_sig),
         (
             "node mismatch",
-            mk_resp(Some(
-                FenceSpec::new(*Uuid::now_v7().as_bytes(), *ep.as_bytes(), 11)
-                    .authority(3)
-                    .capabilities(caps.clone())
-                    .sign(&signing),
-            )),
+            signed_handshake_response(
+                &signing,
+                &Uuid::now_v7(),
+                &ep,
+                3,
+                11,
+                caps.clone(),
+                1_700_000_000,
+                1_700_000_300,
+            ),
         ),
         (
             "endpoint mismatch",
-            mk_resp(Some(
-                FenceSpec::new(
-                    *node.as_bytes(),
-                    *iroh::SecretKey::from_bytes(&[8; 32]).public().as_bytes(),
-                    11,
-                )
-                .authority(3)
-                .capabilities(caps.clone())
-                .sign(&signing),
-            )),
+            signed_handshake_response(
+                &signing,
+                &node,
+                &iroh::SecretKey::from_bytes(&[8; 32]).public(),
+                3,
+                11,
+                caps,
+                1_700_000_000,
+                1_700_000_300,
+            ),
         ),
     ];
 
-    let dir = TempDir::new("fence-negative");
+    let dir = TempDir::new("epoch-negative");
     let jpath = dir.join("journal.db");
     let mut journal = Journal::open(&jpath).expect("journal");
     journal.raise_owner_fence_epoch_floor(10).expect("preseed");
     let mut floor = 10_u64;
 
-    // Read-only signed session activates without raising floor.
-    let ro_resp = signed_handshake_response(
-        &signing,
-        &node,
-        &ep,
-        3,
-        vec!["ocserv.status.read".into()],
-        None,
-        1_700_000_000,
-        1_700_000_300,
-    );
-    let ro_mode = negotiate_session_mode_at_instant(
-        &ro_resp,
-        &supported_capabilities(),
-        node,
-        ep,
-        &kr,
-        NOW,
-        0,
-    )
-    .expect("ro");
-    assert!(matches!(
-        &ro_mode,
-        ActiveSessionAuthority::SignedReadOnlyV11(_)
-    ));
-    activate_session_connection_fence(&ro_mode, &mut journal, &mut floor, NOW, 100)
-        .expect("ro active");
-    assert_eq!(floor, 10);
-
     for (name, resp) in cases {
-        if let Ok(mode) = negotiate_session_mode_at_instant(
-            &resp,
-            &supported_capabilities(),
-            node,
-            ep,
-            &kr,
-            NOW,
-            0,
-        ) {
+        if let Ok(authority) =
+            negotiate_session_mode_at_instant(&resp, &supported_capabilities(), node, ep, &kr, NOW)
+        {
             assert!(
-                activate_session_connection_fence(&mode, &mut journal, &mut floor, NOW, 100)
-                    .is_err(),
+                activate_session_epoch(&authority, &mut journal, &mut floor).is_err(),
                 "{name} must fail closed"
             );
         }
@@ -876,7 +451,7 @@ fn agent_protocol_session_grant_validation() {
     let signing = test_key();
     let kr = test_keyring();
 
-    // Grantless v1.0 (read-only & mutating) and grantless v1.1 all rejected.
+    // Grantless v1.0 and grantless v1.1 all rejected.
     for (minor, caps) in [
         (
             0,
@@ -896,20 +471,19 @@ fn agent_protocol_session_grant_validation() {
             controller_version: "test".into(),
             negotiated_capabilities: caps,
             session_grant: None,
-            connection_fence: None,
         };
         assert!(negotiate_session_mode(&resp, &supported_capabilities(), node, ep, &kr).is_err());
     }
 
-    // Invalid v1.1 grant signature rejected; valid signature accepted as SignedReadOnlyV11.
+    // Invalid v1.1 grant signature rejected; valid signature accepted.
     let now_sec = ocservia_test_support::unix_seconds();
     let mut resp = signed_handshake_response(
         &signing,
         &node,
         &ep,
         1,
+        1,
         vec!["ocserv.status.read".into()],
-        None,
         now_sec - 1,
         now_sec + 30,
     );
@@ -922,10 +496,9 @@ fn agent_protocol_session_grant_validation() {
     resp.session_grant.as_mut().expect("grant").signature = vec![0; 64];
     assert!(negotiate_session_mode(&resp, &supported_capabilities(), node, ep, &kr).is_err());
     resp.session_grant.as_mut().expect("grant").signature = good_sig;
-    assert!(matches!(
-        negotiate_session_mode(&resp, &supported_capabilities(), node, ep, &kr).expect("valid"),
-        ActiveSessionAuthority::SignedReadOnlyV11(_)
-    ));
+    let authority =
+        negotiate_session_mode(&resp, &supported_capabilities(), node, ep, &kr).expect("valid");
+    assert_eq!(authority.session_epoch, 1);
 }
 
 #[tokio::test]
@@ -1067,6 +640,10 @@ fn startup_key_enrollment_and_token_requirements() {
     std::fs::write(&token, format!("obt2_{valid}")).expect("restore");
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("insecure");
     assert!(read_enrollment_token(&token).is_err());
+    std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("restore mode");
+    let token_link = tok_dir.join("enrollment.link");
+    std::os::unix::fs::symlink(&token, &token_link).expect("symlink enrollment token");
+    assert!(read_enrollment_token(&token_link).is_err());
 }
 
 #[test]
@@ -1075,6 +652,16 @@ fn custom_relay_count_and_security_contract() {
     let token = dir.join("token");
     std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("token");
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
+    let token_link = dir.join("token.link");
+    std::os::unix::fs::symlink(&token, &token_link).expect("symlink relay token");
+    assert!(
+        build_relay_mode(
+            "custom",
+            Some("https://relay-0.example.test"),
+            Some(&token_link)
+        )
+        .is_err()
+    );
 
     assert!(build_relay_mode("custom", None, Some(&token)).is_err());
     let RelayMode::Custom(map) =
@@ -1138,8 +725,6 @@ fn privd_error_receipt_and_unexpected_result_classification() {
 
     let payload = command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
         username: "alice".into(),
-        sealed_password: Vec::new(),
-        secret_key_id: String::new(),
         desired_revision: 7,
         sealed_password_v1: Some(test_user_password(vec![0xa5; 64])),
     });
@@ -1189,8 +774,6 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
         payload: Some(command_envelope::Payload::UserPasswordRotate(
             UserPasswordRotate {
                 username: "alice".into(),
-                sealed_password: Vec::new(),
-                secret_key_id: String::new(),
                 desired_revision: 7,
                 sealed_password_v1: Some(test_user_password(vec![0xa5; 64])),
             },

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -17,10 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -31,20 +27,7 @@ import (
 
 func userStateBackend(t *testing.T) database.Backend {
 	t.Helper()
-	pool := testfixture.OpenRuntimePool(t)
-	// PostgreSQL packages share a database. Preserve the fencing epoch, but
-	// leave the singleton expired both before and after this fixture.
-	expireLeadership := func() {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := pool.Exec(ctx, `UPDATE scheduler_leadership SET lease_until='-infinity' WHERE id=1`); err != nil {
-			t.Fatalf("expire fixture scheduler leadership: %v", err)
-		}
-	}
-	t.Cleanup(expireLeadership)
-	expireLeadership()
-	return postgres.WrapPool(pool)
+	return testfixture.OpenRuntime(t)
 }
 
 func TestUserStateBackendIntegration(t *testing.T) {
@@ -70,7 +53,8 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	}
 	exec(`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'key',$2,now())`, node, bytes.Repeat([]byte{1}, 32))
 	signer := testfixture.CommandSigner(2)
-	s := NewWithSignerBackend(b, signer)
+	queue := operations.NewBackend(b, 0, signer)
+	s := NewWithOperationsBackend(b, signer, queue)
 	request := func(kind MutationKind, name string, version int64) MutationRequest {
 		r := MutationRequest{NodeID: node, ActorIdentityID: identity, ActorSessionID: session, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 		if kind == UserCreate || kind == UserPasswordRotate {
@@ -78,11 +62,22 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		}
 		return r
 	}
+	if _, _, err := s.Mutate(ctx, request(UserCreate, "attestation-required", 0)); !errors.Is(err, ErrCapabilityMissing) {
+		t.Fatalf("missing attestation returned %v", err)
+	}
+	if _, err := testfixture.InstallKeyBackend(ctx, b, node); err != nil {
+		t.Fatal(err)
+	}
 	mutate := func(r MutationRequest) operations.Operation {
 		t.Helper()
 		op, replay, err := s.Mutate(ctx, r)
 		if err != nil || replay {
 			t.Fatalf("mutate %s: %+v %v %v", r.Kind, op, replay, err)
+		}
+		select {
+		case <-queue.Wakeup():
+		default:
+			t.Fatal("committed user operation did not wake the dispatcher")
 		}
 		return op
 	}
@@ -188,7 +183,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	if err := row(`SELECT command_id FROM operations WHERE id=$1`, uuid.MustParse(*states[0].OperationID)).Scan(&currentCommand); err != nil {
 		t.Fatal(err)
 	}
-	lockedUntil, _ := value.FromTime(time.Now().UTC().Add(time.Minute))
+	lockedUntil := time.Now().UTC().Add(time.Minute)
 	exec(`UPDATE outbox_events SET locked_by=$1,locked_until=$2 WHERE command_id=$3`, uuid.New(), lockedUntil, currentCommand)
 	fourthRequest := request(GroupApply, "staff", 3)
 	fourthRequest.Members = []string{"member0"}
@@ -207,27 +202,6 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	}
 	recovered := mutate(request(UserCreate, "alice", 1))
 	assertEnvelope(recovered, 0, 1)
-	// Failed fencing rolls back desired rows, supersession, outbox and audit.
-	schedulerIdentity, err := coordination.NewIdentity()
-	testutil.NoError(t, err)
-	leader, err := coordination.AcquireBackend(ctx, b, schedulerIdentity, time.Minute)
-	testutil.NoError(t, err)
-	fenced := coordination.WithFence(ctx, leader)
-	fencedRequest := request(GroupApply, "fenced", 0)
-	if _, _, err := s.Mutate(fenced, fencedRequest); err != nil {
-		t.Fatal(err)
-	}
-	exec(`UPDATE scheduler_leadership SET epoch=epoch+1 WHERE id=1`)
-	if _, _, err := s.Mutate(fenced, request(GroupApply, "fenced", 1)); !errors.Is(err, coordination.ErrNotLeader) {
-		t.Fatal("fencing", err)
-	}
-	if _, _, err := s.Mutate(fenced, fencedRequest); !errors.Is(err, coordination.ErrNotLeader) {
-		t.Fatal("fenced idempotent replay", err)
-	}
-	var version int64
-	if err := row(`SELECT version FROM desired_groups WHERE node_id=$1 AND group_name='fenced'`, node).Scan(&version); err != nil || version != 1 {
-		t.Fatal("fenced rollback", version, err)
-	}
 	overflow := request(GroupApply, "overflow", 0)
 	for i := range MaxManagedResources {
 		overflow.Members = append(overflow.Members, fmt.Sprintf("capacity%d", i))
@@ -235,33 +209,32 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	if _, _, err := s.Mutate(ctx, overflow); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatal("membership capacity", err)
 	}
-	// Store and read contracts retain NULL, dimensions, bounds and infinity.
-	members := value.TextList([]string{"alpha", "alpha", "", "long " + strings.Repeat("x", 500)})
-	members.Dimensions = []value.Dimension{{Length: 2, LowerBound: -1}, {Length: 2, LowerBound: 5}}
-	members.Elements[2] = nil
-	infinity := value.Timestamp{Valid: true, Micros: value.PositiveInfinity}
+	members := []string{"alpha", "beta", "long " + strings.Repeat("x", 500)}
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := userstore.From(tx)
 		if err != nil {
 			return err
 		}
-		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "logical", Version: 7, Revision: 3, Fingerprint: bytes.Repeat([]byte{2}, 32), Members: members, At: infinity}); err != nil {
+		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "logical", Version: 7, Revision: 3, Members: members, At: now}); err != nil {
+			return err
+		}
+		// A group without members still consumes one managed resource slot.
+		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "empty", Version: 1, Revision: 1, Members: []string{}, At: now}); err != nil {
 			return err
 		}
 		// Identical UPDATE is a matched row, not a not-found error.
-		v := userstore.Desired{NodeID: node, Kind: "user_enable", Name: "alice", Version: 7, Revision: 3, Fingerprint: bytes.Repeat([]byte{2}, 32), At: infinity}
+		v := userstore.Desired{NodeID: node, Kind: "user_enable", Name: "alice", Version: 7, Revision: 3, At: now}
 		if err := store.WriteDesired(ctx, v); err != nil {
 			return err
 		}
 		return store.WriteDesired(ctx, v)
 	})
 	testutil.NoError(t, err)
-	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at)VALUES($1,'logical',$2,3,$3,$4)`, node, members, bytes.Repeat([]byte{2}, 32), infinity)
-	object, err := value.ParseJSONB([]byte(`{}`))
-	testutil.NoError(t, err)
-	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at)VALUES($1,$2,$2,'desired',$3,'test','test','test',$4,$4,$4,$2)`, node, infinity, uuid.New(), object)
-	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,fingerprint,observed_at)VALUES($1,'remote',$2,0,$3,$4)`, node, value.TextList([]string{"Bob", "bob", "bob "}), bytes.Repeat([]byte{2}, 32), infinity)
-	exec(`INSERT INTO observed_users(node_id,username,enabled,revision,fingerprint,observed_at)VALUES($1,'remote',true,0,$2,$3)`, node, bytes.Repeat([]byte{2}, 32), infinity)
+	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,observed_at)VALUES($1,'logical',$2,3,$3)`, node, members, now)
+	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,ocserv,system,path,last_heartbeat_at)VALUES($1,$2,$2,'desired',$3,'test','test','test','{}','{}','{}',$2)`, node, now, uuid.New())
+	exec(`INSERT INTO observed_groups(node_id,group_name,members,revision,observed_at)VALUES($1,'remote',$2,0,$3)`, node, []string{"Bob", "bob", "bob "}, now)
+	exec(`INSERT INTO observed_users(node_id,username,enabled,revision,observed_at)VALUES($1,'remote',true,0,$2)`, node, now)
 	assertCounts := func(users, groups, memberships int) {
 		t.Helper()
 		if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
@@ -269,10 +242,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			fresh, err := value.FromTime(time.Now().UTC().Add(-90 * time.Second))
-			if err != nil {
-				return err
-			}
+			fresh := time.Now().UTC().Add(-90 * time.Second)
 			u, err := store.CountResources(ctx, node, "absent", false, fresh)
 			if err != nil {
 				return err
@@ -294,7 +264,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 		}
 	}
 	assertCounts(2, 4, 7)
-	exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1 WHERE node_id=$2`, value.Timestamp{Valid: true, Micros: value.NegativeInfinity}, node)
+	exec(`UPDATE node_observed_snapshots SET last_heartbeat_at=$1 WHERE node_id=$2`, now.Add(-time.Hour), node)
 	assertCounts(1, 3, 4)
 	states, err = s.List(ctx, node)
 	testutil.NoError(t, err)
@@ -304,12 +274,8 @@ func TestUserStateBackendIntegration(t *testing.T) {
 			continue
 		}
 		found = true
-		if !reflect.DeepEqual(item.DesiredMemberDimensions, members.Dimensions) || !reflect.DeepEqual(item.DesiredMembers, members.Elements) || !reflect.DeepEqual(item.ObservedMembers, members.Elements) || item.ObservedAt == nil || *item.ObservedAt != infinity || item.Convergence != "converged" {
-			t.Fatal("lossless resource", item)
-		}
-		encoded, err := json.Marshal(item)
-		if err != nil || !bytes.Contains(encoded, []byte(`"observed_at":"infinity"`)) || !bytes.Contains(encoded, []byte(`null`)) {
-			t.Fatal("wire values", string(encoded), err)
+		if !reflect.DeepEqual(item.DesiredMembers, members) || !reflect.DeepEqual(item.ObservedMembers, members) || item.ObservedAt == nil || !item.ObservedAt.Equal(now) || item.Convergence != "converged" {
+			t.Fatal("resource", item)
 		}
 	}
 	if !found {

@@ -33,8 +33,6 @@ type goldenVector struct {
 	ActorIdentity            string `json:"actor_identity"`
 	Action                   string `json:"action"`
 	RequiredCapability       string `json:"required_capability"`
-	ApprovalIDHex            string `json:"approval_id_hex"`
-	ApprovalRequestSHA256Hex string `json:"approval_request_sha256_hex"`
 	ExpectedRevision         uint64 `json:"expected_revision"`
 	SemanticHashVersion      uint32 `json:"semantic_hash_version"`
 	SemanticPayloadSHA256Hex string `json:"semantic_payload_sha256_hex"`
@@ -58,6 +56,7 @@ type sessionGrantGolden struct {
 	NodeIDHex              string   `json:"node_id_hex"`
 	EndpointIDHex          string   `json:"endpoint_id_hex"`
 	AuthorizationRevision  uint64   `json:"authorization_revision"`
+	SessionEpoch           uint64   `json:"session_epoch"`
 	NegotiatedCapabilities []string `json:"negotiated_capabilities"`
 	IssuedAtSeconds        int64    `json:"issued_at_seconds"`
 	IssuedAtNanos          uint32   `json:"issued_at_nanos"`
@@ -133,6 +132,7 @@ func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 		ProtocolMajor: vector.ProtocolMajor, ProtocolMinor: vector.ProtocolMinor,
 		NodeID: testFixed16(t, vector.NodeIDHex), EndpointID: testFixed32(t, vector.EndpointIDHex),
 		AuthorizationRevision:  vector.AuthorizationRevision,
+		SessionEpoch:           vector.SessionEpoch,
 		NegotiatedCapabilities: vector.NegotiatedCapabilities,
 		IssuedAtSeconds:        vector.IssuedAtSeconds, IssuedAtNanos: vector.IssuedAtNanos,
 		ExpiresAtSeconds: vector.ExpiresAtSeconds, ExpiresAtNanos: vector.ExpiresAtNanos,
@@ -186,12 +186,7 @@ func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 }
 
 func TestLoadSignerRejectsUnsafeKeyPaths(t *testing.T) {
-	directory, err := os.MkdirTemp(".", ".command-key-test-")
-	testutil.NoError(t, err)
-	directory, err = filepath.Abs(directory)
-	testutil.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	testutil.NoError(t, os.Chmod(directory, 0o700))
+	directory := testutil.PrivateTempDir(t)
 	var seed [32]byte
 	seed[0] = 7
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
@@ -258,8 +253,6 @@ func claimsFromGolden(t *testing.T, keyID string, vector goldenVector) ClaimsV1 
 		ActorIdentity:         vector.ActorIdentity,
 		Action:                vector.Action,
 		RequiredCapability:    vector.RequiredCapability,
-		ApprovalID:            testOptional16(t, vector.ApprovalIDHex),
-		ApprovalRequestSHA256: testOptional32(t, vector.ApprovalRequestSHA256Hex),
 		ExpectedRevision:      vector.ExpectedRevision,
 		SemanticHashVersion:   vector.SemanticHashVersion,
 		SemanticPayloadSHA256: testFixed32(t, vector.SemanticPayloadSHA256Hex),
@@ -289,22 +282,4 @@ func testFixed16(t *testing.T, value string) [16]byte {
 func testFixed32(t *testing.T, value string) [32]byte {
 	t.Helper()
 	return [32]byte(testHex(t, value, 32))
-}
-
-func testOptional16(t *testing.T, value string) *[16]byte {
-	t.Helper()
-	if value == "" {
-		return nil
-	}
-	fixed := testFixed16(t, value)
-	return &fixed
-}
-
-func testOptional32(t *testing.T, value string) *[32]byte {
-	t.Helper()
-	if value == "" {
-		return nil
-	}
-	fixed := testFixed32(t, value)
-	return &fixed
 }

@@ -5,28 +5,21 @@ use ocservia_agent_protocol::{
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, AuthorizationError, CommandAuthorizationV1, ControllerCommandKeyring,
-    FenceBindingClaimsV2, VerifiedConnectionFenceV2,
+    VerifiedCommand, VerifiedSessionGrant,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, ConnectionFenceV2, FenceBindingV2, FenceOperationKind,
-    SealedSecretPurpose, SealedSecretVersion, SemanticPayloadHashVersion, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SessionGrantV1, command_envelope,
 };
-use ocservia_privd_attestation::requested_subject_digest;
 use uuid::Uuid;
 
+use crate::MAX_REQUEST_LIFETIME;
 use crate::effect_binding::{effect_binding, error};
-use crate::{CONNECTION_FENCING_CAPABILITY, MAX_REQUEST_LIFETIME};
 
 pub(crate) enum ValidatedRequest<'a> {
     Read,
-    Execute(
-        &'a CommandEnvelope,
-        CommandAuthorizationV1,
-        prost_types::Timestamp,
-        u64,
-    ),
-    Reconcile(&'a CommandEnvelope, CommandAuthorizationV1),
-    ArtifactRead(ArtifactGrantClaimsV1, u64, u64),
+    Execute(VerifiedCommand<'a>, prost_types::Timestamp, u64),
+    Reconcile(VerifiedCommand<'a>),
+    ArtifactRead(ArtifactGrantClaimsV1, u64),
     ArtifactConsume(ArtifactGrantClaimsV1, Vec<u8>, u64, bool, u64),
 }
 
@@ -74,10 +67,11 @@ pub(crate) fn validate_request<'a>(
         }
         let now_seconds = i64::try_from(now.as_secs())
             .map_err(|_| error(ErrorKind::Unavailable, "system clock unavailable"))?;
-        let claims = command_keys
+        let verified = command_keys
             .verify_command(command, node_id, now_seconds)
             .map_err(|failure| authorization_error(&failure))?;
-        validate_privileged_payload(command, &claims)?;
+        let claims = verified.claims();
+        validate_privileged_payload(command, claims)?;
         let delivery = CommandDeliveryMode::try_from(command.delivery_mode)
             .unwrap_or(CommandDeliveryMode::Unspecified);
         match (mode, delivery) {
@@ -100,25 +94,33 @@ pub(crate) fn validate_request<'a>(
                         "journal acceptance timestamp invalid",
                     ));
                 }
-                let owner_epoch = verify_execution_fence(
-                    command,
-                    &claims,
+                let session = verify_session_grant(
+                    request.session_grant.as_deref(),
                     node_id,
                     endpoint_id,
                     command_keys,
                     now_seconds,
-                    now.subsec_nanos(),
                 )?;
-                ValidatedRequest::Execute(command, claims, accepted, owner_epoch)
+                if claims.expected_revision != session.authorization_revision
+                    || !session
+                        .negotiated_capabilities
+                        .contains(&claims.required_capability)
+                {
+                    return Err(error(
+                        ErrorKind::PermissionDenied,
+                        "session grant does not authorize this command",
+                    ));
+                }
+                ValidatedRequest::Execute(verified, accepted, session.session_epoch)
             }
             (PrivilegedRequestMode::Reconcile, CommandDeliveryMode::ReconcileOnly) => {
-                if effect_binding(command, &claims).is_none() {
+                if effect_binding(command, claims).is_none() {
                     return Err(error(
                         ErrorKind::InvalidRequest,
                         "command does not support privileged reconciliation",
                     ));
                 }
-                ValidatedRequest::Reconcile(command, claims)
+                ValidatedRequest::Reconcile(verified)
             }
             _ => {
                 return Err(error(
@@ -163,20 +165,14 @@ pub(crate) fn validate_request<'a>(
                 )
                 .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
-            let owner_epoch = verify_artifact_fence(
-                value.connection_fence.as_deref(),
-                value.fence_binding.as_deref(),
-                &claims.artifact_id,
+            let session = verify_session_grant(
+                request.session_grant.as_deref(),
                 node_id,
                 endpoint_id,
                 command_keys,
                 now_seconds,
-                now.subsec_nanos(),
             )?;
-            if value.offset > claims.max_bytes {
-                return Err(error(ErrorKind::InvalidRequest, "artifact offset invalid"));
-            }
-            ValidatedRequest::ArtifactRead(claims, value.offset, owner_epoch)
+            ValidatedRequest::ArtifactRead(claims, session.session_epoch)
         } else if let Some(privd_request::Operation::ArtifactConsume(value)) =
             request.operation.as_ref()
         {
@@ -212,15 +208,12 @@ pub(crate) fn validate_request<'a>(
             }
             .map_err(|failure| authorization_error(&failure))?;
             validate_artifact_claims(&claims)?;
-            let owner_epoch = verify_artifact_fence(
-                value.connection_fence.as_deref(),
-                value.fence_binding.as_deref(),
-                &claims.grant_id,
+            let session = verify_session_grant(
+                request.session_grant.as_deref(),
                 node_id,
                 endpoint_id,
                 command_keys,
                 now_seconds,
-                now.subsec_nanos(),
             )?;
             if value.sha256.len() != 32 || value.size == 0 || value.size > claims.max_bytes {
                 return Err(error(
@@ -233,7 +226,7 @@ pub(crate) fn validate_request<'a>(
                 value.sha256.clone(),
                 value.size,
                 value.confirm_only,
-                owner_epoch,
+                session.session_epoch,
             )
         } else if !matches!(
             request.operation,
@@ -271,7 +264,7 @@ fn validate_artifact_claims(claims: &ArtifactGrantClaimsV1) -> Result<(), PrivdE
     .any(|value| Uuid::from_bytes(value).get_version_num() != 7)
         || claims.certificate_version == 0
         || claims.max_bytes == 0
-        || claims.max_bytes > 64 * 1024 * 1024
+        || claims.max_bytes > 256 * 1024
         || claims.authorized_subject.is_empty()
         || claims.authorized_subject.len() > 256
     {
@@ -287,113 +280,21 @@ fn authorization_error(failure: &AuthorizationError) -> PrivdError {
     error(ErrorKind::PermissionDenied, failure.code())
 }
 
-/// The Agent's own owner-term checks do not survive an Agent compromise, so
-/// root re-verifies the Controller-signed connection fence and its command
-/// binding at its own clock before any new effect.
-fn verify_execution_fence(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
+/// Root independently verifies the Controller-signed `SessionGrantV1` against
+/// its own clock, pinned node ID, and root-provisioned `EndpointID` before any
+/// privileged mutation or artifact operation.
+fn verify_session_grant(
+    grant: Option<&SessionGrantV1>,
     node_id: &[u8; 16],
     endpoint_id: &[u8; 32],
     command_keys: &ControllerCommandKeyring,
     now_seconds: i64,
-    now_nanos: u32,
-) -> Result<u64, PrivdError> {
-    let (fence, binding) = verify_fence_carriers(
-        command.connection_fence.as_ref(),
-        command.fence_binding.as_ref(),
-        node_id,
-        endpoint_id,
-        command_keys,
-        now_seconds,
-        now_nanos,
-    )?;
-    if binding.operation_kind != FenceOperationKind::Command as u32
-        || binding.operation_id != claims.command_id
-        || binding.capability != claims.required_capability
-        || claims.expected_revision != fence.authorization_revision
-        || !fence.capabilities.contains(&binding.capability)
-        || !binding.matches_fence(&fence)
-    {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "connection fence does not authorize this command",
-        ));
-    }
-    Ok(fence.owner_epoch)
-}
-
-/// Verifies the signed owner term and binding carriers against privd's own
-/// clock, pinned node ID and root-provisioned `EndpointID`.
-fn verify_fence_carriers(
-    fence: Option<&ConnectionFenceV2>,
-    binding: Option<&FenceBindingV2>,
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-    now_seconds: i64,
-    now_nanos: u32,
-) -> Result<(VerifiedConnectionFenceV2, FenceBindingClaimsV2), PrivdError> {
-    let (Some(fence), Some(binding)) = (fence, binding) else {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "signed connection fence and binding required",
-        ));
-    };
-    let fence = command_keys
-        .verify_connection_fence_v2_at(fence, node_id, endpoint_id, now_seconds, now_nanos)
-        .map_err(|failure| authorization_error(&failure))?;
-    if fence.lease_expired(now_seconds, now_nanos) {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "connection-owner lease expired",
-        ));
-    }
-    let binding = command_keys
-        .verify_fence_binding_v2_at(binding, node_id, endpoint_id, now_seconds, now_nanos)
-        .map_err(|failure| authorization_error(&failure))?;
-    Ok((fence, binding))
-}
-
-/// Artifact reads and consumption are not commands, so the Agent's owner-term
-/// check is re-proven here from the same Controller-signed artifact binding the
-/// Agent verified: fetch binds the artifact ID, consumption binds the grant ID.
-/// Each read re-checks the one dispatch fence, which suffices only while a P12
-/// fits one 256 KiB chunk (the 256 KiB chain cap with an RSA-4096 key yields
-/// ~192 KiB). If artifacts can span chunks, the Controller must refresh the
-/// fence during the transfer.
-#[allow(clippy::too_many_arguments)]
-fn verify_artifact_fence(
-    fence: Option<&ConnectionFenceV2>,
-    binding: Option<&FenceBindingV2>,
-    operation_id: &[u8; 16],
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-    now_seconds: i64,
-    now_nanos: u32,
-) -> Result<u64, PrivdError> {
-    let (fence, binding) = verify_fence_carriers(
-        fence,
-        binding,
-        node_id,
-        endpoint_id,
-        command_keys,
-        now_seconds,
-        now_nanos,
-    )?;
-    if binding.operation_kind != FenceOperationKind::Artifact as u32
-        || binding.operation_id.as_slice() != operation_id
-        || binding.capability != CONNECTION_FENCING_CAPABILITY
-        || !fence.capabilities.contains(&binding.capability)
-        || !binding.matches_fence(&fence)
-    {
-        return Err(error(
-            ErrorKind::PermissionDenied,
-            "connection fence does not authorize this artifact operation",
-        ));
-    }
-    Ok(fence.owner_epoch)
+) -> Result<VerifiedSessionGrant, PrivdError> {
+    let grant =
+        grant.ok_or_else(|| error(ErrorKind::PermissionDenied, "signed session grant required"))?;
+    command_keys
+        .verify_session_grant(grant, node_id, endpoint_id, now_seconds)
+        .map_err(|failure| authorization_error(&failure))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -415,24 +316,11 @@ fn validate_privileged_payload(
         }
     }
     match command.payload.as_ref() {
-        Some(
-            command_envelope::Payload::CompleteConfigPlan(_)
-            | command_envelope::Payload::CompleteConfigApply(_),
-        ) => {
-            // `verify_command` already verified the V2 canonical semantic hash
-            // and `candidate_hash` binding for complete config commands.
-            if claims.semantic_hash_version != SemanticPayloadHashVersion::V2 as u32 {
-                return Err(error(
-                    ErrorKind::PermissionDenied,
-                    "complete_config_identity_invalid",
-                ));
-            }
-        }
         Some(command_envelope::Payload::SessionDisconnect(payload)) => {
-            validate_session(&payload.session_id, &payload.boot_id)?;
+            validate_boot_id(&payload.boot_id)?;
         }
         Some(command_envelope::Payload::SessionTerminate(payload)) => {
-            validate_session(&payload.session_id, &payload.boot_id)?;
+            validate_boot_id(&payload.boot_id)?;
         }
         Some(command_envelope::Payload::IpBanRemove(payload)) => {
             let canonical = payload
@@ -456,68 +344,34 @@ fn validate_privileged_payload(
         }
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-            requested_subject_digest(payload).map_err(|_| {
-                error(
+            if payload.common_name.len() > 253
+                || !payload.common_name.is_ascii()
+                || payload
+                    .dns_names
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > 253 || !name.is_ascii())
+            {
+                return Err(error(
                     ErrorKind::InvalidRequest,
                     "certificate requested subject invalid",
-                )
-            })?;
+                ));
+            }
         }
         Some(command_envelope::Payload::CertificateRevoke(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
-            if payload.certificate_version == 0 {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "certificate version invalid",
-                ));
-            }
         }
         Some(command_envelope::Payload::CertificateP12(payload)) => {
             validate_uuid(&payload.certificate_id, "certificate ID invalid")?;
             validate_uuid(&payload.artifact_id, "artifact ID invalid")?;
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::CertificateP12Password,
-            )?;
-            if !payload.sealed_password.is_empty()
-                || !payload.secret_key_id.is_empty()
-                || payload.certificate_version == 0
-                || payload.artifact_expires_at.is_none()
-            {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "P12 secret binding invalid",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::UserCreate(payload)) => {
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::UserPassword,
-            )?;
-            if !payload.sealed_password.is_empty() || !payload.secret_key_id.is_empty() {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "user secret binding invalid",
-                ));
-            }
-        }
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
-            validate_sealed_secret(
-                payload.sealed_password_v1.as_ref(),
-                SealedSecretPurpose::UserPassword,
-            )?;
-            if !payload.sealed_password.is_empty() || !payload.secret_key_id.is_empty() {
-                return Err(error(
-                    ErrorKind::InvalidRequest,
-                    "user secret binding invalid",
-                ));
-            }
         }
         Some(
             command_envelope::Payload::ServiceReload(_)
             | command_envelope::Payload::UserDisable(_)
-            | command_envelope::Payload::UserEnable(_),
+            | command_envelope::Payload::UserEnable(_)
+            | command_envelope::Payload::UserCreate(_)
+            | command_envelope::Payload::UserPasswordRotate(_)
+            | command_envelope::Payload::CompleteConfigPlan(_)
+            | command_envelope::Payload::CompleteConfigApply(_),
         ) => {}
         Some(command_envelope::Payload::AgentUpgrade(payload)) => {
             validate_upgrade_release(payload)?;
@@ -532,48 +386,10 @@ fn validate_privileged_payload(
     Ok(())
 }
 
-fn validate_sealed_secret(
-    secret: Option<&ocservia_contracts::generated::ocserv::platform::agent::v1::SealedSecretV1>,
-    purpose: SealedSecretPurpose,
-) -> Result<(), PrivdError> {
-    let secret =
-        secret.ok_or_else(|| error(ErrorKind::InvalidRequest, "sealed secret required"))?;
-    if SealedSecretVersion::try_from(secret.version).ok() != Some(SealedSecretVersion::V1)
-        || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(purpose)
-        || secret.key_id.is_empty()
-        || secret.key_id.len() > 128
-        || secret.ciphertext.len() < 32
-        || secret.ciphertext.len() > 16 * 1024
-    {
-        return Err(error(ErrorKind::InvalidRequest, "sealed secret invalid"));
-    }
-    Ok(())
-}
-
-/// Independently validates the immutable upgrade release identity carried by a
-/// Controller-signed command. Privd never trusts the Agent-side validation and
-/// never executes package installation at this boundary.
+/// Checks the host-specific policy after signed payload validation.
 fn validate_upgrade_release(
     payload: &ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgrade,
 ) -> Result<(), PrivdError> {
-    if !ocservia_contracts::agent_upgrade::valid_target_version(&payload.target_version) {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade target version invalid",
-        ));
-    }
-    if payload.package_sha256.len() != 32 {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade package digest invalid",
-        ));
-    }
-    if !ocservia_contracts::agent_upgrade::valid_architecture(&payload.architecture) {
-        return Err(error(
-            ErrorKind::InvalidRequest,
-            "agent upgrade architecture invalid",
-        ));
-    }
     if ocservia_contracts::agent_upgrade::runtime_architecture()
         != Some(payload.architecture.as_str())
     {
@@ -585,14 +401,10 @@ fn validate_upgrade_release(
     Ok(())
 }
 
-fn validate_session(session_id: &str, boot_id: &str) -> Result<(), PrivdError> {
-    let parsed = session_id
-        .parse::<u64>()
-        .map_err(|_| error(ErrorKind::InvalidRequest, "session ID invalid"))?;
-    if parsed == 0 || parsed.to_string() != session_id || Uuid::parse_str(boot_id).is_err() {
-        return Err(error(ErrorKind::InvalidRequest, "session target invalid"));
-    }
-    Ok(())
+fn validate_boot_id(boot_id: &str) -> Result<(), PrivdError> {
+    Uuid::parse_str(boot_id)
+        .map(|_| ())
+        .map_err(|_| error(ErrorKind::InvalidRequest, "session target invalid"))
 }
 
 fn validate_uuid(value: &[u8], detail: &str) -> Result<(), PrivdError> {

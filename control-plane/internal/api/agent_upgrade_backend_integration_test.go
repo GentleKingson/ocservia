@@ -15,7 +15,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
@@ -30,7 +29,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	b, owner := authenticationBackendFixtureWithIsolation(t, true)
 	f := newApplyHTTPFixtureWithBackend(t, b, owner)
 	node := uuid.MustParse("019fde50-2222-7222-8222-222222222222")
-	at, _ := value.FromTime(time.Now().UTC())
+	at := time.Now().UTC()
 	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'upgrade','active',1,$3,$4)`, node, f.workspace, at, at)
 	key := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
 	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, []byte(key), at)
@@ -39,7 +38,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, node, capability)
 	}
 	manifest := filepath.Join(t.TempDir(), "releases.json")
-	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("43", 32)+`"},{"version":"2.0.0","architecture":"arm64","package_sha256":"`+strings.Repeat("44", 32)+`"},{"version":"1.0.0","architecture":"amd64","package_sha256":"`+strings.Repeat("45", 32)+`"}]}`), 0600); err != nil {
+	if err := os.WriteFile(manifest, []byte(`{"releases":[{"version":"2.0.0","architecture":"amd64","package_format":"deb","package_sha256":"`+strings.Repeat("43", 32)+`"},{"version":"2.0.0","architecture":"arm64","package_format":"deb","package_sha256":"`+strings.Repeat("44", 32)+`"},{"version":"1.0.0","architecture":"amd64","package_format":"deb","package_sha256":"`+strings.Repeat("45", 32)+`"}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := releasecatalog.Load(manifest)

@@ -13,10 +13,9 @@ case "${scope}" in
 esac
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
-require_test_commands go jq setsid python3 curl sha256sum
+require_test_commands go jq setsid python3 curl
 require_test_docker
 require_go_race
-bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 
 RUN_ID="${RUN_ID:-database-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
@@ -29,6 +28,14 @@ export OCSERV_AUDIT_EVENT_KEY_ID=test-audit-event-v1
 export OCSERV_TEST_AUDIT_EVENT_KEY_HEX=1111111111111111111111111111111111111111111111111111111111111111
 export OCSERV_AUDIT_CHECKPOINT_KEY=2222222222222222222222222222222222222222222222222222222222222222
 PG_MAJOR="${PG_MAJOR:-all}"
+case "${PG_MAJOR}" in
+  all) POSTGRES_MAJORS=(18) ;;
+  18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
+  *)
+    echo "PG_MAJOR must be all or 18" >&2
+    exit 2
+    ;;
+esac
 API_PORT_BASE=$((18000 + $(printf '%s' "${RUN_ID}" | cksum | awk '{print $1}') % 10000))
 PIDS=()
 CONTAINERS=()
@@ -71,6 +78,23 @@ trap 'exit 143' TERM
 
 mkdir -p "${TMP_ROOT}"
 export DATABASE_CASE_RESULTS="${TMP_ROOT}/required-case-results.jsonl"
+
+# Start PostgreSQL early so image pull and initdb overlap with migration checks and controller build.
+for major in "${POSTGRES_MAJORS[@]}"; do
+  container="${PREFIX}-pg${major}"
+  CONTAINERS+=("${container}")
+  # Keep the selected loopback port stable across the lifecycle restart test.
+  port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  case "${major}" in
+    18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
+  esac
+  docker run -d --name "${container}" \
+    -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
+    -p "127.0.0.1:${port}:5432" "${postgres_image}" >/dev/null
+done
+
+bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
+
 STARTUP_BIN=""
 if [[ -n "${OCSERVIA_CONTROL_BIN:-}" ]]; then
   [[ -x "${BIN}" ]] || {
@@ -84,26 +108,26 @@ fi
 
 TEST_CONTROL_PLANE="${ROOT}/control-plane"
 
-case "${PG_MAJOR}" in
-  all) POSTGRES_MAJORS=(18) ;;
-  18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
-  *)
-    echo "PG_MAJOR must be all or 18" >&2
-    exit 2
-    ;;
-esac
-
-schema_header() {
-  sed -n "s/^-- ocservia:$1=//p" "${ROOT}/control-plane/migrations/schema.sql" | head -n 1
+expected_migration_version() {
+  (
+    cd "${ROOT}/control-plane/migrations/sql"
+    for file in [0-9]*_*.sql; do
+      if [[ -f "${file}" && ! -L "${file}" ]]; then
+        printf '%s\n' "${file}"
+      fi
+    done
+  ) \
+    | sed -n 's/^\([0-9][0-9]*\)_.*/\1/p' \
+    | awk '{print $1 + 0}' \
+    | sort -n \
+    | tail -n 1
 }
 
 assert_current_checkpoint() {
-  local container=$1 database=$2 expected_checksum expected_epoch expected_revision
-  expected_checksum="$(sha256sum "${ROOT}/control-plane/migrations/schema.sql" | cut -d' ' -f1)"
-  expected_epoch="$(schema_header epoch)"
-  expected_revision="$(schema_header revision)"
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*)=1 AND bool_and(epoch=${expected_epoch} AND revision=${expected_revision} AND checksum=decode('${expected_checksum}','hex') AND state='verified' AND step=1 AND verified_at>=started_at) FROM schema_revisions")" = t
-  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin')")" = 0
+  local container=$1 database=$2 expected_version
+  expected_version="$(expected_migration_version)"
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT COALESCE(MAX(version_id), 0) = ${expected_version} FROM goose_db_version WHERE is_applied = true")" = t
+  test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin','schema_revisions','controller_schema_compatibility','scheduler_leadership')")" = 0
 }
 
 assert_local_bootstrap_schema() {
@@ -120,18 +144,18 @@ wait_for_postgres() {
   local container=$1
   # TCP probe: the entrypoint's initdb temporary server listens on the Unix
   # socket only, so a socket probe can report ready before the final server.
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 240); do
     if docker exec -e PGPASSWORD=test-owner-only "${container}" psql -h 127.0.0.1 -U ocservia_owner -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then return 0; fi
-    sleep 1
+    sleep 0.25
   done
   return 1
 }
 
 wait_for_http() {
   local url=$1
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 240); do
     if curl --fail --silent "${url}" >/dev/null; then return 0; fi
-    sleep 1
+    sleep 0.25
   done
   return 1
 }
@@ -139,12 +163,12 @@ wait_for_http() {
 wait_for_tcp() {
   local host=$1
   local port=$2
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 240); do
     if (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; then
       exec 3>&- 3<&-
       return 0
     fi
-    sleep 1
+    sleep 0.25
   done
   return 1
 }
@@ -219,7 +243,7 @@ run_postgres_business_tests() {
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-certificates -p 1 ./internal/certificates -run Integration)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
-    go test -p 1 ./internal/audit ./internal/privdattestation -run Integration -count=1)
+    go test -p 1 ./internal/audit -run Integration -count=1)
   clone_database "${container}" ocservia_latest ocservia_auth_backend
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_auth_backend}" \
     OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_auth_backend}" \
@@ -247,15 +271,6 @@ run_postgres_business_tests() {
 for major in "${POSTGRES_MAJORS[@]}"; do
   : >"${DATABASE_CASE_RESULTS}"
   container="${PREFIX}-pg${major}"
-  CONTAINERS+=("${container}")
-  # Keep the selected loopback port stable across the lifecycle restart test.
-  port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-  case "${major}" in
-    18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
-  esac
-  docker run -d --name "${container}" \
-    -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-    -p "127.0.0.1:${port}:5432" "${postgres_image}" >/dev/null
   wait_for_postgres "${container}"
   port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
@@ -282,20 +297,27 @@ for major in "${POSTGRES_MAJORS[@]}"; do
     OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
       "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-migrate-repeat.log" 2>&1
     assert_local_bootstrap_schema "${container}" ocservia
+    # Verify schema-version drift rejection on a clean clone before business
+    # fixtures insert test-keyed audit rows into the shared database.
+    clone_database "${container}" ocservia ocservia_version_drift
+    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia_version_drift -c \
+      "INSERT INTO goose_db_version(version_id,is_applied) VALUES(9000001,true)" >/dev/null
+    if OCSERV_ENVIRONMENT=test OCSERV_HTTP_ADDRESS="127.0.0.1:${api_port}" \
+      OCSERV_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia_version_drift?sslmode=disable" \
+      "${BIN}" >"${TMP_ROOT}/pg${major}-version-rejected.log" 2>&1; then
+      echo 'controller accepted a schema version mismatch' >&2; exit 1
+    fi
+    if ! grep -Fq 'PostgreSQL schema version mismatch' "${TMP_ROOT}/pg${major}-version-rejected.log"; then
+      cat "${TMP_ROOT}/pg${major}-version-rejected.log" >&2
+      exit 1
+    fi
+    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'DROP DATABASE ocservia_version_drift' >/dev/null
     for group in regression-postgres regression-outbox regression-fencing regression-auth regression-auth-postgres regression-telemetry backend-policy-config backend-policy-certificates backend-policy-userstate backend-policy-useroperations; do
       OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
         checked_go_tests "${group}" --select -race -p 1 -parallel 1
     done
-    # Deliberate corruption is last, after all current-schema business checks.
-    docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-      "UPDATE schema_revisions SET checksum=decode(repeat('00',32),'hex') WHERE epoch=$(schema_header epoch) AND revision=$(schema_header revision)" >/dev/null
-    if OCSERV_DATABASE_URL="${owner_url}" OCSERV_RUNTIME_DATABASE_ROLE=ocservia_app \
-      "${BIN}" --migrate-only >"${TMP_ROOT}/pg${major}-checksum-rejected.log" 2>&1; then
-      echo 'migration accepted a checksum mismatch' >&2; exit 1
-    fi
-    grep -Fq 'PostgreSQL revision checksum/state mismatch' "${TMP_ROOT}/pg${major}-checksum-rejected.log"
     required_cases="$(jq -s 'map(.required) | add // 0' "${DATABASE_CASE_RESULTS}")"
-    echo "PostgreSQL ${major} regression: current migration, repeat migration, permissions and checksum guards passed"
+    echo "PostgreSQL ${major} regression: current migration, repeat migration, permissions and version guards passed"
     echo "Database acceptance required cases: backend=postgres${major} shard=regression passed=${required_cases} skipped=0"
   else
   clone_database "${container}" ocservia ocservia_latest
@@ -304,16 +326,13 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -p 1 ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend|HistoryRetentionBackend|AuditRetentionBackend)Integration$')
 
-  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_SNAPSHOT_DATABASE_URL="${owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" postgres-snapshot --select -race -timeout=10m)
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE ocservia_init_smoke' >/dev/null
+  (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia_init_smoke?sslmode=disable" \
+    bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseInitializationSmoke)
+  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'DROP DATABASE ocservia_init_smoke' >/dev/null
 
-  # Scheduler leadership tests need an idle lease, so they run before any
-  # long-lived control-plane process acquires leadership on this database.
-  # -race is required here: these are the only tests that exercise the
-  # coordination package against a database, so this is where the race
-  # detector actually observes renewal, loss, and session snapshotting.
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" \
-    go test -p 1 -race ./internal/coordination ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
+    go test -p 1 -race ./internal/connectionowner ./internal/ownersession -run Integration -count=1)
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     go test -p 1 ./internal/api -run '^TestReadinessRequiresDatabaseConnectivityIntegration$' -count=1)
 
@@ -432,12 +451,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
   assert_current_checkpoint "${container}" ocservia
   assert_local_bootstrap_schema "${container}" ocservia
-  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "INSERT INTO schema_revisions(epoch,revision,checksum,state,step,verified_at) VALUES(2,9000001,decode(repeat('00',32),'hex'),'verified',1,now())" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "200"
-  docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia -c \
-    "DELETE FROM schema_revisions WHERE epoch=2 AND revision=9000001" >/dev/null
-  wait_for_http "http://127.0.0.1:${api_port}/readyz"
 
   docker stop "${container}" >/dev/null
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "503"

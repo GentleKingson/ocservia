@@ -27,23 +27,4 @@ pub mod ocserv {
 }
 EOF
 
-rm -rf "${ROOT}/web/src/api/generated"
-mkdir -p "${ROOT}/web/src/api/generated"
-java -jar "${ROOT}/.tools/openapi-generator-cli-$(sed -n 's/^openapi_generator=//p' "${ROOT}/toolchains.lock").jar" \
-  generate \
-  --generator-name typescript-fetch \
-  --template-dir "${ROOT}/openapi/templates/typescript-fetch" \
-  --input-spec "${ROOT}/openapi/openapi.yaml" \
-  --output "${ROOT}/web/src/api/generated" \
-  --config "${ROOT}/openapi/generator-config.yaml" \
-  --additional-properties=useSingleRequestParameter=true \
-  --global-property=apiDocs=false,modelDocs=false,apiTests=false,modelTests=false \
-  --skip-validate-spec
-
-rm -rf "${ROOT}/web/src/api/generated/.openapi-generator"
-rm -f "${ROOT}/web/src/api/generated/.openapi-generator-ignore"
-# The default generator README only advertises an unpublished npm package and
-# links to per-model docs this configuration never generates.
-rm -f "${ROOT}/web/src/api/generated/README.md"
-(cd "${ROOT}/web" && \
-  npx --no-install prettier --write src/api/generated >/dev/null)
+(cd "${ROOT}/web" && npm run generate:api)

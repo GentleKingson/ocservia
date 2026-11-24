@@ -19,8 +19,8 @@ pub use ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITY;
 #[cfg(test)]
 use ocservia_contracts::generated::ocserv::platform::agent::v1::ConfigApplyResult;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
-    SemanticPayloadHashVersion, command_envelope,
+    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretV1,
+    SemanticPayloadHashVersion, SessionGrantV1, command_envelope,
 };
 use prost::Message;
 use rand::{Rng, RngExt};
@@ -400,6 +400,12 @@ impl CommandExecutor {
                 replayed: true,
             }));
         }
+        if !matches!(
+            record.state,
+            CommandState::Accepted | CommandState::Unknown | CommandState::Running
+        ) {
+            return Err(CommandError::Rejected("reconciliation_state_invalid"));
+        }
         let record = self
             .journal
             .transition_command(
@@ -696,11 +702,6 @@ impl CommandExecutor {
         envelope: &CommandEnvelope,
         context: &CommandContext,
     ) -> Result<CommandOutcome, CommandError> {
-        if envelope.protocol_version
-            == ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION
-        {
-            return self.reconcile(envelope, context);
-        }
         let validated = validate_command(envelope, context)?;
         let record = self.matching_record(&validated)?;
         if record.state != CommandState::Unknown {
@@ -924,22 +925,7 @@ struct ValidatedCommand {
     external: bool,
 }
 
-/// Computes the versioned canonical semantic hash (v1) for a command envelope.
-///
-/// Follows `docs/development/command-semantic-hash-v1.md`. The preimage is
-/// hand-specified canonical bytes, never Protobuf wire encoding, so it is stable
-/// across language runtimes regardless of unknown-field retention.
-///
-/// # Errors
-///
-/// Rejects unsupported payload types.
-pub fn semantic_payload_hash_v1(envelope: &CommandEnvelope) -> Result<[u8; 32], CommandError> {
-    ocservia_command_authorization::semantic_payload_hash_v1(envelope)
-        .map_err(|error| CommandError::Rejected(error.code()))
-}
-
-/// Computes semantic hash v2, which additionally binds the `ConfigPlan` desired
-/// state revision while preserving v1 as a frozen compatibility algorithm.
+/// Computes the canonical CBOR semantic hash (v2) for a command envelope.
 ///
 /// # Errors
 ///
@@ -957,10 +943,7 @@ fn validate_command(
     if encoded_len == 0 || encoded_len > MAX_COMMAND_BYTES {
         return Err(CommandError::Rejected("command_size_invalid"));
     }
-    if envelope.protocol_version != ocservia_command_authorization::COMMAND_PROTOCOL_VERSION
-        && envelope.protocol_version
-            != ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION
-    {
+    if envelope.protocol_version != ocservia_command_authorization::COMMAND_PROTOCOL_VERSION {
         return Err(CommandError::Rejected("protocol_version_unsupported"));
     }
     let node_id = fixed::<16>(&envelope.node_id, "node_id_invalid")?;
@@ -1014,7 +997,8 @@ fn validate_command(
     }
     let hash_version = SemanticPayloadHashVersion::try_from(envelope.semantic_payload_hash_version)
         .map_err(|_| CommandError::Rejected("semantic_hash_version_unsupported"))?;
-    let payload_hash = verify_semantic_payload_hash(envelope, hash_version)?;
+    let payload_hash = ocservia_command_authorization::verify_semantic_payload_hash(envelope)
+        .map_err(|error| CommandError::Rejected(error.code()))?;
     context
         .command_keys
         .verify(envelope)
@@ -1027,28 +1011,6 @@ fn validate_command(
         result,
         external,
     })
-}
-
-fn verify_semantic_payload_hash(
-    envelope: &CommandEnvelope,
-    version: SemanticPayloadHashVersion,
-) -> Result<[u8; 32], CommandError> {
-    let recomputed = match version {
-        SemanticPayloadHashVersion::V1 => semantic_payload_hash_v1(envelope)?,
-        SemanticPayloadHashVersion::V2 => semantic_payload_hash_v2(envelope)?,
-        SemanticPayloadHashVersion::Unspecified => {
-            return Err(CommandError::Rejected("semantic_hash_version_unsupported"));
-        }
-    };
-    let expected: [u8; 32] = envelope
-        .semantic_payload_sha256
-        .as_slice()
-        .try_into()
-        .map_err(|_| CommandError::Rejected("semantic_payload_hash_missing"))?;
-    if recomputed != expected {
-        return Err(CommandError::Rejected("semantic_payload_hash_mismatch"));
-    }
-    Ok(recomputed)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1087,29 +1049,18 @@ fn validate_payload(
         Some(command_envelope::Payload::ServiceReload(_)) => {
             ("ocserv.service.reload", Vec::new(), true)
         }
-        Some(command_envelope::Payload::CompleteConfigPlan(_)) => {
-            semantic_payload_hash_v2(envelope)?;
-            (
-                ocservia_contracts::config_profile::PLAN_CAPABILITY,
-                Vec::new(),
-                true,
-            )
-        }
-        Some(command_envelope::Payload::CompleteConfigApply(_)) => {
-            semantic_payload_hash_v2(envelope)?;
-            (
-                ocservia_contracts::config_profile::APPLY_CAPABILITY,
-                Vec::new(),
-                true,
-            )
-        }
+        Some(command_envelope::Payload::CompleteConfigPlan(_)) => (
+            ocservia_contracts::config_profile::PLAN_CAPABILITY,
+            Vec::new(),
+            true,
+        ),
+        Some(command_envelope::Payload::CompleteConfigApply(_)) => (
+            ocservia_contracts::config_profile::APPLY_CAPABILITY,
+            Vec::new(),
+            true,
+        ),
         Some(command_envelope::Payload::CertificateCsr(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.common_name.is_empty()
-                || payload.common_name.len() > 253
-                || payload.dns_names.len() > 32
-                || !matches!(payload.key_bits, 2048 | 3072 | 4096)
-            {
+            if payload.common_name.len() > 253 {
                 return Err(CommandError::Rejected("certificate_csr_invalid"));
             }
             ("ocserv.certificate.issue", Vec::new(), true)
@@ -1119,8 +1070,6 @@ fn validate_payload(
                 || payload.artifact_id.len() != 16
                 || payload.certificate_chain_pem.len() < 64
                 || payload.certificate_chain_pem.len() > 256 * 1024
-                || !payload.sealed_password.is_empty()
-                || !payload.secret_key_id.is_empty()
                 || payload.certificate_version == 0
                 || payload.artifact_expires_at.is_none()
             {
@@ -1132,22 +1081,13 @@ fn validate_payload(
             )?;
             ("ocserv.certificate.issue", Vec::new(), true)
         }
-        Some(command_envelope::Payload::CertificateRevoke(payload)) => {
-            if payload.certificate_id.len() != 16
-                || payload.reason.is_empty()
-                || payload.reason.len() > 128
-                || payload.certificate_version == 0
-            {
-                return Err(CommandError::Rejected("certificate_revoke_invalid"));
-            }
+        Some(command_envelope::Payload::CertificateRevoke(_)) => {
             ("ocserv.certificate.revoke", Vec::new(), true)
         }
         Some(command_envelope::Payload::UserCreate(payload)) => {
             validate_name(&payload.username)?;
             validate_sealed_secret(
                 payload.sealed_password_v1.as_ref(),
-                &payload.sealed_password,
-                &payload.secret_key_id,
                 payload.desired_revision,
             )?;
             ("ocserv.users.write", Vec::new(), true)
@@ -1166,8 +1106,6 @@ fn validate_payload(
             validate_name(&payload.username)?;
             validate_sealed_secret(
                 payload.sealed_password_v1.as_ref(),
-                &payload.sealed_password,
-                &payload.secret_key_id,
                 payload.desired_revision,
             )?;
             ("ocserv.users.write", Vec::new(), true)
@@ -1261,14 +1199,9 @@ fn validate_revision(value: u64) -> Result<(), CommandError> {
 }
 fn validate_sealed_secret(
     secret: Option<&SealedSecretV1>,
-    legacy_secret: &[u8],
-    legacy_key_id: &str,
     revision: u64,
 ) -> Result<(), CommandError> {
     validate_revision(revision)?;
-    if !legacy_secret.is_empty() || !legacy_key_id.is_empty() {
-        return Err(CommandError::Rejected("sealed_secret_invalid"));
-    }
     validate_typed_secret(secret, SealedSecretPurpose::UserPassword)
 }
 
@@ -1277,7 +1210,7 @@ fn validate_typed_secret(
     purpose: SealedSecretPurpose,
 ) -> Result<(), CommandError> {
     let secret = secret.ok_or(CommandError::Rejected("sealed_secret_invalid"))?;
-    if SealedSecretVersion::try_from(secret.version).ok() != Some(SealedSecretVersion::V1)
+    if secret.version != 1
         || SealedSecretPurpose::try_from(secret.purpose).ok() != Some(purpose)
         || secret.key_id.is_empty()
         || secret.key_id.len() > 128
@@ -1377,14 +1310,37 @@ impl PrivdClient {
             Some(operation),
             None,
             PrivilegedRequestMode::Unspecified,
+            None,
             self.timeout,
             None,
         )
         .await
     }
 
-    /// Sends one original Controller-signed command for independent privd
-    /// verification and execution.
+    /// Calls a fixed operation carrying the active Controller-signed session grant
+    /// (used for artifact reads and consumption).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or deadline error; structured privd failures remain in the response.
+    pub async fn call_with_session(
+        &self,
+        operation: privd_request::Operation,
+        session_grant: &SessionGrantV1,
+    ) -> Result<PrivdResponse, io::Error> {
+        self.call_inner(
+            Some(operation),
+            None,
+            PrivilegedRequestMode::Unspecified,
+            Some(session_grant),
+            self.timeout,
+            None,
+        )
+        .await
+    }
+
+    /// Sends one original Controller-signed command and active session grant for
+    /// independent privd verification and execution.
     ///
     /// # Errors
     ///
@@ -1393,11 +1349,13 @@ impl PrivdClient {
         &self,
         command: &CommandEnvelope,
         accepted_at: i64,
+        session_grant: &SessionGrantV1,
     ) -> Result<PrivdResponse, io::Error> {
         self.call_inner(
             None,
             Some(command),
             PrivilegedRequestMode::Execute,
+            Some(session_grant),
             self.desired_timeout,
             Some(prost_types::Timestamp {
                 seconds: accepted_at,
@@ -1421,6 +1379,7 @@ impl PrivdClient {
             None,
             Some(command),
             PrivilegedRequestMode::Reconcile,
+            None,
             self.desired_timeout,
             None,
         )
@@ -1432,6 +1391,7 @@ impl PrivdClient {
         operation: Option<privd_request::Operation>,
         command: Option<&CommandEnvelope>,
         mode: PrivilegedRequestMode,
+        session_grant: Option<&SessionGrantV1>,
         timeout: Duration,
         accepted_at: Option<prost_types::Timestamp>,
     ) -> Result<PrivdResponse, io::Error> {
@@ -1448,6 +1408,7 @@ impl PrivdClient {
             accepted_at,
             authorization_command: command.cloned(),
             privileged_mode: mode.into(),
+            session_grant: session_grant.cloned().map(Box::new),
             operation,
         };
         let transport_deadline = tokio::time::Instant::now() + timeout;

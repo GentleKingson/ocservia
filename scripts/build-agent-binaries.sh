@@ -12,15 +12,13 @@ case "${PACKAGE_ARCH}:$(docker info --format '{{.Architecture}}')" in
   amd64:x86_64|amd64:amd64|arm64:aarch64|arm64:arm64) ;;
   *) echo 'Docker daemon must match the native Agent build architecture' >&2; exit 2 ;;
 esac
-builder_hash="$(sha256sum "${ROOT}/rust/agent-build.Dockerfile" | cut -c1-16)"
-builder="ocservia-agent-build:${PACKAGE_ARCH}-${builder_hash}"
+builder="ocservia-agent-build:${PACKAGE_ARCH}"
 docker build --platform "linux/${PACKAGE_ARCH}" --tag "${builder}" - <"${ROOT}/rust/agent-build.Dockerfile"
 [[ "$(docker image inspect --format '{{.Architecture}}' "${builder}")" == "${PACKAGE_ARCH}" ]]
 docker run --rm --platform "linux/${PACKAGE_ARCH}" \
   --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges \
   --volume "${ROOT}:${ROOT}" --workdir "${ROOT}" \
   --env VERSION --env PACKAGE_ARCH --env "ELF_MACHINE=${machine}" \
-  --env "BUILD_CACHE_KEY=${PACKAGE_ARCH}-${builder_hash}" \
   --env TAR_OPTIONS=--no-same-owner \
   --env CARGO_INCREMENTAL=0 --env "HOME=${ROOT}/.cache/agent-build-home" \
   "${builder}" bash -euo pipefail -c '
@@ -30,9 +28,13 @@ docker run --rm --platform "linux/${PACKAGE_ARCH}" \
     case "${PACKAGE_ARCH}:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) exit 2 ;; esac
     [[ "$(getconf GNU_LIBC_VERSION)" == "glibc 2.34" ]]
     rpm -q glibc gcc
+    abi_tag="$(rpm -q --qf "%{VERSION}-%{RELEASE}" glibc)-$(rpm -q --qf "%{VERSION}-%{RELEASE}" gcc)"
+    abi_tag="$(printf "%s" "${abi_tag}" | tr -c "A-Za-z0-9._-" "-")"
     rustc --version
     # Never reuse objects compiled against the Ubuntu host libc.
-    export CARGO_TARGET_DIR="${OCSERVIA_ROOT}/rust/target/agent-${BUILD_CACHE_KEY}"
+    export CARGO_TARGET_DIR="${OCSERVIA_ROOT}/rust/target/agent-${PACKAGE_ARCH}-rocky9-${abi_tag}"
+    mkdir -p "${OCSERVIA_ROOT}/rust/target"
+    printf "%s\n" "agent-${PACKAGE_ARCH}-rocky9-${abi_tag}" >"${OCSERVIA_ROOT}/rust/target/.active-agent-${PACKAGE_ARCH}"
     cd rust
     OCSERV_AGENT_RELEASE_VERSION="${VERSION}" cargo build --locked --release \
       --package ocservia-agent --package ocservia-privd --package ocservia-upgrader

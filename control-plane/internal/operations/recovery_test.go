@@ -42,9 +42,8 @@ func TestPrepareRecoveryEnvelopePreservesLogicalCommand(t *testing.T) {
 	if bytes.Equal(recovered.GetMessageId(), messageID) {
 		t.Fatal("recovery reused the dispatch-attempt message identity")
 	}
-	if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY ||
-		recovered.GetConnectionFence() != nil || recovered.GetFenceBinding() != nil {
-		t.Fatal("recovery did not clear old owner proofs and select reconcile-only delivery")
+	if recovered.GetDeliveryMode() != agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY {
+		t.Fatal("recovery did not select reconcile-only delivery")
 	}
 	if recovered.GetSyntheticEcho().GetMessage() != "journaled" ||
 		!bytes.Equal(recovered.GetSemanticPayloadSha256(), semanticHash) {
@@ -85,57 +84,42 @@ func TestRecoveryEnvelopeExtendsOnlyTheFirstObservationWindow(t *testing.T) {
 	}
 }
 
-func TestValidateSentEnvelopeAllowsOnlyOwnerProofs(t *testing.T) {
+func TestDecodeClaimedEnvelopeRequiresMatchingIdentity(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	dispatch, sent := recoveryTestDispatch(t, now, 10*time.Minute)
-	if _, err := validateAndDecodeSentEnvelope(dispatch, sent); err != nil {
-		t.Fatalf("valid fenced send rejected: %v", err)
-	}
-	if _, err := validateAndDecodeSentEnvelope(dispatch, dispatch.Envelope); err != nil {
-		t.Fatalf("valid unfenced send rejected: %v", err)
+	if _, err := decodeClaimedEnvelope(dispatch); err != nil {
+		t.Fatalf("valid send rejected: %v", err)
 	}
 
 	var changed agentv1.CommandEnvelope
 	testutil.NoError(t, proto.Unmarshal(sent, &changed))
-	changed.GetSyntheticEcho().Message = "changed"
+	changed.NodeId = nil
 	changedBytes, err := proto.Marshal(&changed)
 	testutil.NoError(t, err)
-	if _, err := validateAndDecodeSentEnvelope(dispatch, changedBytes); err == nil {
-		t.Fatal("sent envelope changed the semantic payload")
-	}
-
-	testutil.NoError(t, proto.Unmarshal(sent, &changed))
-	changed.FenceBinding.OwnerEpoch++
-	changedBytes, err = proto.Marshal(&changed)
-	testutil.NoError(t, err)
-	if _, err := validateAndDecodeSentEnvelope(dispatch, changedBytes); err == nil {
-		t.Fatal("sent envelope carried mismatched owner proofs")
+	dispatch.Envelope = changedBytes
+	if _, err := decodeClaimedEnvelope(dispatch); err == nil {
+		t.Fatal("sent envelope changed the node identity")
 	}
 }
 
-func TestRecoveryExecutionDeadlineAndLegacyAuthority(t *testing.T) {
+func TestRecoveryPreservesExecutionDeadline(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	for _, legacy := range []bool{false, true} {
-		for _, priorMode := range []agentv1.CommandDeliveryMode{agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT} {
-			dispatch, _ := recoveryTestDispatch(t, now, time.Minute)
-			var command agentv1.CommandEnvelope
-			testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &command))
-			if legacy {
-				command.ProtocolVersion = commandauth.LegacyProtocolVersion
+	for _, priorMode := range []agentv1.CommandDeliveryMode{agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT} {
+		dispatch, _ := recoveryTestDispatch(t, now, time.Minute)
+		var command agentv1.CommandEnvelope
+		testutil.NoError(t, proto.Unmarshal(dispatch.Envelope, &command))
+		command.DeliveryMode = priorMode
+		for _, observed := range []time.Time{now.Add(30 * time.Second), now.Add(2 * time.Minute)} {
+			recovered := proto.Clone(&command).(*agentv1.CommandEnvelope)
+			_, _, err := PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observed, testCommandSigner(t))
+			testutil.NoError(t, err)
+			if !proto.Equal(command.GetExpiresAt(), recovered.GetExpiresAt()) {
+				t.Fatal("observation renewed execution authority")
 			}
-			command.DeliveryMode = priorMode
-			for _, observed := range []time.Time{now.Add(30 * time.Second), now.Add(2 * time.Minute)} {
-				recovered := proto.Clone(&command).(*agentv1.CommandEnvelope)
-				_, _, err := PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, observed, testCommandSigner(t))
-				testutil.NoError(t, err)
-				if !proto.Equal(command.GetExpiresAt(), recovered.GetExpiresAt()) {
-					t.Fatal("observation renewed execution authority")
-				}
-				_, _, err = PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT, observed, testCommandSigner(t))
-				allowed := observed.Before(now.Add(time.Minute)) && (!legacy || priorMode == agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY)
-				if (err == nil) != allowed {
-					t.Fatalf("legacy=%v mode=%v observed=%v retry err=%v", legacy, priorMode, observed, err)
-				}
+			_, _, err = PrepareRecoveryEnvelope(recovered, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT, observed, testCommandSigner(t))
+			allowed := observed.Before(now.Add(time.Minute))
+			if (err == nil) != allowed {
+				t.Fatalf("mode=%v observed=%v retry err=%v", priorMode, observed, err)
 			}
 		}
 	}
@@ -150,32 +134,5 @@ func recoveryTestDispatch(t *testing.T, now time.Time, ttl time.Duration) (Dispa
 		t.Fatalf("marshal recovery fixture: %v", err)
 	}
 	dispatch := Dispatch{CommandID: commandID, OperationID: operationID, NodeID: nodeID, Envelope: base}
-	var envelope agentv1.CommandEnvelope
-	testutil.NoError(t, proto.Unmarshal(base, &envelope))
-	fenceID, connectionID, ownerID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	var node, connection, owner, command [16]byte
-	copy(node[:], nodeID[:])
-	copy(connection[:], connectionID[:])
-	copy(owner[:], ownerID[:])
-	copy(command[:], commandID[:])
-	endpoint := [32]byte{1}
-	signer := testCommandSigner(t)
-	fence, err := signer.IssueConnectionFenceV2(
-		[16]byte(fenceID), node, endpoint, owner, 7, 11, connection, 1,
-		[]string{"ocserv.fencing.v2", "synthetic.echo"}, now.Add(time.Minute), now, now.Add(5*time.Minute),
-	)
-	if err != nil {
-		t.Fatalf("issue recovery fixture fence: %v", err)
-	}
-	binding, err := signer.IssueFenceBindingV2(
-		agentv1.FenceOperationKind_FENCE_OPERATION_KIND_COMMAND, command, [16]byte(fenceID), node, endpoint,
-		owner, 7, 11, connection, 1, "synthetic.echo", now, now.Add(5*time.Minute),
-	)
-	if err != nil {
-		t.Fatalf("issue recovery fixture binding: %v", err)
-	}
-	envelope.ConnectionFence, envelope.FenceBinding = fence, binding
-	sent, err := proto.Marshal(&envelope)
-	testutil.NoError(t, err)
-	return dispatch, sent
+	return dispatch, base
 }

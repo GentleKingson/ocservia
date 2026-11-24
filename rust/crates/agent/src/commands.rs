@@ -1,7 +1,6 @@
 use crate::artifacts::{handle_artifact_consume, handle_artifact_stream};
 use crate::session::{
-    ActiveSessionAuthority, FenceDecision, SessionContext, fenced_artifact_authority,
-    gate_signed_read_only_stale_diagnostic, refresh_fence_epoch_floor, verify_fenced_operation,
+    SessionContext, SessionGrantAuthority, refresh_fence_epoch_floor, validate_artifact_frame_kind,
 };
 use crate::startup::invalid;
 use crate::{ARTIFACT_FRAME_MASK, HANDSHAKE_TIMEOUT};
@@ -16,8 +15,7 @@ use ocservia_command_journal::{CommandRecord, CommandState};
 use ocservia_contracts::decode_strict_command_envelope;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandDeliveryMode, CommandEnvelope, CommandResult,
-    CommandResultState, FenceOperationKind, PrivdReceiptVersion, PrivilegedResultProof,
-    SemanticPayloadHashVersion, command_envelope,
+    CommandResultState, PrivilegedResultProof, SemanticPayloadHashVersion, command_envelope,
 };
 use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
@@ -29,7 +27,7 @@ pub(super) async fn handle_command_stream(
     send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     session: &mut SessionContext<'_>,
-    authority: &ActiveSessionAuthority,
+    authority: &SessionGrantAuthority,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut length = [0_u8; 4];
     tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut length))
@@ -37,34 +35,30 @@ pub(super) async fn handle_command_stream(
         .map_err(|_| invalid("command length timed out"))??;
     let framed_length = u32::from_be_bytes(length);
     if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_FETCH_FRAME {
-        let (grant, active_fence) = fenced_artifact_authority(authority, framed_length)?;
+        validate_artifact_frame_kind(framed_length)?;
         return handle_artifact_stream(
             send,
             recv,
             framed_length & !ARTIFACT_FRAME_MASK,
             session.node_id,
-            session.endpoint_id,
             session.command_keys,
             session.privd,
-            grant,
-            active_fence,
+            authority,
             session.command_executor.journal_mut(),
             session.fence_epoch_floor,
         )
         .await;
     }
     if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_CONSUME_FRAME {
-        let (grant, active_fence) = fenced_artifact_authority(authority, framed_length)?;
+        validate_artifact_frame_kind(framed_length)?;
         return handle_artifact_consume(
             send,
             recv,
             framed_length & !ARTIFACT_FRAME_MASK,
             session.node_id,
-            session.endpoint_id,
             session.command_keys,
             session.privd,
-            grant,
-            active_fence,
+            authority,
             session.command_executor.journal_mut(),
             session.fence_epoch_floor,
         )
@@ -88,7 +82,7 @@ pub(super) async fn handle_command_stream(
 
 async fn process_command(
     session: &mut SessionContext<'_>,
-    authority: &ActiveSessionAuthority,
+    authority: &SessionGrantAuthority,
     envelope: &CommandEnvelope,
 ) -> Result<CommandResult, Box<dyn std::error::Error + Send + Sync>> {
     refresh_fence_epoch_floor(
@@ -97,22 +91,15 @@ async fn process_command(
     )?;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let now_unix_seconds = i64::try_from(now.as_secs())?;
-    if stale_command_owner(
-        session,
-        authority,
-        envelope,
-        now_unix_seconds,
-        now.subsec_nanos(),
-    )? {
+    if authority.session_epoch < *session.fence_epoch_floor {
         let result = rejected_result(envelope, "stale_owner_epoch", now_unix_seconds);
         return Ok(result);
     }
-    let grant = authority.grant();
     let context = CommandContext {
         node_id: *session.node_id.as_bytes(),
-        authorization_revision: grant.authorization_revision,
-        capabilities: grant.negotiated_capabilities.clone(),
-        session_expires_at_unix_seconds: grant.expires_at_unix_seconds,
+        authorization_revision: authority.authorization_revision,
+        capabilities: authority.negotiated_capabilities.clone(),
+        session_expires_at_unix_seconds: authority.expires_at_unix_seconds,
         command_keys: session.command_keys.clone(),
         now_unix_seconds,
         cancelled: false,
@@ -148,7 +135,7 @@ async fn process_command(
         "command delivery passed session authorization"
     );
     let execution = if external {
-        execute_external_command(session, envelope, &context, now_unix_seconds).await
+        execute_external_command(session, authority, envelope, &context, now_unix_seconds).await
     } else {
         session.command_executor.deliver(envelope, &context)
     };
@@ -196,57 +183,6 @@ fn delivery_result(
     }
 }
 
-fn stale_command_owner(
-    session: &SessionContext<'_>,
-    authority: &ActiveSessionAuthority,
-    envelope: &CommandEnvelope,
-    now_unix_seconds: i64,
-    now_nanos: u32,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(match authority {
-        ActiveSessionAuthority::SignedReadOnlyV11(_) => {
-            let fence = envelope
-                .connection_fence
-                .as_ref()
-                .ok_or_else(|| invalid("signed read-only session received an unfenced command"))?;
-            matches!(
-                gate_signed_read_only_stale_diagnostic(
-                    session.command_keys,
-                    *session.fence_epoch_floor,
-                    &session.node_id,
-                    &session.endpoint_id,
-                    fence,
-                    &envelope.command_id,
-                    now_unix_seconds,
-                    now_nanos,
-                )?,
-                FenceDecision::RejectedStaleOwnerEpoch
-            )
-        }
-        ActiveSessionAuthority::FencedV11 {
-            grant,
-            connection_fence,
-        } => {
-            verify_fenced_operation(
-                session.command_keys,
-                grant,
-                connection_fence,
-                *session.fence_epoch_floor,
-                &session.node_id,
-                &session.endpoint_id,
-                envelope.connection_fence.as_ref(),
-                envelope.fence_binding.as_ref(),
-                FenceOperationKind::Command,
-                &envelope.command_id,
-                &envelope.required_capability,
-                now_unix_seconds,
-                now_nanos,
-            )?;
-            false
-        }
-    })
-}
-
 async fn send_command_result(
     mut send: iroh::endpoint::SendStream,
     result: &CommandResult,
@@ -265,6 +201,7 @@ async fn send_command_result(
 
 async fn execute_external_command(
     session: &mut SessionContext<'_>,
+    authority: &SessionGrantAuthority,
     envelope: &CommandEnvelope,
     context: &CommandContext,
     now: i64,
@@ -318,7 +255,7 @@ async fn execute_external_command(
         None => {
             session
                 .privd
-                .call_command(envelope, command.accepted_at())
+                .call_command(envelope, command.accepted_at(), &authority.raw_grant)
                 .await
         }
     };
@@ -353,7 +290,7 @@ pub(super) fn settle_privd_response(
     let terminal = match response.result {
         Some(privd_response::Result::Mutation(result)) if result.applied => {
             applied_revision = desired_resource(envelope);
-            Ok(result.encode_to_vec())
+            Ok(Vec::new())
         }
         Some(privd_response::Result::ConfigPlan(result)) => Ok(result.encode_to_vec()),
         Some(privd_response::Result::ConfigApply(result)) => {
@@ -402,15 +339,11 @@ pub(super) fn settle_privd_response(
 
 pub(super) fn response_proof(response: &PrivdResponse) -> Option<(Vec<u8>, i64)> {
     let proof = response.privileged_result_proof.as_ref()?;
-    if PrivdReceiptVersion::try_from(proof.version).ok()? != PrivdReceiptVersion::V1
-        || proof.signature.len() != 64
-    {
+    if proof.version != 1 || proof.signature.len() != 64 {
         return None;
     }
     let receipt = proof.receipt_v1.as_ref()?;
-    if PrivdReceiptVersion::try_from(receipt.receipt_version).ok()? != PrivdReceiptVersion::V1
-        || receipt.completed_at.as_ref()?.seconds < 0
-    {
+    if receipt.receipt_version != 1 || receipt.completed_at.as_ref()?.seconds < 0 {
         return None;
     }
     let encoded = proof.encode_to_vec();
@@ -483,16 +416,12 @@ pub(super) async fn observe_external_effect_with_reconcile(
     envelope: &CommandEnvelope,
     prefetched_reconcile: Option<Result<PrivdResponse, io::Error>>,
 ) -> ExternalEffectObservation {
-    // Planning is side-effect free. After privd startup cleanup, an interrupted
-    // validation can always be retried from the immutable candidate.
     if matches!(
         envelope.payload,
         Some(command_envelope::Payload::CompleteConfigPlan(_))
     ) {
         return ExternalEffectObservation::Absent;
     }
-    // Certificate key creation and deletion are both idempotent for their
-    // controller-issued UUID. Retrying is safer than guessing a terminal state.
     if matches!(
         envelope.payload,
         Some(
@@ -715,7 +644,9 @@ mod tests {
         write_frame,
     };
     use ocservia_command_journal::Journal;
-    use ocservia_contracts::generated::ocserv::platform::agent::v1::{GroupApply, ServiceReload};
+    use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+        GroupApply, ServiceReload, SessionGrantV1,
+    };
     use ocservia_test_support::{keyring, sign_command_envelope_v2, sign_command_v2};
     use std::time::Duration;
 
@@ -840,6 +771,13 @@ mod tests {
             sealing_keys: &[],
             fence_epoch_floor: &mut fence_epoch_floor,
         };
+        let authority = SessionGrantAuthority {
+            raw_grant: SessionGrantV1::default(),
+            negotiated_capabilities: context.capabilities.clone(),
+            authorization_revision: context.authorization_revision,
+            session_epoch: 1,
+            expires_at_unix_seconds: context.session_expires_at_unix_seconds,
+        };
         for code in ["effect_absent", "receipt_invalid"] {
             let mut envelope = sign_command_v2(
                 &signing,
@@ -857,9 +795,10 @@ mod tests {
             );
             envelope.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
             sign_command_envelope_v2(&signing, &mut envelope);
-            let outcome = execute_external_command(&mut session, &envelope, &context, now + 1)
-                .await
-                .expect("record reconciliation outcome");
+            let outcome =
+                execute_external_command(&mut session, &authority, &envelope, &context, now + 1)
+                    .await
+                    .expect("record reconciliation outcome");
             assert_eq!(outcome.record.state, CommandState::Unknown);
             assert_eq!(outcome.record.error_code.as_deref(), Some(code));
         }

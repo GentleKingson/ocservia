@@ -2,8 +2,10 @@ package migrations
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"strconv"
 	"strings"
@@ -11,9 +13,38 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 )
 
 const migrationLockID int64 = 764057383691829796
+
+//go:embed sql/*.sql
+var embeddedMigrations embed.FS
+
+func migrationFS() (fs.FS, error) {
+	return fs.Sub(embeddedMigrations, "sql")
+}
+
+func newProvider(pool *pgxpool.Pool) (*goose.Provider, func(), error) {
+	fsys, err := migrationFS()
+	if err != nil {
+		return nil, nil, fmt.Errorf("load embedded migrations: %w", err)
+	}
+	db := stdlib.OpenDBFromPool(pool)
+	cleanup := func() { _ = db.Close() }
+	provider, err := goose.NewProvider(
+		goose.DialectPostgres,
+		db,
+		fsys,
+		goose.WithAllowOutofOrder(false),
+	)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("initialize migration provider: %w", err)
+	}
+	return provider, cleanup, nil
+}
 
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
@@ -60,22 +91,74 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// Migrate applies all embedded goose migrations sequentially under an exclusive
+// PostgreSQL session advisory lock. Must be executed by the schema owner role.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	return migrateArtifacts(ctx, pool)
+	return withMigrationConnection(ctx, pool, func(conn *pgx.Conn) error {
+		provider, cleanup, err := newProvider(pool)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if _, err := provider.Up(ctx); err != nil {
+			return fmt.Errorf("apply PostgreSQL migrations: %w", err)
+		}
+		// Refresh the UTC partition window even when Goose has no pending migrations.
+		if _, err := conn.Exec(ctx, `SELECT public.telemetry_ensure_month_partition(month AT TIME ZONE 'UTC')
+			FROM generate_series(
+				date_trunc('month', now() AT TIME ZONE 'UTC') - interval '1 month',
+				date_trunc('month', now() AT TIME ZONE 'UTC') + interval '2 months',
+				interval '1 month'
+			) AS month`); err != nil {
+			return fmt.Errorf("provision telemetry partitions: %w", err)
+		}
+		return nil
+	})
 }
 
-func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*pgxpool.Conn) error) (result error) {
-	conn, err := pool.Acquire(ctx)
+// ValidateSchemaVersion verifies that the connected database is at the exact
+// migration version embedded in this binary. Safe to run under the least-privilege
+// runtime role (requires only SELECT on goose_db_version).
+func ValidateSchemaVersion(ctx context.Context, pool *pgxpool.Pool) error {
+	provider, cleanup, err := newProvider(pool)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	sources := provider.ListSources()
+	if len(sources) == 0 {
+		return errors.New("no embedded migrations found")
+	}
+	expected := sources[len(sources)-1].Version
+
+	var current int64
+	err = pool.QueryRow(ctx, `SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = true`).Scan(&current)
+	if err != nil {
+		return fmt.Errorf("read schema version from goose_db_version: %w", err)
+	}
+	if current != expected {
+		return fmt.Errorf("PostgreSQL schema version mismatch: database is at version %d, expected %d; run --migrate-only first", current, expected)
+	}
+	return nil
+}
+
+func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*pgx.Conn) error) (result error) {
+	pooled, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
 	}
+	// Reserve the lock session outside the pool so Goose can borrow even
+	// when the caller configures pool_max_conns=1.
+	conn := pooled.Hijack()
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
 	lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	_, err = conn.Exec(lockCtx, "SELECT pg_advisory_lock($1)", migrationLockID)
 	cancel()
 	if err != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer closeCancel()
-		_ = conn.Hijack().Close(closeCtx)
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	defer func() {
@@ -84,9 +167,6 @@ func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*
 		var unlocked bool
 		err := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockID).Scan(&unlocked)
 		if err != nil || !unlocked {
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer closeCancel()
-			_ = conn.Hijack().Close(closeCtx)
 			if result == nil {
 				if err != nil {
 					result = fmt.Errorf("unlock migrations: %w", err)
@@ -96,7 +176,6 @@ func withMigrationConnection(ctx context.Context, pool *pgxpool.Pool, run func(*
 			}
 			return
 		}
-		conn.Release()
 	}()
 	return run(conn)
 }
@@ -105,7 +184,7 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	identifier := pgx.Identifier{role}.Sanitize()
 	statements := []string{
 		"GRANT USAGE ON SCHEMA public TO " + identifier,
-		"GRANT SELECT ON schema_revisions TO " + identifier,
+		"GRANT SELECT ON goose_db_version TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON workspaces, nodes, operations TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_endpoint_keys, node_capabilities TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_bootstrap_tokens TO " + identifier,
@@ -136,7 +215,6 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 		"GRANT SELECT, INSERT, DELETE ON observed_users, observed_groups TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON desired_user_policies, user_policy_mutations, observed_user_usage, user_usage_cursors, user_policy_enforcements TO " + identifier,
 		"GRANT DELETE ON user_policy_enforcements TO " + identifier,
-		"GRANT SELECT, INSERT, UPDATE ON scheduler_leadership TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON connection_owner_fencing TO " + identifier,
 		"GRANT SELECT, INSERT, UPDATE ON node_config_state TO " + identifier,
 		"GRANT SELECT, INSERT ON config_plans TO " + identifier,
@@ -182,11 +260,6 @@ func GrantRuntimePrivileges(ctx context.Context, pool *pgxpool.Pool, role string
 	return nil
 }
 
-type queryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-}
-
 func validatePostgreSQLVersion(version int) error {
 	if version/10000 != 18 {
 		return fmt.Errorf("PostgreSQL requires server major version 18, got %d", version/10000)
@@ -202,10 +275,4 @@ func validatePostgreSQLRelease(version int, release string) error {
 		return errors.New("PostgreSQL requires a stable 18.x release")
 	}
 	return nil
-}
-
-func rollbackMigration(tx pgx.Tx) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = tx.Rollback(ctx)
 }

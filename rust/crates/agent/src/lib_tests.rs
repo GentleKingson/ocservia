@@ -17,11 +17,10 @@ use ocservia_command_authorization::{
 };
 use ocservia_contracts::config_profile;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, CommandAuthorizationProof, CommandAuthorizationVersion, CompleteConfigApply,
-    CompleteConfigCandidate, CompleteConfigDirective, ConfigApplyResult, ConfigPlan, GroupApply,
-    IpBanRemove, NodeLocalTlsReference, ServiceReload, SessionDisconnect, SessionTerminate,
-    SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable, UserPasswordRotate,
-    command_envelope, complete_config_directive,
+    AgentUpgrade, CommandAuthorizationProof, CompleteConfigApply, CompleteConfigCandidate,
+    CompleteConfigDirective, ConfigApplyResult, ConfigPlan, GroupApply, NodeLocalTlsReference,
+    SessionDisconnect, SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable,
+    UserPasswordRotate, command_envelope, complete_config_directive,
 };
 use ocservia_test_support::{foreign_architecture, host_architecture, keyring, ts};
 use rand::{SeedableRng, rngs::StdRng};
@@ -63,7 +62,7 @@ fn capabilities(values: &[&str]) -> HashSet<String> {
 
 fn user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
     SealedSecretV1 {
-        version: SealedSecretVersion::V1 as i32,
+        version: 1,
         purpose: SealedSecretPurpose::UserPassword as i32,
         key_id: "node-key-1".into(),
         ciphertext,
@@ -123,7 +122,7 @@ fn authorize_test_command(envelope: &mut CommandEnvelope) {
     envelope.required_capability = capability.into();
     let key = test_signing_key();
     envelope.authorization = Some(CommandAuthorizationProof {
-        version: CommandAuthorizationVersion::V1.into(),
+        version: 1,
         key_id: verification_key_id(&key.verifying_key()),
         signature: Vec::new(),
     });
@@ -154,10 +153,10 @@ fn command(node_id: [u8; 16], key: [u8; 16], message: &str, now: i64) -> Command
         payload: Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
             message: message.into(),
         })),
-        semantic_payload_hash_version: SemanticPayloadHashVersion::V1 as i32,
+        semantic_payload_hash_version: SemanticPayloadHashVersion::V2 as i32,
         ..CommandEnvelope::default()
     };
-    env.semantic_payload_sha256 = semantic_payload_hash_v1(&env).expect("v1 hash").to_vec();
+    env.semantic_payload_sha256 = semantic_payload_hash_v2(&env).expect("v2 hash").to_vec();
     authorize_test_command(&mut env);
     env
 }
@@ -200,16 +199,12 @@ fn desired_command(
     env.payload = Some(match mutation {
         DesiredMutation::Create => command_envelope::Payload::UserCreate(UserCreate {
             username: name.into(),
-            sealed_password: Vec::new(),
-            secret_key_id: String::new(),
             desired_revision,
             sealed_password_v1: Some(user_password(vec![0xa1; 64])),
         }),
         DesiredMutation::Rotate => {
             command_envelope::Payload::UserPasswordRotate(UserPasswordRotate {
                 username: name.into(),
-                sealed_password: Vec::new(),
-                secret_key_id: String::new(),
                 desired_revision,
                 sealed_password_v1: Some(user_password(vec![
                     u8::try_from(desired_revision)
@@ -232,8 +227,8 @@ fn desired_command(
             desired_revision,
         }),
     });
-    env.semantic_payload_hash_version = SemanticPayloadHashVersion::V1 as i32;
-    env.semantic_payload_sha256 = semantic_payload_hash_v1(&env).expect("hash").to_vec();
+    env.semantic_payload_hash_version = SemanticPayloadHashVersion::V2 as i32;
+    env.semantic_payload_sha256 = semantic_payload_hash_v2(&env).expect("hash").to_vec();
     authorize_test_command(&mut env);
     env
 }
@@ -443,7 +438,7 @@ fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
         .begin_attested_recovery(&env, &ctx)
         .expect("recover")
     else {
-        panic!("restore configuration command");
+        panic!("expected recovery execution");
     };
     let res_bytes = observed_result(&env);
     let outcome = executor
@@ -458,6 +453,21 @@ fn config_reconciliation_rebuilds_lost_journal_from_exact_durable_effect() {
         )
         .expect("rebuild");
     assert_eq!(outcome.record.state, CommandState::Succeeded);
+    // A subsequent RECONCILE_ONLY delivery for an already-settled command must
+    // replay the persisted attested outcome instead of rejecting with
+    // reconciliation_state_invalid.
+    let ExternalPreparation::Replay(replayed) = executor
+        .begin_attested_recovery(&env, &ctx)
+        .expect("replay settled attested command")
+    else {
+        panic!("expected replay for already-succeeded command");
+    };
+    assert!(replayed.replayed);
+    assert_eq!(replayed.record.state, CommandState::Succeeded);
+    assert_eq!(
+        replayed.record.privileged_result_proof.as_deref(),
+        Some(b"root-receipt".as_slice())
+    );
     assert_eq!(
         executor
             .journal()
@@ -665,7 +675,7 @@ fn external_command_replay_and_password_reconcile_recovery() {
             boot_id: Uuid::now_v7().to_string(),
         },
     ));
-    disc.semantic_payload_sha256 = semantic_payload_hash_v1(&disc).expect("h").to_vec();
+    disc.semantic_payload_sha256 = semantic_payload_hash_v2(&disc).expect("h").to_vec();
     authorize_test_command(&mut disc);
     let mut dctx = context(node, 100);
     dctx.capabilities = capabilities(&["ocserv.session.disconnect"]);
@@ -718,7 +728,7 @@ fn external_command_replay_and_password_reconcile_recovery() {
     let ExternalPreparation::Execute(rec_cmd) =
         ex2.begin_attested_recovery(&rot2, &ctx).expect("attested")
     else {
-        panic!("resume password rotation");
+        panic!("expected attested recovery execution");
     };
     let rec = ex2
         .complete_external_applied_attested(
@@ -837,7 +847,7 @@ fn password_revision_supersession_and_stale_retry_block() {
     let ExternalPreparation::Execute(rec_old) =
         ex.begin_attested_recovery(&old, &ctx).expect("rec old")
     else {
-        panic!("resume old password rotation");
+        panic!("expected old attested recovery execution");
     };
     ex.complete_external_applied_attested(
         &rec_old,
@@ -1087,24 +1097,12 @@ fn command_validation_authorization_tampering_and_v1_hash_rules() {
     cancelled.cancelled = true;
     assert_exec_rejected(&mut ex, &base, &cancelled, "command_cancelled");
 
-    // Envelope validation, semantic hash v1, and signature tampering matrix.
-    let mut approval = base.clone();
-    approval.approval_id = Uuid::now_v7().as_bytes().to_vec();
-    approval.approval_request_sha256 = vec![0xa5; 32];
-    authorize_test_command(&mut approval);
-    approval.approval_request_sha256[0] ^= 1;
-    assert_exec_rejected(
-        &mut ex,
-        &approval,
-        &ctx,
-        "command_authorization_signature_invalid",
-    );
-
+    // Envelope validation, semantic hash v2, and signature tampering matrix.
     let mut changed_node = base.clone();
     let other_node = *Uuid::now_v7().as_bytes();
     changed_node.node_id = other_node.to_vec();
     changed_node.semantic_payload_sha256 =
-        semantic_payload_hash_v1(&changed_node).expect("h").to_vec();
+        semantic_payload_hash_v2(&changed_node).expect("h").to_vec();
     let mut other_ctx = ctx.clone();
     other_ctx.node_id = other_node;
     assert_exec_rejected(
@@ -1122,7 +1120,7 @@ fn command_validation_authorization_tampering_and_v1_hash_rules() {
         ("clock_skew", |c| c.issued_at = Some(ts(401, 0))),
         ("revision_mismatch", |c| {
             c.expected_revision = 2;
-            c.semantic_payload_sha256 = semantic_payload_hash_v1(c).expect("h").to_vec();
+            c.semantic_payload_sha256 = semantic_payload_hash_v2(c).expect("h").to_vec();
         }),
         ("idempotency_key_invalid", |c| {
             c.idempotency_key = vec![0; 16]
@@ -1181,7 +1179,7 @@ fn command_validation_authorization_tampering_and_v1_hash_rules() {
             boot_id: Uuid::now_v7().to_string(),
         },
     ));
-    priv_cmd.semantic_payload_sha256 = semantic_payload_hash_v1(&priv_cmd).expect("h").to_vec();
+    priv_cmd.semantic_payload_sha256 = semantic_payload_hash_v2(&priv_cmd).expect("h").to_vec();
     authorize_test_command(&mut priv_cmd);
     let mut pctx = ctx.clone();
     pctx.capabilities = capabilities(&["ocserv.session.disconnect"]);
@@ -1222,7 +1220,7 @@ fn idempotency_identity_and_stored_hash_version_conflicts() {
         message: "second".into(),
     }));
     diff_payload.semantic_payload_sha256 =
-        semantic_payload_hash_v1(&diff_payload).expect("h").to_vec();
+        semantic_payload_hash_v2(&diff_payload).expect("h").to_vec();
     authorize_test_command(&mut diff_payload);
     assert!(matches!(
         ex.execute(&diff_payload, &ctx, None),
@@ -1356,7 +1354,7 @@ fn agent_upgrade_capability_payload_auth_and_conflict() {
     let attacker = SigningKey::from_bytes(&[0x66; 32]);
     let claims = claims_from_envelope_v1(&wrong_key).expect("claims");
     wrong_key.authorization = Some(CommandAuthorizationProof {
-        version: CommandAuthorizationVersion::V1.into(),
+        version: 1,
         key_id: verification_key_id(&attacker.verifying_key()),
         signature: attacker
             .sign(&canonical_v1(&claims).expect("c"))
@@ -1412,7 +1410,7 @@ fn agent_upgrade_capability_payload_auth_and_conflict() {
     ));
 }
 
-// ---- Canonical Semantic Payload Hash v1 / v2 Golden Vectors ----
+// ---- Canonical Semantic Payload Hash v2 Golden Vectors ----
 
 fn envelope_from_fixture_vector(
     node_id: &[u8],
@@ -1433,67 +1431,6 @@ fn envelope_from_fixture_vector(
         expected_revision,
         payload,
         ..CommandEnvelope::default()
-    }
-}
-
-fn envelope_from_fixture_payload(
-    node_id: &[u8],
-    expected_revision: u64,
-    kind: u32,
-    payload: &serde_json::Value,
-) -> CommandEnvelope {
-    let f = |n| {
-        payload
-            .get(n)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_owned()
-    };
-    let mut env = CommandEnvelope {
-        protocol_version: "1.0".into(),
-        node_id: node_id.to_vec(),
-        expected_revision,
-        ..CommandEnvelope::default()
-    };
-    env.payload = Some(match kind {
-        100 => command_envelope::Payload::SessionDisconnect(SessionDisconnect {
-            session_id: f("session_id"),
-            boot_id: f("boot_id"),
-        }),
-        105 => command_envelope::Payload::ServiceReload(ServiceReload {}),
-        107 => command_envelope::Payload::SyntheticNoop(SyntheticNoop {}),
-        108 => command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-            message: f("message"),
-        }),
-        112 => command_envelope::Payload::SessionTerminate(SessionTerminate {
-            session_id: f("session_id"),
-            boot_id: f("boot_id"),
-        }),
-        113 => command_envelope::Payload::IpBanRemove(IpBanRemove { ip: f("ip") }),
-        _ => panic!("unsupported payload_kind: {kind}"),
-    });
-    env
-}
-
-#[test]
-fn canonical_semantic_hash_v1_matches_shared_fixture() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../testdata/semantic-payload-hash-v1.json");
-    let fixture: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).expect("read v1 fixture"))
-            .expect("parse");
-    for v in fixture["vectors"].as_array().expect("vectors") {
-        let name = v["name"].as_str().unwrap_or("<unnamed>");
-        let node_id = hex::decode(v["node_id_hex"].as_str().expect("node")).expect("hex");
-        let rev = v["expected_revision"].as_u64().expect("rev");
-        let kind = u32::try_from(v["payload_kind"].as_u64().expect("kind")).expect("u32");
-        let expected = v["expected_sha256"].as_str().expect("sha256");
-        let env = envelope_from_fixture_payload(&node_id, rev, kind, &v["payload"]);
-        assert_eq!(
-            hex::encode(semantic_payload_hash_v1(&env).expect("v1")),
-            expected,
-            "{name} prod"
-        );
     }
 }
 
@@ -1529,7 +1466,7 @@ fn canonical_semantic_hash_v2_matches_shared_config_plan_vector() {
 }
 
 #[test]
-fn canonical_semantic_hash_v1_invariance_sensitivity_and_no_unicode_normalization() {
+fn canonical_semantic_hash_v2_invariance_sensitivity_and_no_unicode_normalization() {
     let node = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     let shifted = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
@@ -1552,8 +1489,8 @@ fn canonical_semantic_hash_v1_invariance_sensitivity_and_no_unicode_normalizatio
     b.actor_id = "bob".into();
     b.reason = "ticket-2".into();
     b.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
-    let hello = semantic_payload_hash_v1(&a).expect("a");
-    assert_eq!(hello, semantic_payload_hash_v1(&b).expect("b"));
+    let hello = semantic_payload_hash_v2(&a).expect("a");
+    assert_eq!(hello, semantic_payload_hash_v2(&b).expect("b"));
 
     // Changes on every semantic input and does not normalize Unicode.
     for other in [
@@ -1562,12 +1499,12 @@ fn canonical_semantic_hash_v1_invariance_sensitivity_and_no_unicode_normalizatio
         envelope_from_fixture_vector(&node, 2, 108, "hello"),
         envelope_from_fixture_vector(&node, 1, 107, ""),
     ] {
-        assert_ne!(hello, semantic_payload_hash_v1(&other).expect("other"));
+        assert_ne!(hello, semantic_payload_hash_v2(&other).expect("other"));
     }
     assert_ne!(
-        semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 108, "\u{00e9}"))
+        semantic_payload_hash_v2(&envelope_from_fixture_vector(&node, 1, 108, "\u{00e9}"))
             .expect("c"),
-        semantic_payload_hash_v1(&envelope_from_fixture_vector(&node, 1, 108, "e\u{0301}"))
+        semantic_payload_hash_v2(&envelope_from_fixture_vector(&node, 1, 108, "e\u{0301}"))
             .expect("d"),
     );
 }

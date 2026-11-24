@@ -7,7 +7,7 @@ import {
   UserPlus,
   UserX,
 } from "@lucide/vue";
-import type { UserGroupResourceState } from "@ocservia/api-client";
+import type { UserGroupResourceState } from "@/api/models";
 import { ref } from "vue";
 
 import SectionCard from "@/components/common/SectionCard.vue";
@@ -100,7 +100,7 @@ function convergenceTone(key: string): string {
       </Button>
     </template>
     <p
-      v-if="!(stateTab === 'users' ? userAction : groupAction).allowed"
+      v-if="(stateTab === 'users' ? userAction : groupAction).explanation"
       class="text-muted-foreground m-0 text-xs"
     >
       {{ (stateTab === "users" ? userAction : groupAction).explanation }}

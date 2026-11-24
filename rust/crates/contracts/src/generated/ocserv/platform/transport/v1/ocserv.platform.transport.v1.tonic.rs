@@ -262,9 +262,7 @@ pub mod transport_service_client {
             &mut self,
             request: impl tonic::IntoRequest<super::FetchArtifactRequest>,
         ) -> std::result::Result<
-            tonic::Response<
-                tonic::codec::Streaming<super::super::super::agent::v1::ArtifactChunk>,
-            >,
+            tonic::Response<super::super::super::agent::v1::ArtifactPayload>,
             tonic::Status,
         > {
             self.inner
@@ -287,7 +285,7 @@ pub mod transport_service_client {
                         "FetchArtifact",
                     ),
                 );
-            self.inner.server_streaming(req, path, codec).await
+            self.inner.unary(req, path, codec).await
         }
         pub async fn consume_artifact(
             &mut self,
@@ -314,64 +312,6 @@ pub mod transport_service_client {
                     GrpcMethod::new(
                         "ocserv.platform.transport.v1.TransportService",
                         "ConsumeArtifact",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn register_owner_fence(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RegisterOwnerFenceRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterOwnerFenceResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ocserv.platform.transport.v1.TransportService/RegisterOwnerFence",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "ocserv.platform.transport.v1.TransportService",
-                        "RegisterOwnerFence",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn get_owner_fence(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetOwnerFenceRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetOwnerFenceResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ocserv.platform.transport.v1.TransportService/GetOwnerFence",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "ocserv.platform.transport.v1.TransportService",
-                        "GetOwnerFence",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -433,20 +373,11 @@ pub mod transport_service_server {
             tonic::Response<super::UpdateNodeTrustResponse>,
             tonic::Status,
         >;
-        /// Server streaming response type for the FetchArtifact method.
-        type FetchArtifactStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<
-                    super::super::super::agent::v1::ArtifactChunk,
-                    tonic::Status,
-                >,
-            >
-            + std::marker::Send
-            + 'static;
         async fn fetch_artifact(
             &self,
             request: tonic::Request<super::FetchArtifactRequest>,
         ) -> std::result::Result<
-            tonic::Response<Self::FetchArtifactStream>,
+            tonic::Response<super::super::super::agent::v1::ArtifactPayload>,
             tonic::Status,
         >;
         async fn consume_artifact(
@@ -454,20 +385,6 @@ pub mod transport_service_server {
             request: tonic::Request<super::ConsumeArtifactRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ConsumeArtifactResponse>,
-            tonic::Status,
-        >;
-        async fn register_owner_fence(
-            &self,
-            request: tonic::Request<super::RegisterOwnerFenceRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterOwnerFenceResponse>,
-            tonic::Status,
-        >;
-        async fn get_owner_fence(
-            &self,
-            request: tonic::Request<super::GetOwnerFenceRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetOwnerFenceResponse>,
             tonic::Status,
         >;
     }
@@ -828,12 +745,11 @@ pub mod transport_service_server {
                     struct FetchArtifactSvc<T: TransportService>(pub Arc<T>);
                     impl<
                         T: TransportService,
-                    > tonic::server::ServerStreamingService<super::FetchArtifactRequest>
+                    > tonic::server::UnaryService<super::FetchArtifactRequest>
                     for FetchArtifactSvc<T> {
-                        type Response = super::super::super::agent::v1::ArtifactChunk;
-                        type ResponseStream = T::FetchArtifactStream;
+                        type Response = super::super::super::agent::v1::ArtifactPayload;
                         type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
+                            tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
@@ -865,7 +781,7 @@ pub mod transport_service_server {
                                 max_decoding_message_size,
                                 max_encoding_message_size,
                             );
-                        let res = grpc.server_streaming(method, req).await;
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)
@@ -901,101 +817,6 @@ pub mod transport_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ConsumeArtifactSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ocserv.platform.transport.v1.TransportService/RegisterOwnerFence" => {
-                    #[allow(non_camel_case_types)]
-                    struct RegisterOwnerFenceSvc<T: TransportService>(pub Arc<T>);
-                    impl<
-                        T: TransportService,
-                    > tonic::server::UnaryService<super::RegisterOwnerFenceRequest>
-                    for RegisterOwnerFenceSvc<T> {
-                        type Response = super::RegisterOwnerFenceResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RegisterOwnerFenceRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as TransportService>::register_owner_fence(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RegisterOwnerFenceSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/ocserv.platform.transport.v1.TransportService/GetOwnerFence" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetOwnerFenceSvc<T: TransportService>(pub Arc<T>);
-                    impl<
-                        T: TransportService,
-                    > tonic::server::UnaryService<super::GetOwnerFenceRequest>
-                    for GetOwnerFenceSvc<T> {
-                        type Response = super::GetOwnerFenceResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetOwnerFenceRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as TransportService>::get_owner_fence(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetOwnerFenceSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

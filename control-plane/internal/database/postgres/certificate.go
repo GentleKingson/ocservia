@@ -9,7 +9,6 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	certificatestore "github.com/GentleKingson/ocservia/control-plane/internal/certificates/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 )
@@ -72,33 +71,33 @@ func (s certificateStore) InsertCSR(ctx context.Context, v certificatestore.Pend
 }
 
 func (s certificateStore) InsertArtifact(ctx context.Context, v certificatestore.PendingArtifact) error {
-	_, err := s.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at,requester_identity_id)
-		VALUES($1,$2,$3,$4,$5,$6,'certificate_p12','pending',$7,$8,$9,$10,$10,$11)`, v.ID, v.WorkspaceID, v.NodeID, v.CertificateID, v.CertificateVersion, v.OperationID, v.TokenSHA256, v.RequestHash, v.ExpiresAt, v.CreatedAt, v.RequesterID)
+	_, err := s.Exec(ctx, `INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,expires_at,created_at,updated_at,requester_identity_id)
+		VALUES($1,$2,$3,$4,$5,$6,'certificate_p12','pending',$7,$8,$9,$9,$10)`, v.ID, v.WorkspaceID, v.NodeID, v.CertificateID, v.CertificateVersion, v.OperationID, v.TokenSHA256, v.ExpiresAt, v.CreatedAt, v.RequesterID)
 	return err
 }
 
 func (s certificateStore) LockIssue(ctx context.Context, id uuid.UUID) (v certificatestore.IssueState, err error) {
-	err = s.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,state,issue_request_hash,issue_actor_identity_id,version,issue_certificate_version,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),csr_receipt_sha256,csr_privd_attestation_key_id,csr_der_sha256,csr_requested_subject_sha256,common_name,dns_names,key_bits FROM certificates WHERE id=$1 FOR UPDATE`, id).Scan(&v.WorkspaceID, &v.NodeID, &v.CSR, &v.State, &v.RequestHash, &v.ActorID, &v.Version, &v.IssueVersion, &v.ReceiptCurrent, &v.ReceiptDigest, &v.ReceiptKey, &v.CSRDigest, &v.SubjectDigest, &v.CommonName, &v.DNSNames, &v.KeyBits)
+	err = s.QueryRow(ctx, `SELECT workspace_id,node_id,csr_der,state,issue_actor_identity_id,version,issue_certificate_version,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),csr_receipt_sha256,csr_privd_attestation_key_id,csr_der_sha256,common_name,dns_names,key_bits FROM certificates WHERE id=$1 FOR UPDATE`, id).Scan(&v.WorkspaceID, &v.NodeID, &v.CSR, &v.State, &v.ActorID, &v.Version, &v.IssueVersion, &v.ReceiptCurrent, &v.ReceiptDigest, &v.ReceiptKey, &v.CSRDigest, &v.CommonName, &v.DNSNames, &v.KeyBits)
 	return
 }
 
 func (s certificateStore) SigningReceipt(ctx context.Context, id uuid.UUID) (v certificatestore.IssueReceipt, err error) {
-	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id AND k.key_id=certificates.csr_privd_attestation_key_id AND k.state='active' AND (k.valid_until IS NULL OR k.valid_until>now())) FROM certificates WHERE id=$1 AND state='signing'`, id).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.SubjectDigest, &v.RequestHash, &v.Current, &v.KeyActive)
+	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,COALESCE(issue_certificate_version,0),(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy),EXISTS(SELECT 1 FROM node_privd_attestation_keys k WHERE k.node_id=certificates.node_id AND k.key_id=certificates.csr_privd_attestation_key_id AND k.state='active' AND (k.valid_until IS NULL OR k.valid_until>now())) FROM certificates WHERE id=$1 AND state='signing'`, id).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.IssueVersion, &v.Current, &v.KeyActive)
 	return
 }
 
 func (s certificateStore) LockReceipt(ctx context.Context, id uuid.UUID) (v certificatestore.IssueReceipt, err error) {
-	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,csr_requested_subject_sha256,issue_request_hash,(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy) FROM certificates WHERE id=$1 FOR UPDATE`, id).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.SubjectDigest, &v.RequestHash, &v.Current)
+	err = s.QueryRow(ctx, `SELECT node_id,csr_der,csr_privd_attestation_key_id,csr_receipt_sha256,csr_der_sha256,COALESCE(issue_certificate_version,0),(csr_receipt_verified_at IS NOT NULL AND NOT csr_receipt_legacy) FROM certificates WHERE id=$1 FOR UPDATE`, id).Scan(&v.NodeID, &v.CSR, &v.ReceiptKey, &v.ReceiptDigest, &v.CSRDigest, &v.IssueVersion, &v.Current)
 	return
 }
 
-func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key string, at value.Timestamp) (active bool, err error) {
+func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key string, at time.Time) (active bool, err error) {
 	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>$3))`, node, key, at).Scan(&active)
 	return
 }
 
 func (s certificateStore) StartIssue(ctx context.Context, v certificatestore.Signing) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_request_hash=$2,issue_actor_identity_id=$3,issue_certificate_version=$4,updated_at=$5 WHERE id=$1`, v.ID, v.RequestHash, v.ActorID, v.Version, v.At)
+	_, err := s.Exec(ctx, `UPDATE certificates SET state='signing',version=version+1,issue_actor_identity_id=$2,issue_certificate_version=$3,updated_at=$4 WHERE id=$1`, v.ID, v.ActorID, v.Version, v.At)
 	return err
 }
 
@@ -107,13 +106,13 @@ func (s certificateStore) ResumeIssue(ctx context.Context, id uuid.UUID, at time
 	return err
 }
 
-func (s certificateStore) SignerUnavailable(ctx context.Context, id uuid.UUID, hash []byte, at time.Time) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=$2 WHERE id=$1 AND state='signing' AND issue_request_hash=$3`, id, at, hash)
+func (s certificateStore) SignerUnavailable(ctx context.Context, id uuid.UUID, version int64, at time.Time) error {
+	_, err := s.Exec(ctx, `UPDATE certificates SET state='signer_unavailable',version=version+1,updated_at=$2 WHERE id=$1 AND state='signing' AND issue_certificate_version=$3`, id, at, version)
 	return err
 }
 
 func (s certificateStore) CompleteIssue(ctx context.Context, v certificatestore.Issued) (bool, error) {
-	n, err := s.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=$2,serial_number=$3,not_before=$4,not_after=$5,updated_at=$6 WHERE id=$1 AND state IN ('signing','signer_unavailable') AND issue_request_hash=$7`, v.ID, v.Chain, v.Serial, v.NotBefore, v.NotAfter, v.At, v.RequestHash)
+	n, err := s.Exec(ctx, `UPDATE certificates SET state='issued',version=version+1,certificate_chain_pem=$2,serial_number=$3,not_before=$4,not_after=$5,updated_at=$6 WHERE id=$1 AND state IN ('signing','signer_unavailable') AND issue_certificate_version=$7`, v.ID, v.Chain, v.Serial, v.NotBefore, v.NotAfter, v.At, v.IssueVersion)
 	return n == 1, err
 }
 
@@ -166,7 +165,7 @@ func (s certificateStore) InsertSecretReference(ctx context.Context, v certifica
 	return err
 }
 
-func (s certificateStore) RotateSecretReference(ctx context.Context, id uuid.UUID, version string, at value.Timestamp) (certificatestore.SecretReference, error) {
+func (s certificateStore) RotateSecretReference(ctx context.Context, id uuid.UUID, version string, at time.Time) (certificatestore.SecretReference, error) {
 	return scanSecretReference(s.QueryRow(ctx, `UPDATE secret_provider_refs SET version=$2,state='active',rotated_at=$3,updated_at=$3 WHERE id=$1 RETURNING `+secretReferenceColumns, id, version, at))
 }
 
@@ -184,7 +183,7 @@ func (s certificateStore) OperationExists(ctx context.Context, workspace uuid.UU
 	return
 }
 
-func (s certificateStore) ReserveRevocation(ctx context.Context, id, workspace, node uuid.UUID, version uint64, at value.Timestamp) (bool, error) {
+func (s certificateStore) ReserveRevocation(ctx context.Context, id, workspace, node uuid.UUID, version uint64, at time.Time) (bool, error) {
 	var state string
 	err := s.QueryRow(ctx, `SELECT state FROM certificates WHERE id=$1 AND workspace_id=$2 AND node_id=$3 AND version=$4 AND serial_number<>'' FOR NO KEY UPDATE`, id, workspace, node, version).Scan(&state)
 	if errors.Is(err, database.ErrNotFound) {
@@ -220,7 +219,7 @@ func (s certificateStore) ReserveRevocation(ctx context.Context, id, workspace, 
 	return true, nil
 }
 
-func (s certificateStore) beginRevocation(ctx context.Context, id uuid.UUID, at value.Timestamp) error {
+func (s certificateStore) beginRevocation(ctx context.Context, id uuid.UUID, at time.Time) error {
 	if _, err := s.Exec(ctx, `UPDATE certificates SET state='revoking',version=version+1,updated_at=$2 WHERE id=$1`, id, at); err != nil {
 		return err
 	}
@@ -290,7 +289,7 @@ func (s certificateStore) ExpireRevocation(ctx context.Context, commandID, certi
 	return err
 }
 
-func (s certificateStore) RevocationSerial(ctx context.Context, id, workspace, node uuid.UUID, version uint64, at value.Timestamp) (string, error) {
+func (s certificateStore) RevocationSerial(ctx context.Context, id, workspace, node uuid.UUID, version uint64) (string, error) {
 	var state, serial string
 	var current uint64
 	err := s.QueryRow(ctx, `SELECT state,serial_number,version FROM certificates
@@ -302,12 +301,6 @@ func (s certificateStore) RevocationSerial(ctx context.Context, id, workspace, n
 	case "revoking", "revocation_unknown":
 		if current > version {
 			return serial, nil
-		}
-	case "issued", "expiring", "expired":
-		// Recover an intent committed before the certificate transition under
-		// older Controllers.
-		if current == version {
-			return serial, s.beginRevocation(ctx, id, at)
 		}
 	}
 	return "", database.ErrNotFound
@@ -336,13 +329,8 @@ func (s certificateStore) P12Eligible(ctx context.Context, id uuid.UUID) (v cert
 	return
 }
 
-func (s certificateStore) ArtifactByRequest(ctx context.Context, workspace uuid.UUID, key string, hash []byte) (v certificatestore.Artifact, err error) {
-	err = s.QueryRow(ctx, `SELECT a.id,a.operation_id,a.expires_at,a.request_hash=$3 FROM operations o JOIN artifact_operations a ON a.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspace, key, hash).Scan(&v.ID, &v.OperationID, &v.ExpiresAt, &v.SameIntent)
-	return
-}
-
-func (s certificateStore) ArtifactByOperation(ctx context.Context, id uuid.UUID) (v certificatestore.Artifact, err error) {
-	err = s.QueryRow(ctx, `SELECT id,operation_id,expires_at FROM artifact_operations WHERE operation_id=$1`, id).Scan(&v.ID, &v.OperationID, &v.ExpiresAt)
+func (s certificateStore) ArtifactByRequest(ctx context.Context, workspace uuid.UUID, key string) (v certificatestore.Artifact, err error) {
+	err = s.QueryRow(ctx, `SELECT a.id,a.operation_id,a.expires_at,o.request_hash FROM operations o JOIN artifact_operations a ON a.operation_id=o.id WHERE o.workspace_id=$1 AND o.idempotency_key=$2`, workspace, key).Scan(&v.ID, &v.OperationID, &v.ExpiresAt, &v.RequestHash)
 	return
 }
 

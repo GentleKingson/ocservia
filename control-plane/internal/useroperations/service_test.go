@@ -68,14 +68,15 @@ func TestQuotaDirectionAndMonthlyBoundary(t *testing.T) {
 func TestStableSchedulerIdentityAndConcurrencyLimit(t *testing.T) {
 	first := operationIdempotencyKey("policy", "node", "alice", "2", "quota", "2026-08-01T00:00:00Z")
 	// Captured from main at 5eb5896 before the port substitution.
-	if first != "i14-d0bab4db91ed94274aca33de89ee0cc44448605f14c9ed502494599b22eb6f7d" || stableTraceparent(first) != "00-4cc2ffdfcb3701893e1ddaf39bd3e959-a48d3e519fe5231b-01" {
+	if first != "i14-d0bab4db91ed94274aca33de89ee0cc44448605f14c9ed502494599b22eb6f7d" {
 		t.Fatal("scheduler identity baseline changed")
 	}
 	if second := operationIdempotencyKey("policy", "node", "alice", "2", "quota", "2026-08-01T00:00:00Z"); first != second {
 		t.Fatal("scheduler idempotency key changed")
 	}
-	if len(first) > 128 || tracecontext.TraceID(stableTraceparent(first)) == "" {
-		t.Fatalf("invalid stable identities key=%q trace=%q", first, stableTraceparent(first))
+	trace := tracecontext.NewTraceparent()
+	if len(first) > 128 || tracecontext.TraceID(trace) == "" || trace == tracecontext.NewTraceparent() {
+		t.Fatalf("invalid scheduler identities key=%q trace=%q", first, trace)
 	}
 	if DefaultGlobalConcurrency != 50 || !strings.HasPrefix(first, "i14-") {
 		t.Fatal("documented global concurrency or key namespace changed")

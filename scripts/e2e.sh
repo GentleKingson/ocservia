@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT="${COMPOSE_PROJECT:-ocservia-e2e-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROJECT="${COMPOSE_PROJECT:-ocservia-e2e-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-}"
 COMPOSE=(docker compose -p "${PROJECT}" -f "${ROOT}/deploy/compose/compose.yaml")
 
@@ -38,6 +38,14 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 "${COMPOSE[@]}" exec -T control-plane /usr/bin/curl --fail --silent http://127.0.0.1:8080/readyz >/dev/null
+web_probe='fetch("http://127.0.0.1:4173/").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
+for _ in $(seq 1 60); do
+  if "${COMPOSE[@]}" exec -T web node -e "${web_probe}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+"${COMPOSE[@]}" exec -T web node -e "${web_probe}" >/dev/null
 if [[ -n "${ARTIFACT_DIR}" ]]; then
   mkdir -p "${ARTIFACT_DIR}"
   "${COMPOSE[@]}" --profile e2e run --rm \

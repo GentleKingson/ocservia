@@ -1,4 +1,4 @@
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { bench, describe } from "vitest";
 import { filterNodes, sortNodes } from "@/features/nodes/node-list";
 import { relativeTimestamp } from "@/shared/timestamp";

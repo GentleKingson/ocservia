@@ -1,57 +1,74 @@
 # Command semantic hash v2
 
-The Controller signs semantic payload hash v2 as the command identity for all
-newly issued commands. Version 2 leaves the v1 specification untouched and
-introduces a distinct domain separator so the envelope revision can carry the
-Controller authorization epoch while `ConfigPlan` binds its own expected
-desired-state revision.
+The Controller signs semantic payload hash v2 as the canonical command identity
+for all commands. Semantic hash v1 has been removed: `SemanticPayloadHashVersion`
+defines only `UNSPECIFIED (0)` and `V2 (2)`, and both Go and Rust reject v1.
 
-The canonical preimage is constructed as:
+## Canonical digest construction
 
-```
-ASCII("ocservia.command.semantic-hash.v2") || 0x00
-|| node_id
-|| uint64_be(authorization_revision)
-|| uint32_be(payload_kind)
-|| canonical_payload_v2
-```
-
-Here `node_id` is the 16-byte raw UUID, `authorization_revision` is the nonzero
-epoch from the verified `SessionGrantV1`, and all integer fields use unsigned
-big-endian encoding. Aside from `ConfigPlan`, payload kind numbers and payload
-encodings match v1. Version 2 adds `CompleteConfigPlan` (129) and
-`CompleteConfigApply` (130), which exist only in v2 and are rejected under v1.
-Their canonical layouts live in the Go `semanticpayload` package and the Rust
-`command-authorization` crate, verified against
-`testdata/complete-config-v1.json`. Note that `CompleteConfigApply` (130)
-retains optional `approval_id` and `approval_request_sha256` presence bytes
-(encoded as `0x00` under the single-Admin authorization boundary) as part of
-its frozen canonical layout.
-
-For `ConfigPlan`, the v2 payload layout appends the expected configuration
-revision:
+The semantic hash is computed as SHA-256 over a null-terminated ASCII domain
+separator followed by an RFC 8949 Core Deterministic CBOR map, independent of
+Protobuf wire serialization:
 
 ```
-payload_kind = uint32_be(103)
-canonical_payload_v2 =
-    candidate_hash
-    || uint64_be(config_expected_revision)
+SHA-256(
+    ASCII("ocservia.command.semantic-hash.cbor.v2") || 0x00
+    || deterministic_cbor(SemanticEnvelopeV2)
+)
 ```
 
-In this layout, `candidate_hash` is the 32-byte candidate digest and
-`config_expected_revision` is the authoritative applied configuration revision
-against which the plan was built. `ConfigApply` continues to bind its 32-byte
-candidate hash, 32-byte expected current hash, and unsigned 64-bit desired
-effect revision.
+`SemanticEnvelopeV2` is a deterministic CBOR text-keyed map with four keys:
 
-The Controller issues only v2. Both the Agent and privd recompute whichever
-supported version a command carries, and the Agent validates the digest before
-recording acceptance in its journal. Stored commands replay only under their
-original hash version, command results preserve that exact version, and backend
-stores validate v2 explicitly without an unknown-version fallback.
+| CBOR key | Type / constraints |
+|---|---|
+| `node_id` | 16-byte raw UUID byte string |
+| `expected_revision` | unsigned integer (`uint64`); nonzero authorization revision from `SessionGrantV1` |
+| `payload_kind` | unsigned integer (`uint32`); Protobuf `CommandEnvelope` oneof field number |
+| `payload` | deterministic CBOR map specific to `payload_kind` |
 
-Cross-language Go and Rust test vectors for `ConfigPlan` live in
-`testdata/semantic-payload-hash-v2.json`, and `AgentUpgrade` vectors live in
-`testdata/semantic-payload-hash-v2-agent-upgrade.json`. Both v1 and v2 are
-frozen; any future semantic change requires a new hash version or a new
-`payload_kind`.
+## Payload structures
+
+All payload maps use RFC 8949 Core Deterministic CBOR encoding (empty byte
+slices encode as zero-length byte strings and empty string lists encode as empty
+arrays). Sealed secrets (`sealed_password`) encode as a nested map with keys
+`version` (`uint32`), `purpose` (`uint32`), `key_id` (`string`), and
+`ciphertext` (`bytes`).
+
+| `payload_kind` | Command | `payload` CBOR keys |
+|---|---|---|
+| `100` | `SessionDisconnect` | `session_id`, `boot_id` |
+| `101` | `UserCreate` | `username`, `desired_revision`, `sealed_password` |
+| `102` | `UserDisable` | `username`, `desired_revision` |
+| `103` | `ConfigPlan` | `candidate_hash` (32B), `expected_revision` (`uint64`) |
+| `104` | `ConfigApply` | `candidate_hash` (32B), `expected_current_hash` (32B), `desired_revision` (`uint64`) |
+| `105` | `ServiceReload` | `{}` (empty map) |
+| `107` | `SyntheticNoop` | `{}` (empty map) |
+| `108` | `SyntheticEcho` | `message` |
+| `112` | `SessionTerminate` | `session_id`, `boot_id` |
+| `113` | `IpBanRemove` | `ip` (canonical IP string) |
+| `114` | `UserPasswordRotate` | `username`, `desired_revision`, `sealed_password` |
+| `115` | `GroupApply` | `group_name`, `members` (`[]string`), `desired_revision` |
+| `116` | `UserEnable` | `username`, `desired_revision` |
+| `117` | `CertificateCsr` | `certificate_id` (16B), `common_name`, `dns_names` (`[]string`), `key_bits` |
+| `118` | `CertificateP12` | `certificate_id` (16B), `artifact_id` (16B), `certificate_chain_pem` (`bytes`), `sealed_password`, `certificate_version`, `artifact_expires_at_seconds`, `artifact_expires_at_nanos` |
+| `119` | `CertificateRevoke` | `certificate_id` (16B), `reason`, `certificate_version` |
+| `128` | `AgentUpgrade` | `target_version`, `architecture`, `package_sha256` (32B) |
+| `129` | `CompleteConfigPlan` | `candidate_hash` (32B) |
+| `130` | `CompleteConfigApply` | `candidate_hash` (32B), `materialized_hash` (32B), `expected_current_hash` (32B), `desired_revision`, `plan_id` (16B), `plan_expires_at_seconds`, `plan_expires_at_nanos` |
+
+For `CompleteConfigPlan` (129) and `CompleteConfigApply` (130), `candidate_hash`
+must match the canonical `configprofile.Hash` of the candidate profile bound to
+the same `node_id`.
+
+## Verification and test vectors
+
+The Controller issues only v2. Both the Agent and privd recompute semantic hash
+v2 independently, and the Agent validates the digest before recording acceptance
+in its journal. Stored commands replay only under v2, command results preserve
+that exact version, and backend stores reject unsupported hash versions without
+fallback.
+
+Shared Go and Rust test vectors live in `testdata/semantic-payload-hash-v2.json`,
+`testdata/semantic-payload-hash-v2-agent-upgrade.json`, and
+`testdata/complete-config-v1.json`. Semantic hash v2 is frozen; any future
+semantic change requires a new hash version or a new `payload_kind`.

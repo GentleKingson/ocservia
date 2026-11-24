@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -19,8 +19,8 @@ type Plan struct {
 	TemplateName, State, CandidateRedacted string
 	ExpectedRevision                       int64
 	CandidateHash, Result                  []byte
-	Warnings                               value.JSONB
-	ExpiresAt, CreatedAt                   value.Timestamp
+	Warnings                               []byte
+	ExpiresAt, CreatedAt                   time.Time
 }
 
 type ApplyInput struct {
@@ -38,7 +38,7 @@ type Proof struct {
 	WorkspaceID, NodeID   uuid.UUID
 	ExpectedRevision      int64
 	CandidateHash, Result []byte
-	ExpiresAt             value.Timestamp
+	ExpiresAt             time.Time
 	State                 string
 }
 
@@ -48,20 +48,19 @@ type PendingPlan struct {
 	TemplateName, CandidateRedacted string
 	ExpectedRevision                uint64
 	CandidateHash                   []byte
-	Warnings                        value.JSONB
-	ExpiresAt, CreatedAt            value.Timestamp
+	Warnings                        []byte
+	ExpiresAt, CreatedAt            time.Time
 }
 
 type PendingApply struct {
 	ID, WorkspaceID, NodeID, PlanID   uuid.UUID
 	ExpectedRevision, DesiredRevision uint64
 	CandidateHash, PreviousHash       []byte
-	CreatedAt                         value.Timestamp
+	CreatedAt                         time.Time
 }
 
 type Store interface {
 	Node(context.Context, uuid.UUID) (Node, error)
-	Capabilities(context.Context, uuid.UUID) ([]string, error)
 	Get(context.Context, uuid.UUID) (Plan, error)
 	// A committed retry retains its allocated revision and expected node version;
 	// Operations still compares the complete intent and owns approval consumption
@@ -73,7 +72,7 @@ type Store interface {
 	HasActiveApply(context.Context, uuid.UUID) (bool, error)
 	InsertPlan(context.Context, PendingPlan) error
 	InsertApply(context.Context, PendingApply) error
-	AdvanceDesiredRevision(context.Context, uuid.UUID, uint64, value.Timestamp) (bool, error)
+	AdvanceDesiredRevision(context.Context, uuid.UUID, uint64, time.Time) (bool, error)
 }
 
 func FromTransaction(tx database.Tx) (Store, error) {

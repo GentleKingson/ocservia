@@ -3,7 +3,6 @@ package operations
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -144,6 +143,8 @@ func TestServiceReloadRequiresActorSession(t *testing.T) {
 		t.Fatalf("authorized reload rejected: %v", err)
 	}
 }
+
+func requestHash(r CreateRequest) [32]byte { return requestDigest(r).Current }
 
 func TestRequestHashBindsTargetActorAndActionButNotAttemptMetadata(t *testing.T) {
 	base := CreateRequest{NodeID: uuid.Must(uuid.NewV7()), IdempotencyKey: "stable-key", ExpectedVersion: 4, ActorID: "operator", Action: "service.reload", Reason: "support case", TTL: time.Minute, RequestID: "request-one", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: ServiceReloadPayload{}}
@@ -312,25 +313,25 @@ func TestConfigAndCertificatePayloadValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	complete.NodeId, complete.ExpectedRevision = id[:], 0
-	canonical, err := configprofile.Canonical(&complete)
+	candidate, err := configprofile.Normalize(&complete)
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256(canonical)
+	digest := candidate.Digest()
 	expiry := timestamppb.New(time.Now().UTC().Add(time.Minute))
-	plan := ConfigPlanPayload{CompleteCandidate: &complete, Candidate: canonical, CandidateHash: digest[:], PlanCapabilities: []string{configprofile.PlanCapability}, PlanMetadata: &ConfigPlanMetadata{TemplateName: "default", CandidateRedacted: "config"}}
-	apply := ConfigApplyPayload{CompleteCandidate: &complete, Candidate: canonical, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, MaterializedHash: digest[:], PlanExpiresAt: expiry, ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}
+	plan := ConfigPlanPayload{Candidate: candidate, PlanMetadata: &ConfigPlanMetadata{TemplateName: "default", CandidateRedacted: "config"}}
+	apply := ConfigApplyPayload{Candidate: candidate, ExpectedCurrentHash: digest[:], DesiredRevision: 1, MaterializedHash: digest[:], PlanExpiresAt: expiry, ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}
 	csr := CertificateCSRPayload{CertificateID: id, CommonName: "node.example.test", DNSNames: []string{"node.example.test"}, KeyBits: 2048}
-	p12 := CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: bytes.Repeat([]byte{1}, 64), ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], RequestHash: digest[:], ExpiresAt: time.Now().UTC().Add(time.Minute)}, SealedPassword: &agentv1.SealedSecretV1{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{1}, 32)}}
+	p12 := CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: bytes.Repeat([]byte{1}, 64), ArtifactID: id, ArtifactMetadata: &ArtifactMetadata{TokenSHA256: digest[:], ExpiresAt: time.Now().UTC().Add(time.Minute)}, SealedPassword: &agentv1.SealedSecretV1{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "secret", Ciphertext: bytes.Repeat([]byte{1}, 32)}}
 	revoke := CertificateRevokePayload{CertificateID: id, CertificateVersion: 1, RevocationReason: "rotate", HoldDispatch: true}
 	for _, tc := range []struct {
 		action  string
 		valid   Payload
 		invalid Payload
 	}{
-		{"config.plan", plan, ConfigPlanPayload{Candidate: canonical, CandidateHash: digest[:], PlanCapabilities: plan.PlanCapabilities, PlanMetadata: plan.PlanMetadata}},
-		{"config.apply", apply, ConfigApplyPayload{Candidate: canonical, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata}},
-		{"config.apply", apply, ConfigApplyPayload{CompleteCandidate: &complete, Candidate: canonical, CandidateHash: digest[:], ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata}},
+		{"config.plan", plan, ConfigPlanPayload{PlanMetadata: plan.PlanMetadata}},
+		{"config.apply", apply, ConfigApplyPayload{ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata}},
+		{"config.apply", apply, ConfigApplyPayload{Candidate: candidate, ExpectedCurrentHash: digest[:], DesiredRevision: 1, ApplyMetadata: apply.ApplyMetadata}},
 		{"certificate.issue", csr, CertificateCSRPayload{CertificateID: id, CommonName: csr.CommonName, KeyBits: 1024}},
 		{"certificate.private_key.export", p12, CertificateP12Payload{CertificateID: id, CertificateVersion: 1, CertificateChain: p12.CertificateChain, SealedPassword: p12.SealedPassword, ArtifactID: id}},
 		{"certificate.revoke", revoke, CertificateRevokePayload{CertificateID: id, RevocationReason: "rotate"}},
@@ -367,22 +368,17 @@ func TestRequestHashRetainsCertificateDeliveryAndGeneratedIDRules(t *testing.T) 
 	}
 }
 
-func TestUpgradeRolloutPayloadRequiresClaimBinding(t *testing.T) {
+func TestUpgradeRolloutPayloadRequiresUUIDv7(t *testing.T) {
 	request := agentUpgradeRequest()
 	payload := request.Payload.(AgentUpgradePayload)
-	payload.RolloutRequestHash = make([]byte, sha256.Size)
+	payload.RolloutID = uuid.New()
 	request.Payload = payload
 	if err := validateCreate(request); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("unclaimed rollout hash: %v", err)
+		t.Fatalf("non-v7 rollout ID: %v", err)
 	}
 	payload.RolloutID = uuid.Must(uuid.NewV7())
 	request.Payload = payload
 	if err := validateCreate(request); err != nil {
 		t.Fatalf("valid rollout binding: %v", err)
-	}
-	payload.RolloutRequestHash = nil
-	request.Payload = payload
-	if err := validateCreate(request); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("missing rollout hash: %v", err)
 	}
 }

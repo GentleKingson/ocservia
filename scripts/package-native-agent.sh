@@ -31,35 +31,19 @@ if ! command -v nfpm >/dev/null 2>&1; then
   exit 1
 fi
 
-archive="${OUTPUT_DIR}/ocservia-agent-${VERSION}-linux-${PACKAGE_ARCH}.tar.gz"
-for suffix in "" ".sha256"; do
-  if [[ ! -f "${archive}${suffix}" ]]; then
-    echo "missing archive input ${archive}${suffix}; run package-agent.sh first" >&2
-    exit 1
-  fi
+mkdir -p -- "${OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
+config="$(mktemp)"
+trap 'rm -f -- "${config}"' EXIT
+sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${PACKAGE_ARCH}/g" \
+  "${ROOT}/deploy/package/nfpm.yaml" >"${config}"
+cd "${ROOT}"
+for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
+  [[ "$(rust/target/release/"${binary}" --version)" == "${binary} ${VERSION}" ]]
 done
-
-staging="$(mktemp -d "${TMPDIR:-/tmp}/ocservia-native-package.XXXXXX")"
-cleanup() { rm -rf -- "${staging}"; }
-trap cleanup EXIT INT TERM
-payload="${staging}/payload/usr/share/ocservia-agent"
-mkdir -p -- "${payload}"
-install -m 0644 -- "${archive}" "${archive}.sha256" "${payload}/"
-install -m 0755 -- "${ROOT}/scripts/verify-agent-package.sh" "${payload}/verify-agent-package.sh"
-
-render() {
-  sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${PACKAGE_ARCH}/g" "$1" >"$2"
-  chmod 0755 -- "$2"
-}
-render "${ROOT}/deploy/package/nfpm.yaml" "${staging}/nfpm.yaml"
-render "${ROOT}/deploy/package/postinstall.sh" "${staging}/postinstall.sh"
-render "${ROOT}/deploy/package/preremove.sh" "${staging}/preremove.sh"
-
 deb="${OUTPUT_DIR}/ocservia-agent_${VERSION}-1_${PACKAGE_ARCH}.deb"
 rpm="${OUTPUT_DIR}/ocservia-agent-${VERSION}-1.${rpm_arch}.rpm"
-(cd "${staging}" && SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
-  nfpm package --config nfpm.yaml --packager deb --target "${deb}")
-(cd "${staging}" && SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
-  nfpm package --config nfpm.yaml --packager rpm --target "${rpm}")
+nfpm package --config "${config}" --packager deb --target "${deb}"
+nfpm package --config "${config}" --packager rpm --target "${rpm}"
 test -s "${deb}" && test -s "${rpm}"
 printf '%s\n%s\n' "${deb}" "${rpm}"

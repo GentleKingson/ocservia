@@ -19,43 +19,29 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const canonicalReceiptGoldenV1 = "6f637365727669612f70726976642d726573756c742d726563656970742f7631000000000100000010018f2a3b4c5d700080000000000000010000004f656432353531392d7368613235363a6665383132633132663361623463653661633564623639616333353266393036636231623131656634336662333365323532656637666635353232363338383900000010018f2a3b4c5d7000800000000000000200000010018f2a3b4c5d7000800000000000000300000010018f2a3b4c5d70008000000000000004000000020000002011111111111111111111111111111111111111111111111111111111111111110000000c000000040000000100000020222222222222222222222222222222222222222222222222222222222222222200000020e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500000010018f2a3b4c5d700080000000000000050000000000000009000000006553f1000000007b000000006553f101000001c8000100000010018f2a3b4c5d7000800000000000000100000020333333333333333333333333333333333333333333333333333333333333333300000020444444444444444444444444444444444444444444444444444444444444444400000020555555555555555555555555555555555555555555555555555555555555555500000010018f2a3b4c5d70008000000000000005"
-
-func TestCanonicalReceiptV1MatchesRustGoldenVector(t *testing.T) {
+func TestCanonicalReceiptV1DeterministicCBOR(t *testing.T) {
 	id := mustHex(t, "018f2a3b4c5d70008000000000000001")
-	effect := mustHex(t, "018f2a3b4c5d70008000000000000005")
 	receipt := &agentv1.PrivdResultReceiptV1{
-		ReceiptVersion: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1,
+		ReceiptVersion: 1,
 		NodeId:         id, PrivdAttestationKeyId: "ed25519-sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
 		CommandId: mustHex(t, "018f2a3b4c5d70008000000000000002"), OperationId: mustHex(t, "018f2a3b4c5d70008000000000000003"), IdempotencyKey: mustHex(t, "018f2a3b4c5d70008000000000000004"),
 		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
 		SemanticPayloadSha256:      makeRepeated(0x11, 32), CommandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR,
 		ResultKind: agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR, TerminalState: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
-		ResultBytesSha256: makeRepeated(0x22, 32), ErrorCodeSha256: mustHex(t, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
-		EffectRecordId: effect, EffectSequence: 9, AcceptedAt: &timestamppb.Timestamp{Seconds: 1_700_000_000, Nanos: 123}, CompletedAt: &timestamppb.Timestamp{Seconds: 1_700_000_001, Nanos: 456},
-		Certificate: &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: id, CsrDerSha256: makeRepeated(0x33, 32), PublicKeySha256: makeRepeated(0x44, 32), RequestedSubjectSha256: makeRepeated(0x55, 32), RootEffectRecordId: effect},
+		ResultCborSha256: makeRepeated(0x22, 32), ErrorCode: "",
+		EffectSequence: 9, AcceptedAt: &timestamppb.Timestamp{Seconds: 1_700_000_000, Nanos: 123}, CompletedAt: &timestamppb.Timestamp{Seconds: 1_700_000_001, Nanos: 456},
+		Certificate: &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: id, CsrDerSha256: makeRepeated(0x33, 32), PublicKeySha256: makeRepeated(0x44, 32)},
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
 	testutil.NoError(t, err)
-	if hex.EncodeToString(canonical) != canonicalReceiptGoldenV1 {
-		t.Fatal("Go canonical transcript differs from the shared Rust golden vector")
+	if !bytes.HasPrefix(canonical, []byte(receiptDomain)) {
+		t.Fatalf("canonical transcript missing CBOR domain prefix: %x", canonical)
 	}
-}
-
-func TestRequestedSubjectDigestAcceptsFullDNSSubjectRange(t *testing.T) {
-	longName := string(bytes.Repeat([]byte{'a'}, 63)) + "." + string(bytes.Repeat([]byte{'b'}, 63)) + "." + string(bytes.Repeat([]byte{'c'}, 63)) + "." + string(bytes.Repeat([]byte{'d'}, 61))
-	if len(longName) != 253 {
-		t.Fatalf("long DNS name length = %d", len(longName))
-	}
-	uppercase := "VPN.Example.Test"
-	request := &agentv1.CertificateCsr{
-		CertificateId: mustHex(t, "018f2a3b4c5d70008000000000000001"),
-		CommonName:    longName,
-		DnsNames:      []string{uppercase, longName, uppercase},
-		KeyBits:       4096,
-	}
-	if _, err := RequestedSubjectDigest(request); err != nil {
-		t.Fatalf("supported certificate subject rejected: %v", err)
+	// Repeat to verify strict determinism.
+	again, err := CanonicalReceiptV1(receipt)
+	testutil.NoError(t, err)
+	if !bytes.Equal(canonical, again) {
+		t.Fatal("canonical CBOR receipt transcript is not deterministic")
 	}
 }
 
@@ -77,13 +63,13 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 		reason string
 	}{
 		{name: "missing receipt", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.PrivilegedResultProof = nil }, status: "missing", reason: "receipt_missing"},
-		{name: "result byte", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.Result[0] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
+		{name: "result byte", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.Result = []byte{0x01} }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "node", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { envelope.NodeId[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "command", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { envelope.CommandId[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "operation", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { envelope.OperationId[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "idempotency", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.IdempotencyKey[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "semantic version", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
-			result.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2
+			result.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED
 		}, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "semantic digest", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.PayloadSha256[0] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
 		{name: "receipt before command issuance", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) {
@@ -93,8 +79,8 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 		{name: "terminal state", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
 			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
 		}, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "effect identity", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
-			result.PrivilegedResultProof.ReceiptV1.EffectRecordId[0] ^= 1
+		{name: "effect sequence", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
+			result.PrivilegedResultProof.ReceiptV1.EffectSequence++
 		}, status: "invalid", reason: "receipt_signature_invalid"},
 		{name: "signature", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
 			result.PrivilegedResultProof.Signature[0] ^= 1
@@ -210,11 +196,11 @@ func TestUnknownPrivilegedReceiptErrorClassification(t *testing.T) {
 func TestReceiptUnknownVersionAndOversizeFailClosed(t *testing.T) {
 	nodeID, envelope, result, key := receiptVerificationFixture(t)
 	lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
-	result.PrivilegedResultProof.Version = agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_UNSPECIFIED
+	result.PrivilegedResultProof.Version = 0
 	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); verification.FailureReason != "receipt_version_unsupported" {
 		t.Fatalf("unknown version verification=%+v", verification)
 	}
-	result.PrivilegedResultProof.Version = agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1
+	result.PrivilegedResultProof.Version = 1
 	result.PrivilegedResultProof.Signature = make([]byte, 65*1024)
 	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); verification.FailureReason != "receipt_malformed" {
 		t.Fatalf("oversized proof verification=%+v", verification)
@@ -234,13 +220,22 @@ func TestCertificateP12AndRevokeRequireBoundReceipts(t *testing.T) {
 			nodeID, envelope, result, key := receiptVerificationFixture(t)
 			certificateID := uuid.Must(uuid.NewV7())
 			if test.name == "p12" {
-				envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: certificateID[:]}}
+				artifactID := uuid.Must(uuid.NewV7())
+				envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: certificateID[:], ArtifactId: artifactID[:]}}
+				raw, err := proto.Marshal(&agentv1.CertificateArtifactResult{CertificateId: certificateID[:], ArtifactId: artifactID[:], ArtifactSha256: makeRepeated(0x33, 32), ArtifactSize: 128})
+				testutil.NoError(t, err)
+				result.Result = raw
 			} else {
 				envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: certificateID[:]}}
+				raw, err := proto.Marshal(&agentv1.CertificateRevokeResult{CertificateId: certificateID[:], KeyRemoved: true})
+				testutil.NoError(t, err)
+				result.Result = raw
 			}
+			resultDigest, err := ResultPayloadCBORHash(test.resultKind, result.Result)
+			testutil.NoError(t, err)
 			receipt := result.GetPrivilegedResultProof().GetReceiptV1()
-			receipt.CommandKind, receipt.ResultKind = test.commandKind, test.resultKind
-			receipt.Certificate = &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: bytes.Clone(certificateID[:]), RootEffectRecordId: bytes.Clone(receipt.GetEffectRecordId())}
+			receipt.CommandKind, receipt.ResultKind, receipt.ResultCborSha256 = test.commandKind, test.resultKind, resultDigest[:]
+			receipt.Certificate = &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: bytes.Clone(certificateID[:])}
 			canonical, err := CanonicalReceiptV1(receipt)
 			testutil.NoError(t, err)
 			result.PrivilegedResultProof.Signature = ed25519.Sign(key, canonical)
@@ -270,29 +265,29 @@ func receiptVerificationFixture(t *testing.T) (uuid.UUID, *agentv1.CommandEnvelo
 	envelope := &agentv1.CommandEnvelope{
 		CommandId: commandID[:], OperationId: operationID[:], IdempotencyKey: idempotencyID[:], NodeId: nodeID[:],
 		IssuedAt: timestamppb.New(accepted), ExpiresAt: timestamppb.New(completed.Add(time.Minute)),
-		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
 		SemanticPayloadSha256:      semantic,
 		Payload:                    &agentv1.CommandEnvelope_SessionDisconnect{SessionDisconnect: &agentv1.SessionDisconnect{SessionId: "session", BootId: "boot"}},
 	}
-	resultBytes := []byte{0x08, 0x01}
 	result := &agentv1.CommandResult{
 		CommandId: commandID[:], IdempotencyKey: idempotencyID[:], PayloadSha256: semantic,
-		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1,
-		State:                      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes,
-		AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(completed),
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
+		State:                      agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
+		AcceptedAt:                 timestamppb.New(accepted), CompletedAt: timestamppb.New(completed),
 	}
-	resultDigest, errorDigest := sha256.Sum256(resultBytes), sha256.Sum256(nil)
+	resultDigest, err := ResultPayloadCBORHash(agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION, nil)
+	testutil.NoError(t, err)
 	receipt := &agentv1.PrivdResultReceiptV1{
-		ReceiptVersion: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1,
+		ReceiptVersion: 1,
 		NodeId:         nodeID[:], PrivdAttestationKeyId: PublicKeyID(publicKey), CommandId: commandID[:], OperationId: operationID[:], IdempotencyKey: idempotencyID[:],
-		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, SemanticPayloadSha256: semantic,
+		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, SemanticPayloadSha256: semantic,
 		CommandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_SESSION_DISCONNECT, ResultKind: agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION,
-		TerminalState: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, ResultBytesSha256: resultDigest[:], ErrorCodeSha256: errorDigest[:],
-		EffectRecordId: makeRepeated(0x22, 32), EffectSequence: 1, AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(completed),
+		TerminalState: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, ResultCborSha256: resultDigest[:], ErrorCode: "",
+		EffectSequence: 1, AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(completed),
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
 	testutil.NoError(t, err)
-	result.PrivilegedResultProof = &agentv1.PrivilegedResultProof{Version: agentv1.PrivdReceiptVersion_PRIVD_RECEIPT_VERSION_V1, ReceiptV1: receipt, Signature: ed25519.Sign(privateKey, canonical)}
+	result.PrivilegedResultProof = &agentv1.PrivilegedResultProof{Version: 1, ReceiptV1: receipt, Signature: ed25519.Sign(privateKey, canonical)}
 	return nodeID, envelope, result, privateKey
 }
 

@@ -19,10 +19,11 @@ use ocservia_agent_protocol::{
     UpgradeOperationResult, UpgradeResultList, privd_request, privd_response, read_frame,
     write_frame,
 };
-use ocservia_command_authorization::{CommandAuthorizationV1, ControllerCommandKeyring};
+use ocservia_command_authorization::{
+    CommandAuthorizationV1, ControllerCommandKeyring, VerifiedCommand,
+};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, CommandEnvelope,
-    PrivdReceiptVersion, command_envelope,
+    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, command_envelope,
 };
 use ocservia_ocserv_adapter::{Adapter, AdapterError, AuthorizedEffectDecision};
 use ocservia_privd_attestation::{key_id, sign_upgrade_result_with_key_id};
@@ -42,8 +43,6 @@ use self::validation::{ValidatedRequest, validate_request};
 
 const MAX_CONCURRENT_CLIENTS: usize = 4;
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(30);
-/// Capability every Controller artifact fence binding names (same as the Agent).
-const CONNECTION_FENCING_CAPABILITY: &str = "ocserv.fencing.v2";
 
 /// Privd server configuration.
 #[derive(Clone)]
@@ -248,12 +247,11 @@ async fn dispatch_attested(
         )
         .await
         .unwrap_or_else(|_| deadline_error()),
-        Ok((deadline, ValidatedRequest::Execute(command, claims, accepted_at, owner_epoch))) => {
+        Ok((deadline, ValidatedRequest::Execute(verified, accepted_at, owner_epoch))) => {
             match tokio::time::timeout(
                 deadline,
                 execute_command(
-                    command,
-                    &claims,
+                    &verified,
                     &accepted_at,
                     node_id,
                     endpoint_id,
@@ -273,9 +271,8 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::Reconcile(command, claims))) => {
-            match tokio::time::timeout(deadline, reconcile_command(command, &claims, adapter)).await
-            {
+        Ok((deadline, ValidatedRequest::Reconcile(verified))) => {
+            match tokio::time::timeout(deadline, reconcile_command(&verified, adapter)).await {
                 Ok(mut response) => {
                     response.request_id = request_id;
                     return response;
@@ -283,11 +280,11 @@ async fn dispatch_attested(
                 Err(_) => deadline_error(),
             }
         }
-        Ok((deadline, ValidatedRequest::ArtifactRead(claims, offset, owner_epoch))) => {
+        Ok((deadline, ValidatedRequest::ArtifactRead(claims, session_epoch))) => {
             match tokio::time::timeout(deadline, async {
-                let identity = artifact_identity(&claims, node_id, endpoint_id, owner_epoch);
+                let identity = artifact_identity(&claims, node_id, endpoint_id, session_epoch);
                 adapter.accept_owner_fence(identity.owner_fence)?;
-                adapter.artifact_read(identity, offset).await
+                adapter.artifact_read(identity).await
             })
             .await
             {
@@ -465,7 +462,7 @@ fn read_attested_upgrade_results(
             .map_err(|_| UpgradeStoreError::Unsafe("attestation time overflows milliseconds"))?;
             let proof = sign_upgrade_result_with_key_id(
                 AgentUpgradeResultProof {
-                    version: PrivdReceiptVersion::V1.into(),
+                    version: 1,
                     node_id: node_id.to_vec(),
                     privd_attestation_key_id: attestation_key_id.to_owned(),
                     operation_id: result.operation_id.as_bytes().to_vec(),
@@ -499,8 +496,7 @@ fn read_attested_upgrade_results(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_command(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
+    verified: &VerifiedCommand<'_>,
     accepted_at: &prost_types::Timestamp,
     node_id: &[u8; 16],
     endpoint_id: &[u8; 32],
@@ -510,6 +506,8 @@ async fn execute_command(
     upgrades: &UpgradeScheduler,
     adapter: &Adapter,
 ) -> PrivdResponse {
+    let command = verified.envelope();
+    let claims = verified.claims();
     let owner_fence = owner_fence(node_id, endpoint_id, owner_epoch);
     if let Err(failure) = adapter.accept_owner_fence(owner_fence) {
         return adapter_error_response(failure);
@@ -517,12 +515,7 @@ async fn execute_command(
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
         let identity = authorized_effect(command, claims, binding);
-        // Legacy recovery grants may have renewed an already expired deadline.
-        if identity.retry_if_absent
-            && (fixed_host_effect(command)
-                || command.protocol_version
-                    == ocservia_command_authorization::LEGACY_COMMAND_PROTOCOL_VERSION)
-        {
+        if identity.retry_if_absent && fixed_host_effect(command) {
             return replay_only_response(adapter, identity, owner_fence);
         }
         match adapter.prepare_authorized_effect(identity, owner_fence) {
@@ -557,7 +550,7 @@ async fn execute_command(
                 execute_agent_upgrade(payload, claims, upgrades).await,
             )
         } else {
-            execute_signed_payload(command, claims, adapter).await
+            execute_signed_payload(verified, adapter).await
         };
     let result = finish_operation(operation_name, result);
     if matches!(&result, privd_response::Result::Error(error) if terminal_result_error_code(error).is_none())
@@ -571,12 +564,16 @@ async fn execute_command(
     let Some(binding) = binding.as_ref() else {
         return response_error(ErrorKind::Unavailable, "root effect identity unavailable");
     };
+    let effect_sequence = match adapter.next_receipt_sequence() {
+        Ok(sequence) => sequence,
+        Err(failure) => return adapter_error_response(failure),
+    };
     let Ok(proof) = build_result_proof(
         command,
         claims,
         accepted_at,
         node_id,
-        binding,
+        effect_sequence,
         &result,
         attestation_key,
         attestation_key_id,
@@ -699,13 +696,14 @@ fn upgrade_store_error(failure: &UpgradeStoreError) -> ocservia_ocserv_adapter::
 
 #[allow(clippy::too_many_lines)]
 async fn execute_signed_payload(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
+    verified: &VerifiedCommand<'_>,
     adapter: &Adapter,
 ) -> (
     &'static str,
     Result<privd_response::Result, ocservia_ocserv_adapter::AdapterError>,
 ) {
+    let command = verified.envelope();
+    let claims = verified.claims();
     let effect = adapter_effect(claims);
     match command.payload.as_ref() {
         Some(command_envelope::Payload::SessionDisconnect(payload)) => (
@@ -736,27 +734,27 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        Some(command_envelope::Payload::UserCreate(payload)) => (
-            "user_create",
-            adapter
-                .user_create(
-                    &payload.username,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .key_id,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .ciphertext,
-                    payload.desired_revision,
-                    effect,
-                )
-                .await
-                .map(privd_response::Result::Mutation),
-        ),
+        Some(command_envelope::Payload::UserCreate(payload)) => {
+            let Some(secret) = payload.sealed_password_v1.as_ref() else {
+                return (
+                    "user_create",
+                    Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+                );
+            };
+            (
+                "user_create",
+                adapter
+                    .user_create(
+                        &payload.username,
+                        &secret.key_id,
+                        &secret.ciphertext,
+                        payload.desired_revision,
+                        effect,
+                    )
+                    .await
+                    .map(privd_response::Result::Mutation),
+            )
+        }
         Some(command_envelope::Payload::UserDisable(payload)) => (
             "user_disable",
             adapter
@@ -771,27 +769,27 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        Some(command_envelope::Payload::UserPasswordRotate(payload)) => (
-            "user_password_rotate",
-            adapter
-                .user_password_rotate(
-                    &payload.username,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .key_id,
-                    &payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret")
-                        .ciphertext,
-                    payload.desired_revision,
-                    effect,
-                )
-                .await
-                .map(privd_response::Result::Mutation),
-        ),
+        Some(command_envelope::Payload::UserPasswordRotate(payload)) => {
+            let Some(secret) = payload.sealed_password_v1.as_ref() else {
+                return (
+                    "user_password_rotate",
+                    Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+                );
+            };
+            (
+                "user_password_rotate",
+                adapter
+                    .user_password_rotate(
+                        &payload.username,
+                        &secret.key_id,
+                        &secret.ciphertext,
+                        payload.desired_revision,
+                        effect,
+                    )
+                    .await
+                    .map(privd_response::Result::Mutation),
+            )
+        }
         Some(command_envelope::Payload::GroupApply(payload)) => (
             "group_apply",
             adapter
@@ -804,17 +802,17 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::Mutation),
         ),
-        Some(command_envelope::Payload::CompleteConfigPlan(payload)) => (
+        Some(command_envelope::Payload::CompleteConfigPlan(_)) => (
             "config_plan",
             adapter
-                .complete_config_plan(payload)
+                .complete_config_plan_verified(verified)
                 .await
                 .map(privd_response::Result::ConfigPlan),
         ),
-        Some(command_envelope::Payload::CompleteConfigApply(payload)) => (
+        Some(command_envelope::Payload::CompleteConfigApply(_)) => (
             "config_apply",
             adapter
-                .complete_config_apply(payload, effect)
+                .complete_config_apply_verified(verified, effect)
                 .await
                 .map(privd_response::Result::ConfigApply),
         ),
@@ -837,28 +835,32 @@ async fn execute_signed_payload(
                 .await
                 .map(privd_response::Result::CertificateRevoke),
         ),
-        Some(command_envelope::Payload::CertificateP12(payload)) => (
-            "certificate_p12",
-            adapter
-                .certificate_p12(
-                    &payload.certificate_id,
-                    &payload.artifact_id,
-                    &payload.certificate_chain_pem,
-                    payload
-                        .sealed_password_v1
-                        .as_ref()
-                        .expect("validated secret"),
-                    payload.certificate_version,
-                    &claims.operation_id,
-                    payload
-                        .artifact_expires_at
-                        .as_ref()
-                        .expect("validated expiry")
-                        .seconds,
-                )
-                .await
-                .map(privd_response::Result::CertificateP12),
-        ),
+        Some(command_envelope::Payload::CertificateP12(payload)) => {
+            let (Some(secret), Some(expires_at)) = (
+                payload.sealed_password_v1.as_ref(),
+                payload.artifact_expires_at.as_ref(),
+            ) else {
+                return (
+                    "certificate_p12",
+                    Err(ocservia_ocserv_adapter::AdapterError::InvalidRequest),
+                );
+            };
+            (
+                "certificate_p12",
+                adapter
+                    .certificate_p12(
+                        &payload.certificate_id,
+                        &payload.artifact_id,
+                        &payload.certificate_chain_pem,
+                        secret,
+                        payload.certificate_version,
+                        &claims.operation_id,
+                        expires_at.seconds,
+                    )
+                    .await
+                    .map(privd_response::Result::CertificateP12),
+            )
+        }
         // AgentUpgrade payloads never reach this executor: privd intercepts
         // them in `execute_command` and hands them to the durable scheduler,
         // because the upgrade must survive the Agent/privd restart it causes.
@@ -869,11 +871,9 @@ async fn execute_signed_payload(
     }
 }
 
-async fn reconcile_command(
-    command: &CommandEnvelope,
-    claims: &CommandAuthorizationV1,
-    adapter: &Adapter,
-) -> PrivdResponse {
+async fn reconcile_command(verified: &VerifiedCommand<'_>, adapter: &Adapter) -> PrivdResponse {
+    let command = verified.envelope();
+    let claims = verified.claims();
     let Some(root_binding) = effect_binding(command, claims) else {
         return response_error(ErrorKind::InvalidRequest, "root effect binding unavailable");
     };

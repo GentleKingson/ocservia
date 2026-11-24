@@ -5,8 +5,7 @@ use iroh::{Endpoint, EndpointId, RelayMap, RelayUrl};
 use ocservia_agent_protocol::{PrivdResponse, privd_response};
 use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    EnrollRequest, EnrollResponse, HandshakeResult, SealedSecretPurpose, SealedSecretVersion,
-    SealingKeyDescriptorV1,
+    EnrollRequest, EnrollResponse, HandshakeResult, SealedSecretPurpose, SealingKeyDescriptorV1,
 };
 use rustls_pki_types::pem::PemObject as _;
 use std::env;
@@ -414,7 +413,7 @@ pub(super) fn build_sealing_keys(
             return Err(invalid("password sealing key descriptor invalid"));
         }
         Ok(SealingKeyDescriptorV1 {
-            version: SealedSecretVersion::V1.into(),
+            version: 1,
             purpose: purpose.into(),
             key_id,
             public_key_sha256: hex::decode(digest)
@@ -578,14 +577,9 @@ fn read_relay_token(path: &Path) -> Result<String, io::Error> {
     Ok(token.to_owned())
 }
 
-#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_wrap)]
 const fn libc_o_nofollow() -> i32 {
-    0x20_000
-}
-
-#[cfg(target_os = "macos")]
-const fn libc_o_nofollow() -> i32 {
-    0x100
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, io::Error> {

@@ -260,6 +260,7 @@ try {
           PLAYWRIGHT_BASE_URL: baseURL,
           PLAYWRIGHT_GATEWAY: gateway ? "1" : "",
           PLAYWRIGHT_OUTPUT_DIR: join(directory, "test-results"),
+          PLAYWRIGHT_DISABLE_ARTIFACTS: "1",
         },
       },
     );

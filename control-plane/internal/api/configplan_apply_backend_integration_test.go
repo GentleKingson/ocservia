@@ -22,7 +22,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -68,8 +67,7 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 	certs := certificates.NewBackend(b, ops, nil, nil, nil, signer)
 	s := newTestServer(t, testHTTPConfig(false), b, Modules{Operations: ops, ConfigPlans: configplan.NewBackend(b, ops), Certificates: certs}, Authorization{Authentication: authn})
 	f := applyHTTPFixture{t: t, b: b, owner: owner, s: s, signer: signer, workspace: uuid.Must(uuid.NewV7())}
-	stamp, err := value.FromTime(time.Now().UTC())
-	testutil.NoError(t, err)
+	stamp := time.Now().UTC()
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply HTTP',$2,$3,$4)`, f.workspace, f.workspace.String(), stamp, stamp)
 	login := func() applyHTTPActor {
 		name, password := "apply-"+uuid.NewString(), "a unique long Apply HTTP fixture password"
@@ -143,17 +141,14 @@ func assertApplyHTTPProblem(t *testing.T, w *httptest.ResponseRecorder, status i
 
 func (f applyHTTPFixture) bindWorkspaceAdmin(actor applyHTTPActor, workspaceID uuid.UUID) {
 	f.t.Helper()
-	f.exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, workspaceID, actor.principal.IdentityID, value.Timestamp{Valid: true})
+	f.exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, workspaceID, actor.principal.IdentityID, time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC))
 }
 
 func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	f.t.Helper()
 	node, secretRef := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	at, err := value.FromTime(now)
-	if err != nil {
-		f.t.Fatal(err)
-	}
+	at := now
 	f.bindWorkspaceAdmin(f.requester, f.workspace)
 	f.exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,$3,'active',3,$4,$5)`, node, f.workspace, "apply-"+node.String(), at, at)
 	endpoint := sha256.Sum256(node[:])
@@ -330,7 +325,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			t.Cleanup(func() {
 				g.exec(`UPDATE auth_sessions SET revoked_at=NULL WHERE id=$1`, f.requester.principal.SessionID)
 			})
-			g.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, value.Timestamp{Valid: true}, f.requester.principal.SessionID)
+			g.exec(`UPDATE auth_sessions SET revoked_at=$1 WHERE id=$2`, time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC), f.requester.principal.SessionID)
 			w := g.call("POST", path, body, "revoked-session", f.requester.cookie, nil)
 			assertApplyHTTPProblem(t, w, 401, "unauthenticated")
 			g.unchanged(plan, before)
@@ -353,7 +348,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		f.unchanged(plan, before)
 		f.bindWorkspaceAdmin(f.requester, f.workspace)
 		foreign := uuid.Must(uuid.NewV7())
-		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'foreign',$2,$3,$4)`, foreign, foreign.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
+		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'foreign',$2,$3,$4)`, foreign, foreign.String(), time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC))
 		g := f
 		g.workspace = foreign
 		foreignPlan := g.plan(true)
@@ -375,9 +370,9 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 				plan := f.plan(name != "unvalidated")
 				switch name {
 				case "expired-plan":
-					f.exec(`UPDATE config_plans SET expires_at=$1 WHERE id=$2`, value.Timestamp{Valid: true}, plan.ID)
+					f.exec(`UPDATE config_plans SET expires_at=$1 WHERE id=$2`, time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC), plan.ID)
 				case "stale-revision":
-					f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,1,1,'',$2)`, plan.NodeID, value.Timestamp{Valid: true})
+					f.exec(`INSERT INTO node_config_state(node_id,revision,desired_revision,redacted_config,updated_at) VALUES($1,1,1,'',$2)`, plan.NodeID, time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC))
 				}
 				before := f.counts(plan.NodeID)
 				assertApplyHTTPProblem(t, f.call("POST", "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(), uuid.NewString(), f.requester.cookie, nil), 409, "stale-revision")
@@ -390,7 +385,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 		f.t = t
 		// Keep the audit failure constraint disjoint from earlier successful Applies.
 		f.workspace = uuid.Must(uuid.NewV7())
-		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply rollback',$2,$3,$4)`, f.workspace, f.workspace.String(), value.Timestamp{Valid: true}, value.Timestamp{Valid: true})
+		f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply rollback',$2,$3,$4)`, f.workspace, f.workspace.String(), time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC))
 		plan := f.plan(true)
 
 		path, body, key := "/api/v1/config-plans/"+plan.ID.String()+"/apply", applyHTTPBody(), uuid.NewString()
@@ -503,12 +498,13 @@ func (f applyHTTPFixture) submitted(w *httptest.ResponseRecorder, plan configpla
 		f.t.Fatal(err)
 	}
 	canonical, err := commandauth.CanonicalV1(claims)
-	if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) || claims.ApprovalID != nil || claims.ApprovalRequestSHA256 != nil {
+	if err != nil || !ed25519.Verify(f.signer.PublicKey(), canonical, envelope.GetAuthorization().GetSignature()) {
 		f.t.Fatalf("single-admin command authorization: %+v %v", claims, err)
 	}
 	apply := envelope.GetCompleteConfigApply()
 	candidateHashGot, hashErr := configprofile.Hash(apply.GetCandidate())
-	if planID != plan.ID || node != plan.NodeID || workspace != plan.WorkspaceID || expected != plan.ExpectedRevision || desired != 1 || fmt.Sprintf("%x", candidateHash) != plan.CandidateHash || fmt.Sprintf("%x", previousHash) != plan.CurrentHash || actor != f.requester.principal.IdentityID.String() || session != f.requester.principal.SessionID || reason != "apply reviewed configuration" || request != "baseline-request" || trace != "0123456789abcdef0123456789abcdef" || idempotency != key || apply == nil || hashErr != nil || !bytes.Equal(candidateHashGot[:], candidateHash) || !bytes.Equal(apply.GetCandidateHash(), candidateHash) || !bytes.Equal(apply.GetExpectedCurrentHash(), previousHash) || apply.GetDesiredRevision() != uint64(desired) || !bytes.Equal(envelope.GetNodeId(), node[:]) || !bytes.Equal(envelope.GetCommandId(), command[:]) || envelope.GetActorId() != actor || envelope.GetReason() != reason || !strings.Contains(envelope.GetTraceparent(), trace) {
+	expectedCurrentHash := bytes.Repeat([]byte{0x42}, 32)
+	if planID != plan.ID || node != plan.NodeID || workspace != plan.WorkspaceID || expected != plan.ExpectedRevision || desired != 1 || fmt.Sprintf("%x", candidateHash) != plan.CandidateHash || plan.CurrentHash != "" || !bytes.Equal(previousHash, expectedCurrentHash) || actor != f.requester.principal.IdentityID.String() || session != f.requester.principal.SessionID || reason != "apply reviewed configuration" || request != "baseline-request" || trace != "0123456789abcdef0123456789abcdef" || idempotency != key || apply == nil || hashErr != nil || !bytes.Equal(candidateHashGot[:], candidateHash) || !bytes.Equal(apply.GetCandidateHash(), candidateHash) || !bytes.Equal(apply.GetExpectedCurrentHash(), previousHash) || apply.GetDesiredRevision() != uint64(desired) || !bytes.Equal(envelope.GetNodeId(), node[:]) || !bytes.Equal(envelope.GetCommandId(), command[:]) || envelope.GetActorId() != actor || envelope.GetReason() != reason || !strings.Contains(envelope.GetTraceparent(), trace) {
 		f.t.Fatalf("Apply associations or signed command differ: op=%+v envelope=%v actor=%s session=%s", op, &envelope, actor, session)
 	}
 	return op

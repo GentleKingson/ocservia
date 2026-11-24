@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"google.golang.org/protobuf/proto"
 )
@@ -36,17 +37,17 @@ func (r *recordingOperationCreator) assertLast(t *testing.T, ctx context.Context
 	switch payload := got.Payload.(type) {
 	case operations.ConfigPlanPayload:
 		expected, ok := want.Payload.(operations.ConfigPlanPayload)
-		if !ok || !proto.Equal(payload.CompleteCandidate, expected.CompleteCandidate) {
+		if !ok || !proto.Equal(payload.Candidate.Proto(), expected.Candidate.Proto()) {
 			t.Fatal("Create plan proto fields mismatch")
 		}
-		payload.CompleteCandidate, expected.CompleteCandidate = nil, nil
+		payload.Candidate, expected.Candidate = configprofile.Normalized{}, configprofile.Normalized{}
 		got.Payload, want.Payload = payload, expected
 	case operations.ConfigApplyPayload:
 		expected, ok := want.Payload.(operations.ConfigApplyPayload)
-		if !ok || !proto.Equal(payload.CompleteCandidate, expected.CompleteCandidate) || !proto.Equal(payload.PlanExpiresAt, expected.PlanExpiresAt) {
+		if !ok || !proto.Equal(payload.Candidate.Proto(), expected.Candidate.Proto()) || !proto.Equal(payload.PlanExpiresAt, expected.PlanExpiresAt) {
 			t.Fatal("Create apply proto fields mismatch")
 		}
-		payload.CompleteCandidate, expected.CompleteCandidate = nil, nil
+		payload.Candidate, expected.Candidate = configprofile.Normalized{}, configprofile.Normalized{}
 		payload.PlanExpiresAt, expected.PlanExpiresAt = nil, nil
 		got.Payload, want.Payload = payload, expected
 	}

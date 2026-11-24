@@ -2,8 +2,8 @@ package store
 
 import (
 	"encoding/json"
+	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -14,7 +14,7 @@ type Rollout struct {
 	StopOnFailure                            bool
 	RequestHash                              []byte
 	Excluded                                 []json.RawMessage
-	CreatedAt, UpdatedAt                     value.Timestamp
+	CreatedAt, UpdatedAt                     time.Time
 }
 
 type RolloutNode struct {
@@ -26,7 +26,7 @@ type RolloutNode struct {
 	FailureCode     string
 	DispatchVersion int64
 	DispatchAttempt int
-	DispatchLease   value.Timestamp
+	DispatchLease   *time.Time
 }
 
 type PendingRollout struct {
@@ -35,7 +35,7 @@ type PendingRollout struct {
 	BatchSize                                int
 	RequestHash                              []byte
 	Exclusions                               json.RawMessage
-	CreatedAt                                value.Timestamp
+	CreatedAt                                time.Time
 }
 
 type RolloutTerminalNode struct {

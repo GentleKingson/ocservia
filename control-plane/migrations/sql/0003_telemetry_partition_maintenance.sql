@@ -1,3 +1,4 @@
+-- +goose Up
 -- Remove the DEFAULT partition from the routing table while retaining its historical rows.
 ALTER TABLE public.telemetry_samples DETACH PARTITION public.telemetry_samples_default;
 GRANT SELECT ON public.telemetry_samples_default TO ocservia_app;
@@ -9,6 +10,7 @@ CREATE TABLE public.telemetry_partition_retirements (
     relation_oid regclass NOT NULL UNIQUE
 );
 
+-- +goose StatementBegin
 CREATE FUNCTION public.telemetry_ensure_upcoming_partitions() RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -33,6 +35,7 @@ BEGIN
     END LOOP;
 END;
 $$;
+-- +goose StatementEnd
 REVOKE ALL ON FUNCTION public.telemetry_ensure_upcoming_partitions() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.telemetry_ensure_upcoming_partitions() TO ocservia_app;
 
@@ -44,6 +47,7 @@ CREATE TABLE public.telemetry_rollup_queue (
 );
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.telemetry_rollup_queue TO ocservia_app;
 
+-- +goose StatementBegin
 CREATE FUNCTION public.telemetry_queue_rollups() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
@@ -57,6 +61,7 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+-- +goose StatementEnd
 CREATE TRIGGER telemetry_queue_rollups AFTER INSERT ON public.telemetry_samples
     REFERENCING NEW TABLE AS inserted_samples FOR EACH STATEMENT
     EXECUTE FUNCTION public.telemetry_queue_rollups();

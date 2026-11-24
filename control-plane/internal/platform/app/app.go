@@ -12,7 +12,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/connection"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
@@ -50,12 +49,33 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger, access
 		return err
 	}
 	defer conn.Close()
-	backend := conn.Store
-	auditManager, err := initializeDatabase(ctx, conn, cfg, logger)
-	if err != nil || auditManager == nil {
+	if cfg.MigrateOnly || cfg.ProvisionWorkspace || cfg.BootstrapLocalAdmin {
+		_, err := initializeDatabase(ctx, conn, cfg, logger)
 		return err
 	}
-	return runController(ctx, cfg, build, backend, auditManager, logger, accessLogger, shutdownDeadline)
+	monitorLock, releaseLock, err := conn.AcquireControllerLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
+	runCtx, stop := context.WithCancel(ctx)
+	lockResult := make(chan error, 1)
+	go func() {
+		err := monitorLock(runCtx)
+		if err != nil {
+			stop()
+		}
+		lockResult <- err
+	}()
+	auditManager, runErr := initializeDatabase(runCtx, conn, cfg, logger)
+	if runErr == nil {
+		runErr = runController(runCtx, cfg, build, conn.Store, auditManager, logger, accessLogger, shutdownDeadline)
+	}
+	stop()
+	if lockErr := <-lockResult; lockErr != nil {
+		return errors.Join(lockErr, failureCause(runErr))
+	}
+	return runErr
 }
 
 func runController(ctx context.Context, cfg config.Config, build BuildInfo, backend database.Backend, auditManager *audit.Manager, logger, accessLogger *slog.Logger, shutdownDeadline func() time.Time) (runErr error) {
@@ -103,13 +123,13 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		}
 	}
 	operationService.EnableReleaseCatalog(releaseCatalog)
-	eventService, fenceExecutor, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
+	eventService, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
 	if err != nil {
 		return err
 	}
 	telemetryService := telemetry.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
-	userStateService := userstate.NewWithSignerBackend(backend, commandSigner)
+	userStateService := userstate.NewWithOperationsBackend(backend, commandSigner, operationService)
 	userOperationsService := useroperations.NewWithConcurrencyBackend(backend, userStateService, cfg.UserOperationConcurrency)
 	if cfg.ControllerEndpointID != "" {
 		controlTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
@@ -129,15 +149,6 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	} else {
 		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
 	}
-	certificateService.EnableOwnerFencing(fenceExecutor)
-	identity, identityErr := coordination.NewIdentity()
-	if identityErr != nil {
-		return fmt.Errorf("mint scheduler identity: %w", identityErr)
-	}
-	// The leadership lease spans the whole maintenance session and is
-	// renewed in the background; losing renewal cancels the session
-	// context, which aborts fenced transactions before they can commit.
-	leader := coordination.NewRunnerBackend(backend, identity, 15*time.Second, 5*time.Second, logger)
 
 	history, err := historyretention.New(backend, cfg.HistoryRetention)
 	if err != nil {
@@ -156,15 +167,10 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 			return auditManager.CompactDetails(ctx, cfg.HistoryRetention.AuditDays)
 		},
 	}
-	if cfg.TestSchedulerEvidence {
-		work.evidence = func(ctx context.Context, session *coordination.Session) error {
-			return coordination.RecordMaintenanceCompletion(ctx, backend, session)
-		}
-	}
 	life.start("run telemetry maintenance", func(ctx context.Context) error {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		return runScheduler(ctx, leader, ticker.C, work, cfg.UserOperationConcurrency, logger)
+		return runScheduler(ctx, ticker.C, work, cfg.UserOperationConcurrency, logger)
 	})
 
 	modules := api.Modules{
@@ -177,7 +183,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		if publicKeySigner != nil {
 			modules.Enrollment.EnableUserPasswordPublicKeys(publicKeySigner)
 		}
-		modules.Transport, modules.OwnerFencing = controlTransport, fenceExecutor
+		modules.Transport = controlTransport
 	}
 	server, err := newHTTPServer(life, cfg, build, backend, auditManager, logger, modules)
 	if err != nil {

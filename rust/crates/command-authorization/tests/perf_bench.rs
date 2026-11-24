@@ -5,8 +5,7 @@ use std::time::Instant;
 use ed25519_dalek::SigningKey;
 use ocservia_command_authorization::{ControllerCommandKeyring, semantic_payload_hash_v2};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CertificateP12, CommandEnvelope, SealedSecretPurpose, SealedSecretV1, SealedSecretVersion,
-    command_envelope,
+    CertificateP12, CommandEnvelope, SealedSecretPurpose, SealedSecretV1, command_envelope,
 };
 
 #[test]
@@ -24,7 +23,7 @@ fn perf_semantic_payload_hash_and_keyring_clone() {
             certificate_chain_pem: vec![b'A'; 128 * 1024],
             artifact_id: vec![6; 16],
             sealed_password_v1: Some(SealedSecretV1 {
-                version: SealedSecretVersion::V1 as i32,
+                version: 1,
                 purpose: SealedSecretPurpose::CertificateP12Password as i32,
                 key_id: "seal-key-1".to_owned(),
                 ciphertext: vec![7; 64],
@@ -34,7 +33,6 @@ fn perf_semantic_payload_hash_and_keyring_clone() {
                 seconds: 1_800_000_000,
                 nanos: 0,
             }),
-            ..Default::default()
         })),
         ..Default::default()
     };

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -18,7 +19,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -41,15 +41,16 @@ type Config struct {
 }
 
 type Service struct {
-	backend             database.Backend
-	localEnabled        bool
-	aead                cipher.AEAD
-	accountLogKey       []byte
-	sessionTTL          time.Duration
-	breakGlassEnabled   bool
-	breakGlassTokenHash []byte
-	now                 func() time.Time
-	random              io.Reader
+	backend                     database.Backend
+	localEnabled                bool
+	aead                        cipher.AEAD
+	accountLogKey               []byte
+	sessionTTL                  time.Duration
+	breakGlassEnabled           bool
+	breakGlassTokenHash         []byte
+	legacyBreakGlassFingerprint [sha256.Size]byte
+	now                         func() time.Time
+	random                      io.Reader
 }
 
 type Principal struct {
@@ -86,9 +87,11 @@ func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
 		aead:                aead,
 		sessionTTL:          cfg.SessionTTL,
 		breakGlassEnabled:   cfg.BreakGlassEnabled,
-		breakGlassTokenHash: cfg.BreakGlassTokenHash,
-		now:                 func() time.Time { return time.Now().UTC() },
-		random:              rand.Reader,
+		breakGlassTokenHash: bytes.Clone(cfg.BreakGlassTokenHash),
+		// Preserve rotation records written before the single-hash format.
+		legacyBreakGlassFingerprint: sha256.Sum256(cfg.BreakGlassTokenHash),
+		now:                         func() time.Time { return time.Now().UTC() },
+		random:                      rand.Reader,
 	}, nil
 }
 
@@ -115,17 +118,11 @@ func (s *Service) Authenticate(ctx context.Context, cookie *http.Cookie) (Princi
 		}
 		principal.Issuer, principal.Subject, principal.BreakGlass = session.Issuer, session.Subject, session.BreakGlass
 		principal.ExpiresAt = envelope.ExpiresAt
-		if !session.ExpiresAt.Valid {
+		if session.ExpiresAt.IsZero() {
 			return ErrUnauthenticated
 		}
-		if session.ExpiresAt.Micros != value.PositiveInfinity {
-			expires, err := session.ExpiresAt.Time()
-			if err != nil {
-				return err
-			}
-			if expires.Before(principal.ExpiresAt) {
-				principal.ExpiresAt = expires
-			}
+		if session.ExpiresAt.Before(principal.ExpiresAt) {
+			principal.ExpiresAt = session.ExpiresAt
 		}
 		return nil
 	})
@@ -161,12 +158,11 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 	if !s.ValidBreakGlassToken(token) {
 		return nil, Principal{}, ErrUnauthenticated
 	}
-	fingerprint := sha256.Sum256(s.breakGlassTokenHash)
 	identityID := uuid.Must(uuid.NewV7())
 	sessionID := uuid.Must(uuid.NewV7())
 	var expires time.Time
 	err := s.withAuthentication(ctx, func(tx database.Tx, store authstore.Store) error {
-		used, err := store.BreakGlassUsed(ctx, fingerprint[:])
+		used, err := store.BreakGlassUsed(ctx, s.breakGlassTokenHash, s.legacyBreakGlassFingerprint[:])
 		if err != nil {
 			return err
 		}
@@ -182,7 +178,7 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 		if err = store.InsertSession(ctx, sessionID, identityID, expires, true, now); err != nil {
 			return err
 		}
-		if err = store.RecordBreakGlass(ctx, fingerprint[:], identityID, sessionID, uuid.Must(uuid.NewV7()), now); err != nil {
+		if err = store.RecordBreakGlass(ctx, s.breakGlassTokenHash, identityID, sessionID, uuid.Must(uuid.NewV7()), now); err != nil {
 			return err
 		}
 		workspaces, err := store.Workspaces(ctx)

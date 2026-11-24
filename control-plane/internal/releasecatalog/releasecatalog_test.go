@@ -18,24 +18,31 @@ func writeManifest(t *testing.T, contents string) string {
 
 func TestLoadAcceptsExactReleaseIdentities(t *testing.T) {
 	path := writeManifest(t, `{"releases":[
-		{"version":"0.2.0","architecture":"amd64","package_sha256":"`+digestHex("a")+`"},
-		{"version":"0.2.0","architecture":"arm64","package_sha256":"`+digestHex("b")+`"}
+		{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"`+digestHex("a")+`"},
+		{"version":"0.2.0","architecture":"amd64","package_format":"rpm","package_sha256":"`+digestHex("c")+`"},
+        {"version":"0.2.0","architecture":"arm64","package_format":"deb","package_sha256":"`+digestHex("b")+`"}
 	]}`)
 	catalog, err := Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	digest, ok := catalog.Lookup("0.2.0", "amd64")
+	digest, ok := catalog.Lookup("0.2.0", "amd64", "ubuntu")
 	if !ok || digest != digestValue("a") {
 		t.Fatalf("amd64 lookup mismatch: %v %v", digest, ok)
 	}
-	if _, ok := catalog.Lookup("0.2.0", "arm64"); !ok {
+	if _, ok := catalog.Lookup("0.2.0", "arm64", "debian"); !ok {
 		t.Fatal("arm64 release missing")
 	}
-	if _, ok := catalog.Lookup("0.3.0", "amd64"); ok {
+	if digest, ok := catalog.Lookup("0.2.0", "amd64", "rocky"); !ok || digest != digestValue("c") {
+		t.Fatal("wrong RPM for amd64 Rocky Linux")
+	}
+	if _, ok := catalog.Lookup("0.2.0", "amd64", "unknown"); ok {
+		t.Fatal("unknown package format resolved")
+	}
+	if _, ok := catalog.Lookup("0.3.0", "amd64", "debian"); ok {
 		t.Fatal("unreleased version must not resolve")
 	}
-	if _, ok := catalog.Lookup("0.2.0", "riscv64"); ok {
+	if _, ok := catalog.Lookup("0.2.0", "riscv64", "debian"); ok {
 		t.Fatal("unknown architecture must not resolve")
 	}
 }
@@ -44,13 +51,13 @@ func TestLoadFailsClosed(t *testing.T) {
 	cases := map[string]string{
 		"missing file":    "",
 		"empty releases":  `{"releases":[]}`,
-		"unknown field":   `{"releases":[{"version":"0.2.0","architecture":"amd64","package_sha256":"` + digestHex("a") + `"}],"extra":1}`,
-		"bad version":     `{"releases":[{"version":"latest","architecture":"amd64","package_sha256":"` + digestHex("a") + `"}]}`,
-		"bad arch":        `{"releases":[{"version":"0.2.0","architecture":"x86","package_sha256":"` + digestHex("a") + `"}]}`,
-		"short digest":    `{"releases":[{"version":"0.2.0","architecture":"amd64","package_sha256":"abcd"}]}`,
-		"uppercase hash":  `{"releases":[{"version":"0.2.0","architecture":"amd64","package_sha256":"` + digestHexUpper("a") + `"}]}`,
-		"duplicate pair":  `{"releases":[{"version":"0.2.0","architecture":"amd64","package_sha256":"` + digestHex("a") + `"},{"version":"0.2.0","architecture":"amd64","package_sha256":"` + digestHex("b") + `"}]}`,
-		"trailing rocket": `{"releases":[{"version":"0.2.0","architecture":"amd64","package_sha256":"` + digestHex("a") + `"}]} trailing`,
+		"unknown field":   `{"releases":[{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"` + digestHex("a") + `"}],"extra":1}`,
+		"bad version":     `{"releases":[{"version":"latest","architecture":"amd64","package_format":"deb","package_sha256":"` + digestHex("a") + `"}]}`,
+		"bad arch":        `{"releases":[{"version":"0.2.0","architecture":"x86","package_format":"deb","package_sha256":"` + digestHex("a") + `"}]}`,
+		"short digest":    `{"releases":[{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"abcd"}]}`,
+		"uppercase hash":  `{"releases":[{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"` + digestHexUpper("a") + `"}]}`,
+		"duplicate pair":  `{"releases":[{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"` + digestHex("a") + `"},{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"` + digestHex("b") + `"}]}`,
+		"trailing rocket": `{"releases":[{"version":"0.2.0","architecture":"amd64","package_format":"deb","package_sha256":"` + digestHex("a") + `"}]} trailing`,
 	}
 	for name, contents := range cases {
 		t.Run(name, func(t *testing.T) {

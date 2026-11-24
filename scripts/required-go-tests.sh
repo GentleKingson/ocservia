@@ -43,7 +43,7 @@ if [[ "${group}" == database-* ]]; then
   : "${OCSERV_TEST_DATABASE_URL:?database acceptance requires a runtime connection}"
   : "${OCSERV_TEST_OWNER_DATABASE_URL:?database acceptance requires an owner connection}"
 fi
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/required-go-tests-XXXXXX")"
+tmp="$(private_go_tmpdir required-go-tests)"
 result="${tmp}/results.json"
 export RESULT_FILE="${result}"
 # Include testing.T.TempDir fixtures (notably bootstrap Secret files) in cleanup

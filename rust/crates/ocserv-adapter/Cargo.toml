@@ -8,7 +8,9 @@ publish = false
 
 [dependencies]
 hex.workspace = true
+hmac.workspace = true
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol" }
+ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization" }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 rand.workspace = true
 rusqlite.workspace = true
@@ -18,6 +20,7 @@ serde.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 uuid.workspace = true
+x509-parser = "=0.18.1"
 zeroize.workspace = true
 
 [dev-dependencies]

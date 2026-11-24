@@ -101,7 +101,6 @@ case "${platform}" in
     rust_platform="aarch64-apple-darwin"
     ruff_platform="aarch64-apple-darwin"
     buf_platform="Darwin-arm64"
-    protoc_platform="osx-aarch_64"
     gitleaks_platform="darwin_arm64"
     oasdiff_platform="darwin_all"
     cargo_audit_platform="aarch64-apple-darwin"
@@ -116,7 +115,6 @@ case "${platform}" in
     rust_platform="x86_64-unknown-linux-gnu"
     ruff_platform="x86_64-unknown-linux-gnu"
     buf_platform="Linux-x86_64"
-    protoc_platform="linux-x86_64"
     gitleaks_platform="linux_x64"
     oasdiff_platform="linux_amd64"
     cargo_audit_platform="x86_64-unknown-linux-gnu"
@@ -131,7 +129,6 @@ case "${platform}" in
     rust_platform="aarch64-unknown-linux-gnu"
     ruff_platform="aarch64-unknown-linux-gnu"
     buf_platform="Linux-aarch64"
-    protoc_platform="linux-aarch_64"
     gitleaks_platform="linux_arm64"
     oasdiff_platform="linux_arm64"
     cargo_audit_platform="aarch64-unknown-linux-gnu"
@@ -246,29 +243,6 @@ install_ruff() {
   [[ "$(ruff --version)" == "ruff $(version ruff)" ]]
 }
 
-install_protoc() {
-  local artifact archive
-  artifact="protoc-$(version protobuf)-${protoc_platform}.zip"
-  if ! version_output_equals "libprotoc $(version protobuf)" "${TOOLS}/protoc/bin/protoc" \
-    "${TOOLS}/protoc/bin/protoc" --version; then
-    archive="$(download "https://github.com/protocolbuffers/protobuf/releases/download/v$(version protobuf)/${artifact}" "${artifact}")"
-    rm -rf "${TOOLS}/protoc"
-    mkdir -p "${TOOLS}/protoc"
-    unzip -q "${archive}" -d "${TOOLS}/protoc"
-  fi
-  [[ "$(protoc --version)" == "libprotoc $(version protobuf)" ]]
-}
-
-install_openapi_generator() {
-  local artifact jar
-  artifact="openapi-generator-cli-$(version openapi_generator).jar"
-  if [[ ! -f "${TOOLS}/${artifact}" ]]; then
-    jar="$(download "https://github.com/OpenAPITools/openapi-generator/releases/download/v$(version openapi_generator)/${artifact}" "${artifact}")"
-    install -m 0644 "${jar}" "${TOOLS}/${artifact}"
-  fi
-  verify_sha256 "${TOOLS}/${artifact}" "$(checksum "${artifact}")"
-}
-
 install_gitleaks() {
   local artifact archive
   artifact="gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz"
@@ -284,23 +258,25 @@ install_gitleaks() {
 install_syft() {
   local artifact archive
   artifact="syft_$(version syft)_${syft_platform}.tar.gz"
-  if ! version_output_contains "$(version syft)" "${TOOLS}/bin/syft" --version; then
+  if ! version_output_contains "$(version syft)" "${TOOLS}/bin/syft" \
+    "${TOOLS}/bin/syft" --version; then
     archive="$(download "https://github.com/anchore/syft/releases/download/v$(version syft)/${artifact}" "${artifact}")"
     tar -xzf "${archive}" -C "${TOOLS}/bin" syft
     chmod 0755 "${TOOLS}/bin/syft"
   fi
-  "${TOOLS}/bin/syft" --version >/dev/null
+  [[ "$("${TOOLS}/bin/syft" --version)" == *"$(version syft)"* ]]
 }
 
 install_grype() {
   local artifact archive
   artifact="grype_$(version grype)_${grype_platform}.tar.gz"
-  if ! version_output_contains "$(version grype)" "${TOOLS}/bin/grype" --version; then
+  if ! version_output_contains "$(version grype)" "${TOOLS}/bin/grype" \
+    "${TOOLS}/bin/grype" --version; then
     archive="$(download "https://github.com/anchore/grype/releases/download/v$(version grype)/${artifact}" "${artifact}")"
     tar -xzf "${archive}" -C "${TOOLS}/bin" grype
     chmod 0755 "${TOOLS}/bin/grype"
   fi
-  "${TOOLS}/bin/grype" --version >/dev/null
+  [[ "$("${TOOLS}/bin/grype" --version)" == *"$(version grype)"* ]]
 }
 
 install_oasdiff() {
@@ -322,6 +298,18 @@ install_govulncheck() {
       "golang.org/x/vuln/cmd/govulncheck@v$(version govulncheck)"
   fi
   [[ "$(govulncheck -version 2>&1)" == *"v$(version govulncheck)"* ]]
+}
+
+install_go_licenses() {
+  local expected actual
+  expected="v$(version go_licenses)"
+  actual="$(go version -m "${TOOLS}/bin/go-licenses" 2>/dev/null | awk '$1 == "mod" { print $3 }' || true)"
+  if [[ "${actual}" != "${expected}" ]]; then
+    GOBIN="${TOOLS}/bin" go install \
+      "github.com/google/go-licenses/v2@${expected}"
+  fi
+  actual="$(go version -m "${TOOLS}/bin/go-licenses" 2>/dev/null | awk '$1 == "mod" { print $3 }' || true)"
+  [[ "${actual}" == "${expected}" ]]
 }
 
 install_cargo_audit() {
@@ -366,12 +354,12 @@ install_nfpm() {
 
 install_contract_tools() {
   install_buf
-  install_openapi_generator
   install_oasdiff
 }
 
 install_go_quality_tools() {
   install_govulncheck
+  install_go_licenses
 }
 
 install_rust_quality_tools() {
@@ -391,14 +379,6 @@ verify_host_command() {
   }
 }
 
-verify_java() {
-  verify_host_command java
-  java -version >/dev/null 2>&1 || {
-    echo "Java 17 or newer is required to run OpenAPI Generator" >&2
-    exit 1
-  }
-}
-
 # shellcheck source=scripts/env.sh
 # shellcheck disable=SC1091
 source "${ROOT}/scripts/env.sh"
@@ -412,11 +392,9 @@ case "${PROFILE}" in
     install_npm
     install_rust
     install_contract_tools
-    install_protoc
     install_gitleaks
     install_go_quality_tools
     install_rust_quality_tools
-    verify_java
     verify_host_command jq
     verify_host_command shellcheck
     install_ruff
@@ -431,7 +409,6 @@ case "${PROFILE}" in
     install_node
     install_npm
     install_contract_tools
-    verify_java
     install_web_dependencies
     ;;
   secret-scan)
@@ -446,6 +423,7 @@ case "${PROFILE}" in
   go-security)
     install_go
     install_govulncheck
+    install_go_licenses
     ;;
   rust-basic)
     install_rust

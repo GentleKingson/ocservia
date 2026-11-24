@@ -412,6 +412,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -562,6 +589,12 @@ name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+
+[[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-common"
@@ -738,6 +771,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
+ "subtle",
 ]
 
 [[package]]
@@ -901,9 +935,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1116,6 +1150,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1150,6 +1195,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.7",
+]
 
 [[package]]
 name = "http"
@@ -1452,6 +1506,8 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 [[package]]
 name = "iroh"
 version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a11e776f1bf36f140e465133ff4108e46bd37a3d10ecdf5b1ea8dfb3bd35a7d2"
 dependencies = [
  "axum",
  "backon",
@@ -2385,13 +2441,25 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "iroh",
+ "ocservia-canonical-cbor",
  "ocservia-contracts",
  "prost",
  "prost-types",
  "rustix",
+ "serde",
  "sha2 0.10.9",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "ocservia-canonical-cbor"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "hex",
+ "serde",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2400,9 +2468,11 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "ocservia-canonical-cbor",
  "ocservia-contracts",
  "prost-types",
  "rustix",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -2419,8 +2489,10 @@ dependencies = [
 name = "ocservia-contracts"
 version = "0.1.0"
 dependencies = [
+ "ocservia-canonical-cbor",
  "prost",
  "prost-types",
+ "serde",
  "serde_json",
  "tonic",
  "tonic-prost",
@@ -2441,7 +2513,9 @@ name = "ocservia-ocserv-adapter"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "hmac",
  "ocservia-agent-protocol",
+ "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-test-support",
  "rand",
@@ -2452,6 +2526,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "uuid",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -2488,10 +2563,13 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "ocservia-canonical-cbor",
  "ocservia-contracts",
+ "prost",
  "prost-types",
  "rand",
  "rustix",
+ "serde",
  "sha2 0.10.9",
 ]
 
@@ -2514,6 +2592,7 @@ dependencies = [
  "ocservia-command-authorization",
  "ocservia-contracts",
  "prost-types",
+ "rustix",
  "uuid",
 ]
 
@@ -2537,7 +2616,6 @@ dependencies = [
  "prost-types",
  "rustix",
  "rustls-pki-types",
- "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -2554,6 +2632,7 @@ name = "ocservia-transportd-stub"
 version = "0.1.0"
 dependencies = [
  "ocservia-contracts",
+ "ocservia-test-support",
  "prost",
  "prost-types",
  "rustix",
@@ -2571,7 +2650,6 @@ name = "ocservia-upgrader"
 version = "0.1.0"
 dependencies = [
  "hex",
- "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-observability",
  "rustix",
@@ -4054,9 +4132,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.22"
+version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
+checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "matchers",
  "nu-ansi-term",
@@ -4121,9 +4199,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	"github.com/google/uuid"
@@ -35,7 +34,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	username, password := "read-"+uuid.NewString(), "a long Controller reader test password"
 	identity, err := service.CreateLocalCredential(ctx, username, password)
 	testutil.NoError(t, err)
-	at, _ := value.FromTime(time.Now().UTC())
+	at := time.Now().UTC()
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
 	config := testHTTPConfig(false)
 	config.LocalSimulator, config.DevAuthToken = true, "read-backend-development-token-32-characters"
@@ -119,9 +118,8 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	get("/api/v1/audit/events", other, cookie, http.StatusForbidden)
 	get("/api/v1/audit/events?page_size=201", workspace, cookie, http.StatusBadRequest)
 
-	// Legacy rows deliberately exercise the reader's complete timestamp domain,
-	// not authenticated audit-chain creation or verification.
-	stamps := []value.Timestamp{{Micros: value.NegativeInfinity, Valid: true}, {Micros: value.EndTimestamp - 1, Valid: true}, {Micros: value.PositiveInfinity, Valid: true}}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	stamps := []time.Time{base.Add(-2 * time.Hour), base.Add(-time.Hour), base}
 	var auditIDs []uuid.UUID
 	for _, stamp := range stamps {
 		id := uuid.Must(uuid.NewV7())
@@ -138,11 +136,11 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	}
 	for i, item := range page.Items {
 		var id uuid.UUID
-		var stamp value.Timestamp
+		var stamp time.Time
 		if err := json.Unmarshal(item["id"], &id); err != nil || id != auditIDs[2-i] {
 			t.Fatalf("audit order/scope: %s %v", item["id"], err)
 		}
-		if err := json.Unmarshal(item["occurred_at"], &stamp); err != nil || stamp != stamps[2-i] {
+		if err := json.Unmarshal(item["occurred_at"], &stamp); err != nil || !stamp.Equal(stamps[2-i]) {
 			t.Fatalf("audit time: %s %v", item["occurred_at"], err)
 		}
 		for _, field := range []string{"resource_id", "node_id", "trace_id", "command_id", "reason", "error_type"} {
@@ -169,8 +167,8 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &events); err != nil || len(events.Items) != 1 || events.Items[0].NodeID != node.String() || events.Items[0].Type != "disconnected" {
 		t.Fatalf("offline event API: %s %v", w.Body, err)
 	}
-	if _, err := events.Items[0].OccurredAt.Time(); err != nil {
-		t.Fatal("non-finite maintenance event", err)
+	if events.Items[0].OccurredAt.IsZero() {
+		t.Fatal("missing maintenance event time")
 	}
 	w = get("/api/v1/development/runtime", uuid.Nil, nil, http.StatusOK)
 	var metrics struct {

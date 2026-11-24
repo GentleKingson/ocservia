@@ -17,15 +17,15 @@ func TestNewPasswordPolicy(t *testing.T) {
 		valid          bool
 	}{
 		{"single", "x", false},
-		{"fourteen", "aB7!dE9?gH2#jK", false},
-		{"fifteen", "aB7!dE9?gH2#jK5", true},
-		{"unicode-short", strings.Repeat("\u754c", 14), false},
-		{"unicode-fifteen", strings.Repeat("\u754c", 15), true},
+		{"seven", "nA6/X2k", false},
+		{"eight", "nA6/X2kZ", true},
+		{"unicode-short", strings.Repeat("\u754c", 7), false},
+		{"unicode-eight", strings.Repeat("\u754c", 8), true},
 		{"spaces", "  a spacious password  ", true},
 		{"long", strings.Repeat("long phrase ", 60), true},
 		{"byte-limit", strings.Repeat("\u754c", 341) + "x", true},
 		{"over-byte-limit", strings.Repeat("\u754c", 342), false},
-		{"invalid-utf8", strings.Repeat("x", 15) + "\xff", false},
+		{"invalid-utf8", strings.Repeat("x", 8) + "\xff", false},
 		{"common-long", "12345678901234567890", false},
 		{"common-case", "ManchesterUnited", false},
 		{"service", "OcserviaPassword", false},
@@ -69,7 +69,7 @@ func TestPasswordWriteEntrypointsRejectBeforeDatabase(t *testing.T) {
 	s := &Service{localEnabled: true}
 	ctx := context.Background()
 	id := uuid.Must(uuid.NewV7())
-	for _, password := range []string{"x", "12345678901234567890", "ocserviapassword"} {
+	for _, password := range []string{"x", "nA6/X2k", "password", "12345678901234567890", "ocserviapassword"} {
 		calls := []func() (uuid.UUID, error){
 			func() (uuid.UUID, error) { return s.CreateLocalCredential(ctx, "alice", password) },
 			func() (uuid.UUID, error) {

@@ -6,21 +6,21 @@
 )]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use ocservia_command_authorization::{
-    COMMAND_PROTOCOL_VERSION, ConnectionFenceClaimsV2, ControllerCommandKeyring,
-    FENCE_SIGNATURE_VERSION_ED25519_V1, FenceBindingClaimsV2, canonical_connection_fence_v2,
-    canonical_fence_binding_v2, canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2,
+    COMMAND_PROTOCOL_VERSION, ControllerCommandKeyring, SessionGrantClaimsV1,
+    canonical_session_grant_v1, canonical_v1, claims_from_envelope_v1, semantic_payload_hash_v2,
     verification_key_id,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandAuthorizationProof, CommandAuthorizationVersion, CommandDeliveryMode, CommandEnvelope,
-    ConnectionFenceV2, FenceBindingV2, FenceOperationKind, FenceSignatureVersion,
-    SemanticPayloadHashVersion, command_envelope,
+    CommandAuthorizationProof, CommandDeliveryMode, CommandEnvelope, SemanticPayloadHashVersion,
+    SessionGrantV1, command_envelope,
 };
 use prost_types::Timestamp;
 use uuid::Uuid;
@@ -74,198 +74,48 @@ pub fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-#[derive(Clone, Debug)]
-pub struct FenceSpec {
-    pub fence_id: [u8; 16],
-    pub node_id: [u8; 16],
-    pub endpoint_id: [u8; 32],
-    pub owner_instance_id: [u8; 16],
-    pub owner_incarnation: u64,
-    pub owner_epoch: u64,
-    pub connection_id: [u8; 16],
-    pub authorization_revision: u64,
-    pub capabilities: Vec<String>,
-    pub lease_until: (i64, u32),
-    pub issued_at: (i64, u32),
-    pub expires_at: (i64, u32),
-}
-
-impl FenceSpec {
-    pub fn new(node_id: [u8; 16], endpoint_id: [u8; 32], owner_epoch: u64) -> Self {
-        Self {
-            fence_id: [1; 16],
-            node_id,
-            endpoint_id,
-            owner_instance_id: [2; 16],
-            owner_incarnation: 1,
-            owner_epoch,
-            connection_id: [3; 16],
-            authorization_revision: 1,
-            capabilities: vec!["synthetic.noop".to_owned()],
-            lease_until: (1_700_000_200, 0),
-            issued_at: (1_700_000_000, 0),
-            expires_at: (1_700_000_300, 0),
-        }
-    }
-
-    pub fn authority(mut self, revision: u64) -> Self {
-        self.authorization_revision = revision;
-        self
-    }
-
-    pub fn capabilities<I, S>(mut self, caps: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.capabilities = caps.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn lease(mut self, seconds: i64, nanos: u32) -> Self {
-        self.lease_until = (seconds, nanos);
-        self
-    }
-
-    pub fn issued(mut self, seconds: i64, nanos: u32) -> Self {
-        self.issued_at = (seconds, nanos);
-        self
-    }
-
-    pub fn expires(mut self, seconds: i64, nanos: u32) -> Self {
-        self.expires_at = (seconds, nanos);
-        self
-    }
-
-    pub fn ids(
-        mut self,
-        fence_id: [u8; 16],
-        owner_instance_id: [u8; 16],
-        owner_incarnation: u64,
-        connection_id: [u8; 16],
-    ) -> Self {
-        self.fence_id = fence_id;
-        self.owner_instance_id = owner_instance_id;
-        self.owner_incarnation = owner_incarnation;
-        self.connection_id = connection_id;
-        self
-    }
-
-    pub fn sign(self, key: &SigningKey) -> ConnectionFenceV2 {
-        let claims = ConnectionFenceClaimsV2 {
-            signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
-            key_id: verification_key_id(&key.verifying_key()),
-            fence_id: self.fence_id,
-            node_id: self.node_id,
-            endpoint_id: self.endpoint_id,
-            owner_instance_id: self.owner_instance_id,
-            owner_incarnation: self.owner_incarnation,
-            owner_epoch: self.owner_epoch,
-            connection_id: self.connection_id,
-            authorization_revision: self.authorization_revision,
-            capabilities: self.capabilities,
-            lease_until_seconds: self.lease_until.0,
-            lease_until_nanos: self.lease_until.1,
-            issued_at_seconds: self.issued_at.0,
-            issued_at_nanos: self.issued_at.1,
-            expires_at_seconds: self.expires_at.0,
-            expires_at_nanos: self.expires_at.1,
-        };
-        let canonical = canonical_connection_fence_v2(&claims).expect("canonical fence");
-        let signature = key.sign(&canonical).to_bytes().to_vec();
-        ConnectionFenceV2 {
-            signature_version: FenceSignatureVersion::Ed25519V1.into(),
-            key_id: claims.key_id,
-            fence_id: claims.fence_id.to_vec(),
-            node_id: claims.node_id.to_vec(),
-            endpoint_id: claims.endpoint_id.to_vec(),
-            owner_instance_id: claims.owner_instance_id.to_vec(),
-            owner_incarnation: claims.owner_incarnation,
-            owner_epoch: claims.owner_epoch,
-            connection_id: claims.connection_id.to_vec(),
-            authorization_revision: claims.authorization_revision,
-            capabilities: claims.capabilities,
-            lease_until: Some(ts(
-                claims.lease_until_seconds,
-                i32::try_from(claims.lease_until_nanos).expect("lease nanos"),
-            )),
-            issued_at: Some(ts(
-                claims.issued_at_seconds,
-                i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-            )),
-            expires_at: Some(ts(
-                claims.expires_at_seconds,
-                i32::try_from(claims.expires_at_nanos).expect("expires nanos"),
-            )),
-            signature,
-        }
-    }
-}
-
-pub fn sign_fence_binding(
+pub fn sign_session_grant(
     key: &SigningKey,
-    fence: &ConnectionFenceV2,
-    operation_kind: FenceOperationKind,
-    operation_id: [u8; 16],
-    capability: &str,
-    issued_at: (i64, u32),
-    expires_at: (i64, u32),
-) -> FenceBindingV2 {
-    let claims = FenceBindingClaimsV2 {
-        signature_version: FENCE_SIGNATURE_VERSION_ED25519_V1,
+    node_id: [u8; 16],
+    endpoint_id: [u8; 32],
+    authorization_revision: u64,
+    session_epoch: u64,
+    capabilities: Vec<String>,
+    issued_at: i64,
+    expires_at: i64,
+) -> SessionGrantV1 {
+    let mut negotiated_capabilities = capabilities;
+    negotiated_capabilities.sort();
+    negotiated_capabilities.dedup();
+    let claims = SessionGrantClaimsV1 {
+        version: 1,
         key_id: verification_key_id(&key.verifying_key()),
-        operation_kind: operation_kind as u32,
-        operation_id,
-        fence_id: fence.fence_id.as_slice().try_into().expect("fence ID"),
-        node_id: fence.node_id.as_slice().try_into().expect("node ID"),
-        endpoint_id: fence
-            .endpoint_id
-            .as_slice()
-            .try_into()
-            .expect("endpoint ID"),
-        owner_instance_id: fence
-            .owner_instance_id
-            .as_slice()
-            .try_into()
-            .expect("owner instance ID"),
-        owner_incarnation: fence.owner_incarnation,
-        owner_epoch: fence.owner_epoch,
-        connection_id: fence
-            .connection_id
-            .as_slice()
-            .try_into()
-            .expect("connection ID"),
-        authorization_revision: fence.authorization_revision,
-        capability: capability.to_owned(),
-        issued_at_seconds: issued_at.0,
-        issued_at_nanos: issued_at.1,
-        expires_at_seconds: expires_at.0,
-        expires_at_nanos: expires_at.1,
+        protocol_major: 1,
+        protocol_minor: 1,
+        node_id,
+        endpoint_id,
+        authorization_revision,
+        session_epoch,
+        negotiated_capabilities: negotiated_capabilities.clone(),
+        issued_at_seconds: issued_at,
+        issued_at_nanos: 0,
+        expires_at_seconds: expires_at,
+        expires_at_nanos: 0,
     };
-    let canonical = canonical_fence_binding_v2(&claims).expect("canonical binding");
+    let canonical = canonical_session_grant_v1(&claims).expect("canonical session grant");
     let signature = key.sign(&canonical).to_bytes().to_vec();
-    FenceBindingV2 {
-        signature_version: FenceSignatureVersion::Ed25519V1.into(),
+    SessionGrantV1 {
+        version: 1,
         key_id: claims.key_id,
-        operation_kind: operation_kind.into(),
-        operation_id: claims.operation_id.to_vec(),
-        fence_id: claims.fence_id.to_vec(),
-        node_id: claims.node_id.to_vec(),
-        endpoint_id: claims.endpoint_id.to_vec(),
-        owner_instance_id: claims.owner_instance_id.to_vec(),
-        owner_incarnation: claims.owner_incarnation,
-        owner_epoch: claims.owner_epoch,
-        connection_id: claims.connection_id.to_vec(),
-        authorization_revision: claims.authorization_revision,
-        capability: claims.capability,
-        issued_at: Some(ts(
-            claims.issued_at_seconds,
-            i32::try_from(claims.issued_at_nanos).expect("issued nanos"),
-        )),
-        expires_at: Some(ts(
-            claims.expires_at_seconds,
-            i32::try_from(claims.expires_at_nanos).expect("expires nanos"),
-        )),
+        protocol_major: 1,
+        protocol_minor: 1,
+        node_id: node_id.to_vec(),
+        endpoint_id: endpoint_id.to_vec(),
+        authorization_revision,
+        session_epoch,
+        negotiated_capabilities,
+        issued_at: Some(ts(issued_at, 0)),
+        expires_at: Some(ts(expires_at, 0)),
         signature,
     }
 }
@@ -298,7 +148,7 @@ pub fn sign_command_v2(
         semantic_payload_hash_version: SemanticPayloadHashVersion::V2.into(),
         payload: Some(payload),
         authorization: Some(CommandAuthorizationProof {
-            version: CommandAuthorizationVersion::V1.into(),
+            version: 1,
             key_id: verification_key_id(&key.verifying_key()),
             signature: Vec::new(),
         }),
@@ -315,7 +165,7 @@ pub fn sign_command_envelope_v2(key: &SigningKey, command: &mut CommandEnvelope)
         .to_vec();
     let key_id = verification_key_id(&key.verifying_key());
     command.authorization = Some(CommandAuthorizationProof {
-        version: CommandAuthorizationVersion::V1.into(),
+        version: 1,
         key_id,
         signature: Vec::new(),
     });
@@ -328,38 +178,217 @@ pub fn sign_command_envelope_v2(key: &SigningKey, command: &mut CommandEnvelope)
         .signature = signature.to_bytes().to_vec();
 }
 
-pub fn attach_command_fence(
-    key: &SigningKey,
-    command: &mut CommandEnvelope,
-    fence_id: [u8; 16],
-    endpoint_id: [u8; 32],
-    lease_until: (i64, u32),
-) {
-    let issued_at = command.issued_at.expect("command issuance").seconds;
-    let expires_at = command.expires_at.expect("command expiry").seconds;
-    let node_id: [u8; 16] = command.node_id.as_slice().try_into().expect("node ID");
-    let fence = FenceSpec::new(node_id, endpoint_id, 1)
-        .ids(fence_id, [2; 16], 1, [3; 16])
-        .authority(command.expected_revision)
-        .capabilities([command.required_capability.clone()])
-        .lease(lease_until.0, lease_until.1)
-        .issued(issued_at - 1, 0)
-        .expires(expires_at.max(lease_until.0 + 1), 0)
-        .sign(key);
-    let op_id: [u8; 16] = command
-        .command_id
-        .as_slice()
-        .try_into()
-        .expect("command ID");
-    let binding = sign_fence_binding(
-        key,
-        &fence,
-        FenceOperationKind::Command,
-        op_id,
-        &command.required_capability,
-        (issued_at, 0),
-        (fence.expires_at.expect("fence expiry").seconds, 0),
-    );
-    command.fence_binding = Some(binding);
-    command.connection_fence = Some(fence);
+const MAX_UNIX_SOCKET_DIR_BYTES: usize = 80;
+
+/// RAII private `0700` temporary directory outside the repository checkout
+/// whose entire ancestor chain up to `/` is real, root-or-self owned, and
+/// neither group- nor world-writable (`mode & 0o022 == 0`).
+pub struct PrivateTempDir(PathBuf);
+
+impl PrivateTempDir {
+    pub fn new(prefix: &str) -> Self {
+        let base = resolve_private_temp_base(prefix);
+        let dir = create_unique_private_dir(&base, prefix);
+        Self(dir)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.0.join(path)
+    }
+
+    /// Create every relative component under this directory with mode `0700`
+    /// so host `umask` never produces group-writable ancestors.
+    pub fn create_subdir_all(&self, relative: impl AsRef<Path>) -> PathBuf {
+        let mut current = self.0.clone();
+        for component in relative.as_ref().components() {
+            match component {
+                Component::Normal(part) => {
+                    current.push(part);
+                    match fs::DirBuilder::new().mode(0o700).create(&current) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(err) => {
+                            panic!("create private subdir {}: {err}", current.display());
+                        }
+                    }
+                    fs::set_permissions(&current, fs::Permissions::from_mode(0o700))
+                        .expect("chmod private subdir");
+                }
+                Component::CurDir => {}
+                other => panic!("create_subdir_all requires relative path, got {other:?}"),
+            }
+        }
+        current
+    }
+}
+
+impl AsRef<Path> for PrivateTempDir {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn repo_root() -> Option<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .parent()?
+        .canonicalize()
+        .ok()
+}
+
+fn candidate_bases() -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(dir) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dir));
+    }
+    // Intentionally use $HOME/.cache rather than $XDG_CACHE_HOME because
+    // scripts/env.sh sets XDG_CACHE_HOME inside the repository checkout.
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        let home_path = PathBuf::from(home);
+        let cache = home_path.join(".cache");
+        if home_path.is_dir() && !cache.exists() {
+            let _ = fs::DirBuilder::new().mode(0o700).create(&cache);
+            let _ = fs::set_permissions(&cache, fs::Permissions::from_mode(0o700));
+        }
+        candidates.push(cache);
+    }
+    candidates
+}
+
+fn select_private_base(
+    candidates: &[PathBuf],
+    repo: Option<&Path>,
+    prefix: &str,
+    uid: u32,
+) -> Option<PathBuf> {
+    for candidate in candidates {
+        let Ok(resolved) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if let Some(root) = repo
+            && resolved.starts_with(root)
+        {
+            continue;
+        }
+        if !has_safe_ancestry(&resolved, uid) {
+            continue;
+        }
+        if resolved.as_os_str().len() + prefix.len() + 20 > MAX_UNIX_SOCKET_DIR_BYTES {
+            continue;
+        }
+        return Some(resolved);
+    }
+    None
+}
+
+fn resolve_private_temp_base(prefix: &str) -> PathBuf {
+    let uid = rustix::process::geteuid().as_raw();
+    let repo = repo_root();
+    let candidates = candidate_bases();
+    select_private_base(&candidates, repo.as_deref(), prefix, uid).unwrap_or_else(|| {
+        panic!(
+            "no private temporary directory with non-group/world-writable ancestry outside the repository; set TMPDIR to a private 0700 directory"
+        )
+    })
+}
+
+fn has_safe_ancestry(path: &Path, uid: u32) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        let Ok(meta) = fs::symlink_metadata(dir) else {
+            return false;
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return false;
+        }
+        let owner = meta.uid();
+        if owner != 0 && owner != uid {
+            return false;
+        }
+        if meta.permissions().mode() & 0o022 != 0 {
+            return false;
+        }
+        current = dir.parent();
+    }
+    true
+}
+
+fn create_unique_private_dir(base: &Path, prefix: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    for _ in 0..1024 {
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("{prefix}-{pid}-{seq}"));
+        match fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+                    .expect("chmod private temp dir");
+                return dir;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => panic!("create private temp dir {}: {err}", dir.display()),
+        }
+    }
+    panic!("exhausted private temp dir names under {}", base.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_temp_dir_has_safe_ancestry_outside_repo_and_cleans_up() {
+        let uid = rustix::process::geteuid().as_raw();
+        let repo = repo_root().expect("repo root");
+        let created_path = {
+            let dir = PrivateTempDir::new("ts");
+            let path = dir.path().to_path_buf();
+            assert!(!path.starts_with(&repo), "must be outside repo checkout");
+            assert!(has_safe_ancestry(&path, uid), "must have safe ancestry");
+            assert_eq!(
+                fs::symlink_metadata(&path)
+                    .expect("dir meta")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            let nested = dir.create_subdir_all("a/b/c");
+            assert!(has_safe_ancestry(&nested, uid));
+            path
+        };
+        assert!(!created_path.exists(), "Drop must remove temp dir");
+    }
+
+    #[test]
+    fn selector_skips_world_writable_and_in_repo_candidates() {
+        let uid = rustix::process::geteuid().as_raw();
+        let repo = repo_root().expect("repo root");
+        let safe = PrivateTempDir::new("sel");
+        let candidates = vec![
+            PathBuf::from("/tmp"),
+            repo.clone(),
+            safe.path().to_path_buf(),
+        ];
+        let picked = select_private_base(&candidates, Some(&repo), "s", uid)
+            .expect("falls back to safe candidate");
+        assert_eq!(picked, fs::canonicalize(safe.path()).expect("canonical"));
+    }
 }

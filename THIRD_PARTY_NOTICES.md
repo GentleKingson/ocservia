@@ -24,13 +24,6 @@ source under `web/src/components/ui`. Local changes include explicit `as` and
 DropdownMenu adaptations for accessibility and layout. The UI primitives are
 purely presentational.
 
-The generated TypeScript client uses the `modelOneOf.mustache` template from
-OpenAPITools/openapi-generator
-(`modules/openapi-generator/src/main/resources/typescript-fetch/modelOneOf.mustache`),
-licensed under Apache-2.0. The copy in `openapi/templates/typescript-fetch`
-changes only the handling of free-form object-map branches in deserialization
-and serialization.
-
 The Controller embeds Django 5.2.6's common/breached password blocklist,
 from commit `75c4403f07b8ad25893f7832dbe8fc6814b53b2d`, under BSD-3-Clause.
 Copyright (c) Django Software Foundation and individual contributors.

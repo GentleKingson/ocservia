@@ -6,7 +6,6 @@ source "${ROOT}/scripts/go-test-environment.sh"
 require_test_commands go jq setsid python3
 require_test_docker
 require_go_race
-bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 case "${DATABASE_TEST_SCOPE:-smoke}" in
   smoke) ;;
   *) echo 'PostgreSQL smoke requires smoke scope' >&2; exit 2 ;;
@@ -36,10 +35,11 @@ PY
 docker run -d --name "${name}" -p "127.0.0.1:${port}:5432" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner \
   -e POSTGRES_PASSWORD=test-owner-only "${image}" >/dev/null
+bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 ready=false
-for ((i=0; i<60; i++)); do
+for ((i=0; i<240; i++)); do
   if docker exec -e PGPASSWORD=test-owner-only "${name}" psql -h127.0.0.1 -U ocservia_owner -d ocservia -Atc 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
-  sleep 1
+  sleep 0.25
 done
 [[ "${ready}" == true ]] || { echo 'PostgreSQL did not become ready' >&2; exit 1; }
 docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
@@ -47,11 +47,10 @@ docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
 port="$(docker port "${name}" 5432/tcp | sed 's/127.0.0.1://')"
 export OCSERV_TEST_OWNER_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 export OCSERV_TEST_DATABASE_URL="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
-export OCSERV_TEST_SNAPSHOT_DATABASE_URL="${OCSERV_TEST_OWNER_DATABASE_URL}"
 cd "${ROOT}/control-plane"
+bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/database/connection TestControllerLockSessionLoss
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./internal/platform/app TestDatabaseCoreSmoke
 docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE initialization_smoke' >/dev/null
-export OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/initialization_smoke?sslmode=disable"
+export OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/initialization_smoke?sslmode=disable&pool_max_conns=1"
 bash "${ROOT}/scripts/required-go-tests.sh" --smoke ./migrations TestDatabaseInitializationSmoke
 bash "${ROOT}/scripts/test-enrollment-restart.sh" "${name}"
-bash "${ROOT}/scripts/required-go-tests.sh" postgres-snapshot --select -race -timeout=10m

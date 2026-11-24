@@ -61,9 +61,9 @@ func (s authenticationStore) DeleteIdentityAttempts(ctx context.Context, id uuid
 	_, err := s.tx.Exec(ctx, `DELETE FROM local_auth_attempts WHERE username IN ((SELECT username FROM local_credentials WHERE identity_id=$1),$2)`, id, authstore.PasswordChangeAttemptKey(id))
 	return err
 }
-func (s authenticationStore) BreakGlassUsed(ctx context.Context, fingerprint []byte) (bool, error) {
+func (s authenticationStore) BreakGlassUsed(ctx context.Context, fingerprint, legacyFingerprint []byte) (bool, error) {
 	var used bool
-	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM break_glass_uses WHERE credential_fingerprint=$1 AND rotation_required=true)`, fingerprint).Scan(&used)
+	err := s.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM break_glass_uses WHERE credential_fingerprint IN ($1,$2) AND rotation_required=true)`, fingerprint, legacyFingerprint).Scan(&used)
 	return used, err
 }
 func (s authenticationStore) BreakGlassIdentity(ctx context.Context, id uuid.UUID, now time.Time) (uuid.UUID, error) {

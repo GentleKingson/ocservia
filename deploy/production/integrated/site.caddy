@@ -42,7 +42,7 @@ route {
 	handle /readyz {
 		reverse_proxy control-plane:8080
 	}
-	import /etc/caddy/relay*.caddy
+	import /etc/caddy/{$OCSERV_RELAY_ROUTE_PREFIX:disabled}*.caddy
 	handle {
 		root * /srv
 		@builtAsset {

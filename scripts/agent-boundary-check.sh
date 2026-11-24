@@ -12,15 +12,15 @@ fi
 
 if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.rs' \
   'shell\.exec|command\.run|occtl\.raw|systemctl\.raw|journalctl\.raw|Command::new\([^)]*(request|input|argument)' \
-  "${ROOT}/rust/crates/agent" "${ROOT}/rust/crates/privd" "${ROOT}/rust/crates/ocserv-adapter"; then
+  "${ROOT}/rust/crates/agent" "${ROOT}/rust/crates/privd" "${ROOT}/rust/crates/ocserv-adapter" "${ROOT}/rust/crates/upgrader"; then
   echo "generic execution capability found in Agent privilege boundary" >&2
   exit 1
 fi
 
 # Check the program argument, not later test arguments such as TestCrashChild.
 if grep -R -n -E --exclude-dir=.cache --exclude-dir=target --include='*.go' --include='*.rs' \
-  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|docker\.sock' \
-  "${ROOT}/control-plane" "${ROOT}/rust"; then
+  'Command::new\([^)]*(sh|bash)|exec\.Command\([^,)]*(sh|bash)|exec\.CommandContext\([^,]*,[^,)]*(sh|bash)|docker\.sock' \
+  "${ROOT}/control-plane" "${ROOT}/signer" "${ROOT}/rust"; then
   echo "forbidden generic shell or Docker socket surface found" >&2
   exit 1
 fi
@@ -71,7 +71,7 @@ if grep -Eq '^[[:space:]]*ConditionPathExists[[:space:]]*=.*\/var\/lib\/ocservia
   exit 1
 fi
 grep -Fxq 'ProtectSystem=strict' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
-grep -Fxq 'IPAddressDeny=any' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
+grep -Fxq 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"
 if grep -q '^\[Install\]' "${ROOT}/deploy/systemd/ocservia-upgrader@.service"; then
   echo "the durable upgrade runner must stay an on-demand unit without an [Install] section" >&2
   exit 1

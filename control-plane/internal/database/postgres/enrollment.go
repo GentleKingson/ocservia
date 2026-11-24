@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
@@ -35,7 +34,7 @@ func (s enrollmentStore) TokenByHash(ctx context.Context, hash []byte, lock bool
 	return
 }
 
-func (s enrollmentStore) ConsumeToken(ctx context.Context, token, node uuid.UUID, endpoint []byte, at value.Timestamp) (bool, error) {
+func (s enrollmentStore) ConsumeToken(ctx context.Context, token, node uuid.UUID, endpoint []byte, at time.Time) (bool, error) {
 	n, err := s.Exec(ctx, `UPDATE node_bootstrap_tokens SET bound_endpoint_id=$1,consumed_node_id=$2,consumed_at=$3 WHERE id=$4 AND consumed_at IS NULL`, endpoint, node, at, token)
 	return n == 1, err
 }
@@ -80,17 +79,17 @@ func (s enrollmentStore) EndpointExists(ctx context.Context, endpoint []byte) (v
 	return
 }
 
-func (s enrollmentStore) InsertNode(ctx context.Context, id, workspace uuid.UUID, name string, at value.Timestamp) error {
+func (s enrollmentStore) InsertNode(ctx context.Context, id, workspace uuid.UUID, name string, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,$3,'pending',$4,$4)`, id, workspace, name, at)
 	return err
 }
 
-func (s enrollmentStore) InsertEndpoint(ctx context.Context, id uuid.UUID, endpoint []byte, at value.Timestamp) error {
+func (s enrollmentStore) InsertEndpoint(ctx context.Context, id uuid.UUID, endpoint []byte, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at)VALUES($1,$2,'pending',$3)`, id, endpoint, at)
 	return err
 }
 
-func (s enrollmentStore) InsertSealingKey(ctx context.Context, id uuid.UUID, key enrollmentstore.SealingKey, at value.Timestamp) error {
+func (s enrollmentStore) InsertSealingKey(ctx context.Context, id uuid.UUID, key enrollmentstore.SealingKey, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,$2,$3,$4,$5,$6)`, id, key.Purpose, key.Version, key.ID, key.Digest, at)
 	return err
 }
@@ -135,7 +134,7 @@ func (s enrollmentStore) InsertCapabilities(ctx context.Context, id uuid.UUID, c
 	return err
 }
 
-func (s enrollmentStore) Activate(ctx context.Context, id uuid.UUID, labels, policy string, at value.Timestamp) (revision uint64, err error) {
+func (s enrollmentStore) Activate(ctx context.Context, id uuid.UUID, labels, policy string, at time.Time) (revision uint64, err error) {
 	err = s.QueryRow(ctx, `UPDATE nodes SET status='active',labels=$2::jsonb,policy=$3,version=version+1,authorization_revision=authorization_revision+1,updated_at=$4 WHERE id=$1 RETURNING authorization_revision`, id, labels, policy, at).Scan(&revision)
 	if err == nil {
 		_, err = s.Exec(ctx, `UPDATE node_endpoint_keys SET state='active' WHERE node_id=$1`, id)
@@ -143,7 +142,7 @@ func (s enrollmentStore) Activate(ctx context.Context, id uuid.UUID, labels, pol
 	return
 }
 
-func (s enrollmentStore) Revoke(ctx context.Context, id uuid.UUID, at value.Timestamp) (revision uint64, err error) {
+func (s enrollmentStore) Revoke(ctx context.Context, id uuid.UUID, at time.Time) (revision uint64, err error) {
 	err = s.QueryRow(ctx, `UPDATE nodes SET status='revoked',version=version+1,authorization_revision=authorization_revision+1,updated_at=$2 WHERE id=$1 RETURNING authorization_revision`, id, at).Scan(&revision)
 	if err == nil {
 		_, err = s.Exec(ctx, `UPDATE node_endpoint_keys SET state='revoked',revoked_at=$2 WHERE node_id=$1`, id, at)
@@ -220,7 +219,7 @@ func (t *transaction) TrustConvergenceStore() enrollmentstore.TrustStore {
 	return trustConvergenceStore{t}
 }
 
-func (s trustConvergenceStore) Enqueue(ctx context.Context, v enrollmentstore.TrustJob, at value.Timestamp) error {
+func (s trustConvergenceStore) Enqueue(ctx context.Context, v enrollmentstore.TrustJob, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO node_trust_convergence
 		(node_id,endpoint_id,desired_state,revision,reason,close_required,available_at,created_at,updated_at)
 		VALUES($1,$2,$3,$4,$5,$3::text='revoked',$6,$6,$6)
@@ -248,10 +247,7 @@ func (s trustConvergenceStore) Claim(ctx context.Context, worker uuid.UUID) (v e
 	if err != nil {
 		return v, err
 	}
-	until, err := at.Add(enrollmentstore.TrustLeaseTTL)
-	if err != nil {
-		return v, err
-	}
+	until := at.Add(enrollmentstore.TrustLeaseTTL)
 	n, err := s.Exec(ctx, `UPDATE node_trust_convergence SET locked_by=$2,locked_until=$4,attempts=attempts+1,updated_at=$5 WHERE node_id=$1 AND revision=$3`, v.NodeID, worker, v.Revision, until, at)
 	if err == nil && n != 1 {
 		err = database.ErrNotFound
@@ -261,17 +257,17 @@ func (s trustConvergenceStore) Claim(ctx context.Context, worker uuid.UUID) (v e
 }
 
 // Check time after the row lock, including waits that cross the lease deadline.
-func (s trustConvergenceStore) lockClaim(ctx context.Context, v enrollmentstore.TrustJob, worker uuid.UUID) (value.Timestamp, bool, error) {
-	var until value.Timestamp
+func (s trustConvergenceStore) lockClaim(ctx context.Context, v enrollmentstore.TrustJob, worker uuid.UUID) (time.Time, bool, error) {
+	var until *time.Time
 	err := s.QueryRow(ctx, `SELECT locked_until FROM node_trust_convergence WHERE node_id=$1 AND revision=$2 AND locked_by=$3 AND attempts=$4 FOR UPDATE`, v.NodeID, v.Revision, worker, v.Attempts).Scan(&until)
 	if errors.Is(err, database.ErrNotFound) {
-		return value.Timestamp{}, false, nil
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return value.Timestamp{}, false, err
+		return time.Time{}, false, err
 	}
 	at, err := database.WallTime(ctx, s.Tx)
-	return at, err == nil && until.Valid && until.Micros > at.Micros, err
+	return at, err == nil && until != nil && until.After(at), err
 }
 
 func (s trustConvergenceStore) Renew(ctx context.Context, v enrollmentstore.TrustJob, worker uuid.UUID) (bool, error) {
@@ -279,10 +275,7 @@ func (s trustConvergenceStore) Renew(ctx context.Context, v enrollmentstore.Trus
 	if err != nil || !valid {
 		return false, err
 	}
-	until, err := at.Add(enrollmentstore.TrustLeaseTTL)
-	if err != nil {
-		return false, err
-	}
+	until := at.Add(enrollmentstore.TrustLeaseTTL)
 	_, err = s.Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$2,updated_at=$3 WHERE node_id=$1`, v.NodeID, until, at)
 	return err == nil, err
 }
@@ -292,10 +285,7 @@ func (s trustConvergenceStore) MarkUpdateApplied(ctx context.Context, v enrollme
 	if err != nil || !valid {
 		return false, err
 	}
-	until, err := at.Add(enrollmentstore.TrustLeaseTTL)
-	if err != nil {
-		return false, err
-	}
+	until := at.Add(enrollmentstore.TrustLeaseTTL)
 	_, err = s.Exec(ctx, `UPDATE node_trust_convergence SET update_applied=true,locked_until=$2,last_error=NULL,updated_at=$3 WHERE node_id=$1`, v.NodeID, until, at)
 	return err == nil, err
 }
@@ -323,10 +313,7 @@ func (s trustConvergenceStore) Release(ctx context.Context, v enrollmentstore.Tr
 	if err != nil || !valid {
 		return err
 	}
-	next, err := at.Add(delay)
-	if err != nil {
-		return err
-	}
+	next := at.Add(delay)
 	_, err = s.Exec(ctx, `UPDATE node_trust_convergence SET locked_by=NULL,locked_until=NULL,available_at=$2,last_error=$3,updated_at=$4 WHERE node_id=$1`, v.NodeID, next, detail, at)
 	return err
 }

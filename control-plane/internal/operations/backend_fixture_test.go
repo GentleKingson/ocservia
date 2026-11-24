@@ -17,10 +17,8 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/schedulerlease"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 )
@@ -46,8 +44,7 @@ func newOutboxFixture(t *testing.T) *outboxFixture {
 	var err error
 	f.signer, err = commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	at, err := value.FromTime(time.Now().UTC())
-	testutil.NoError(t, err)
+	at := time.Now().UTC()
 	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Outbox transaction test',$2,$3,$4)`, f.workspace, f.workspace.String(), at, at)
 	f.exec(t, `INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'outbox-test',$2,$3,$3)`, outboxIdentityID, outboxIdentityID.String(), at)
 	f.exec(t, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, f.workspace, outboxIdentityID, at)
@@ -74,8 +71,7 @@ func (f *outboxFixture) count(t *testing.T, query string, args ...any) int {
 func (f *outboxFixture) node(t *testing.T) uuid.UUID {
 	t.Helper()
 	node := uuid.Must(uuid.NewV7())
-	at, err := value.FromTime(time.Now().UTC())
-	testutil.NoError(t, err)
+	at := time.Now().UTC()
 	f.exec(t, `INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$5)`, node, f.workspace, node.String(), at, at)
 	endpoint := sha256.Sum256(node[:])
 	f.exec(t, `INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, endpoint[:], at)
@@ -124,10 +120,10 @@ func (t *commitFaultTx) Commit(ctx context.Context) error {
 	}
 	return lostCommit
 }
-func (t *commitFaultTx) WallTime(ctx context.Context) (value.Timestamp, error) {
+func (t *commitFaultTx) WallTime(ctx context.Context) (time.Time, error) {
 	return database.WallTime(ctx, t.Tx)
 }
-func (t *commitFaultTx) TransactionTime(ctx context.Context) (value.Timestamp, error) {
+func (t *commitFaultTx) TransactionTime(ctx context.Context) (time.Time, error) {
 	return database.TransactionTime(ctx, t.Tx)
 }
 func (t *commitFaultTx) AuthenticationStore() authstore.Store {
@@ -145,9 +141,5 @@ func (t *commitFaultTx) AuditStore() auditstore.Store {
 }
 func (t *commitFaultTx) ConnectionOwnerStore() connectionowner.Store {
 	s, _ := connectionowner.StoreFromTransaction(t.Tx)
-	return s
-}
-func (t *commitFaultTx) SchedulerLeaseStore() schedulerlease.Store {
-	s, _ := schedulerlease.FromTransaction(t.Tx)
 	return s
 }

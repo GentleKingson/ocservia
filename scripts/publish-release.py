@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-shot release publication. Existing drafts/tags are never resumed or replaced."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -9,16 +10,20 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zipfile import BadZipFile
+
+from controller_release_manifest import build_manifest
+import release_evidence
 
 ROLES = ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer')
 ARCHES = ('amd64', 'arm64')
 PREFIX = 'ghcr.io/gentlekingson/ocservia'
 ROOT = Path(__file__).resolve().parent.parent
-GENERATOR = ROOT / 'scripts/generate-controller-release-manifest.mjs'
 MIGRATIONS = ROOT / 'control-plane/migrations'
 PINNED_IMAGES = {
     'postgres': 'docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af',
@@ -30,6 +35,8 @@ ACCEPT = ', '.join(('application/vnd.oci.image.index.v1+json',
                     'application/vnd.docker.distribution.manifest.list.v2+json',
                     'application/vnd.oci.image.manifest.v1+json',
                     'application/vnd.docker.distribution.manifest.v2+json'))
+_TOKEN_CACHE = {}
+_TOKEN_LOCK = threading.Lock()
 
 
 def require(condition, message):
@@ -60,8 +67,7 @@ def asset_files(version, directory, include_manifests=True):
     if include_manifests:
         names.update(MANIFEST_ASSETS)
     for arch, rpm_arch in (('amd64', 'x86_64'), ('arm64', 'aarch64')):
-        archive = f'ocservia-agent-{version}-linux-{arch}.tar.gz'
-        names.update((archive, archive + '.sha256', f'ocservia-agent_{version}-1_{arch}.deb',
+        names.update((f'ocservia-agent_{version}-1_{arch}.deb',
                       f'ocservia-agent-{version}-1.{rpm_arch}.rpm'))
     require({p.name for p in directory.iterdir()} == names, 'Incomplete or unexpected release asset set')
     files = [directory / name for name in sorted(names)]
@@ -76,14 +82,24 @@ def digest(path):
         return 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def manifest(name, tag):
-    repository = f'gentlekingson/ocservia/{name}'
+def registry_token(repository):
+    with _TOKEN_LOCK:
+        cached = _TOKEN_CACHE.get(repository)
+    if cached is not None:
+        return cached
     credentials = base64.b64encode(f"{os.environ['GITHUB_ACTOR']}:{os.environ['GH_TOKEN']}".encode()).decode()
     query = urlencode({'service': 'ghcr.io', 'scope': f'repository:{repository}:pull'})
     # Token failures (including 404) are errors, never evidence of a missing tag.
     with urlopen(Request('https://ghcr.io/token?' + query,
                          headers={'Authorization': 'Basic ' + credentials}), timeout=60) as response:
         token = json.load(response)['token']
+    with _TOKEN_LOCK:
+        return _TOKEN_CACHE.setdefault(repository, token)
+
+
+def manifest(name, tag):
+    repository = f'gentlekingson/ocservia/{name}'
+    token = registry_token(repository)
     request = Request(f'https://ghcr.io/v2/{repository}/manifests/{tag}',
                       headers={'Authorization': 'Bearer ' + token, 'Accept': ACCEPT})
     try:
@@ -146,8 +162,11 @@ def preflight(repo, tag, images):
             path = images / f'{name}-linux-{arch}.tar'
             require(path.is_file() and not path.is_symlink() and path.stat().st_size > 0,
                     f'Missing image archive: {path.name}')
-        for suffix in ('', '-amd64', '-arm64'):
-            absent(name, tag + suffix)
+    with ThreadPoolExecutor(max_workers=len(ROLES)) as executor:
+        futures = [executor.submit(absent, name, tag + suffix)
+                   for name in ROLES for suffix in ('', '-amd64', '-arm64')]
+        for future in futures:
+            future.result()
 
 
 def verify_assets(repo, release_id, files):
@@ -175,39 +194,59 @@ def draft(repo, tag, sha, prerelease):
 
 
 def verify_images(expected):
-    for (name, tag), expected_digest in expected.items():
+    def verify_one(name, tag, expected_digest):
         current = manifest(name, tag)
         require(current is not None and current[0] == expected_digest, f'Published image changed: {name}:{tag}')
+
+    with ThreadPoolExecutor(max_workers=len(ROLES)) as executor:
+        futures = [executor.submit(verify_one, name, tag, expected_digest)
+                   for (name, tag), expected_digest in expected.items()]
+        for future in futures:
+            future.result()
 
 
 def generate_release_manifests(version, sha, directory, image_digests):
     require(set(image_digests) == set(ROLES), 'Missing verified release image digest')
-    image_args = []
-    expected_images = {}
-    for name in ROLES:
-        digest_value = image_digests[name]
-        require(re.fullmatch(r'sha256:[0-9a-f]{64}', digest_value) is not None,
-                f'Invalid verified release image digest: {name}')
-        expected_images[name] = f'{PREFIX}/{name}@{digest_value}'
-        image_args.extend(('--image', f'{name}={expected_images[name]}'))
-    for name, reference in PINNED_IMAGES.items():
-        expected_images[name] = reference
-        image_args.extend(('--image', f'{name}={reference}'))
+    images = {name: f'{PREFIX}/{name}@{value}' for name, value in image_digests.items()}
+    images.update(PINNED_IMAGES)
     for arch in ARCHES:
         output = directory / f'controller-release-{arch}.json'
-        require(not output.exists(), f'Release manifest already exists: {output.name}')
-        command('node', str(GENERATOR), '--output', str(output), '--manifest-version', '2',
-                '--release-version', version, '--release-tag', 'v' + version,
-                '--source-commit', sha, '--platform', f'linux/{arch}',
-                '--migration-dir', str(MIGRATIONS), *image_args)
-        generated = json.loads(output.read_text())
-        require(generated.get('platform') == f'linux/{arch}'
-                and generated.get('images') == expected_images,
-                f'Generated release manifest does not bind verified digests: {arch}')
+        manifest_data = build_manifest(version, 'v' + version, sha, f'linux/{arch}', MIGRATIONS, 2, images)
+        with output.open('x') as stream:
+            stream.write(json.dumps(manifest_data, indent=2) + '\n')
     require(not (directory / 'controller-release.json').exists(),
             'Release manifest already exists: controller-release.json')
     shutil.copyfile(directory / 'controller-release-amd64.json',
                     directory / 'controller-release.json')
+
+
+def publish_role(name, version, tag, images):
+    children = {}
+    role_expected = {}
+    for arch in ARCHES:
+        source = f'{PREFIX}/{name}:{version}-linux-{arch}'
+        target = f'{PREFIX}/{name}:{tag}-{arch}'
+        command('docker', 'load', '--input', str(images / f'{name}-linux-{arch}.tar'))
+        local = json.loads(command('docker', 'image', 'inspect', source))[0]
+        require(local['Os'] == 'linux' and local['Architecture'] == arch, f'Wrong image platform: {source}')
+        command('docker', 'tag', source, target)
+        push_image(name, f'{tag}-{arch}')
+        remote = manifest(name, f'{tag}-{arch}')
+        require(remote is not None and remote[1].get('config', {}).get('digest') == local['Id'],
+                f'Pushed image does not match scanned archive: {target}')
+        children[arch] = remote[0]
+        role_expected[name, f'{tag}-{arch}'] = remote[0]
+    absent(name, tag)
+    command('docker', 'buildx', 'imagetools', 'create', '--tag', f'{PREFIX}/{name}:{tag}',
+            *(f'{PREFIX}/{name}@{children[arch]}' for arch in ARCHES))
+    index = manifest(name, tag)
+    require(index is not None, f'Missing multi-arch index: {name}')
+    descriptors = index[1].get('manifests', [])
+    require(len(descriptors) == 2 and
+            {(d['platform']['os'], d['platform']['architecture'], d['digest']) for d in descriptors}
+            == {('linux', arch, children[arch]) for arch in ARCHES}, f'Invalid multi-arch index: {name}')
+    role_expected[name, tag] = index[0]
+    return role_expected, index[0]
 
 
 def finish(repo, version, sha, assets, images):
@@ -219,38 +258,16 @@ def finish(repo, version, sha, assets, images):
             input=os.environ['GH_TOKEN'])
     expected = {}
     image_digests = {}
-    for name in ROLES:
-        children = {}
-        for arch in ARCHES:
-            source = f'{PREFIX}/{name}:{version}-linux-{arch}'
-            target = f'{PREFIX}/{name}:{tag}-{arch}'
-            command('docker', 'load', '--input', str(images / f'{name}-linux-{arch}.tar'))
-            local = json.loads(command('docker', 'image', 'inspect', source))[0]
-            require(local['Os'] == 'linux' and local['Architecture'] == arch, f'Wrong image platform: {source}')
-            command('docker', 'tag', source, target)
-            push_image(name, f'{tag}-{arch}')
-            remote = manifest(name, f'{tag}-{arch}')
-            require(remote is not None and remote[1].get('config', {}).get('digest') == local['Id'],
-                    f'Pushed image does not match scanned archive: {target}')
-            children[arch] = remote[0]
-            expected[name, f'{tag}-{arch}'] = remote[0]
-        absent(name, tag)
-        command('docker', 'buildx', 'imagetools', 'create', '--tag', f'{PREFIX}/{name}:{tag}',
-                *(f'{PREFIX}/{name}@{children[arch]}' for arch in ARCHES))
-        index = manifest(name, tag)
-        require(index is not None, f'Missing multi-arch index: {name}')
-        descriptors = index[1].get('manifests', [])
-        require(len(descriptors) == 2 and
-                {(d['platform']['os'], d['platform']['architecture'], d['digest']) for d in descriptors}
-                == {('linux', arch, children[arch]) for arch in ARCHES}, f'Invalid multi-arch index: {name}')
-        expected[name, tag] = index[0]
-        image_digests[name] = index[0]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {name: executor.submit(publish_role, name, version, tag, images) for name in ROLES}
+        for name in ROLES:
+            role_expected, index_digest = futures[name].result()
+            expected.update(role_expected)
+            image_digests[name] = index_digest
     # Bind release assets only after the complete published index set is stable.
-    verify_images(expected)
     generate_release_manifests(version, sha, assets, image_digests)
     files = asset_files(version, assets)
     command('gh', 'release', 'upload', tag, *(str(path) for path in files))
-    verify_assets(repo, release_id, files)
     require(draft(repo, tag, sha, prerelease) == release_id, 'Draft identity changed')
     verify_assets(repo, release_id, files)
     verify_images(expected)
@@ -261,8 +278,6 @@ def finish(repo, version, sha, assets, images):
     require(published['draft'] is False and published.get('immutable') is True
             and published['tag_name'] == tag and published['prerelease'] == prerelease,
             'Release is not published and immutable; enable repository Immutable Releases before publishing')
-    verify_assets(repo, release_id, files)
-    verify_images(expected)
     if prerelease:
         require(api(f'repos/{repo}/releases/latest')['tag_name'] != tag, 'RC must not become Latest')
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
@@ -274,33 +289,19 @@ def qualify(repo, tag, sha):
     tag_commit = api(f'repos/{repo}/commits/refs/tags/{tag}')['sha']
     require(source_commit == sha and tag_commit == source_commit,
             'Release tag no longer matches the build commit')
-    pages = api(
-        f'repos/{repo}/actions/workflows/release-check.yml/runs'
-        f'?head_sha={source_commit}&branch=main&event=workflow_dispatch&per_page=100',
-        '--paginate', '--slurp',
-    )
-    runs = [run for page in pages for run in page.get('workflow_runs', [])]
-    # A newer failed or unfinished qualification must not reuse an older PASS.
-    latest = max(runs, key=lambda run: run['run_number']) if runs else None
-    require(
-        latest is not None
-        and latest.get('head_sha') == source_commit
-        and latest.get('head_branch') == 'main'
-        and latest.get('event') == 'workflow_dispatch'
-        and latest.get('status') == 'completed'
-        and latest.get('conclusion') == 'success',
-        f'No successful latest Release Check on main for {source_commit}',
-    )
-    summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
-    if summary_path:
-        with open(summary_path, 'a') as summary:
-            summary.write(f"Release Check: {latest['html_url']} (SHA: {source_commit})\n")
+    evidence = release_evidence.qualify(repo, source_commit, tag.removeprefix('v'))
+    expected_id = os.environ.get('REQUIRE_QUALIFICATION_ID')
+    if expected_id is not None:
+        require(expected_id == str(evidence['qualification_id']), 'Release qualification changed; restart publication')
+    release_evidence.write_outputs(evidence)
+    with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+        summary.write(f"Release Check: {evidence['qualification_url']} (SHA: {source_commit}, tag: {tag})\n")
 
 
 def main():
     phase = sys.argv[1]
     version = os.environ['VERSION']
-    require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?', version), 'Invalid version')
+    require(release_evidence.VERSION.fullmatch(version), 'Invalid version')
     if phase == 'qualify':
         qualify(os.environ['GH_REPO'], 'v' + version, os.environ['GITHUB_SHA'])
         return
@@ -325,6 +326,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError, BadZipFile, subprocess.CalledProcessError) as error:
         print(f'Release publication failed: {error}', file=sys.stderr)
         sys.exit(1)

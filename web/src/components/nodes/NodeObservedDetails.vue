@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { NodeObservedState } from "@ocservia/api-client";
+import type { NodeObservedState } from "@/api/models";
 import { computed } from "vue";
 
 import CopyButton from "@/components/common/CopyButton.vue";

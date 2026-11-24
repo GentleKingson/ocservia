@@ -50,7 +50,7 @@ func TestTrustUpdateRequiresExactAcknowledgement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = client.UpdateNodeTrust(context.Background(), make([]byte, 16), make([]byte, 32), transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, "revoke", 3, make([]byte, 16), nil)
+			err = client.UpdateNodeTrust(context.Background(), make([]byte, 16), make([]byte, 32), transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, "revoke", 3)
 			if (err == nil) != test.accepted {
 				t.Fatal("unexpected acknowledgement", err)
 			}
@@ -76,8 +76,8 @@ func TestTrustRPCUncertainOutcomes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				updateErr := client.UpdateNodeTrust(context.Background(), make([]byte, 16), make([]byte, 32), transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, "revoke", 3, make([]byte, 16), nil)
-				closeErr := client.CloseNode(context.Background(), make([]byte, 16), "revoke", nil)
+				updateErr := client.UpdateNodeTrust(context.Background(), make([]byte, 16), make([]byte, 32), transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED, "revoke", 3)
+				closeErr := client.CloseNode(context.Background(), make([]byte, 16), "revoke")
 				wantEffects := int32(0)
 				if after {
 					wantEffects = 2
@@ -110,11 +110,11 @@ func TestCloseNotFoundIsAbsenceWithoutExecutionReceipt(t *testing.T) {
 				t.Fatal(err)
 			}
 			if removed {
-				if err := client.CloseNode(context.Background(), make([]byte, 16), "revoke", nil); status.Code(err) != codes.Unavailable {
+				if err := client.CloseNode(context.Background(), make([]byte, 16), "revoke"); status.Code(err) != codes.Unavailable {
 					t.Fatal(err)
 				}
 			}
-			if err := client.CloseNode(context.Background(), make([]byte, 16), "revoke", nil); err != nil {
+			if err := client.CloseNode(context.Background(), make([]byte, 16), "revoke"); err != nil {
 				t.Fatal(err)
 			}
 			wantEffects := int32(0)

@@ -59,7 +59,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		operationID, commandID, messageID, idempotencyKey := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 		now := time.Now().UTC()
 		envelope := agentv1.CommandEnvelope{ProtocolVersion: commandauth.ProtocolVersion, MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: idempotencyKey[:], NodeId: nodeID[:], Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Hour)), ExpectedRevision: 1, Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", ActorId: "operator", Reason: "privileged result trust", OperationId: operationID[:], Action: "service.reload", RequiredCapability: "ocserv.service.reload", DeliveryMode: mode, Payload: &agentv1.CommandEnvelope_ServiceReload{ServiceReload: &agentv1.ServiceReload{}}}
-		testutil.NoError(t, semanticpayload.PopulateV1(&envelope))
+		testutil.NoError(t, semanticpayload.PopulateV2(&envelope))
 		testutil.NoError(t, signer.Authorize(&envelope))
 		encoded, err := proto.Marshal(&envelope)
 		testutil.NoError(t, err)
@@ -101,12 +101,13 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		return operation, command
 	}
 	base := func(envelope *agentv1.CommandEnvelope, state agentv1.CommandResultState) *agentv1.CommandResult {
-		hash, err := semanticpayload.HashV1(envelope)
+		hash, err := semanticpayload.HashV2(envelope)
 		testutil.NoError(t, err)
 		now := timestamppb.Now()
-		return &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: hash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V1, State: state, AcceptedAt: now, CompletedAt: now}
+		return &agentv1.CommandResult{CommandId: envelope.GetCommandId(), IdempotencyKey: envelope.GetIdempotencyKey(), PayloadSha256: hash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: state, AcceptedAt: now, CompletedAt: now}
 	}
 
+	var effectSeq uint64
 	for _, start := range []string{"dispatched", "unknown"} {
 		t.Run("unsigned_rejected_from_"+start, func(t *testing.T) {
 			operationID, commandID, outboxID := stage(start, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY)
@@ -134,7 +135,8 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 			// Genuine signed completion still settles the command and its outbox.
 			envelope = storedEnvelope(commandID)
 			success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-			testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, 1))
+			effectSeq++
+			testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, effectSeq))
 			ingest(envelope, success)
 			if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 				t.Fatalf("signed result did not settle the command: operation=%s command=%s", operation, command)
@@ -162,7 +164,8 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 		}
 		// The signed completion from the original execution still recovers it.
 		success := base(envelope, agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED)
-		testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, 2))
+		effectSeq++
+		testutil.NoError(t, testfixture.AttachProof(envelope, success, attestationKey, effectSeq))
 		ingest(envelope, success)
 		if operation, command := states(operationID); operation != "succeeded" || command != "succeeded" {
 			t.Fatalf("signed recovery did not settle the command: operation=%s command=%s", operation, command)

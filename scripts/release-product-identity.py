@@ -11,9 +11,8 @@ def product_files(kind, version, arch):
     if kind == 'controller':
         return [f'{role}-linux-{arch}.tar' for role in
                 ('gateway', 'control', 'transport', 'backup', 'edge', 'relay', 'signer')]
-    archive = f'ocservia-agent-{version}-linux-{arch}.tar.gz'
     rpm_arch = {'amd64': 'x86_64', 'arm64': 'aarch64'}[arch]
-    return [archive, archive + '.sha256', f'ocservia-agent_{version}-1_{arch}.deb',
+    return [f'ocservia-agent_{version}-1_{arch}.deb',
             f'ocservia-agent-{version}-1.{rpm_arch}.rpm']
 
 

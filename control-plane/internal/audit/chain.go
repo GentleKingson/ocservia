@@ -17,9 +17,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -139,8 +137,9 @@ func currentEventAuthenticator() eventAuthenticator {
 			panic(fmt.Sprintf("initialize audit event authenticator: %v", err))
 		}
 		if keyID == "" {
-			digest := sha256.Sum256(key[:])
-			keyID = "ephemeral-" + hex.EncodeToString(digest[:8])
+			var label [8]byte
+			rand.Read(label[:])
+			keyID = "ephemeral-" + hex.EncodeToString(label[:])
 		}
 		if !eventKeyIDPattern.MatchString(keyID) {
 			panic("initialize audit event authenticator: invalid key ID")
@@ -189,14 +188,8 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 		return fmt.Errorf("assign audit order: %w", err)
 	}
 	// Hash the persisted microsecond value, never a higher-precision clock value.
-	at, err := value.FromTime(record.At)
-	if err != nil {
-		return err
-	}
-	record.At, err = at.Time()
-	if err != nil {
-		return err
-	}
+	at := record.At.UTC().Truncate(time.Microsecond)
+	record.At = at
 	previous, err := s.Previous(ctx, record.WorkspaceID)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return fmt.Errorf("read audit chain: %w", err)
@@ -212,9 +205,7 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if err != nil {
 		return err
 	}
-	// Feed the unchanged canonicalizer the same logical JSON it will read back.
-	// In particular, whitespace around a top-level null must not add a field.
-	record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
+	record.BeforeSummary, record.AfterSummary = before, after
 	payload, err := encodeChainPayload(previous, record)
 	if err != nil {
 		return fmt.Errorf("encode audit payload: %w", err)
@@ -224,7 +215,7 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if record.TraceID != "" {
 		traceID = record.TraceID
 	}
-	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), before, after, nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
+	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), nullableJSON(before), nullableJSON(after), nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
@@ -273,11 +264,6 @@ func canonicalJSON(input json.RawMessage) (json.RawMessage, error) {
 	}
 	var decoded any
 	if err := json.Unmarshal(input, &decoded); err != nil {
-		// Preserve every previously signable v1 payload byte. Only extend the
-		// formerly rejected domain for valid JSONB numbers outside float64.
-		if logical, parseErr := value.ParseJSONB(input); parseErr == nil {
-			return json.RawMessage(logical.Bytes()), nil
-		}
 		return nil, err
 	}
 	encoded, err := json.Marshal(decoded)
@@ -311,6 +297,66 @@ func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verificati
 	return verified.Verification, err
 }
 
+type eventRow struct {
+	record                             ChainRecord
+	previous, hash, mac, compactionMAC []byte
+	authVersion                        int16
+	keyID, compactionKeyID             *string
+	compactedAt                        *time.Time
+}
+
+func scanEventRow(rows database.Rows, workspace uuid.UUID, includesWorkspace bool) (event eventRow, err error) {
+	record := &event.record
+	record.WorkspaceID = workspace
+	var resourceID *uuid.UUID
+	var before, after []byte
+	fields := []any{
+		&record.EventID, &record.At, &record.ActorType, &record.ActorID, &record.Action,
+		&record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result,
+		&record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID,
+		&before, &after, &record.ErrorType, &event.previous, &event.hash, &event.authVersion,
+		&event.keyID, &event.mac, &event.compactedAt, &event.compactionKeyID, &event.compactionMAC,
+	}
+	if includesWorkspace {
+		fields = append([]any{&record.WorkspaceID}, fields...)
+	}
+	if err = rows.Scan(fields...); err != nil {
+		return event, err
+	}
+	record.At = record.At.UTC().Truncate(time.Microsecond)
+	record.BeforeSummary, record.AfterSummary = before, after
+	if resourceID != nil {
+		record.ResourceID = *resourceID
+	}
+	return event, nil
+}
+
+func (m *Manager) validEventHash(event eventRow, previous []byte) (bool, error) {
+	if !bytes.Equal(event.previous, previous) {
+		return false, nil
+	}
+	if event.compactedAt != nil {
+		return event.authVersion == eventAuthVersionV1 && m.validCompaction(event.record, event.previous, event.hash, event.mac, *event.compactedAt, event.compactionKeyID, event.compactionMAC), nil
+	}
+	if event.compactionKeyID != nil || len(event.compactionMAC) != 0 {
+		return false, nil
+	}
+	payload, err := encodeChainPayload(previous, event.record)
+	if err != nil {
+		return false, err
+	}
+	digest := sha256.Sum256(payload)
+	return bytes.Equal(event.hash, digest[:]), nil
+}
+
+func (m *Manager) validEventMAC(event eventRow) bool {
+	if event.keyID == nil {
+		return false
+	}
+	key, ok := m.eventKeys[*event.keyID]
+	return ok && hmac.Equal(event.mac, signEvent(key, event.hash))
+}
+
 func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, allowLegacyOnly bool) (chainVerification, error) {
 	s, err := auditstore.From(tx)
 	if err != nil {
@@ -331,44 +377,24 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	var checkpointHash, transitionAnchorHash []byte
 	seenAuthenticated := false
 	for rows.Next() {
-		record := ChainRecord{WorkspaceID: workspaceID}
-		var resourceID *uuid.UUID
-		var storedPrevious, storedHash, eventMAC, compactionMAC []byte
-		var compactedAt value.Timestamp
-		var compactionKeyID *string
-		var authVersion int16
-		var eventKeyID *string
-		var at value.Timestamp
-		var before, after value.JSONB
-		if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC, &compactedAt, &compactionKeyID, &compactionMAC); err != nil {
-			return chainVerification{}, err
-		}
-		record.At, err = at.Time()
+		event, err := scanEventRow(rows, workspaceID, false)
 		if err != nil {
 			return chainVerification{}, err
 		}
-		record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
-		if resourceID != nil {
-			record.ResourceID = *resourceID
-		}
-		payload, err := encodeChainPayload(previous, record)
+		record := event.record
+		hashValid, err := m.validEventHash(event, previous)
 		if err != nil {
 			return chainVerification{}, err
 		}
-		digest := sha256.Sum256(payload)
-		hashValid := subtle.ConstantTimeCompare(storedHash, digest[:]) == 1
-		if compactedAt.Valid {
-			hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, compactedAt, compactionKeyID, compactionMAC)
+		if event.compactedAt != nil {
 			verified.CompactedEvents++
-		} else if compactionKeyID != nil || len(compactionMAC) != 0 {
-			hashValid = false
 		}
-		if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || !hashValid {
+		if !hashValid {
 			verified.Valid = false
 		}
-		switch authVersion {
+		switch event.authVersion {
 		case 0:
-			if seenAuthenticated || eventKeyID != nil || len(eventMAC) != 0 {
+			if seenAuthenticated || event.keyID != nil || len(event.mac) != 0 {
 				verified.Valid = false
 			}
 		case eventAuthVersionV1:
@@ -379,23 +405,18 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 				}
 			}
 			seenAuthenticated = true
-			if eventKeyID == nil {
-				verified.Valid = false
-				break
-			}
-			key, ok := m.eventKeys[*eventKeyID]
-			if !ok || !hmac.Equal(eventMAC, signEvent(key, storedHash)) {
+			if !m.validEventMAC(event) {
 				verified.Valid = false
 			}
 		default:
 			verified.Valid = false
 		}
-		previous = append(previous[:0], storedHash...)
+		previous = append(previous[:0], event.hash...)
 		previousID = record.EventID
 		verified.lastID = record.EventID
-		verified.lastHash = append(verified.lastHash[:0], storedHash...)
+		verified.lastHash = append(verified.lastHash[:0], event.hash...)
 		if record.EventID == latestID {
-			checkpointHash = append([]byte(nil), storedHash...)
+			checkpointHash = append([]byte(nil), event.hash...)
 		}
 		verified.Events++
 	}
@@ -409,7 +430,7 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 			return chainVerification{}, err
 		}
 		if err != nil || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: transitionAnchorID, eventHash: hash, signature: signature}) ||
-			subtle.ConstantTimeCompare(hash, transitionAnchorHash) != 1 {
+			!bytes.Equal(hash, transitionAnchorHash) {
 			verified.Valid = false
 		}
 	}
@@ -420,7 +441,7 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	if latestID == uuid.Nil {
 		verified.Checkpoint = verified.Events == 0
 	} else {
-		verified.Checkpoint = len(checkpointHash) != 0 && subtle.ConstantTimeCompare(checkpointHash, latestHash) == 1 &&
+		verified.Checkpoint = len(checkpointHash) != 0 && bytes.Equal(checkpointHash, latestHash) &&
 			m.validCheckpoint(workspaceID, checkpointRecord{eventID: latestID, eventHash: latestHash, signature: latestSignature})
 	}
 	return verified, nil
@@ -457,7 +478,7 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 				return err
 			}
 		}
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
+		return nil
 	})
 }
 
@@ -477,7 +498,7 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 		return uuid.Nil, nil, false, err
 	}
 	if err == nil && cpAuthVersion == eventAuthVersionV1 {
-		if !cpOccurredAt.Valid || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
+		if cpOccurredAt.IsZero() || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
 			return uuid.Nil, nil, false, errors.New("audit checkpoint is not authenticated")
 		}
 		rows, err := s.EventsFrom(ctx, workspaceID, cpOccurredAt, cpEventID)
@@ -490,67 +511,36 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 		var deltaCount int64
 		valid := true
 		for rows.Next() {
-			record := ChainRecord{WorkspaceID: workspaceID}
-			var resourceID *uuid.UUID
-			var storedPrevious, storedHash, eventMAC, compactionMAC []byte
-			var compactedAt value.Timestamp
-			var compactionKeyID *string
-			var authVersion int16
-			var eventKeyID *string
-			var at value.Timestamp
-			var before, after value.JSONB
-			if err := rows.Scan(&record.EventID, &at, &record.ActorType, &record.ActorID, &record.Action, &record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result, &record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID, &before, &after, &record.ErrorType, &storedPrevious, &storedHash, &authVersion, &eventKeyID, &eventMAC, &compactedAt, &compactionKeyID, &compactionMAC); err != nil {
-				return uuid.Nil, nil, false, err
-			}
-			record.At, err = at.Time()
+			event, err := scanEventRow(rows, workspaceID, false)
 			if err != nil {
 				return uuid.Nil, nil, false, err
-			}
-			record.BeforeSummary, record.AfterSummary = before.Bytes(), after.Bytes()
-			if resourceID != nil {
-				record.ResourceID = *resourceID
 			}
 			if deltaCount == 0 {
-				if record.EventID != cpEventID || subtle.ConstantTimeCompare(cpHash, storedHash) != 1 {
+				if event.record.EventID != cpEventID || !bytes.Equal(cpHash, event.hash) {
 					return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
 				}
-				previous = bytes.Clone(storedPrevious)
+				previous = bytes.Clone(event.previous)
 			}
-			payload, err := encodeChainPayload(previous, record)
+			hashValid, err := m.validEventHash(event, previous)
 			if err != nil {
 				return uuid.Nil, nil, false, err
 			}
-			digest := sha256.Sum256(payload)
-			hashValid := subtle.ConstantTimeCompare(storedHash, digest[:]) == 1
-			if compactedAt.Valid {
-				hashValid = authVersion == eventAuthVersionV1 && m.validCompaction(record, storedPrevious, storedHash, eventMAC, compactedAt, compactionKeyID, compactionMAC)
-			} else if compactionKeyID != nil || len(compactionMAC) != 0 {
-				hashValid = false
-			}
-			if subtle.ConstantTimeCompare(storedPrevious, previous) != 1 || !hashValid {
+			if !hashValid || event.authVersion != eventAuthVersionV1 || !m.validEventMAC(event) {
 				valid = false
 			}
-			if authVersion != eventAuthVersionV1 || eventKeyID == nil {
-				valid = false
-			} else {
-				key, ok := m.eventKeys[*eventKeyID]
-				if !ok || !hmac.Equal(eventMAC, signEvent(key, storedHash)) {
-					valid = false
-				}
-			}
-			previous = append(previous[:0], storedHash...)
-			lastID = record.EventID
+			previous = append(previous[:0], event.hash...)
+			lastID = event.record.EventID
 			deltaCount++
 		}
 		if err := rows.Err(); err != nil {
 			return uuid.Nil, nil, false, err
 		}
-		if deltaCount == 0 || !valid || lastID != tailID || subtle.ConstantTimeCompare(previous, tailHash) != 1 {
+		if deltaCount == 0 || !valid || lastID != tailID || !bytes.Equal(previous, tailHash) {
 			return uuid.Nil, nil, false, errors.New("audit chain is not authenticated")
 		}
 		return lastID, previous, deltaCount == 1, nil
 	}
-	if err == nil && !cpOccurredAt.Valid {
+	if err == nil && cpOccurredAt.IsZero() {
 		return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
 	}
 	if !verifyGenesis {
@@ -658,7 +648,7 @@ func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID u
 		if err != nil {
 			return errors.New("legacy audit checkpoint does not cover the tail")
 		}
-		if subtle.ConstantTimeCompare(hash, verified.lastHash) != 1 ||
+		if !bytes.Equal(hash, verified.lastHash) ||
 			!m.validCheckpoint(workspaceID, checkpointRecord{eventID: verified.lastID, eventHash: hash, signature: signature}) {
 			return errors.New("legacy audit checkpoint does not authenticate the tail")
 		}
@@ -697,9 +687,16 @@ func nullableString(value string) any {
 	}
 	return value
 }
-func summaryValue(raw json.RawMessage) (value.JSONB, error) {
+func summaryValue(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
-		return value.JSONB{}, nil
+		return nil, nil
 	}
-	return value.ParseJSONB(raw)
+	return canonicalJSON(raw)
+}
+
+func nullableJSON(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return []byte(raw)
 }

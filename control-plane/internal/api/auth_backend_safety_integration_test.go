@@ -14,7 +14,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/google/uuid"
 )
 
@@ -28,8 +27,7 @@ func authSafetyExec(t *testing.T, b database.Backend, query string, args ...any)
 func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	now, err := value.FromTime(time.Now().UTC())
-	testutil.NoError(t, err)
+	now := time.Now().UTC()
 	authSafetyExec(t, owner, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Authentication safety test',$2,$3,$4)`, id, "auth-safety-"+id.String(), now, now)
 	return id
 }

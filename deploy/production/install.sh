@@ -1,36 +1,4 @@
 #!/usr/bin/env bash
-# Thin production orchestrator for a one-command Controller install.
-#
-# Scope: from a verified Release runtime bundle, prepare the host, download the
-# architecture-specific Controller deployment configuration over HTTPS into
-# protected lifecycle state, and delegate activation to controller.sh.
-# Host preparation and Controller lifecycle remain their existing authorities.
-# Production secrets and runtime command/PKI trust material are operator supplied.
-#
-# Usage model:
-#   cd <configuration directory>
-#   export OCSERV_BACKUP_DIR=... OCSERV_SECRET_DIR=...
-#   # export the remaining production Controller configuration...
-#   # (or keep the allowlisted configuration in ./install.env, parsed by the
-#   # strict non-executing loader in deploy/lib/install-env.sh; explicit
-#   # shell variables always win over the file)
-#   deploy/production/install.sh                          # launcher user with Docker access
-#   deploy/production/install.sh --root-lifecycle         # deliberate root lifecycle (fresh host)
-#
-# Launcher contract: run this script as the lifecycle launcher user, not as a
-# whole-script sudo invocation. bootstrap-host.sh provisions the state root
-# for the SUDO_USER launcher while controller.sh validates state ownership
-# against the actual invoking user, so 'sudo install.sh' would mismatch them;
-# In launcher mode sudo is invoked internally only for the host bootstrap
-# step. A deliberate whole-lifecycle-as-root install is available through
-# 'install.sh --root-lifecycle': it reaches root through a controlled sudo env,
-# then strips SUDO_USER (which sudo -i retains) so the bootstrap provisions the
-# state root for the same root user that activates the Controller, and never
-# infers intent from SUDO_COMMAND. On a host without a
-# Docker client the fresh-host path additionally requires this root lifecycle
-# mode: a fresh Docker installation grants no non-root daemon access, and
-# this installer never modifies the Docker permission model, so a non-root
-# launcher fails closed up front instead of after host mutation.
 set -euo pipefail
 umask 077
 
@@ -51,102 +19,16 @@ fail() {
   exit 1
 }
 
-CONFIG_FILE="${PWD}/install.env"
-NON_INTERACTIVE=false
-while (($#)); do
-  case "$1" in
-    --root-lifecycle) ROOT_LIFECYCLE=true; shift ;;
-    --non-interactive) NON_INTERACTIVE=true; shift ;;
-    --config) (($# >= 2)) || fail "--config requires a path"; CONFIG_FILE="$2"; shift 2 ;;
-    *) echo "usage: install.sh [--root-lifecycle] [--non-interactive] [--config PATH]" >&2; exit 2 ;;
-  esac
-done
-sudo_args=()
-[[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
-
-# Operator configuration comes from the invoking shell environment and, for
-# allowlisted variables not exported there, from $PWD/install.env. The
-# strict non-executing loader fail-closes on unknown keys, expansion
-# syntax, and unsafe file metadata, so a configuration error surfaces
-# before any host mutation below; an absent file is a no-op and explicit
-# shell variables always win. OCSERV_INSTALL_ENV_RESOLVED marks the
-# deliberate --root-lifecycle re-exec: the launcher user already resolved
-# install.env under its own privileges and forwarded the effective values
-# across the sudo boundary, so root must not treat a possibly-replaced
-# $PWD/install.env as new authoritative input.
-if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
-  install_env_load "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
-fi
-# Every configuration-derived variable is computed only after the
-# configuration sources above are final.
-case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
-  postgres:bundled|postgres:external) ;;
-  *) fail 'unsupported database configuration; only OCSERV_DATABASE_BACKEND=postgres with OCSERV_DATABASE_DEPLOYMENT=bundled or external is supported' ;;
-esac
-STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
-if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then
-  fail "Integrated requires --root-lifecycle for private Signer custody"
-fi
-
-forward_root_lifecycle() {
-  local variable allowed
-  local -a reexec_args=()
-  [[ "${NON_INTERACTIVE}" == false ]] || reexec_args+=(--non-interactive)
-  local -a forwarded_environment=()
-  # Only operator-supplied production configuration crosses the internal sudo
-  # boundary. Release image variables are generated from the deployment configuration;
-  # bootstrap and test seams are intentionally not forwarded.
-  while IFS= read -r variable; do
-    for allowed in "${CONTROLLER_INSTALL_ENV_NAMES[@]}"; do
-      [[ "${variable}" == "${allowed}" ]] || continue
-      forwarded_environment+=("${variable}=${!variable}")
-      break
-    done
-  done < <(compgen -e)
-  command -v sudo >/dev/null 2>&1 ||
-    fail "sudo is required for --root-lifecycle when the installer is not already running as root"
-  # OCSERV_INSTALL_ENV_RESOLVED tells the root re-exec that install.env was
-  # already resolved by the launcher user: root must not re-read a file that
-  # may have been replaced across the privilege transition.
-  exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
-    OCSERV_INSTALL_ENV_RESOLVED=1 \
-    "${ROOT}/deploy/production/install.sh" --root-lifecycle "${reexec_args[@]}"
-}
-
-if [[ "${ROOT_LIFECYCLE}" == true ]]; then
-  (( EUID == 0 )) || forward_root_lifecycle
-  # bootstrap-host.sh resolves its launcher from SUDO_USER, which sudo -i
-  # retains: strip it so the state root is provisioned for the same root user
-  # that activates the Controller. SUDO_UID/SUDO_GID stay untouched — git
-  # trusts a checkout owned by the sudo-invoking user exactly through them.
-  unset SUDO_USER
-fi
-
-if (( EUID == 0 )) && [[ "${ROOT_LIFECYCLE}" == false ]]; then
-  case "${SUDO_USER:-}" in
-    ""|root) ;;
-    *)
-      fail "run install.sh as the lifecycle launcher user; the installer will invoke sudo only for host bootstrap (whole-script sudo from '${SUDO_USER}' would provision the state root for a launcher that never activates it); for a deliberate whole-lifecycle-as-root install run 'deploy/production/install.sh --root-lifecycle'"
-      ;;
-  esac
-fi
-
-[[ -x "${BOOTSTRAP}" && ! -L "${BOOTSTRAP}" ]] ||
-  fail "Controller host bootstrap is missing or not executable: ${BOOTSTRAP}"
-[[ -x "${CONTROLLER}" && ! -L "${CONTROLLER}" ]] ||
-  fail "Controller lifecycle entrypoint is missing or not executable: ${CONTROLLER}"
-
 resolve_release_identity() {
   local tag matching=()
   if [[ -e "${ROOT}/RELEASE" ]]; then
     # shellcheck source=deploy/lib/controller-runtime.sh
     source "${ROOT}/deploy/lib/controller-runtime.sh"
     read -r RELEASE_TAG RELEASE_COMMIT <"${ROOT}/RELEASE"
-    runtime_validate "${ROOT}" "${RELEASE_TAG}" "${RELEASE_COMMIT}"
+    runtime_identity "${ROOT}" "${RELEASE_TAG}" "${RELEASE_COMMIT}"
     echo "release identity: ${RELEASE_TAG} (${RELEASE_COMMIT})"
     return
   fi
-  # Compatibility for deliberate invocation from an old tagged checkout.
   command -v git >/dev/null 2>&1 ||
     fail "git is required to identify the release checkout"
   RELEASE_COMMIT="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" ||
@@ -172,13 +54,6 @@ resolve_architecture() {
 }
 
 verify_fresh_host_launcher_path() {
-  # When the Docker client is absent entirely, the bootstrap installs Docker
-  # from scratch. A fresh Docker installation grants no non-root daemon
-  # access, and neither this installer nor bootstrap-host.sh ever modifies the
-  # Docker permission model (group membership, socket, listeners), so the
-  # bootstrap's launcher access verification would fail for a non-root
-  # launcher only after the host had already been mutated. Fail closed before
-  # any host mutation instead and hand the operator the two supported paths.
   if (( EUID != 0 )) && ! command -v docker >/dev/null 2>&1; then
     fail "no Docker client is installed, so the host bootstrap would install Docker from scratch; a fresh Docker installation grants no non-root daemon access and this installer never modifies the Docker permission model — run 'deploy/production/install.sh --root-lifecycle' for a deliberate root Controller lifecycle on this fresh host, or install Docker separately and deliberately grant this launcher Docker daemon access per Docker's official post-install steps, then rerun install.sh as the launcher"
   fi
@@ -186,9 +61,6 @@ verify_fresh_host_launcher_path() {
 
 run_host_bootstrap() {
   local sudo_env=() args=(install)
-  # sudo resets the environment, so an explicitly configured state root must
-  # cross the sudo boundary for the bootstrap to provision the same root the
-  # launcher will activate.
   if [[ -n "${OCSERV_CONTROLLER_STATE_ROOT:-}" ]]; then
     sudo_env+=("OCSERV_CONTROLLER_STATE_ROOT=${OCSERV_CONTROLLER_STATE_ROOT}")
   elif [[ -n "${OCSERV_CONTROLLER_STATE_DIR:-}" ]]; then
@@ -198,55 +70,273 @@ run_host_bootstrap() {
     args+=(--backup-dir "${OCSERV_BACKUP_DIR}")
   fi
   if (( EUID == 0 )); then
-    # Root runs the bootstrap directly; under --root-lifecycle the sudo
-    # identity was already stripped at startup, so the state root is
-    # provisioned for the same root user that activates the Controller.
     env "${sudo_env[@]+"${sudo_env[@]}"}" "${BOOTSTRAP}" "${args[@]}"
   else
     sudo "${sudo_args[@]}" env "${sudo_env[@]+"${sudo_env[@]}"}" "${BOOTSTRAP}" "${args[@]}"
   fi
 }
 
-validate_state_root() {
-  case "${STATE_ROOT}" in
-    /*) ;;
-    *) fail "state root ${STATE_ROOT} must be an absolute path" ;;
-  esac
-  case "${STATE_ROOT}" in
-    /|*/|*/../*|*/..|*/./*|*/.)
-      fail "state root ${STATE_ROOT} must be a canonical path without traversal" ;;
-  esac
-  [[ -d "${STATE_ROOT}" && ! -L "${STATE_ROOT}" ]] ||
-    fail "state root ${STATE_ROOT} was not provisioned by the host bootstrap; rerun deploy/production/install.sh from the launcher user"
+download_release_bundle() {
+  BUNDLE_DIR="${STATE_ROOT}/release-bundles/${RELEASE_TAG}"
+  [[ ! -L "${STATE_ROOT}/release-bundles" && ! -L "${BUNDLE_DIR}" ]] ||
+    fail "release bundle directory must not be a symlink"
+  mkdir -p -- "${BUNDLE_DIR}"
+  release_file="${BUNDLE_DIR}/controller-release-${ARCH_WORD}.json"
+  local temporary
+  temporary="$(mktemp "${BUNDLE_DIR}/.manifest.XXXXXX")"
+  curl -fsSL --proto '=https' --tlsv1.2 --output "${temporary}" \
+    "${DOWNLOAD_BASE}/${RELEASE_TAG}/controller-release-${ARCH_WORD}.json" || {
+    rm -f -- "${temporary}"
+    fail "cannot download release manifest"
+  }
+  mv -fT -- "${temporary}" "${release_file}"
 }
 
-download_release_bundle() {
-  local name names=(
-    "controller-release-${ARCH_WORD}.json"
-  )
-  BUNDLE_DIR="${STATE_ROOT}/release-bundles/${RELEASE_TAG}"
-  if [[ -L "${STATE_ROOT}/release-bundles" || -L "${BUNDLE_DIR}" ]]; then
-    fail "release bundle directory ${BUNDLE_DIR} must not be a symlink"
-  fi
-  # Only the version directory is private; its parent holds public release bundles.
-  # shellcheck disable=SC2174
-  mkdir -p -m 0700 -- "${BUNDLE_DIR}"
-  for name in "${names[@]}"; do
-    echo "downloading ${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
-    curl -fsSL --proto '=https' --tlsv1.2 \
-      --output "${BUNDLE_DIR}/${name}" "${DOWNLOAD_BASE}/${RELEASE_TAG}/${name}"
-    chmod 600 -- "${BUNDLE_DIR}/${name}"
+quick_install() {
+  CONFIG_DIR=/etc/ocservia
+  CONFIG="${CONFIG_DIR}/install.env"
+  CREDENTIALS_DIR=/root/ocservia-initial-credentials
+  STATE_ROOT=/var/lib/ocservia-controller
+  HEADER="# ocservia Quick install configuration (generated; keep unchanged)"
+
+  note() { echo "quick install: $*"; }
+
+  controller_domain="" relay_domain="" acme_email="" release_file=""
+  materials_args=()
+  non_interactive=false
+  sudo_args=()
+  original_args=("$@")
+  while (($#)); do
+    if [[ "$1" == --non-interactive ]]; then
+      non_interactive=true
+      sudo_args=(-n)
+      materials_args+=(--non-interactive)
+      shift
+      continue
+    fi
+    (($# >= 2)) || fail "missing value for $1"
+    case "$1" in
+      --controller-domain) controller_domain="$2" ;;
+      --relay-domain) relay_domain="$2" ;;
+      --acme-email) acme_email="$2" ;;
+      --root-ca-passphrase-file) materials_args+=("$1" "$2" --non-interactive) ;;
+      --root-ca-export-dir) materials_args+=("$1" "$2") ;;
+      --release-file) release_file="$2" ;;
+      *) fail "unknown argument: $1" ;;
+    esac
+    shift 2
   done
-  echo "release bundle stored: ${BUNDLE_DIR}"
+  [[ -n "${controller_domain}" && -n "${acme_email}" ]] ||
+    fail "--controller-domain and --acme-email are required"
+  [[ -n "${relay_domain}" ]] || relay_domain="${controller_domain}"
+  [[ -z "${release_file}" || ("${release_file}" == /* && -f "${release_file}") ]] ||
+    fail "--release-file must be an absolute path to a release manifest"
+
+  if [[ "${non_interactive}" == true && " ${materials_args[*]} " != *" --root-ca-passphrase-file "* ]]; then
+    fail "--non-interactive requires --root-ca-passphrase-file"
+  fi
+  if ((EUID != 0)); then
+    command -v sudo >/dev/null 2>&1 || fail "run as root or install sudo"
+    exec sudo "${sudo_args[@]}" env ${OCSERV_ACME_DIRECTORY_URL:+"OCSERV_ACME_DIRECTORY_URL=${OCSERV_ACME_DIRECTORY_URL}"} \
+      ${OCSERV_ACME_CA_FILE:+"OCSERV_ACME_CA_FILE=${OCSERV_ACME_CA_FILE}"} "$0" --quick "${original_args[@]}"
+  fi
+
+  unset SUDO_USER
+  acme_directory="${OCSERV_ACME_DIRECTORY_URL:-}" acme_ca="${OCSERV_ACME_CA_FILE:-}"
+  while IFS= read -r variable; do
+    [[ "${variable}" != OCSERV_* ]] || unset "${variable}"
+  done < <(compgen -e)
+
+  config_keys=(OCSERV_DEPLOYMENT_MODE OCSERV_DATABASE_BACKEND OCSERV_DATABASE_DEPLOYMENT OCSERV_TLS_MODE
+    OCSERV_ACME_EMAIL OCSERV_ACME_DIRECTORY_URL OCSERV_ACME_CA_FILE OCSERV_PUBLIC_HOST OCSERV_RELAY_PUBLIC_HOST
+    OCSERV_LOCAL_AUTH_ENABLED OCSERV_SECRET_DIR OCSERV_RELAY_SECRET_DIR OCSERV_SIGNER_SECRET_DIR
+    OCSERV_SIGNER_STATE_DIR OCSERV_BACKUP_DIR OCSERV_AUDIT_EVENT_KEY_ID OCSERV_CONTROLLER_ENDPOINT_ID)
+
+  if [[ -e "${CONFIG}" || -L "${CONFIG}" ]]; then
+    [[ -f "${CONFIG}" && ! -L "${CONFIG}" && "$(head -n 1 -- "${CONFIG}")" == "${HEADER}" ]] ||
+      fail "${CONFIG} was not generated by the Quick install; use the manual installation"
+    for line in "OCSERV_PUBLIC_HOST=${controller_domain}" "OCSERV_RELAY_PUBLIC_HOST=${relay_domain}" \
+      "OCSERV_ACME_EMAIL=${acme_email}"; do
+      grep -qxF -- "${line}" "${CONFIG}" || fail "${CONFIG} records different domains or email; rerun with the original values"
+    done
+    note "continuing the Quick installation recorded in ${CONFIG}"
+  elif [[ -e "${STATE_ROOT}/release-history.json" || -e "${STATE_ROOT}/deployment-profile.json" || -e "${STATE_ROOT}/current-release.json" ]]; then
+    fail "a Controller deployment already exists in ${STATE_ROOT}; Quick only installs a new host"
+  fi
+
+  secret_dir="${CONFIG_DIR}/secrets"
+  relay_dir="${CONFIG_DIR}/relay"
+  signer_dir="${CONFIG_DIR}/signer"
+  signer_state=/var/lib/ocservia-signer
+  backup_dir=/var/backups/ocservia
+
+  "${ROOT}/deploy/production/bootstrap-host.sh" install --backup-dir "${backup_dir}"
+
+  install -d -o 0 -g 0 -m 0755 -- "${CONFIG_DIR}"
+  [[ -d "${relay_dir}" ]] || install -d -o 0 -g 0 -m 0700 -- "${relay_dir}"
+  OCSERV_SECRET_DIR="${secret_dir}" OCSERV_SIGNER_SECRET_DIR="${signer_dir}" OCSERV_SIGNER_STATE_DIR="${signer_state}" \
+    generate_materials ${materials_args[@]+"${materials_args[@]}"}
+
+  if [[ ! -e "${CONFIG}" ]]; then
+    endpoint_id="$(jq -er '.controller_endpoint_id' "${secret_dir}/quick-install.json")"
+    staged="$(mktemp "${CONFIG_DIR}/.install.env.XXXXXX")"
+    {
+      printf '%s\n' "${HEADER}"
+      printf '%s\n' OCSERV_DEPLOYMENT_MODE=integrated \
+        OCSERV_DATABASE_DEPLOYMENT=bundled OCSERV_TLS_MODE=acme "OCSERV_ACME_EMAIL=${acme_email}"
+      [[ -z "${acme_directory}" ]] || printf 'OCSERV_ACME_DIRECTORY_URL=%s\n' "${acme_directory}"
+      [[ -z "${acme_ca}" ]] || printf 'OCSERV_ACME_CA_FILE=%s\n' "${acme_ca}"
+      printf '%s\n' "OCSERV_PUBLIC_HOST=${controller_domain}" "OCSERV_RELAY_PUBLIC_HOST=${relay_domain}" \
+        OCSERV_LOCAL_AUTH_ENABLED=true "OCSERV_SECRET_DIR=${secret_dir}" "OCSERV_RELAY_SECRET_DIR=${relay_dir}" \
+        "OCSERV_SIGNER_SECRET_DIR=${signer_dir}" "OCSERV_SIGNER_STATE_DIR=${signer_state}" \
+        "OCSERV_BACKUP_DIR=${backup_dir}" "OCSERV_AUDIT_EVENT_KEY_ID=quick-$(date -u +%Y%m%d)" \
+        "OCSERV_CONTROLLER_ENDPOINT_ID=${endpoint_id}"
+    } >"${staged}"
+    mv -fT -- "${staged}" "${CONFIG}"
+    note "configuration written: ${CONFIG}"
+  fi
+
+  install_env_load "${CONFIG}" "${config_keys[@]}"
+
+  history="${STATE_ROOT}/release-history.json"
+  if [[ ! -e "${history}" && ! -e "${STATE_ROOT}/current-release.json" ]]; then
+    if [[ -z "${release_file}" ]]; then
+      resolve_release_identity
+      resolve_architecture
+      download_release_bundle
+    fi
+    "${CONTROLLER}" install --release-file "${release_file}"
+  fi
+  [[ -e "${history}" ]] || history="${STATE_ROOT}/current-release.json"
+
+  for role in gateway control transport backup postgres otel edge relay signer; do
+    variable="OCSERV_${role^^}_IMAGE"
+    printf -v "${variable}" '%s' "$(jq -er --arg role "${role}" '(.current // .).images[$role]' "${history}")"
+    export "${variable?}"
+  done
+  compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
+
+  if [[ -e "${CREDENTIALS_DIR}/complete" ]]; then
+    note "initial Local administrator already exists"
+  else
+    workspace_id="$(compose run --rm --no-deps -T migrate --provision-management-workspace |
+      jq -Rr 'fromjson? | select(.msg == "management workspace ready") | .workspace_id')"
+    [[ "${workspace_id}" =~ ^[0-9a-f-]{36}$ ]] || fail "the management workspace was not provisioned"
+
+    [[ -d "${CREDENTIALS_DIR}" ]] || install -d -o 0 -g 0 -m 0700 -- "${CREDENTIALS_DIR}"
+    file="${CREDENTIALS_DIR}/admin.txt"
+    if [[ ! -e "${file}" ]]; then
+      password="$(openssl rand -base64 6)"
+      staged="$(mktemp "${CREDENTIALS_DIR}/.admin.XXXXXX")"
+      printf 'URL: https://%s\nUsername: admin\nPassword: %s\n' \
+        "${controller_domain}" "${password}" >"${staged}"
+      unset password
+      chmod 0400 -- "${staged}"
+      mv -fT -- "${staged}" "${file}"
+    fi
+    username="$(sed -n 's/^Username: //p' "${file}")"
+    trap 'rm -f -- "${secret_dir}"/local-bootstrap-admin-password' EXIT
+    sed -n 's/^Password: //p' "${file}" |
+      install -o 65534 -g 65532 -m 0400 /dev/stdin "${secret_dir}/local-bootstrap-admin-password"
+    status=0
+    output="$(compose run --rm --no-deps -T \
+      -e "OCSERV_LOCAL_BOOTSTRAP_USERNAME=${username}" \
+      -e "OCSERV_LOCAL_BOOTSTRAP_WORKSPACE_ID=${workspace_id}" \
+      -e OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE=/run/secrets/local-bootstrap-password \
+      -v "${secret_dir}/local-bootstrap-admin-password:/run/secrets/local-bootstrap-password:ro" \
+      control-plane --bootstrap-local-admin)" || status=$?
+    printf '%s\n' "${output}"
+    if ((status != 0)); then
+      jq -Rr 'fromjson? | .error // empty' <<<"${output}" | grep -qxF "Local authentication is already initialized" ||
+        fail "Local bootstrap was rejected"
+      note "Local authentication was already initialized by an earlier run"
+    fi
+    : >"${CREDENTIALS_DIR}/complete"
+  fi
+
+  cat <<EOF
+Quick install complete: https://${controller_domain}
+Initial Local administrator credentials (root-only file):
+  ${CREDENTIALS_DIR}/admin.txt
+Change the initial password after the first login.
+EOF
 }
+
+if [[ "${1:-}" == --quick ]]; then
+  shift
+  # shellcheck source=deploy/lib/quick-materials.sh
+  source "${ROOT}/deploy/lib/quick-materials.sh"
+  quick_install "$@"
+  exit
+fi
+
+CONFIG_FILE="${PWD}/install.env"
+NON_INTERACTIVE=false
+while (($#)); do
+  case "$1" in
+    --root-lifecycle) ROOT_LIFECYCLE=true; shift ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --config) (($# >= 2)) || fail "--config requires a path"; CONFIG_FILE="$2"; shift 2 ;;
+    *) echo "usage: install.sh [--root-lifecycle] [--non-interactive] [--config PATH]" >&2; exit 2 ;;
+  esac
+done
+sudo_args=()
+[[ "${NON_INTERACTIVE}" == false ]] || sudo_args+=(-n)
+
+if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
+  install_env_load "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
+fi
+case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
+  postgres:bundled|postgres:external) ;;
+  *) fail 'unsupported database configuration; only OCSERV_DATABASE_BACKEND=postgres with OCSERV_DATABASE_DEPLOYMENT=bundled or external is supported' ;;
+esac
+STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
+if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then
+  fail "Integrated requires --root-lifecycle for private Signer custody"
+fi
+
+forward_root_lifecycle() {
+  local variable allowed
+  local -a reexec_args=()
+  [[ "${NON_INTERACTIVE}" == false ]] || reexec_args+=(--non-interactive)
+  local -a forwarded_environment=()
+  while IFS= read -r variable; do
+    for allowed in "${CONTROLLER_INSTALL_ENV_NAMES[@]}"; do
+      [[ "${variable}" == "${allowed}" ]] || continue
+      forwarded_environment+=("${variable}=${!variable}")
+      break
+    done
+  done < <(compgen -e)
+  command -v sudo >/dev/null 2>&1 ||
+    fail "sudo is required for --root-lifecycle when the installer is not already running as root"
+  exec sudo "${sudo_args[@]}" env "${forwarded_environment[@]+"${forwarded_environment[@]}"}" \
+    OCSERV_INSTALL_ENV_RESOLVED=1 \
+    "${ROOT}/deploy/production/install.sh" --root-lifecycle "${reexec_args[@]}"
+}
+
+if [[ "${ROOT_LIFECYCLE}" == true ]]; then
+  (( EUID == 0 )) || forward_root_lifecycle
+  unset SUDO_USER
+fi
+
+if (( EUID == 0 )) && [[ "${ROOT_LIFECYCLE}" == false ]]; then
+  case "${SUDO_USER:-}" in
+    ""|root) ;;
+    *)
+      fail "run install.sh as the lifecycle launcher user; the installer will invoke sudo only for host bootstrap (whole-script sudo from '${SUDO_USER}' would provision the state root for a launcher that never activates it); for a deliberate whole-lifecycle-as-root install run 'deploy/production/install.sh --root-lifecycle'"
+      ;;
+  esac
+fi
+
+[[ -x "${BOOTSTRAP}" && ! -L "${BOOTSTRAP}" ]] ||
+  fail "Controller host bootstrap is missing or not executable: ${BOOTSTRAP}"
+[[ -x "${CONTROLLER}" && ! -L "${CONTROLLER}" ]] ||
+  fail "Controller lifecycle entrypoint is missing or not executable: ${CONTROLLER}"
+
 
 resolve_release_identity
 resolve_architecture
 verify_fresh_host_launcher_path
-
 run_host_bootstrap
-validate_state_root
 download_release_bundle
-
-exec "${CONTROLLER}" install \
-  --release-file "${BUNDLE_DIR}/controller-release-${ARCH_WORD}.json"
+exec "${CONTROLLER}" install --release-file "${release_file}"

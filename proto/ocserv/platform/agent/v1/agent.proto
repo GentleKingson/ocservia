@@ -66,11 +66,6 @@ message SessionHandshake {
   repeated SealingKeyDescriptorV1 sealing_keys = 16;
 }
 
-enum SealedSecretVersion {
-  SEALED_SECRET_VERSION_UNSPECIFIED = 0;
-  SEALED_SECRET_VERSION_V1 = 1;
-}
-
 enum SealedSecretPurpose {
   SEALED_SECRET_PURPOSE_UNSPECIFIED = 0;
   SEALED_SECRET_PURPOSE_USER_PASSWORD = 1;
@@ -80,7 +75,7 @@ enum SealedSecretPurpose {
 // SealingKeyDescriptorV1 identifies one purpose-specific RSA-OAEP-SHA256
 // public key. Enrollment proof binds the complete advertised set.
 message SealingKeyDescriptorV1 {
-  SealedSecretVersion version = 1;
+  uint32 version = 1;
   SealedSecretPurpose purpose = 2;
   string key_id = 3;
   bytes public_key_sha256 = 4;
@@ -89,7 +84,7 @@ message SealingKeyDescriptorV1 {
 // SealedSecretV1 is purpose-bound metadata plus ciphertext. Purpose isolation
 // is additionally enforced by distinct private keys at privd.
 message SealedSecretV1 {
-  SealedSecretVersion version = 1;
+  uint32 version = 1;
   SealedSecretPurpose purpose = 2;
   string key_id = 3;
   bytes ciphertext = 4;
@@ -103,23 +98,12 @@ message SessionHandshakeResponse {
   string controller_version = 5;
   repeated string negotiated_capabilities = 6;
   SessionGrantV1 session_grant = 7;
-  // Present only when the negotiating agent advertised the connection fencing
-  // capability and the Controller currently owns the node connection lease.
-  // transportd verifies it, records it as the node's active owner fence, and
-  // relays it to the agent; mutations on such a session must carry fence
-  // proofs. Its absence keeps the established compatibility paths unchanged.
-  ConnectionFenceV2 connection_fence = 8;
 }
 
-enum SessionGrantVersion {
-  SESSION_GRANT_VERSION_UNSPECIFIED = 0;
-  SESSION_GRANT_VERSION_V1 = 1;
-}
-
-// SessionGrantV1 is signed by the Controller over an independent canonical
-// representation. transportd relays and retains it but cannot mint it.
+// SessionGrantV1 is signed by the Controller over RFC 8949 Core Deterministic CBOR.
+// transportd relays and retains it, and agent/privd enforce monotonic session_epoch.
 message SessionGrantV1 {
-  SessionGrantVersion version = 1;
+  uint32 version = 1;
   string key_id = 2;
   uint32 protocol_major = 3;
   uint32 protocol_minor = 4;
@@ -130,68 +114,7 @@ message SessionGrantV1 {
   google.protobuf.Timestamp issued_at = 9;
   google.protobuf.Timestamp expires_at = 10;
   bytes signature = 11;
-}
-
-enum FenceSignatureVersion {
-  FENCE_SIGNATURE_VERSION_UNSPECIFIED = 0;
-  FENCE_SIGNATURE_VERSION_ED25519_V1 = 1;
-}
-
-enum FenceOperationKind {
-  FENCE_OPERATION_KIND_UNSPECIFIED = 0;
-  FENCE_OPERATION_KIND_COMMAND = 1;
-  FENCE_OPERATION_KIND_ARTIFACT = 2;
-  FENCE_OPERATION_KIND_CONNECTION_CLOSE = 3;
-  FENCE_OPERATION_KIND_STATE_UPDATE = 4;
-}
-
-// ConnectionFenceV2 is the Controller-signed per-node connection-owner fence.
-// It binds the exact owner instance, process incarnation, connection identity,
-// and the monotonically increasing fencing epoch recorded by the database
-// ownership authority. V1 session grants never carry these fields and are
-// never reinterpreted as fences: a V1 grant stays a bounded compatibility
-// proof and cannot authorize a fenced mutation.
-message ConnectionFenceV2 {
-  FenceSignatureVersion signature_version = 1;
-  string key_id = 2;
-  bytes fence_id = 3;
-  bytes node_id = 4;
-  bytes endpoint_id = 5;
-  bytes owner_instance_id = 6;
-  uint64 owner_incarnation = 7;
-  uint64 owner_epoch = 8;
-  bytes connection_id = 9;
-  uint64 authorization_revision = 10;
-  repeated string capabilities = 11;
-  google.protobuf.Timestamp lease_until = 12;
-  google.protobuf.Timestamp issued_at = 13;
-  google.protobuf.Timestamp expires_at = 14;
-  bytes signature = 15;
-}
-
-// FenceBindingV2 binds one operation identity (command dispatch, artifact
-// acknowledgement, connection close, or state update) to the exact fence
-// identity tuple: owner instance, incarnation, connection, and epoch. A
-// binding signed for one epoch never authorizes work recorded under a
-// different epoch, so late legitimate results are matched against the fence
-// of the actual dispatch attempt.
-message FenceBindingV2 {
-  FenceSignatureVersion signature_version = 1;
-  string key_id = 2;
-  FenceOperationKind operation_kind = 3;
-  bytes operation_id = 4;
-  bytes fence_id = 5;
-  bytes node_id = 6;
-  bytes endpoint_id = 7;
-  bytes owner_instance_id = 8;
-  uint64 owner_incarnation = 9;
-  uint64 owner_epoch = 10;
-  bytes connection_id = 11;
-  uint64 authorization_revision = 12;
-  string capability = 13;
-  google.protobuf.Timestamp issued_at = 14;
-  google.protobuf.Timestamp expires_at = 15;
-  bytes signature = 16;
+  uint64 session_epoch = 12;
 }
 
 enum AgentEventType {
@@ -222,25 +145,16 @@ enum CommandDeliveryMode {
   COMMAND_DELIVERY_MODE_RETRY_IF_EFFECT_ABSENT = 3;
 }
 
-// SemanticPayloadHashVersion identifies the canonical command identity
-// algorithm. See docs/development/command-semantic-hash-v1.md and v2.md.
+// SemanticPayloadHashVersion identifies the canonical command identity algorithm.
 enum SemanticPayloadHashVersion {
   SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED = 0;
-  SEMANTIC_PAYLOAD_HASH_VERSION_V1 = 1;
   SEMANTIC_PAYLOAD_HASH_VERSION_V2 = 2;
 }
 
-// CommandAuthorizationVersion selects the canonical Controller authorization
-// format. Command authorization is independent of Protobuf serialization.
-enum CommandAuthorizationVersion {
-  COMMAND_AUTHORIZATION_VERSION_UNSPECIFIED = 0;
-  COMMAND_AUTHORIZATION_VERSION_V1 = 1;
-}
-
 // CommandAuthorizationProof is issued by the Controller and only relayed by
-// transportd. The signature covers CommandAuthorizationV1 canonical bytes.
+// transportd. The signature covers RFC 8949 Core Deterministic CBOR bytes.
 message CommandAuthorizationProof {
-  CommandAuthorizationVersion version = 1;
+  uint32 version = 1;
   string key_id = 2;
   bytes signature = 3;
 }
@@ -258,11 +172,6 @@ message CommandResult {
   bool replayed = 9;
   SemanticPayloadHashVersion semantic_payload_hash_version = 10;
   PrivilegedResultProof privileged_result_proof = 11;
-}
-
-enum PrivdReceiptVersion {
-  PRIVD_RECEIPT_VERSION_UNSPECIFIED = 0;
-  PRIVD_RECEIPT_VERSION_V1 = 1;
 }
 
 enum PrivilegedCommandKind {
@@ -299,15 +208,15 @@ enum PrivilegedResultKind {
 }
 
 // PrivilegedResultProof is opaque evidence to Agent and transportd. Only
-// root-owned privd signs it and Controller reconstructs its canonical bytes.
+// root-owned privd signs it and Controller reconstructs its canonical CBOR bytes.
 message PrivilegedResultProof {
-  PrivdReceiptVersion version = 1;
+  uint32 version = 1;
   PrivdResultReceiptV1 receipt_v1 = 2;
   bytes signature = 3;
 }
 
 message PrivdResultReceiptV1 {
-  PrivdReceiptVersion receipt_version = 1;
+  uint32 receipt_version = 1;
   bytes node_id = 2;
   string privd_attestation_key_id = 3;
   bytes command_id = 4;
@@ -318,9 +227,8 @@ message PrivdResultReceiptV1 {
   PrivilegedCommandKind command_kind = 9;
   PrivilegedResultKind result_kind = 10;
   CommandResultState terminal_state = 11;
-  bytes result_bytes_sha256 = 12;
-  bytes error_code_sha256 = 13;
-  bytes effect_record_id = 14;
+  bytes result_cbor_sha256 = 12;
+  string error_code = 13;
   uint64 effect_sequence = 15;
   google.protobuf.Timestamp accepted_at = 16;
   google.protobuf.Timestamp completed_at = 17;
@@ -332,14 +240,12 @@ message PrivdCertificateReceiptBindingV1 {
   bytes certificate_id = 1;
   bytes csr_der_sha256 = 2;
   bytes public_key_sha256 = 3;
-  bytes requested_subject_sha256 = 4;
-  bytes root_effect_record_id = 5;
 }
 
 // PrivdAttestationRegistrationV1 proves possession of the new key while a
 // separately delivered root-only one-time credential establishes trust.
 message PrivdAttestationRegistrationV1 {
-  PrivdReceiptVersion version = 1;
+  uint32 version = 1;
   bytes node_id = 2;
   string privd_attestation_key_id = 3;
   bytes public_key = 4;
@@ -427,14 +333,12 @@ message UserObservation {
   string username = 1;
   bool enabled = 2;
   uint64 revision = 3;
-  bytes fingerprint_sha256 = 4;
 }
 
 message GroupObservation {
   string group_name = 1;
   repeated string members = 2;
   uint64 revision = 3;
-  bytes fingerprint_sha256 = 4;
 }
 
 message CommandEnvelope {
@@ -481,17 +385,7 @@ message CommandEnvelope {
   bytes operation_id = 120;
   string action = 121;
   string required_capability = 122;
-  bytes approval_id = 123;
-  bytes approval_request_sha256 = 124;
   CommandAuthorizationProof authorization = 125;
-  // Owner fence proofs for fenced dispatch. Both travel with the command so
-  // transportd can enforce the fence before the agent stream is opened and so
-  // the agent can independently re-verify them. The V1 authorization signature
-  // does not cover these fields; they are separate signed proofs and a frame
-  // carrying them is only produced for sessions that negotiated connection
-  // fencing.
-  ConnectionFenceV2 connection_fence = 126;
-  FenceBindingV2 fence_binding = 127;
 }
 
 message SessionDisconnect {
@@ -510,9 +404,6 @@ message IpBanRemove {
 
 message UserCreate {
   string username = 1;
-  // Deprecated wire fields are rejected by protocol 1.1 execution.
-  bytes sealed_password = 2;
-  string secret_key_id = 3;
   uint64 desired_revision = 4;
   SealedSecretV1 sealed_password_v1 = 5;
 }
@@ -529,9 +420,6 @@ message UserEnable {
 
 message UserPasswordRotate {
   string username = 1;
-  // Deprecated wire fields are rejected by protocol 1.1 execution.
-  bytes sealed_password = 2;
-  string secret_key_id = 3;
   uint64 desired_revision = 4;
   SealedSecretV1 sealed_password_v1 = 5;
 }
@@ -633,9 +521,6 @@ message CertificateCsrResult {
 message CertificateP12 {
   bytes certificate_id = 1;
   bytes certificate_chain_pem = 2;
-  // Deprecated wire fields are rejected by protocol 1.1 execution.
-  bytes sealed_password = 3;
-  string secret_key_id = 4;
   bytes artifact_id = 5;
   SealedSecretV1 sealed_password_v1 = 6;
   uint64 certificate_version = 7;
@@ -696,7 +581,7 @@ enum AgentUpgradeOutcomeState {
 // which is the time key validity is judged against so a key rotation after
 // completion can still attest history it now reads.
 message AgentUpgradeResultProof {
-  PrivdReceiptVersion version = 1;
+  uint32 version = 1;
   bytes node_id = 2;
   string privd_attestation_key_id = 3;
   bytes operation_id = 4;
@@ -723,10 +608,6 @@ message ArtifactFetchRequest {
   string purpose = 2;
   uint64 max_bytes = 3;
   ArtifactGrantV1 grant = 4;
-  // The Agent independently verifies the exact live owner term and the
-  // artifact operation binding; transportd is only a relay for these proofs.
-  ConnectionFenceV2 connection_fence = 5;
-  FenceBindingV2 fence_binding = 6;
 }
 
 // ArtifactConsumeRequest is sent only after the Control Plane has received and
@@ -738,11 +619,6 @@ message ArtifactConsumeRequest {
   // Confirmation is read-only and may use an expired grant only to prove that
   // the exact root-owned ledger record was already consumed.
   bool confirm_only = 4;
-  // Consumption is bound to the same fenced artifact operation as the fetch.
-  // Confirmation remains side-effect free but retains the proof carriers so
-  // the Agent never has to trust transportd's authorization decision.
-  ConnectionFenceV2 connection_fence = 5;
-  FenceBindingV2 fence_binding = 6;
 }
 
 message ArtifactConsumeResponse {
@@ -751,15 +627,10 @@ message ArtifactConsumeResponse {
   bool consumed = 3;
 }
 
-enum ArtifactGrantVersion {
-  ARTIFACT_GRANT_VERSION_UNSPECIFIED = 0;
-  ARTIFACT_GRANT_VERSION_V1 = 1;
-}
-
-// ArtifactGrantV1 is signed by the Controller over an independent canonical
-// representation. transportd only relays this proof.
+// ArtifactGrantV1 is signed by the Controller over RFC 8949 Core Deterministic CBOR.
+// transportd only relays this proof.
 message ArtifactGrantV1 {
-  ArtifactGrantVersion version = 1;
+  uint32 version = 1;
   string key_id = 2;
   bytes node_id = 3;
   bytes artifact_id = 4;
@@ -775,12 +646,12 @@ message ArtifactGrantV1 {
   bytes signature = 14;
 }
 
-message ArtifactChunk {
+// ArtifactPayload carries a complete encrypted P12 artifact (<= 256 KiB) in a
+// single request-response exchange.
+message ArtifactPayload {
   bytes artifact_id = 1;
-  uint64 offset = 2;
-  bytes data = 3;
-  bool eof = 4;
-  bytes sha256 = 5;
+  bytes data = 2;
+  bytes sha256 = 3;
 }
 
 message ServiceReload {}

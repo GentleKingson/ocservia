@@ -192,15 +192,15 @@ func TestNodeBootstrapTokenRevalidatesSessionAfterBodyRead(t *testing.T) {
 	}
 }
 
-func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {
+func (f certificateArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (certificateArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) error {
+func (certificateArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error {
 	return nil
 }
 
-func (certificateArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error) {
+func (certificateArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
 	return true, nil
 }
 
@@ -210,18 +210,18 @@ type invalidatingArtifactFixture struct {
 	data       []byte
 }
 
-func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ *agentv1.FenceBindingV2) (io.ReadCloser, error) {
+func (f invalidatingArtifactFixture) FetchArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
 	if _, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state='failed',lease_until=NULL WHERE id=$1`, f.artifactID); err != nil {
 		return nil, err
 	}
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (invalidatingArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) error {
+func (invalidatingArtifactFixture) ConsumeArtifact(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) error {
 	return nil
 }
 
-func (invalidatingArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error) {
+func (invalidatingArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
 	return true, nil
 }
 
@@ -232,11 +232,11 @@ type terminalArtifactFixture struct {
 	data       []byte
 }
 
-func (f terminalArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1, *agentv1.FenceBindingV2) (io.ReadCloser, error) {
+func (f terminalArtifactFixture) FetchArtifact(context.Context, *agentv1.ArtifactGrantV1) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ []byte, _ int64, _ *agentv1.FenceBindingV2) error {
+func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1.ArtifactGrantV1, _ []byte, _ int64) error {
 	command, err := f.pool.Exec(ctx, `UPDATE artifact_operations SET state=$2,lease_until=NULL,active_grant_expires_at=now(),updated_at=now() WHERE id=$1 AND state='consuming'`, f.artifactID, f.state)
 	if err != nil {
 		return err
@@ -247,7 +247,7 @@ func (f terminalArtifactFixture) ConsumeArtifact(ctx context.Context, _ *agentv1
 	return nil
 }
 
-func (terminalArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64, *agentv1.FenceBindingV2) (bool, error) {
+func (terminalArtifactFixture) ConfirmArtifactConsumed(context.Context, *agentv1.ArtifactGrantV1, []byte, int64) (bool, error) {
 	return true, nil
 }
 
@@ -261,10 +261,76 @@ func (*failingArtifactWriter) Write(value []byte) (int, error) {
 	return len(value) / 2, io.ErrUnexpectedEOF
 }
 
+func TestCertificateCreateOptionalDNSNamesIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := testfixture.OpenIsolated(t, t, "certificate_create")
+	backend := postgres.WrapPool(pool)
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Certificate API','certificate-api',now(),now())`, workspaceID)
+	testutil.Exec(t, ctx, pool, `INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'certificate-node','offline',1,now(),now())`, nodeID, workspaceID)
+	testutil.Exec(t, ctx, pool, `INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.certificate.issue',true)`, nodeID)
+	_, err := testfixture.InstallKey(ctx, pool, nodeID)
+	testutil.NoError(t, err)
+
+	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	testutil.NoError(t, err)
+	const username = "certificate-api-admin"
+	const password = "unique certificate API integration administrator password"
+	_, err = authn.BootstrapLocalAdmin(ctx, username, password, workspaceID)
+	testutil.NoError(t, err)
+	cookie, _, err := authn.AuthenticateLocal(ctx, username, password)
+	testutil.NoError(t, err)
+	certificateService := certificates.NewBackend(backend, apiOperationService(pool), nil, nil, nil, nil)
+	server := newTestServer(t, testHTTPConfig(false), backend, Modules{Certificates: certificateService}, Authorization{Authentication: authn})
+	submit := func(dnsField string) *httptest.ResponseRecorder {
+		body := `{"expected_version":1,"common_name":"node.example.test","key_bits":2048,"reason":"create certificate"` + dnsField + `}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/certificates", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", authTestOrigin)
+		request.Header.Set("X-Workspace-ID", workspaceID.String())
+		request.Header.Set("Idempotency-Key", "certificate-create")
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		server.http.Handler.ServeHTTP(response, request)
+		return response
+	}
+
+	created := submit("")
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("omitted dns_names: status=%d body=%s", created.Code, created.Body)
+	}
+	var certificate certificates.Certificate
+	testutil.NoError(t, json.Unmarshal(created.Body.Bytes(), &certificate))
+	if certificate.ID == uuid.Nil || string(certificate.DNSNames) != "[]" {
+		t.Fatalf("unexpected created certificate: %s", created.Body)
+	}
+	var storedNames string
+	testutil.NoError(t, pool.QueryRow(ctx, `SELECT dns_names::text FROM certificates WHERE id=$1`, certificate.ID).Scan(&storedNames))
+	if storedNames != "[]" {
+		t.Fatalf("stored dns_names = %s, want []", storedNames)
+	}
+
+	for _, field := range []string{`,"dns_names":[]`, `,"dns_names":null`} {
+		response := submit(field)
+		if response.Code != http.StatusAccepted || response.Header().Get("Idempotency-Replayed") != "true" {
+			t.Fatalf("replay with %s: status=%d headers=%v body=%s", field, response.Code, response.Header(), response.Body)
+		}
+		var replayed certificates.Certificate
+		testutil.NoError(t, json.Unmarshal(response.Body.Bytes(), &replayed))
+		if replayed.ID != certificate.ID {
+			t.Fatalf("replayed certificate = %s, want %s", replayed.ID, certificate.ID)
+		}
+	}
+	if response := submit(`,"dns_names":["node.example.test"]`); response.Code != http.StatusConflict {
+		t.Fatalf("reused key with a different DNS list: status=%d body=%s", response.Code, response.Body)
+	}
+}
+
 func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
 	workspaceID, managerID, outsiderID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	managerSession := uuid.Must(uuid.NewV7())
 	nodeA, nodeB, operationID, certificateID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	// Only fixture batches use simple protocol; service queries retain the
 	// production pool's extended-protocol default.
@@ -273,19 +339,20 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($7,$1,'cert-node-a','active',1,now(),now()),($8,$1,'cert-node-b','active',1,now(),now());
 		INSERT INTO operations(id,workspace_id,node_id,state,version,request_id,idempotency_key,request_hash,created_at,updated_at) VALUES($9,$1,$7,'succeeded',1,'certificate-auth','certificate-auth',decode(repeat('00',32),'hex'),now(),now());
 		INSERT INTO certificates(id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,created_at,updated_at) VALUES($10,$1,$7,$9,'node-a.example.test','[]',2048,'csr_pending',now(),now());
-		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,request_hash,expires_at,created_at,updated_at) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),decode(repeat('02',32),'hex'),now()+interval '10 minutes',now(),now());
-		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), outsiderID, outsiderID.String(), nodeA, nodeB, operationID, certificateID, artifactID); err != nil {
+		INSERT INTO artifact_operations(id,workspace_id,node_id,certificate_id,certificate_version,operation_id,purpose,state,token_sha256,expires_at,created_at,updated_at,requester_identity_id) VALUES($11,$1,$7,$10,1,$9,'certificate_p12','pending',decode(repeat('01',32),'hex'),now()+interval '10 minutes',now(),now(),$3);
+		INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($12,$3,now()+interval '1 hour',now());
+		INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$3,now())`, pgx.QueryExecModeSimpleProtocol, workspaceID, "certificate-auth-"+workspaceID.String(), managerID, managerID.String(), outsiderID, outsiderID.String(), nodeA, nodeB, operationID, certificateID, artifactID, managerSession); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM workspace_admins WHERE workspace_id=$1; DELETE FROM artifact_operations WHERE id=$2; DELETE FROM certificates WHERE id=$3; DELETE FROM operations WHERE id=$4; DELETE FROM nodes WHERE workspace_id=$1; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$1`, pgx.QueryExecModeSimpleProtocol, workspaceID, artifactID, certificateID, operationID, managerID, outsiderID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workspace_admins WHERE workspace_id=$1; DELETE FROM artifact_operations WHERE id=$2; DELETE FROM certificates WHERE id=$3; DELETE FROM operations WHERE id=$4; DELETE FROM nodes WHERE workspace_id=$1; DELETE FROM auth_sessions WHERE id=$7; DELETE FROM identities WHERE id IN($5,$6); DELETE FROM workspaces WHERE id=$1`, pgx.QueryExecModeSimpleProtocol, workspaceID, artifactID, certificateID, operationID, managerID, outsiderID, managerSession)
 	}()
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
 	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	server := &Server{auth: authn, certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
-	manager := auth.Principal{IdentityID: managerID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
+	manager := auth.Principal{IdentityID: managerID, SessionID: managerSession, Issuer: "integration"}
 	outsider := auth.Principal{IdentityID: outsiderID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	tests := []struct {
 		name, method, path, pathKey, pathValue string
@@ -295,11 +362,11 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 		{"admin lists node A", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
 		{"admin lists node B", http.MethodGet, "/api/v1/nodes/" + nodeB.String() + "/certificates", "node_id", nodeB.String(), manager, true},
 		{"admin issues node A", http.MethodPost, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), manager, true},
-		{"admin creates p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_action", certificateID.String() + ":p12", manager, true},
-		{"admin revokes certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", manager, true},
+		{"admin creates p12", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":p12", "certificate_id", certificateID.String() + ":p12", manager, true},
+		{"admin revokes certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_id", certificateID.String() + ":revoke", manager, true},
 		{"admin downloads artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), manager, true},
 		{"outsider cannot list node A", http.MethodGet, "/api/v1/nodes/" + nodeA.String() + "/certificates", "node_id", nodeA.String(), outsider, false},
-		{"outsider cannot revoke certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_action", certificateID.String() + ":revoke", outsider, false},
+		{"outsider cannot revoke certificate", http.MethodPost, "/api/v1/certificates/" + certificateID.String() + ":revoke", "certificate_id", certificateID.String() + ":revoke", outsider, false},
 		{"outsider cannot read artifact", http.MethodGet, "/api/v1/artifacts/" + artifactID.String(), "artifact_id", artifactID.String(), outsider, false},
 	}
 	for _, test := range tests {

@@ -53,17 +53,15 @@ pub(super) fn write_executable(path: &Path, bytes: impl AsRef<[u8]>) {
         .expect("chmod fixture executable");
 }
 
-struct TempDir(PathBuf);
+struct TempDir(ocservia_test_support::PrivateTempDir);
 
 impl TempDir {
     fn new(prefix: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("ocservia-{prefix}-{}", Uuid::now_v7()));
-        std::fs::create_dir(&path).expect("create temp dir");
-        Self(path)
+        Self(ocservia_test_support::PrivateTempDir::new(prefix))
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
 
     fn join(&self, name: impl AsRef<Path>) -> PathBuf {
@@ -98,12 +96,6 @@ impl TempDir {
 
     fn user_adapter(&self, ocpasswd: PathBuf, openssl: PathBuf, limits: Limits) -> Adapter {
         Adapter::new(self.user_resources(ocpasswd, openssl), limits)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -228,7 +220,13 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
     let dir = TempDir::new("preflight");
     let program = dir.exec(
         "snapshot-command",
-        "case \"$1\" in\n--version) echo 'ocserv 1.3.0';;\nshow) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n--json) echo '[]';;\n*) exit 99;;\nesac",
+        r#"case "$*" in
+    --version) echo 'ocserv 1.3.0';;
+    'show ocserv.service '*) printf 'LoadState=loaded\nActiveState=active\nSubState=running\n';;
+    '--json show users') cat "${0%/*}/sessions.json";;
+    '--json show ip bans') echo '[]';;
+    *) exit 99;;
+esac"#,
     );
     let config = dir.join("ocserv.conf");
     std::fs::write(&config, b"tcp-port = 443\n").expect("config");
@@ -253,6 +251,8 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
     .with_effect_store(dir.join("absent.sqlite3"), dir.join("absent.key"))
     .expect("store");
     let adapter = Adapter::new(resources, Limits::default());
+    let sessions = dir.join("sessions.json");
+    std::fs::write(&sessions, b"[]").expect("valid session output");
     adapter.host_preflight().await.expect("healthy snapshot");
     assert_eq!(std::fs::read(&config).expect("config"), b"tcp-port = 443\n");
     assert_eq!(
@@ -262,10 +262,18 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
     for absent in ["absent.sqlite3", "absent.key", "absent-key.pem"] {
         assert!(!dir.join(absent).exists());
     }
+    std::fs::write(&sessions, b"invalid JSON").expect("malformed session output");
+    assert!(matches!(
+        adapter.host_preflight().await,
+        Err(("occtl.show-users-json", AdapterError::MalformedOutput))
+    ));
     std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o644)).expect("mode");
     assert!(matches!(
         adapter.host_preflight().await,
-        Err(AdapterError::ResourceMetadata { reason: "mode", .. })
+        Err((
+            "ocpasswd.users",
+            AdapterError::ResourceMetadata { reason: "mode", .. }
+        ))
     ));
 }
 
@@ -2076,7 +2084,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
     }
 
     let sealed_p12 = SealedSecretV1 {
-        version: SealedSecretVersion::V1 as i32,
+        version: 1,
         purpose: SealedSecretPurpose::CertificateP12Password as i32,
         key_id: "fixture-key".to_owned(),
         ciphertext: p12_ct,
@@ -2194,42 +2202,33 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         &grant_id,
         effect_now().expect("now") + 300,
     );
-    let (a, b) = tokio::join!(
-        adapter.artifact_read(lease, 0),
-        adapter.artifact_read(lease, 0)
-    );
+    let (a, b) = tokio::join!(adapter.artifact_read(lease), adapter.artifact_read(lease));
     assert!(a.is_ok() ^ b.is_ok());
-    let chunk = a.or(b).expect("winner");
-    assert!(chunk.eof && chunk.sha256 == int_res.artifact_sha256);
+    let payload = a.or(b).expect("winner");
+    assert_eq!(payload.sha256, int_res.artifact_sha256);
 
     let restarted = Adapter::new(resources.clone(), limits);
     let other_grant = Uuid::now_v7();
     assert!(matches!(
         restarted
-            .artifact_read(
-                ArtifactLeaseIdentity {
-                    grant_id: other_grant.as_bytes(),
-                    ..lease
-                },
-                0
-            )
+            .artifact_read(ArtifactLeaseIdentity {
+                grant_id: other_grant.as_bytes(),
+                ..lease
+            })
             .await,
         Err(AdapterError::Unavailable)
     ));
     assert!(matches!(
         restarted
-            .artifact_read(
-                ArtifactLeaseIdentity {
-                    certificate_version: 2,
-                    ..lease
-                },
-                0
-            )
+            .artifact_read(ArtifactLeaseIdentity {
+                certificate_version: 2,
+                ..lease
+            })
             .await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        restarted.artifact_read(lease, 0).await,
+        restarted.artifact_read(lease).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(
@@ -2266,13 +2265,8 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         owner_fence: test_owner_fence(&TEST_COMMAND_ID, 2),
         ..lease
     };
-    assert!(
-        restarted
-            .artifact_read(rec_lease, 0)
-            .await
-            .expect("re-lease")
-            .eof
-    );
+    let payload = restarted.artifact_read(rec_lease).await.expect("re-lease");
+    assert_eq!(payload.sha256, int_res.artifact_sha256);
     restarted
         .artifact_consume(rec_lease, &int_res.artifact_sha256, int_res.artifact_size)
         .await
@@ -2286,7 +2280,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         ..rec_lease
     };
     assert!(matches!(
-        restarted.artifact_read(stale_lease, 0).await,
+        restarted.artifact_read(stale_lease).await,
         Err(AdapterError::StaleOwnerEpoch)
     ));
     assert!(matches!(
@@ -2333,7 +2327,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        restarted.artifact_read(rec_lease, 0).await,
+        restarted.artifact_read(rec_lease).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(!artifact_dir.join(format!("{int_art}.p12")).exists());
@@ -2391,7 +2385,7 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         )
     };
     adapter
-        .artifact_read(rev_lease, 0)
+        .artifact_read(rev_lease)
         .await
         .expect("lease before revoke");
     let prep_art = Uuid::now_v7();
@@ -2441,11 +2435,11 @@ async fn certificate_p12_is_encrypted_bounded_and_replayable() {
         ..rev_lease
     };
     assert!(matches!(
-        adapter.artifact_read(unavail_lease, 0).await,
+        adapter.artifact_read(unavail_lease).await,
         Err(AdapterError::InvalidRequest)
     ));
     assert!(matches!(
-        adapter.artifact_read(rev_lease, 0).await,
+        adapter.artifact_read(rev_lease).await,
         Err(AdapterError::InvalidRequest)
     ));
 }
@@ -2563,4 +2557,30 @@ fn effect_store_concurrent_writers_zero_busy() {
         .expect("artifact still present");
     assert_eq!(after.state, "available");
     assert_eq!(after.record_hmac, before.record_hmac);
+}
+
+#[test]
+fn receipt_sequence_is_monotonic_durable_and_tamper_checked() {
+    let dir = TempDir::new("receipt-seq");
+    let resources = dir.effect_resources();
+    let adapter = Adapter::new(resources.clone(), Limits::default());
+    assert_eq!(adapter.next_receipt_sequence().expect("seq 1"), 1);
+    assert_eq!(adapter.next_receipt_sequence().expect("seq 2"), 2);
+
+    // Survives adapter reopen with the same effect store.
+    let reopened = Adapter::new(resources.clone(), Limits::default());
+    assert_eq!(reopened.next_receipt_sequence().expect("seq 3"), 3);
+
+    // Tampering with the persisted counter fails closed.
+    let conn = rusqlite::Connection::open(dir.join("effects.sqlite3")).expect("open sqlite");
+    conn.execute(
+        "UPDATE receipt_sequence SET last_sequence = 1 WHERE singleton = 1",
+        [],
+    )
+    .expect("tamper counter");
+    drop(conn);
+    assert!(matches!(
+        reopened.next_receipt_sequence(),
+        Err(AdapterError::InvalidResource)
+    ));
 }

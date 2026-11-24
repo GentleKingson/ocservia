@@ -40,7 +40,7 @@ func (m *Manager) handleTransportEvent(ctx context.Context, event *transportv1.T
 	if err != nil {
 		return nil
 	}
-	return m.CloseSession(ctx, nodeID, connectionID, int64(event.GetOwnerEpoch()))
+	return m.CloseSession(ctx, nodeID, connectionID, event.GetSessionEpoch())
 }
 
 type transportEventHandler struct {
@@ -85,7 +85,7 @@ func (h transportEventHandler) ReconcileOwnerEventGap(ctx context.Context, readC
 			publicationPending = true
 			continue
 		}
-		if err := h.manager.CloseSession(ctx, result.snapshot.nodeID, result.snapshot.connectionID, result.snapshot.ownerEpoch); err != nil {
+		if err := h.manager.CloseSession(ctx, result.snapshot.nodeID, result.snapshot.connectionID, uint64(result.snapshot.sessionEpoch)); err != nil {
 			return fmt.Errorf("ownersession: close disconnected node %x after transport event gap: %w", result.snapshot.nodeID, err)
 		}
 	}
@@ -100,7 +100,7 @@ type sessionTermSnapshot struct {
 	nodeID       [16]byte
 	endpointID   [32]byte
 	connectionID [16]byte
-	ownerEpoch   int64
+	sessionEpoch int64
 	openedAt     time.Time
 }
 
@@ -143,16 +143,12 @@ func readSessionInventory(ctx context.Context, snapshots []sessionTermSnapshot, 
 
 func sessionInventoryMatches(snapshot sessionTermSnapshot, connection *transportv1.NodeConnection) bool {
 	return connection != nil &&
-		snapshot.ownerEpoch > 0 &&
-		connection.GetOwnerEpoch() == uint64(snapshot.ownerEpoch) &&
+		snapshot.sessionEpoch > 0 &&
+		connection.GetSessionEpoch() == uint64(snapshot.sessionEpoch) &&
 		bytes.Equal(connection.GetNodeId(), snapshot.nodeID[:]) &&
 		bytes.Equal(connection.GetEndpointId(), snapshot.endpointID[:])
 }
 
-// snapshotSessionTerms copies each immutable PostgreSQL term and its fixed
-// publication start while holding only the map mutex. Callers may perform
-// transport and database I/O after the mutex is released without reversing
-// the node-lock -> map-lock order used by the rest of Manager.
 func (m *Manager) snapshotSessionTerms() []sessionTermSnapshot {
 	m.mu.Lock()
 	terms := make([]sessionTermSnapshot, 0, len(m.sessions))
@@ -161,7 +157,7 @@ func (m *Manager) snapshotSessionTerms() []sessionTermSnapshot {
 			nodeID:       session.term.NodeID(),
 			endpointID:   session.endpointID,
 			connectionID: session.term.ConnectionID(),
-			ownerEpoch:   session.term.Epoch(),
+			sessionEpoch: session.term.Epoch(),
 			openedAt:     session.openedAt,
 		})
 	}

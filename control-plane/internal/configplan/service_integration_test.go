@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -19,7 +18,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -138,12 +136,9 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		Action:          "config.plan",
 		Reason:          request.Reason,
 		Payload: operations.ConfigPlanPayload{
-			Candidate:         rendered.Candidate,
-			CompleteCandidate: rendered.CompleteCandidate,
-			CandidateHash:     rendered.Hash[:],
-			OcservVersion:     "1.2.4",
-			PlanCapabilities:  []string{configprofile.PlanCapability},
-			PlanMetadata:      &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted, Warnings: []string{}, CreatedBy: requesterID},
+			Candidate:     rendered,
+			OcservVersion: "1.2.4",
+			PlanMetadata:  &operations.ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: rendered.Redacted(), Warnings: []string{}, CreatedBy: requesterID},
 		},
 	}
 	creator.assertLast(t, ctx, 3, wantCreate)
@@ -161,8 +156,8 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrCapability) {
 		t.Fatal("missing capability accepted", err)
 	}
-	if len(creator.requests) != 4 {
-		t.Fatal("preflight rejection reached creator")
+	if len(creator.requests) != 5 {
+		t.Fatal("operation transaction must check the capability")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE node_capabilities SET approved=true WHERE node_id=$1 AND capability=$2`, nodeID, configprofile.PlanCapability); err != nil {
 		t.Fatal(err)
@@ -246,11 +241,8 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if err != nil || replayed || apply.State != "queued" {
 		t.Fatalf("apply=%+v replayed=%v err=%v", apply, replayed, err)
 	}
-	expires, expiryErr := validated.ExpiresAt.Time()
-	if expiryErr != nil {
-		t.Fatal(expiryErr)
-	}
-	creator.assertLast(t, ctx, 7, operations.CreateRequest{
+	expires := validated.ExpiresAt.UTC()
+	creator.assertLast(t, ctx, 8, operations.CreateRequest{
 		NodeID:          nodeID,
 		IdempotencyKey:  applyRequest.IdempotencyKey,
 		ExpectedVersion: 1,
@@ -263,9 +255,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		Action:          "config.apply",
 		Reason:          applyRequest.Reason,
 		Payload: operations.ConfigApplyPayload{
-			CompleteCandidate:   rendered.CompleteCandidate,
-			Candidate:           rendered.Candidate,
-			CandidateHash:       rendered.Hash[:],
+			Candidate:           rendered,
 			ExpectedCurrentHash: currentHash,
 			MaterializedHash:    materializedHash,
 			DesiredRevision:     1,
@@ -344,7 +334,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	validResult := &agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, Result: resultBytes, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()}
-	testutil.NoError(t, testfixture.AttachProof(&applyEnvelope, validResult, attestationKey, 1))
+	testutil.NoError(t, testfixture.AttachProof(&applyEnvelope, validResult, attestationKey, 2))
 	commandResultBytes, err := proto.Marshal(validResult)
 	testutil.NoError(t, err)
 	applyEventID := uuid.Must(uuid.NewV7())
@@ -376,22 +366,6 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	request.IdempotencyKey = "stale-plan"
 	if _, _, err := service.Create(ctx, request); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("stale revision error=%v", err)
-	}
-	warnings := `["safe",null,[1.234567890123456789],{"value":true}]`
-	if _, err := ownerPool.Exec(ctx, `UPDATE config_plans SET warnings=$2::jsonb,created_at='-infinity',expires_at='infinity' WHERE id=$1`, plan.ID, warnings); err != nil {
-		t.Fatal(err)
-	}
-	extended, err := service.Get(ctx, plan.ID)
-	if err != nil || extended.CreatedAt.Micros != value.NegativeInfinity || extended.ExpiresAt.Micros != value.PositiveInfinity || len(extended.Warnings) < 4 {
-		t.Fatal("extended configuration read", extended, err)
-	}
-	encoded, err := json.Marshal(extended.Warnings[:4])
-	testutil.NoError(t, err)
-	got, err := value.ParseJSONB(encoded)
-	testutil.NoError(t, err)
-	want, err := value.ParseJSONB([]byte(warnings))
-	if err != nil || !bytes.Equal(got.Bytes(), want.Bytes()) {
-		t.Fatal("stored warnings narrowed", string(encoded), err)
 	}
 }
 

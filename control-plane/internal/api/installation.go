@@ -89,7 +89,7 @@ func (s *Server) installationRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		enrollment.InstallationKeyBinding
 		Registration struct {
-			Version                 int32  `json:"version"`
+			Version                 uint32 `json:"version"`
 			KeyID                   string `json:"key_id"`
 			PublicKey               string `json:"public_key"`
 			ControllerNonce         string `json:"controller_nonce"`
@@ -112,7 +112,7 @@ func (s *Server) installationRegister(w http.ResponseWriter, r *http.Request) {
 		s.writeInstallationError(w, r, enrollment.ErrInvalidRequest)
 		return
 	}
-	id, err := s.enrollment.RegisterInstallationKey(r.Context(), body.InstallationKeyBinding, &agentv1.PrivdAttestationRegistrationV1{Version: agentv1.PrivdReceiptVersion(body.Registration.Version), NodeId: body.NodeID[:], PrivdAttestationKeyId: body.Registration.KeyID, PublicKey: public, ControllerNonce: nonce, CredentialContextSha256: context, Signature: signature}, requestID(r))
+	id, err := s.enrollment.RegisterInstallationKey(r.Context(), body.InstallationKeyBinding, &agentv1.PrivdAttestationRegistrationV1{Version: body.Registration.Version, NodeId: body.NodeID[:], PrivdAttestationKeyId: body.Registration.KeyID, PublicKey: public, ControllerNonce: nonce, CredentialContextSha256: context, Signature: signature}, requestID(r))
 	if err != nil {
 		s.writeInstallationError(w, r, err)
 		return

@@ -15,6 +15,48 @@ x-service-defaults: &service-defaults
       soft: 1024
       hard: 4096
 
+x-gateway: &gateway
+  <<: *service-defaults
+  image: ${OCSERV_GATEWAY_IMAGE:?set OCSERV_GATEWAY_IMAGE to a digest-pinned image}
+  environment:
+    GOMEMLIMIT: 200MiB
+    GOMAXPROCS: "1"
+    OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set OCSERV_PUBLIC_HOST}
+  tmpfs:
+    - /config:size=1m,mode=0700
+    - /data:size=8m,mode=0700
+    - /tmp:size=8m,mode=0700
+  depends_on:
+    control-plane:
+      condition: service_healthy
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 256M
+        pids: 256
+
+x-relay: &relay
+  <<: *service-defaults
+  image: ${OCSERV_RELAY_IMAGE:-${OCSERV_GATEWAY_IMAGE}}
+  tmpfs: ["/tmp:size=16m,mode=0700,uid=65532,gid=65532"]
+  ports: ["${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:7842:7842/udp"]
+  networks:
+    edge-relay: {aliases: [relay]}
+    gateway-relay: {aliases: [relay]}
+  healthcheck:
+    test: ["CMD", "relay-healthcheck"]
+    interval: 15s
+    timeout: 3s
+    retries: 8
+    start_period: 15s
+  deploy:
+    resources:
+      limits:
+        cpus: "2.0"
+        memory: 1G
+        pids: 256
+
 services:
   transport-runtime-init:
     <<: *service-defaults
@@ -38,35 +80,92 @@ services:
           memory: 16M
           pids: 16
 
+  gateway-standalone:
+    <<: *gateway
+    profiles: [standalone]
+    secrets: [tls_certificate, tls_private_key]
+    ports: ["${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:443:8443/tcp"]
+    networks:
+      frontend: {}
+      application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
+
   gateway:
-    <<: *service-defaults
-    image: ${OCSERV_GATEWAY_IMAGE:?set OCSERV_GATEWAY_IMAGE to a digest-pinned image}
-    ports:
-      - "${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:443:8443/tcp"
+    <<: *gateway
+    profiles: [manual]
+    secrets: [tls_certificate, tls_private_key]
     environment:
       GOMEMLIMIT: 200MiB
       GOMAXPROCS: "1"
-      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set OCSERV_PUBLIC_HOST}
-    secrets:
-      - tls_certificate
-      - tls_private_key
+      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST}
+      OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
+      OCSERV_RELAY_ROUTE_PREFIX: ${OCSERV_RELAY_ROUTE_PREFIX:-disabled}
     tmpfs:
-      - /config:size=1m,mode=0700
-      - /data:size=8m,mode=0700
-      - /tmp:size=8m,mode=0700
+      - /config:size=1m,mode=0700,uid=65532,gid=65532
+      - /data:size=8m,mode=0700,uid=65532,gid=65532
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532
     networks:
-      frontend: {}
-      application:
-        ipv4_address: ${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}
-    depends_on:
-      control-plane:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 256M
-          pids: 256
+      edge-gateway: {aliases: [gateway]}
+      gateway-relay: {}
+      application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
+    volumes:
+      - ./integrated/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./integrated/site.caddy:/etc/caddy/site.caddy:ro
+      - ./integrated/relay.caddy:/etc/caddy/relay.caddy:ro
+
+  gateway-acme:
+    <<: *gateway
+    profiles: [acme]
+    environment:
+      GOMEMLIMIT: 200MiB
+      GOMAXPROCS: "1"
+      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST}
+      OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
+      OCSERV_RELAY_ROUTE_PREFIX: ${OCSERV_RELAY_ROUTE_PREFIX:-disabled}
+      OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:-}
+      OCSERV_ACME_DIRECTORY_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      SSL_CERT_FILE: ${OCSERV_ACME_CA_FILE:+/run/secrets/acme_ca}
+    secrets: [acme_ca]
+    tmpfs:
+      - /config:size=1m,mode=0700,uid=65532,gid=65532
+      - /data:size=8m,mode=0700,uid=65532,gid=65532
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532
+    networks:
+      edge-gateway: {aliases: [gateway]}
+      gateway-relay: {}
+      application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
+      acme-egress: {}
+    volumes:
+      - ./integrated/Caddyfile.acme:/etc/caddy/Caddyfile:ro
+      - gateway-acme:/var/lib/caddy-acme
+      - ./integrated/site.caddy:/etc/caddy/site.caddy:ro
+      - ./integrated/relay.caddy:/etc/caddy/relay.caddy:ro
+
+  relay:
+    <<: *relay
+    profiles: [manual]
+    environment:
+      IROH_RELAY_ACCESS_TOKEN_FILE: /run/secrets/relay_access_token
+    command: "${OCSERV_RELAY_MODE_ARG:-} --config-path /etc/iroh-relay/relay.toml"
+    secrets: [relay_access_token, relay_tls_certificate, relay_tls_private_key]
+    volumes:
+      - ./relay/relay.toml:/etc/iroh-relay/relay.toml:ro
+
+  relay-acme:
+    <<: *relay
+    profiles: [acme]
+    environment:
+      IROH_RELAY_ACCESS_TOKEN_FILE: /run/secrets/relay_access_token
+      IROH_RELAY_ACME_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      IROH_RELAY_ACME_CA:
+      OCSERV_RELAY_CONFIG_TEMPLATE: /etc/iroh-relay/template.toml
+      OCSERV_RELAY_PUBLIC_HOST: ${OCSERV_RELAY_PUBLIC_HOST:-}
+      OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:-}
+      OCSERV_RELAY_SHARED_ACME_DIR: ${OCSERV_RELAY_SHARED_ACME_DIR:-}
+    secrets: [relay_access_token, acme_ca]
+    command: "${OCSERV_RELAY_MODE_ARG:-} --config-path /tmp/relay.toml"
+    volumes:
+      - ${OCSERV_RELAY_TEMPLATE:-./integrated/relay.acme.toml}:/etc/iroh-relay/template.toml:ro
+      - ${OCSERV_RELAY_ACME_VOLUME:-relay-acme:/var/lib/iroh-relay}
 
   migrate:
     <<: *service-defaults
@@ -77,6 +176,8 @@ services:
       GOMEMLIMIT: 200MiB
       GOMAXPROCS: "1"
       OCSERV_ENVIRONMENT: production
+      OCSERV_DATABASE_BUNDLED_POSTGRES: ${OCSERV_DATABASE_BUNDLED_POSTGRES:-true}
+      OCSERV_DATABASE_TLS_CA_FILE: ${OCSERV_DATABASE_TLS_CA_FILE:-}
       OCSERV_DATABASE_URL_FILE: /run/secrets/database_owner_url
       OCSERV_RUNTIME_DATABASE_ROLE: ocservia_app
       OCSERV_LOCAL_AUTH_ENABLED: ${OCSERV_LOCAL_AUTH_ENABLED:-true}
@@ -88,6 +189,8 @@ services:
       OCSERV_AUDIT_EVENT_KEY_ID: ${OCSERV_AUDIT_EVENT_KEY_ID:?set the audit event HMAC key ID}
       OCSERV_AUDIT_EVENT_KEY_FILE: /run/secrets/audit_event_key
     secrets:
+      - source: ${OCSERV_DATABASE_CA_SECRET:-system_ca}
+        target: database_ca
       - database_owner_url
       - session_key
       - audit_checkpoint_key
@@ -98,7 +201,9 @@ services:
         mode: 0400
     tmpfs:
       - /tmp:size=8m,mode=0700
-    networks: [database]
+    networks: ["${OCSERV_DATABASE_NETWORK:-database}"]
+    depends_on:
+      postgres: {condition: service_healthy, required: false}
     deploy:
       resources:
         limits:
@@ -112,6 +217,8 @@ services:
     environment:
       GOMEMLIMIT: 800MiB
       OCSERV_ENVIRONMENT: production
+      OCSERV_DATABASE_BUNDLED_POSTGRES: ${OCSERV_DATABASE_BUNDLED_POSTGRES:-true}
+      OCSERV_DATABASE_TLS_CA_FILE: ${OCSERV_DATABASE_TLS_CA_FILE:-}
       OCSERV_HTTP_ADDRESS: 0.0.0.0:8080
       OCSERV_AUTH_TRUSTED_PROXY_CIDRS: ${OCSERV_AUTH_TRUSTED_PROXY_CIDRS-${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}/32}
       OCSERV_DATABASE_URL_FILE: /run/secrets/database_app_url
@@ -132,6 +239,7 @@ services:
       OCSERV_RELAY_ACCESS_TOKEN_FILE: /run/secrets/relay_access_token
       OCSERV_CONTROLLER_ENDPOINT_ID: ${OCSERV_CONTROLLER_ENDPOINT_ID:?set OCSERV_CONTROLLER_ENDPOINT_ID}
       OCSERV_CERTIFICATE_SIGNER_URL: ${OCSERV_CERTIFICATE_SIGNER_URL:?set OCSERV_CERTIFICATE_SIGNER_URL}
+      OCSERV_CERTIFICATE_SIGNER_CA_FILE: ${OCSERV_CERTIFICATE_SIGNER_CA_FILE:-}
       OCSERV_CERTIFICATE_SIGNER_TOKEN_FILE: /run/secrets/certificate_signer_token
       OCSERV_SSE_GLOBAL_LIMIT: "128"
       OCSERV_SSE_IDENTITY_LIMIT: "8"
@@ -147,6 +255,8 @@ services:
       OCSERV_SSE_RETRY_AFTER: 5s
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OCSERV_OTEL_BACKEND_ENDPOINT:+http://otel-collector:4317}
     secrets:
+      - source: ${OCSERV_DATABASE_CA_SECRET:-system_ca}
+        target: database_ca
       - database_app_url
       - session_key
       - audit_checkpoint_key
@@ -160,6 +270,8 @@ services:
         uid: "65534"
         gid: "65532"
         mode: 0400
+      - source: ${OCSERV_SIGNER_CA_SECRET:-system_ca}
+        target: certificate_signer_ca
       - certificate_signer_token
       - source: controller_command_signing_key
         target: controller_command_signing_key
@@ -175,8 +287,9 @@ services:
       - trust-runtime:/run/ocserv-trust
     tmpfs:
       - /tmp:size=16m,mode=0700
-    networks: [application, database, observability]
+    networks: [application, "${OCSERV_DATABASE_NETWORK:-database}", observability, signer]
     depends_on:
+      signer: {condition: service_healthy, required: false}
       migrate:
         condition: service_completed_successfully
       transport-runtime-init:
@@ -236,6 +349,8 @@ services:
       - --enrollment-completion-concurrency
       - "8"
     secrets:
+      - source: ${OCSERV_RELAY_TRUST_SECRET:-system_ca}
+        target: ${OCSERV_RELAY_TRUST_TARGET:-system_ca}
       - source: controller_command_verification_key
         target: controller_command_verification_key
         uid: "0"
@@ -302,6 +417,144 @@ services:
           memory: 512M
           pids: 256
 
+  postgres:
+    profiles: [bundled-postgres]
+    <<: *service-defaults
+    user: "999:999"
+    image: ${OCSERV_POSTGRES_IMAGE:?set OCSERV_POSTGRES_IMAGE to a digest-pinned PostgreSQL 18 image}
+    entrypoint: ["/bin/bash", "/usr/local/bin/ocservia-postgres-entrypoint"]
+    environment:
+      PGDATA: /var/lib/postgresql/18/docker
+      POSTGRES_DB: ocservia
+      POSTGRES_USER: ocservia_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+    secrets: [postgres_owner_password, postgres_app_password, postgres_backup_password]
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ../lib/postgres-entrypoint.sh:/usr/local/bin/ocservia-postgres-entrypoint:ro
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /run/postgresql:size=16m,uid=999,gid=999,mode=0770
+      - /tmp:size=16m,uid=999,gid=999,mode=0700
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocservia_owner -d ocservia"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits: {cpus: "2.0", memory: 2G, pids: 256}
+
+  backup:
+    profiles: [bundled-postgres, external-postgres]
+    <<: *service-defaults
+    image: ${OCSERV_BACKUP_IMAGE:?set OCSERV_BACKUP_IMAGE to the repository backup image}
+    environment:
+      PGHOST: ${OCSERV_DATABASE_BACKUP_HOST:-postgres}
+      PGPORT: ${OCSERV_DATABASE_BACKUP_PORT:-5432}
+      PGDATABASE: ${OCSERV_DATABASE_BACKUP_NAME:-ocservia}
+      PGUSER: ${OCSERV_DATABASE_BACKUP_USER:-ocservia_backup}
+      PGSSLMODE: ${OCSERV_BACKUP_SSLMODE:-disable}
+      PGSSLROOTCERT: /run/secrets/database_ca
+      POSTGRES_SERVER_MAJOR: "18"
+      PGPASS_SOURCE: /run/secrets/postgres_pgpass
+      BACKUP_ROOT: /var/lib/ocservia-backup
+      BACKUP_INTERVAL_SECONDS: ${OCSERV_BACKUP_INTERVAL_SECONDS:-900}
+      BACKUP_RETENTION_COUNT: ${OCSERV_BACKUP_RETENTION_COUNT:-8}
+    secrets:
+      - postgres_pgpass
+      - source: ${OCSERV_DATABASE_CA_SECRET:-system_ca}
+        target: database_ca
+    volumes:
+      - ${OCSERV_BACKUP_DIR:?set OCSERV_BACKUP_DIR to a separately protected backup mount}:/var/lib/ocservia-backup
+    tmpfs:
+      - /tmp:size=32m,uid=999,gid=999,mode=0700
+    networks: ["${OCSERV_DATABASE_NETWORK:-database}"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "find /var/lib/ocservia-backup/LATEST -mmin \"-$$((BACKUP_INTERVAL_SECONDS / 60 + 11))\" -type f | grep -q ."]
+      interval: 5m
+      timeout: 5s
+      retries: 2
+      # Engine 25+ defaults to 5s startup probes; omit start_interval for older Compose.
+      start_period: 60s
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 512M, pids: 256}
+
+  signer:
+    profiles: [manual, acme]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    image: ${OCSERV_SIGNER_IMAGE:-${OCSERV_GATEWAY_IMAGE}}
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    command: [serve]
+    environment:
+      GOMEMLIMIT: 200MiB
+      GOMAXPROCS: "1"
+      OCSERV_SIGNER_CERT_TTL: ${OCSERV_SIGNER_CERT_TTL:-2160h}
+    volumes:
+      - type: bind
+        source: ${OCSERV_SIGNER_STATE_DIR:-/var/lib/ocservia-signer}
+        target: /var/lib/ocservia-signer
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OCSERV_SIGNER_SECRET_DIR:-/etc/ocservia/signer}
+        target: /run/secrets
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [signer]
+    healthcheck:
+      test: [CMD, /ocserv-signer, health, --url, "https://signer:9443/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 256M, pids: 64}
+
+  edge:
+    profiles: [manual, acme]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    image: ${OCSERV_EDGE_IMAGE:-${OCSERV_GATEWAY_IMAGE}}
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    environment:
+      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set Controller DNS name}
+      OCSERV_RELAY_PUBLIC_HOST: ${OCSERV_RELAY_PUBLIC_HOST:-}
+    ports:
+      - "${OCSERV_HTTPS_ADDRESS:-0.0.0.0}:443:8443/tcp"
+    tmpfs: ["/tmp:size=8m,mode=0700,uid=65532,gid=65532"]
+    ulimits:
+      nofile: {soft: 8192, hard: 8192}
+    networks:
+      frontend: {}
+      edge-gateway:
+        ipv4_address: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
+      edge-relay: {}
+    deploy:
+      resources:
+        limits: {cpus: "1.0", memory: 64M, pids: 32}
+
 networks:
   # Only transportd needs outbound HTTPS to the dedicated Relay.
   relay-egress: {}
@@ -317,10 +570,24 @@ networks:
     internal: true
   observability:
     internal: true
+  database-egress: {}
+  signer: {internal: true}
+  gateway-relay: {internal: true}
+  acme-egress: {}
+  edge-gateway:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${OCSERV_EDGE_GATEWAY_SUBNET:-172.30.241.0/24}
+          ip_range: ${OCSERV_EDGE_GATEWAY_IP_RANGE:-172.30.241.128/25}
+  edge-relay: {}
 
 volumes:
   transport-runtime: {}
   trust-runtime: {}
+  gateway-acme: {}
+  relay-acme: {}
+  postgres-data: {}
 
 secrets:
   tls_certificate:
@@ -353,3 +620,25 @@ secrets:
     file: ${OCSERV_SECRET_DIR}/otel-client.key
   otel_ca_certificate:
     file: ${OCSERV_SECRET_DIR}/otel-ca.crt
+  postgres_owner_password:
+    file: ${OCSERV_SECRET_DIR}/postgres-owner-password
+  postgres_app_password:
+    file: ${OCSERV_SECRET_DIR}/postgres-app-password
+  postgres_backup_password:
+    file: ${OCSERV_SECRET_DIR}/postgres-backup-password
+  postgres_pgpass:
+    file: ${OCSERV_SECRET_DIR}/postgres.pgpass
+  system_ca:
+    file: /etc/ssl/certs/ca-certificates.crt
+  relay_ca:
+    file: ${OCSERV_SECRET_DIR}/relay-ca.pem
+  database_ca:
+    file: ${OCSERV_SECRET_DIR}/database-ca.pem
+  certificate_signer_ca:
+    file: ${OCSERV_SIGNER_SECRET_DIR:-/etc/ocservia/signer}/tls-ca.pem
+  acme_ca:
+    file: ${OCSERV_ACME_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
+  relay_tls_certificate:
+    file: ${OCSERV_RELAY_TLS_DIR:-${OCSERV_RELAY_SECRET_DIR:-/etc/ocservia/relay}}/tls.crt
+  relay_tls_private_key:
+    file: ${OCSERV_RELAY_TLS_DIR:-${OCSERV_RELAY_SECRET_DIR:-/etc/ocservia/relay}}/tls.key

@@ -134,3 +134,109 @@ test("clears a displayed token when the dialog closes and when the page is left"
   await prepare(page);
   await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveCount(0);
 });
+
+test("discards a bootstrap token if the dialog closes during issuance", async ({
+  page,
+}) => {
+  await setup(page, true);
+  const received = Promise.withResolvers<undefined>();
+  const release = Promise.withResolvers<undefined>();
+  const finished = Promise.withResolvers<undefined>();
+  let posts = 0;
+  await page.route("**/api/v1/node-bootstrap-tokens", async (route) => {
+    posts += 1;
+    received.resolve(undefined);
+    await release.promise;
+    try {
+      await route.fulfill({
+        status: 201,
+        json: {
+          id: alpha,
+          token: secret,
+          expires_at: new Date().toISOString(),
+        },
+      });
+    } finally {
+      finished.resolve(undefined);
+    }
+  });
+  await page.goto("/nodes");
+  await prepare(page);
+  await page
+    .getByRole("button", { name: "Create bootstrap token", exact: true })
+    .click();
+  await received.promise;
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  release.resolve(undefined);
+  await finished.promise;
+  await prepare(page);
+  await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveCount(0);
+  expect(posts).toBe(1);
+});
+
+for (const [status, message] of [
+  [400, /^400: The Controller rejected/],
+  [403, /^403: You are not authorized/],
+  [503, /The request outcome is unknown/],
+  ["network", /The request outcome is unknown/],
+  ["malformed", /The request outcome is unknown/],
+] as const) {
+  test(`reports bootstrap issuance failure ${String(status)} without exposing the response or retrying`, async ({
+    page,
+  }) => {
+    await setup(page, true);
+    let posts = 0;
+    await page.route("**/api/v1/node-bootstrap-tokens", (route) => {
+      posts += 1;
+      if (status === "network") return route.abort("failed");
+      return route.fulfill({
+        status: status === "malformed" ? 201 : status,
+        json: { token: secret, expires_at: "invalid" },
+      });
+    });
+    await page.goto("/nodes");
+    await prepare(page);
+    const issue = page.getByRole("button", {
+      name: "Create bootstrap token",
+      exact: true,
+    });
+    await issue.click();
+    await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(
+      message,
+    );
+    await expect(issue).toBeDisabled();
+    await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveCount(
+      0,
+    );
+    expect(posts).toBe(1);
+  });
+}
+
+test("shows a fresh token despite clock skew and clears it when its lifetime elapses", async ({
+  page,
+}) => {
+  await setup(page, true);
+  await page.clock.install();
+  let posts = 0;
+  await page.route("**/api/v1/node-bootstrap-tokens", (route) => {
+    posts += 1;
+    return route.fulfill({
+      status: 201,
+      json: { id: alpha, token: secret, expires_at: "2025-01-01T00:15:00Z" },
+    });
+  });
+  await page.goto("/nodes");
+  await prepare(page);
+  await page
+    .getByRole("button", { name: "Create bootstrap token", exact: true })
+    .click();
+  await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveValue(
+    secret,
+  );
+  await page.clock.fastForward(900_000);
+  await expect(page.getByLabel("Bootstrap token (shown once)")).toHaveCount(0);
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "This token has expired",
+  );
+  expect(posts).toBe(1);
+});

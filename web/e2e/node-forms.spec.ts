@@ -99,6 +99,70 @@ test("explains denied and unknown permissions on disabled controls", async ({
   expect(writes).toHaveLength(0);
 });
 
+test("keeps node sections and certificate input stable during refresh", async ({
+  page,
+}) => {
+  await page.clock.install();
+  const allowed = { allowed: true, reason: "available" };
+  await openNode(page, {
+    "service.reload": allowed,
+    "user.manage": allowed,
+    "config.plan": allowed,
+    "certificate.read": allowed,
+    "certificate.issue": allowed,
+  });
+  const nodePath = `**/api/v1/nodes/${nodeId}`;
+  await page.route(`${nodePath}/certificates`, (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  const release = Promise.withResolvers<undefined>();
+  await page.route(nodePath, async (route) => {
+    await release.promise;
+    await route.fallback();
+  });
+  const certificateResponse = page.waitForResponse(`${nodePath}/certificates`);
+  await page.getByRole("button", { name: "Certificate", exact: true }).click();
+  await certificateResponse;
+  const dialog = page.getByRole("dialog");
+  const commonName = dialog.getByLabel("Common name");
+  const requestCsr = dialog.getByRole("button", { name: "Request CSR" });
+  await dialog.getByLabel("Reason").fill("Renew the VPN certificate");
+  await commonName.fill("vpn.example.com");
+  await expect(commonName).toBeFocused();
+  await expect(requestCsr).toBeEnabled();
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  const sections = page.locator(
+    "#node-overview, #node-users-groups, #node-configuration, #node-certificates",
+  );
+  await expect(sections).toHaveCount(4);
+  const heights = () =>
+    sections.evaluateAll((elements) =>
+      elements.map((element) => element.getBoundingClientRect().height),
+    );
+  const before = await heights();
+  const reload = page.locator("#node-overview").getByRole("button", {
+    name: "Reload",
+    exact: true,
+    includeHidden: true,
+  });
+  const request = page.waitForRequest(nodePath);
+  try {
+    await page.clock.fastForward(16_000);
+    await request;
+    await expect(reload).toBeDisabled();
+    await expect(requestCsr).toBeDisabled();
+    await expect(commonName).toBeFocused();
+    await expect(commonName).toHaveValue("vpn.example.com");
+    expect(await heights()).toEqual(before);
+  } finally {
+    release.resolve(undefined);
+  }
+  await expect(reload).toBeEnabled();
+  await expect(requestCsr).toBeEnabled();
+  await expect(commonName).toBeFocused();
+  expect(await heights()).toEqual(before);
+});
+
 test("opens user and group forms for the row that was chosen", async ({
   page,
 }) => {

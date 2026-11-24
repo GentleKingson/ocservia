@@ -3,7 +3,7 @@ use super::super::{
     MAX_EFFECT_RECORDS, MAX_FRAME_BYTES, OptionalExtension, OwnerFenceIdentity,
     TransactionBehavior, Uuid, params,
 };
-use super::hmac::authenticate_authorized_record;
+use super::hmac::{authenticate_authorized_record, authenticate_receipt_sequence, verify_mac};
 use super::owner_fence::{enforce_owner_fence, validate_owner_fence};
 use super::{EffectStore, effect_now, fixed_blob, sqlite_io};
 
@@ -97,7 +97,7 @@ impl EffectStore {
         }
         // Preserve exact ID replay/conflict decisions above; only unrelated,
         // successful authorizations are safe to forget after expiry.
-        prune_expired_authorized_effects(&transaction, &self.hmac_key, now)?;
+        prune_expired_authorized_effects(&transaction, now)?;
         let count: i64 = transaction
             .query_row("SELECT count(*) FROM authorized_effects", [], |row| {
                 row.get(0)
@@ -221,6 +221,59 @@ impl EffectStore {
             return Ok(Some(record.response));
         }
         Ok(None)
+    }
+
+    pub(crate) fn next_receipt_sequence(&mut self) -> Result<u64, AdapterError> {
+        let now = effect_now()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_io)?;
+        let existing: Option<(i64, Vec<u8>)> = transaction
+            .prepare_cached(
+                "SELECT last_sequence,record_hmac FROM receipt_sequence WHERE singleton=1",
+            )
+            .map_err(sqlite_io)?
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(sqlite_io)?;
+        let next = if let Some((last_raw, hmac_bytes)) = existing {
+            let last = u64::try_from(last_raw).map_err(|_| AdapterError::InvalidResource)?;
+            let stored_hmac: [u8; 32] = hmac_bytes
+                .try_into()
+                .map_err(|_| AdapterError::InvalidResource)?;
+            if !verify_mac(
+                &authenticate_receipt_sequence(&self.hmac_key, last),
+                &stored_hmac,
+            ) {
+                return Err(AdapterError::InvalidResource);
+            }
+            let next = last.checked_add(1).ok_or(AdapterError::Unavailable)?;
+            let next_i64 = i64::try_from(next).map_err(|_| AdapterError::Unavailable)?;
+            let next_hmac = authenticate_receipt_sequence(&self.hmac_key, next);
+            let changed = transaction
+                .execute(
+                    "UPDATE receipt_sequence SET last_sequence=?1,record_hmac=?2,updated_at=?3 WHERE singleton=1",
+                    params![next_i64, next_hmac.as_slice(), now],
+                )
+                .map_err(sqlite_io)?;
+            if changed != 1 {
+                return Err(AdapterError::Unavailable);
+            }
+            next
+        } else {
+            let next = 1_u64;
+            let next_hmac = authenticate_receipt_sequence(&self.hmac_key, next);
+            transaction
+                .execute(
+                    "INSERT INTO receipt_sequence(singleton,last_sequence,record_hmac,updated_at) VALUES(1,1,?1,?2)",
+                    params![next_hmac.as_slice(), now],
+                )
+                .map_err(sqlite_io)?;
+            next
+        };
+        transaction.commit().map_err(sqlite_io)?;
+        Ok(next)
     }
 }
 
@@ -362,42 +415,13 @@ pub(crate) fn query_authorized_effect(
         .map_err(sqlite_io)
 }
 
-fn prune_expired_authorized_effects(
-    connection: &Connection,
-    key: &[u8; 32],
-    now: i64,
-) -> Result<(), AdapterError> {
-    let records = {
-        let mut statement = connection
-            .prepare_cached(
-                "SELECT command_id,idempotency_key,node_id,operation_id,payload_sha256,action,authorization_revision,effect_kind,resource_key,effect_revision,expires_at,state,delivery_mode,response,record_hmac FROM authorized_effects WHERE state='applied' AND expires_at<=?1",
-            )
-            .map_err(sqlite_io)?;
-        let rows = statement
-            .query_map([now], decode_authorized_row)
-            .map_err(sqlite_io)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)?
-    };
-    if records.is_empty() {
-        return Ok(());
-    }
-    let mut delete_stmt = connection
-        .prepare_cached(
-            "DELETE FROM authorized_effects WHERE command_id=?1 AND state='applied' AND expires_at<=?2",
+fn prune_expired_authorized_effects(connection: &Connection, now: i64) -> Result<(), AdapterError> {
+    connection
+        .execute(
+            "DELETE FROM authorized_effects WHERE state='applied' AND expires_at<=?1",
+            [now],
         )
         .map_err(sqlite_io)?;
-    for record in records {
-        validate_authorized_record(key, &record)?;
-        if record.state != "applied" || record.expires_at > now {
-            return Err(AdapterError::InvalidResource);
-        }
-        let changed = delete_stmt
-            .execute(params![record.command_id.as_slice(), now])
-            .map_err(sqlite_io)?;
-        if changed != 1 {
-            return Err(AdapterError::Unavailable);
-        }
-    }
     Ok(())
 }
 
@@ -428,7 +452,10 @@ fn validate_authorized_record(
     if record.response.len() > MAX_FRAME_BYTES
         || !matches!(record.state, "prepared" | "applied")
         || !matches!(record.delivery_mode, 1 | 3)
-        || authenticate_authorized_record(key, record) != record.record_hmac
+        || !verify_mac(
+            &authenticate_authorized_record(key, record),
+            &record.record_hmac,
+        )
     {
         return Err(AdapterError::InvalidResource);
     }

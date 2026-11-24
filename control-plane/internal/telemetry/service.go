@@ -10,9 +10,7 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/coordination"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
@@ -90,17 +88,15 @@ type IPBan = telemetrystore.IPBan
 type ReadSession = telemetrystore.ReadSession
 
 type User struct {
-	Username    string `json:"username"`
-	Enabled     bool   `json:"enabled"`
-	Revision    uint64 `json:"revision"`
-	Fingerprint []byte `json:"fingerprint_sha256"`
+	Username string `json:"username"`
+	Enabled  bool   `json:"enabled"`
+	Revision uint64 `json:"revision"`
 }
 
 type Group struct {
-	Name        string   `json:"name"`
-	Members     []string `json:"members"`
-	Revision    uint64   `json:"revision"`
-	Fingerprint []byte   `json:"fingerprint_sha256"`
+	Name     string   `json:"name"`
+	Members  []string `json:"members"`
+	Revision uint64   `json:"revision"`
 }
 
 type Sample struct {
@@ -132,18 +128,18 @@ type Batch struct {
 }
 
 type Node struct {
-	ID              string           `json:"id"`
-	Name            string           `json:"name"`
-	Version         int64            `json:"version"`
-	ConfigRevision  int64            `json:"config_revision"`
-	TrustStatus     string           `json:"trust_status"`
-	ConnectionState string           `json:"connection_state"`
-	Freshness       string           `json:"freshness"`
-	ObservedAt      *value.Timestamp `json:"observed_at,omitempty"`
-	LastHeartbeatAt *value.Timestamp `json:"last_heartbeat_at,omitempty"`
-	BootID          string           `json:"boot_id,omitempty"`
-	AgentInstanceID string           `json:"agent_instance_id,omitempty"`
-	AgentVersion    string           `json:"agent_version,omitempty"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Version         int64      `json:"version"`
+	ConfigRevision  int64      `json:"config_revision"`
+	TrustStatus     string     `json:"trust_status"`
+	ConnectionState string     `json:"connection_state"`
+	Freshness       string     `json:"freshness"`
+	ObservedAt      *time.Time `json:"observed_at,omitempty"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	BootID          string     `json:"boot_id,omitempty"`
+	AgentInstanceID string     `json:"agent_instance_id,omitempty"`
+	AgentVersion    string     `json:"agent_version,omitempty"`
 	// AgentVersionState and RecommendedAgentVersion are derived at read time
 	// from AgentVersion and the configured recommendation; they are never
 	// persisted.
@@ -282,7 +278,7 @@ func (s *Service) applyAgentUpgradeEligibility(node *Node, upgradeEligible bool)
 	if s.agentUpgradeCatalog == nil || node.ConnectionState != "online" || node.Freshness != "fresh" || node.Architecture == "" {
 		return
 	}
-	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture); !trusted {
+	if _, trusted := s.agentUpgradeCatalog.Lookup(node.RecommendedAgentVersion, node.Architecture, node.OSRelease); !trusted {
 		return
 	}
 	node.AgentUpgradeEligible = upgradeEligible
@@ -325,29 +321,18 @@ func readNode(v telemetrystore.Node, now time.Time) Node {
 	n := Node{ID: v.ID.String(), Name: v.Name, Version: v.Version, ConfigRevision: v.ConfigRevision, TrustStatus: v.Status,
 		BootID: v.BootID, AgentInstanceID: v.InstanceID, AgentVersion: v.AgentVersion,
 		OcservVersion: v.OcservVersion, OSRelease: v.OSRelease, Architecture: v.Architecture,
-		Ocserv: v.Ocserv.Bytes(), System: v.System.Bytes(), Path: v.Path.Bytes(), SessionCount: v.Sessions,
+		Ocserv: v.Ocserv, System: v.System, Path: v.Path, SessionCount: v.Sessions,
+		ObservedAt: v.ObservedAt, LastHeartbeatAt: v.Heartbeat,
 		Dropped: DropCounters{Security: v.Security, Health: v.Health, Aggregate: v.Aggregate, Raw: v.Raw}}
-	if v.ObservedAt.Valid {
-		n.ObservedAt = &v.ObservedAt
-	}
-	if v.Heartbeat.Valid {
-		n.LastHeartbeatAt = &v.Heartbeat
-	}
-	if !v.Heartbeat.Valid {
+	if v.Heartbeat == nil {
 		n.Freshness = "never"
 		n.ConnectionState = "offline"
+	} else if !v.Heartbeat.Before(now.Add(-OfflineAfter)) {
+		n.Freshness = "fresh"
+		n.ConnectionState = "online"
 	} else {
-		cutoff, err := value.FromTime(now.Add(-OfflineAfter))
-		if err == nil && now.Nanosecond()%1000 != 0 {
-			cutoff.Micros++
-		}
-		if err == nil && v.Heartbeat.Micros >= cutoff.Micros {
-			n.Freshness = "fresh"
-			n.ConnectionState = "online"
-		} else {
-			n.Freshness = "stale"
-			n.ConnectionState = "offline"
-		}
+		n.Freshness = "stale"
+		n.ConnectionState = "offline"
 	}
 	return n
 }
@@ -376,28 +361,11 @@ func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after stri
 }
 
 func (s *Service) History(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since time.Time) ([]HistoryPoint, error) {
-	if since.IsZero() {
-		since = s.now().Add(-24 * time.Hour)
-	}
-	at, err := value.FromTime(since)
-	if err != nil {
-		return nil, err
-	}
-	return s.HistoryFrom(ctx, nodeID, metric, resolution, at)
-}
-
-// HistoryFrom retains infinite and extended finite query bounds and results.
-// A NULL bound means the same default window as an omitted HTTP query.
-func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, resolution string, since value.Timestamp) ([]HistoryPoint, error) {
 	if !allowedMetrics[metric] {
 		return nil, ErrInvalidMetric
 	}
-	if !since.Valid {
-		var err error
-		since, err = value.FromTime(s.now().Add(-24 * time.Hour))
-		if err != nil {
-			return nil, err
-		}
+	if since.IsZero() {
+		since = s.now().Add(-24 * time.Hour)
 	}
 	if resolution != "raw" && resolution != "5m" && resolution != "1h" {
 		return nil, ErrInvalidResolution
@@ -408,7 +376,7 @@ func (s *Service) HistoryFrom(ctx context.Context, nodeID uuid.UUID, metric, res
 		if err != nil {
 			return err
 		}
-		points, err = history.History(ctx, nodeID, metric, resolution, since)
+		points, err = history.History(ctx, nodeID, metric, resolution, since.UTC())
 		return err
 	})
 	return points, err
@@ -439,9 +407,7 @@ func (s *Service) Maintain(ctx context.Context) error {
 			}
 		}
 		return nil
-	}, func(ctx context.Context, tx database.Tx) error {
-		return coordination.AssertFenceTx(ctx, tx, coordination.FenceFromContext(ctx))
-	})
+	}, nil)
 	if err == nil && ensurePartitions {
 		s.partitionsEnsuredAt = now
 	}

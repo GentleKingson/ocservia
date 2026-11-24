@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database/value"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
@@ -36,14 +35,14 @@ func (s commandResultStore) LoadCommand(ctx context.Context, command, node uuid.
 	return
 }
 
-func (s commandResultStore) Receipt(ctx context.Context, key string, effect []byte, sequence uint64) (id uuid.UUID, digest []byte, err error) {
-	err = s.QueryRow(ctx, `SELECT command_id,receipt_sha256 FROM agent_command_results WHERE privd_attestation_key_id=$1 AND effect_record_id=$2 AND effect_sequence=$3 AND receipt_verification_status='verified'`, key, effect, sequence).Scan(&id, &digest)
+func (s commandResultStore) Receipt(ctx context.Context, key string, sequence uint64) (id uuid.UUID, digest []byte, err error) {
+	err = s.QueryRow(ctx, `SELECT command_id,receipt_sha256 FROM agent_command_results WHERE privd_attestation_key_id=$1 AND effect_sequence=$2 AND receipt_verification_status='verified'`, key, sequence).Scan(&id, &digest)
 	return
 }
 
 func (s commandResultStore) InsertResult(ctx context.Context, v resultstore.Result) error {
-	_, err := s.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_record_id,effect_sequence,receipt_sha256,privileged_result_proof)
-	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),$12,$13,$14,$15,$16,$17,$18)`, v.EventID, v.CommandID, v.IdempotencyKey, v.PayloadHash, v.HashVersion, v.State, v.Bytes, v.ErrorCode, v.AcceptedAt, v.CompletedAt, v.Replayed, v.VerificationStatus, v.FailureReason, v.KeyID, v.EffectRecordID, v.EffectSequence, v.ReceiptHash, v.Proof)
+	_, err := s.Exec(ctx, `INSERT INTO agent_command_results(event_id,command_id,idempotency_key,payload_sha256,semantic_payload_hash_version,state,result,error_code,accepted_at,completed_at,replayed,created_at,receipt_verification_status,receipt_failure_reason,privd_attestation_key_id,effect_sequence,receipt_sha256,privileged_result_proof)
+	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),$12,$13,$14,$15,$16,$17)`, v.EventID, v.CommandID, v.IdempotencyKey, v.PayloadHash, v.HashVersion, v.State, v.Bytes, v.ErrorCode, v.AcceptedAt, v.CompletedAt, v.Replayed, v.VerificationStatus, v.FailureReason, v.KeyID, v.EffectSequence, v.ReceiptHash, v.Proof)
 	return err
 }
 
@@ -52,22 +51,22 @@ func (s commandResultStore) Workspace(ctx context.Context, node uuid.UUID) (id u
 	return
 }
 
-func (s commandResultStore) Alert(ctx context.Context, id, workspace uuid.UUID, severity, kind string, at value.Timestamp) error {
+func (s commandResultStore) Alert(ctx context.Context, id, workspace uuid.UUID, severity, kind string, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO security_alerts(id,workspace_id,severity,kind,created_at)VALUES($1,$2,$3,$4,$5)`, id, workspace, severity, kind, at)
 	return err
 }
 
-func (s commandResultStore) UpdateCommand(ctx context.Context, id uuid.UUID, state string, at value.Timestamp) (bool, error) {
+func (s commandResultStore) UpdateCommand(ctx context.Context, id uuid.UUID, state string, at time.Time) (bool, error) {
 	n, err := s.Exec(ctx, `UPDATE commands SET state=$2,updated_at=GREATEST(updated_at,$3) WHERE id=$1 AND state IN ('queued','dispatched','accepted','running','unknown')`, id, state, at)
 	return n != 0, err
 }
 
-func (s commandResultStore) UpdateOperation(ctx context.Context, operation, command uuid.UUID, state string, terminal bool, at value.Timestamp) (v resultstore.ResultOperation, err error) {
+func (s commandResultStore) UpdateOperation(ctx context.Context, operation, command uuid.UUID, state string, terminal bool, at time.Time) (v resultstore.ResultOperation, err error) {
 	err = s.QueryRow(ctx, `UPDATE operations SET state=$3,version=version+1,updated_at=GREATEST(updated_at,$4),completed_at=CASE WHEN $5::boolean THEN GREATEST(COALESCE(completed_at,$4),$4) ELSE NULL END WHERE id=$1 AND command_id=$2 AND state IN ('queued','dispatched','accepted','running','unknown') RETURNING id,workspace_id,request_id,COALESCE(trace_id,'')`, operation, command, state, at, terminal).Scan(&v.ID, &v.WorkspaceID, &v.RequestID, &v.TraceID)
 	return
 }
 
-func (s commandResultStore) CompleteOutbox(ctx context.Context, command uuid.UUID, at value.Timestamp) error {
+func (s commandResultStore) CompleteOutbox(ctx context.Context, command uuid.UUID, at time.Time) error {
 	_, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=COALESCE(published_at,$2),locked_by=NULL,locked_until=NULL,last_error=NULL WHERE command_id=$1`, command, at)
 	return err
 }
@@ -108,7 +107,7 @@ func (s commandResultStore) ConfigOutcome(ctx context.Context, v resultstore.Con
 }
 
 func (s commandResultStore) CSROutcome(ctx context.Context, v resultstore.CSROutcome) error {
-	_, err := s.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),csr_receipt_verified_at=COALESCE($7,csr_receipt_verified_at),csr_receipt_sha256=COALESCE($8,csr_receipt_sha256),csr_privd_attestation_key_id=COALESCE($9,csr_privd_attestation_key_id),csr_effect_record_id=COALESCE($10,csr_effect_record_id),csr_der_sha256=COALESCE($11,csr_der_sha256),csr_requested_subject_sha256=COALESCE($12,csr_requested_subject_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, v.CertificateID, v.State, v.DER, v.PublicHash, v.At, v.OperationID, v.VerifiedAt, v.ReceiptHash, v.KeyID, v.EffectRecordID, v.CSRHash, v.SubjectHash)
+	_, err := s.Exec(ctx, `UPDATE certificates SET state=$2,version=version+1,csr_der=COALESCE($3,csr_der),public_key_sha256=COALESCE($4,public_key_sha256),csr_receipt_verified_at=COALESCE($7,csr_receipt_verified_at),csr_receipt_sha256=COALESCE($8,csr_receipt_sha256),csr_privd_attestation_key_id=COALESCE($9,csr_privd_attestation_key_id),csr_der_sha256=COALESCE($10,csr_der_sha256),updated_at=$5 WHERE id=$1 AND operation_id=$6`, v.CertificateID, v.State, v.DER, v.PublicHash, v.At, v.OperationID, v.VerifiedAt, v.ReceiptHash, v.KeyID, v.CSRHash)
 	return err
 }
 
@@ -122,17 +121,17 @@ func (s commandResultStore) ArtifactOutcome(ctx context.Context, v resultstore.A
 	return err
 }
 
-func (s commandResultStore) UpgradeOutcome(ctx context.Context, operation uuid.UUID, state string, scheduled, at value.Timestamp) error {
+func (s commandResultStore) UpgradeOutcome(ctx context.Context, operation uuid.UUID, state string, scheduled *time.Time, at time.Time) error {
 	_, err := s.Exec(ctx, `UPDATE agent_upgrade_operations SET state=$2,scheduled_at=COALESCE($3,scheduled_at),updated_at=$4 WHERE operation_id=$1`, operation, state, scheduled, at)
 	return err
 }
 
-func (s commandResultStore) AppendEvent(ctx context.Context, id, operation uuid.UUID, state string, at value.Timestamp) error {
+func (s commandResultStore) AppendEvent(ctx context.Context, id, operation uuid.UUID, state string, at time.Time) error {
 	_, err := s.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,$3,$4)`, id, operation, state, at)
 	return err
 }
 
-func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.UUID, payload []byte, expires, at value.Timestamp, receiptFailed bool) error {
+func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.UUID, payload []byte, expires, at time.Time, receiptFailed bool) error {
 	const receiptRecoveryAttemptLimit = 3
 	var attempts, limit int
 	var published, locked bool
@@ -149,11 +148,8 @@ func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.U
 		// sending attempt and its lease, and observes the persisted cap.
 		return nil
 	}
-	available, err := at.Add(recoveryBackoff(attempts))
-	if err != nil {
-		return err
-	}
-	if attempts >= limit || len(payload) == 0 || available.Micros >= expires.Micros {
+	available := at.Add(recoveryBackoff(attempts))
+	if attempts >= limit || len(payload) == 0 || !available.Before(expires) {
 		_, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=$2,locked_by=NULL,locked_until=NULL,
 			last_error=CASE WHEN receipt_recovery_attempt_limit IS NOT NULL AND attempts>=receipt_recovery_attempt_limit
 				THEN 'receipt reconciliation attempt limit reached' ELSE 'reconciliation attempt limit or deadline reached' END
@@ -171,7 +167,7 @@ func (s commandResultStore) ScheduleRecovery(ctx context.Context, command uuid.U
 	if _, err := s.Exec(ctx, `UPDATE commands SET envelope=$2,expires_at=$3 WHERE id=$1 AND state='unknown'`, command, payload, expires); err != nil {
 		return err
 	}
-	_, err = s.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE id=(SELECT operation_id FROM commands WHERE id=$1) AND command_id=$1 AND state='unknown'`, command, expires)
+	_, err := s.Exec(ctx, `UPDATE operations SET expires_at=$2 WHERE id=(SELECT operation_id FROM commands WHERE id=$1) AND command_id=$1 AND state='unknown'`, command, expires)
 	return err
 }
 

@@ -149,8 +149,8 @@ func enrollmentGoldenRequest(endpoint []byte) *agentv1.EnrollRequest {
 		AgentInstanceId: instanceID,
 		Capabilities:    []string{"ocserv.users.write", "ocserv.status.read"},
 		SealingKeys: []*agentv1.SealingKeyDescriptorV1{
-			{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: "fixture-user-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x11}, sha256.Size)},
-			{Version: agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "fixture-p12-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x22}, sha256.Size)},
+			{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: "fixture-user-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x11}, sha256.Size)},
+			{Version: 1, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_CERTIFICATE_P12_PASSWORD, KeyId: "fixture-p12-key-v1", PublicKeySha256: bytes.Repeat([]byte{0x22}, sha256.Size)},
 		},
 		Environment:             "production",
 		Nonce:                   nonce,

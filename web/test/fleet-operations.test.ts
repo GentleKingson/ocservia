@@ -1,11 +1,11 @@
-import {
-  ResponseError,
-  type NodeIpBan,
-  type NodeObservedState,
-  type NodeSession,
-  type Operation,
-  type UserGroupResourceState,
-} from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type {
+  NodeIpBan,
+  NodeObservedState,
+  NodeSession,
+  Operation,
+  UserGroupResourceState,
+} from "@/api/models";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +20,6 @@ import {
   listNodes,
   listNodeSessions,
 } from "../src/api/nodes";
-import { getWorkspace, workspaceContext } from "../src/api/workspace";
 import { useFleetStore } from "../src/shared/fleet";
 
 vi.mock("../src/api/users", () => ({
@@ -36,11 +35,6 @@ vi.mock("../src/api/operations", () => ({
   reloadService: vi.fn(),
   removeIpBan: vi.fn(),
   terminateSession: vi.fn(),
-}));
-vi.mock("../src/api/workspace", async (original) => ({
-  ...(await original<typeof import("../src/api/workspace")>()),
-  getWorkspace: vi.fn(),
-  workspaceContext: vi.fn(),
 }));
 vi.mock("../src/api/nodes", () => ({
   getNode: vi.fn(),
@@ -102,16 +96,7 @@ describe("controlled fleet operations", () => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
     vi.resetAllMocks();
-    vi.mocked(getWorkspace).mockResolvedValue({
-      id: "workspace",
-      name: "Workspace",
-      slug: "workspace",
-      version: 1,
-    });
-    vi.mocked(workspaceContext).mockReturnValue({
-      id: "workspace",
-      generation: 1,
-    });
+
     vi.mocked(listEvents).mockResolvedValue({
       items: [],
       page: { hasMore: false },

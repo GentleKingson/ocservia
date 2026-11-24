@@ -8,8 +8,8 @@ pub mod identity;
 use std::io;
 
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, ConnectionFenceV2, FenceBindingV2,
-    PrivilegedResultProof,
+    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
+    SessionGrantV1,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -61,6 +61,11 @@ pub struct PrivdRequest {
     /// Whether the signed command is being executed or reconciled.
     #[prost(enumeration = "PrivilegedRequestMode", tag = "8")]
     pub privileged_mode: i32,
+    /// Controller-signed session grant carrying the monotonic `session_epoch`.
+    /// Privd independently verifies this grant and enforces the epoch floor on
+    /// command execution and artifact operations.
+    #[prost(message, optional, boxed, tag = "9")]
+    pub session_grant: Option<Box<SessionGrantV1>>,
     /// One of the permanently fixed operations.
     #[prost(
         oneof = "privd_request::Operation",
@@ -194,15 +199,6 @@ pub struct UpgradeResultList {
 pub struct ArtifactReadRequest {
     #[prost(message, optional, tag = "1")]
     pub grant: Option<ArtifactGrantV1>,
-    #[prost(uint64, tag = "2")]
-    pub offset: u64,
-    /// Controller-signed owner term and artifact binding; privd re-verifies
-    /// them instead of trusting the Agent's fence checks. Boxed to keep the
-    /// request enum, and every future holding it, small.
-    #[prost(message, optional, boxed, tag = "3")]
-    pub connection_fence: Option<Box<ConnectionFenceV2>>,
-    #[prost(message, optional, boxed, tag = "4")]
-    pub fence_binding: Option<Box<FenceBindingV2>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -215,10 +211,6 @@ pub struct ArtifactConsumeRequest {
     pub size: u64,
     #[prost(bool, tag = "4")]
     pub confirm_only: bool,
-    #[prost(message, optional, boxed, tag = "5")]
-    pub connection_fence: Option<Box<ConnectionFenceV2>>,
-    #[prost(message, optional, boxed, tag = "6")]
-    pub fence_binding: Option<Box<FenceBindingV2>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -227,13 +219,9 @@ pub struct ArtifactData {
     pub artifact_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub grant_id: Vec<u8>,
-    #[prost(uint64, tag = "3")]
-    pub offset: u64,
-    #[prost(bytes = "vec", tag = "4")]
+    #[prost(bytes = "vec", tag = "3")]
     pub data: Vec<u8>,
-    #[prost(bool, tag = "5")]
-    pub eof: bool,
-    #[prost(bytes = "vec", tag = "6")]
+    #[prost(bytes = "vec", tag = "4")]
     pub sha256: Vec<u8>,
 }
 
@@ -630,6 +618,7 @@ mod tests {
             accepted_at: None,
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+            session_grant: None,
             operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
         };
         let mut bytes = Vec::new();
@@ -680,6 +669,7 @@ mod tests {
                 ..CommandEnvelope::default()
             }),
             privileged_mode: PrivilegedRequestMode::Execute.into(),
+            session_grant: None,
             operation: None,
         };
         let (mut request_writer, mut request_reader) =
@@ -743,6 +733,7 @@ mod tests {
             accepted_at: None,
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
+            session_grant: None,
             operation: Some(privd_request::Operation::UpgradeResultList(
                 UpgradeResultListRequest {},
             )),

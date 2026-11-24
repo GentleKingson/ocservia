@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -186,35 +185,6 @@ func (s *service) verify() error {
 		if b := tx.Bucket([]byte("audit")); b.Sequence() != uint64(b.Stats().KeyN) {
 			return invalidState
 		}
-		m := tx.Bucket([]byte("meta"))
-		for _, name := range buckets[1:] {
-			if err := tx.Bucket([]byte(name)).ForEach(func(k, v []byte) error {
-				if v == nil || string(m.Get([]byte("sha256:"+name+":"+string(k)))) != digest(v) {
-					return invalidState
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		// Loop above verified every record in buckets[1:] matches its meta sha256 entry;
-		// verify no orphaned or non-data sha256 entries exist in meta without re-hashing.
-		if err := m.ForEach(func(k, v []byte) error {
-			if !strings.HasPrefix(string(k), "sha256:") {
-				return nil
-			}
-			parts := strings.SplitN(string(k), ":", 3)
-			if len(parts) != 3 || parts[1] == "meta" {
-				return invalidState
-			}
-			b := tx.Bucket([]byte(parts[1]))
-			if b == nil || b.Get([]byte(parts[2])) == nil {
-				return invalidState
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
 		if err := tx.Bucket([]byte("issued")).ForEach(func(k, v []byte) error {
 			var r issuance
 			id, err := uuid.Parse(string(k))
@@ -263,26 +233,7 @@ func audit(tx *bolt.Tx, action, id string) error {
 	if err != nil {
 		return err
 	}
-	return putRecord(tx, "audit", []byte(fmt.Sprintf("%020d", n)), data)
-}
-
-func getRecord(tx *bolt.Tx, bucket string, key []byte) ([]byte, error) {
-	data := tx.Bucket([]byte(bucket)).Get(key)
-	checksum := tx.Bucket([]byte("meta")).Get([]byte("sha256:" + bucket + ":" + string(key)))
-	if data == nil && checksum == nil {
-		return nil, nil
-	}
-	if data == nil || string(checksum) != digest(data) {
-		return nil, invalidState
-	}
-	return data, nil
-}
-
-func putRecord(tx *bolt.Tx, bucket string, key, data []byte) error {
-	if err := tx.Bucket([]byte(bucket)).Put(key, data); err != nil {
-		return err
-	}
-	return tx.Bucket([]byte("meta")).Put([]byte("sha256:"+bucket+":"+string(key)), []byte(digest(data)))
+	return tx.Bucket([]byte("audit")).Put([]byte(fmt.Sprintf("%020d", n)), data)
 }
 
 func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
@@ -292,14 +243,11 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 
 	var result issuance
 	readExisting := func(tx *bolt.Tx) error {
-		old, err := getRecord(tx, "issued", key)
-		if err != nil {
-			return err
-		}
+		old := tx.Bucket([]byte("issued")).Get(key)
 		if old == nil {
 			return nil
 		}
-		if json.Unmarshal(old, &result) != nil {
+		if json.Unmarshal(old, &result) != nil || result.Digest == "" || result.Chain == "" || result.Serial == "" {
 			return invalidState
 		}
 		if result.Digest != csrDigest {
@@ -337,7 +285,7 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 			return err
 		}
 		result = candidate
-		if err := putRecord(tx, "issued", key, data); err != nil {
+		if err := tx.Bucket([]byte("issued")).Put(key, data); err != nil {
 			return err
 		}
 		if err := audit(tx, "issue", idStr); err != nil {
@@ -355,10 +303,7 @@ func (s *service) sign(id uuid.UUID, der []byte) (issuance, error) {
 
 func (s *service) revoke(id, serial, reason string) error {
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		old, err := getRecord(tx, "issued", []byte(id))
-		if err != nil {
-			return err
-		}
+		old := tx.Bucket([]byte("issued")).Get([]byte(id))
 		if old == nil {
 			return statusError(404)
 		}
@@ -379,7 +324,7 @@ func (s *service) revoke(id, serial, reason string) error {
 		if err != nil {
 			return err
 		}
-		if err := putRecord(tx, "issued", []byte(id), data); err != nil {
+		if err := tx.Bucket([]byte("issued")).Put([]byte(id), data); err != nil {
 			return err
 		}
 		if err := audit(tx, "revoke", id); err != nil {
@@ -443,10 +388,7 @@ func (s *service) crl(w io.Writer) error {
 			return err
 		}
 		revision = tx.Bucket([]byte("audit")).Sequence()
-		return tx.Bucket([]byte("issued")).ForEach(func(k, v []byte) error {
-			if _, err := getRecord(tx, "issued", k); err != nil {
-				return err
-			}
+		return tx.Bucket([]byte("issued")).ForEach(func(_, v []byte) error {
 			var r issuance
 			if json.Unmarshal(v, &r) != nil {
 				return invalidState

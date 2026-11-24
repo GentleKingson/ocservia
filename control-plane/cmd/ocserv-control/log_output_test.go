@@ -133,3 +133,53 @@ func TestLogShutdownInterruptsBlockedOutputs(t *testing.T) {
 		t.Fatal("shutdown did not interrupt blocked log outputs")
 	}
 }
+
+func TestLogShutdownUnblocksFullQueueWriter(t *testing.T) {
+	reader, dst := io.Pipe()
+	defer reader.Close()
+	defer dst.Close()
+	out := newLogOutput(dst, io.Discard)
+	// Block the consumer goroutine inside its first flush to dst.
+	if _, err := out.Write(bytes.Repeat([]byte("x"), 32<<10)); err != nil {
+		t.Fatal(err)
+	}
+	var first [1]byte
+	if _, err := io.ReadFull(reader, first[:]); err != nil {
+		t.Fatal(err)
+	}
+	for range cap(out.records) {
+		if _, err := out.Write([]byte("fill\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := out.Write([]byte("blocked\n"))
+		writeErr <- err
+	}()
+	// Give the blocked writer a moment to enter the channel send under RLock.
+	time.Sleep(20 * time.Millisecond)
+
+	// Unblock dst concurrently only after Close starts so Close must interrupt the
+	// blocked writer rather than deadlocking waiting for RLock.
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- out.Close()
+	}()
+	select {
+	case err := <-writeErr:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("blocked writer returned %v, want io.ErrClosedPipe", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked waiting on blocked full-queue writer")
+	}
+	_ = reader.Close()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not complete after sink closed")
+	}
+	// Calling Close a second time must remain safe and idempotent.
+	_ = out.Close()
+}

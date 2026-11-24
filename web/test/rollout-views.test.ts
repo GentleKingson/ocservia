@@ -1,5 +1,6 @@
 import { nextTick, reactive } from "vue";
-import { ResponseError, type AgentRollout } from "@ocservia/api-client";
+import { ResponseError } from "@/api/transport";
+import type { AgentRollout } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountSetup } from "./renderer";
 
@@ -10,8 +11,7 @@ const mocks = vi.hoisted(() => ({
   createAgentRollout: vi.fn(),
   listOperations: vi.fn(),
   getOperation: vi.fn(),
-  getWorkspace: vi.fn(),
-  workspaceContext: vi.fn(),
+  getWorkspaceId: vi.fn(),
   push: vi.fn(),
   route: { params: { rolloutId: "rollout-a" } },
 }));
@@ -50,7 +50,6 @@ function responseError(status: number): ResponseError {
   return new ResponseError(new Response("{}", { status }));
 }
 
-let workspace = { id: "workspace-a", generation: 1 };
 let unmount: (() => void) | undefined;
 
 // Foreground reads requested by a route or workspace change run on a 0 ms timer.
@@ -71,12 +70,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.resetAllMocks();
   vi.stubGlobal("window", new EventTarget());
-  workspace = { id: "workspace-a", generation: 1 };
   mocks.route = reactive({ params: { rolloutId: "rollout-a" } });
-  mocks.workspaceContext.mockImplementation(() => ({ ...workspace }));
-  mocks.getWorkspace.mockImplementation(() =>
-    Promise.resolve({ id: workspace.id }),
-  );
+  mocks.getWorkspaceId.mockResolvedValue("workspace-a");
 });
 afterEach(() => {
   unmount?.();

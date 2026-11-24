@@ -20,7 +20,7 @@ relay_ipv4_rule=false
 relay_ipv6_rule=false
 
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted && "$EUID" == 0 ]]
-[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
 [[ -z "$(git -C "${ROOT}" status --porcelain)" && "$(ps -p 1 -o comm=)" == systemd ]]
 [[ ! -e /etc/ocservia-agent && ! -e /usr/libexec/ocservia && ! -e /etc/ocservia ]]
 if getent passwd ocserv-agent >/dev/null; then
@@ -33,9 +33,11 @@ fi
 
 umask 077
 mkdir -m 700 "${ARTIFACT_DIR}"
+: >"${ARTIFACT_DIR}/scenario-timings.jsonl"
 export OCSERVIA_BUSINESS_TEST_WORK_DIR
 OCSERVIA_BUSINESS_TEST_WORK_DIR="$(mktemp -d "${HOME}/.ocservia-business-test-XXXXXX")"
 work="${OCSERVIA_BUSINESS_TEST_WORK_DIR}"
+prefetch_pids=()
 stage=preflight
 started="$(date -u +%FT%TZ)"
 stage_started="$(date +%s)"
@@ -56,8 +58,7 @@ export OCSERV_RELAY_URL_A="https://${OCSERV_RELAY_PUBLIC_HOST}"
 export OCSERV_CERTIFICATE_SIGNER_URL=https://signer:9443/sign
 export OCSERV_RELAY_SECRET_DIR="${work}/relay-secrets"
 export OCSERV_SIGNER_SECRET_DIR="${work}/production-signer/secrets" OCSERV_SIGNER_STATE_DIR="${work}/production-signer/data"
-unset OCSERV_OTEL_BACKEND_ENDPOINT OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH \
-  OCSERV_MANAGED_NODE_SYSROOT OCSERV_MANAGED_NODE_OS_RELEASE
+unset OCSERV_OTEL_BACKEND_ENDPOINT OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLER_SMOKE_SH
 
 registry="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-registry"
 export OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="business-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-relay"
@@ -85,6 +86,11 @@ cleanup() {
   if [[ -f "${work}/private.log" ]]; then
     {
       compose logs --no-color
+      if [[ -n "$(compose ps -q postgres 2>/dev/null)" ]]; then
+        echo '=== transport_event_quarantine ==='
+        compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c \
+          "SELECT observed_at, event_id, node_id, event_type, reason_code, reason_detail FROM transport_event_quarantine ORDER BY observed_at DESC LIMIT 50"
+      fi
       for service in control-plane transportd; do
         container="$(compose ps -a -q "${service}")"
         if [[ -n "${container}" ]]; then
@@ -108,10 +114,12 @@ cleanup() {
     --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" \
     --rawfile checkpoints "${ARTIFACT_DIR}/checkpoints.txt" \
     --slurpfile timings "${ARTIFACT_DIR}/timings.json" \
+    --slurpfile scenario_timings "${ARTIFACT_DIR}/scenario-timings.jsonl" \
     '{source_commit:$source,version:$version,run_id:$run,run_attempt:$attempt,profile:"smoke",terminal:"revocation",
       ocserv_fixture:"distribution",execution_environment:"GitHub-hosted runner",
       started_at:$start,finished_at:$end,exit_code:$code,last_stage:$stage,
-      timings:$timings[0],passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
+      timings:$timings[0],scenario_timings:$scenario_timings,
+      passed_checkpoints:($checkpoints | split("\n") | map(select(length > 0))),
       probe_status:(if $code == 0 then "PASS" else "FAIL" end),
       scope:"business-smoke",resilience_requested:true,
       resilience_result:(if $code != 0 and $resilience == "PASS" then "FAIL" else $resilience end),
@@ -121,6 +129,11 @@ cleanup() {
       limitations:[],
       not_applicable:["cross-host resilience and performance assessment"]}' >"${ARTIFACT_DIR}/result.json"
   sudo systemctl stop ocservia-agent ocservia-privd ocserv >/dev/null 2>&1
+  for pid in "${prefetch_pids[@]:-}"; do
+    [[ -n "${pid}" ]] || continue
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+  done
   if [[ "$relay_ipv4_rule" == true ]]; then
     sudo iptables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
   fi
@@ -144,6 +157,33 @@ mkdir -m 700 "${work}/private" "${work}/secrets" "${work}/state" "${work}/backup
 release_verify_native_runner "$CONTROLLER_ARCH" >"${ARTIFACT_DIR}/native.json"
 { uname -a; cat /etc/os-release; docker version; docker compose version; node --version; } >"${ARTIFACT_DIR}/environment.txt"
 
+pw_version="$(jq -r '.devDependencies["@playwright/test"]' "${ROOT}/web/package.json")"
+pw_version="${pw_version#^}"
+[[ "${pw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+pw_image="mcr.microsoft.com/playwright:v${pw_version}-noble"
+
+# Overlap image pulls and web npm ci with product loading, apt-get, and Controller setup.
+(
+  docker pull -q registry:2 >/dev/null
+  docker pull -q "${OCSERV_POSTGRES_IMAGE}" >/dev/null
+) >"${work}/prefetch-infra.log" 2>&1 &
+prefetch_infra_pid=$!
+(
+  pw_pulled=false
+  for attempt in 1 2 3; do
+    if docker pull -q "${pw_image}"; then
+      pw_pulled=true
+      break
+    fi
+    if ((attempt < 3)); then sleep $((attempt * 2)); fi
+  done
+  [[ "${pw_pulled}" == true ]]
+) >"${work}/prefetch-playwright.log" 2>&1 &
+prefetch_pw_pid=$!
+npm --prefix "${ROOT}/web" ci --ignore-scripts >"${work}/prefetch-npm.log" 2>&1 &
+prefetch_npm_pid=$!
+prefetch_pids=("${prefetch_infra_pid}" "${prefetch_pw_pid}" "${prefetch_npm_pid}")
+
 next_stage product_consumption
 cp "$PRODUCTS_DIR/product-identity.json" "$ARTIFACT_DIR/agent-product-identity.json"
 cp "$IMAGES_DIR/product-identity.json" "$ARTIFACT_DIR/controller-product-identity.json"
@@ -154,8 +194,8 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay \
 record products_ready
 
 next_stage dependency_install
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
+sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 update -qq
+sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
 
@@ -213,6 +253,11 @@ install -m 444 "$work/private/relay-tls.key" "$OCSERV_RELAY_SECRET_DIR/tls.key"
 chmod 444 "$OCSERV_RELAY_SECRET_DIR/tls.crt"
 scenario signer_prepare
 
+infra_status=0
+wait "${prefetch_infra_pid}" || infra_status=$?
+cat "${work}/prefetch-infra.log"
+((infra_status == 0))
+
 docker run -d --name "${registry}" -p 127.0.0.1:5000:5000 registry:2
 manifest="${DEPLOYMENT_CONFIG_DIR}/controller-release-${CONTROLLER_ARCH}.json"
 release_publish_local_manifest "${ROOT}" "localhost:5000" "" "${VERSION}" "${CONTROLLER_ARCH}" "${SOURCE_COMMIT}" "${manifest}"
@@ -248,8 +293,6 @@ scenario transport_ready
 
 next_stage native_node
 deb="${PRODUCTS_DIR}/ocservia-agent_${VERSION}-1_${CONTROLLER_ARCH}.deb"
-sudo install -d -m 755 /etc/ocservia
-sudo touch /etc/ocservia/agent-install-production-relays
 sudo dpkg -i "${deb}"
 sudo install -o root -g root -m 444 "${work}/ca.crt" /etc/ocservia-agent/relay-ca.pem
 export CONTROLLER_ENDPOINT_ID="${OCSERV_CONTROLLER_ENDPOINT_ID}" RELAY_URL_A="${OCSERV_RELAY_URL_A}"
@@ -331,15 +374,14 @@ printf 'Additional public Relay CA: one-link root:root 0444 on Controller and no
 cmp "${ROOT}/deploy/production/systemd/agent-relays.sh" /usr/libexec/ocservia/ocservia-agent-relays
 [[ ! -e /etc/systemd/system/ocservia-agent.service.d/99-t07-ca.conf ]]
 
-identity_digest() {
-  sudo sha256sum /var/lib/ocservia-agent/identity/endpoint.key /var/lib/ocservia-agent/identity/controller.endpoint
-}
-enrolled_identity="$(identity_digest)"
+identity_dir=/var/lib/ocservia-agent/identity
+sudo install -d -m 0700 "${work}/unchanged"
+sudo cp -- "${identity_dir}/endpoint.key" "${identity_dir}/controller.endpoint" "${work}/unchanged/"
 scenario bootstrap_verify
 bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-rerun.log"
 grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-rerun.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-rerun.log"
-[[ "$(identity_digest)" == "${enrolled_identity}" ]]
+scenario check_enrolled_identity
 record bootstrap_token_enrollment_and_rerun_identity
 record official_managed_enrollment_and_unchanged_launchers
 
@@ -362,17 +404,37 @@ record production_signer_active_binding
 bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq ONLINE "${ARTIFACT_DIR}/managed-active.log"
 grep -Fxq "NODE_ID: ${OCSERVIA_BUSINESS_TEST_NODE_ID}" "${ARTIFACT_DIR}/managed-active.log"
-[[ "$(identity_digest)" == "${enrolled_identity}" ]]
+scenario check_enrolled_identity
 record native_node_services
 
 next_stage browser
-npm --prefix "${ROOT}/web" ci --ignore-scripts
-(cd "${ROOT}/web" && npx playwright install --with-deps chromium)
+npm_status=0; pw_status=0
+wait "${prefetch_npm_pid}" || npm_status=$?
+wait "${prefetch_pw_pid}" || pw_status=$?
+cat "${work}/prefetch-npm.log" "${work}/prefetch-playwright.log"
+((npm_status == 0 && pw_status == 0))
 mkdir -p "${HOME}/.pki/nssdb"
 if [[ ! -f "${HOME}/.pki/nssdb/cert9.db" ]]; then certutil -N --empty-password -d "sql:${HOME}/.pki/nssdb"; fi
 certutil -A -d "sql:${HOME}/.pki/nssdb" -n ocservia-business-test-ca -t C,, -i "${work}/ca.crt"
 scenario browser_prepare
-NODE_EXTRA_CA_CERTS="${work}/ca.crt" node "${ROOT}/scripts/release-business-browser.mjs"
+docker run --rm --init --ipc=host --network=host \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  -v "${ROOT}:${ROOT}:ro" \
+  -v "${work}:${work}" \
+  -v "${ARTIFACT_DIR}:${ARTIFACT_DIR}" \
+  -v "${HOME}/.pki/nssdb:${HOME}/.pki/nssdb" \
+  -w "${ROOT}" \
+  -e "PATH=${ROOT}/.tools/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  -e "HOME=${HOME}" \
+  -e "NODE_EXTRA_CA_CERTS=${work}/ca.crt" \
+  -e "OCSERVIA_BUSINESS_TEST_WORK_DIR=${work}" \
+  -e "OCSERVIA_BUSINESS_TEST_NODE_ID=${OCSERVIA_BUSINESS_TEST_NODE_ID}" \
+  -e "OCSERVIA_BUSINESS_TEST_WORKSPACE_ID=${OCSERVIA_BUSINESS_TEST_WORKSPACE_ID}" \
+  -e "OCSERV_CONTROLLER_PUBLIC_URL=${OCSERV_CONTROLLER_PUBLIC_URL}" \
+  -e "ARTIFACT_DIR=${ARTIFACT_DIR}" \
+  "${pw_image}" \
+  node "${ROOT}/scripts/release-business-browser.mjs"
 scenario browser_verify
 record real_browser_subset
 
@@ -393,7 +455,7 @@ cat >"${work}/vpn-script" <<'EOF'
 #!/bin/sh
 set -eu
 if [ "$reason" = connect ]; then
-  ip link set "$TUNDEV" up
+  ip link set dev "$TUNDEV" mtu "$INTERNAL_IP4_MTU" up
   ip addr add "$INTERNAL_IP4_ADDRESS/24" dev "$TUNDEV"
 fi
 EOF

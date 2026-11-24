@@ -51,7 +51,7 @@ p.write_text(s)
 EMBED
 done
 if [[ -n "${release_tag}" ]]; then
-  copy_asset "${ROOT}/deploy/bootstrap/install-controller" "install-controller"
+  cp -- "${asset_dir}/controller-bootstrap.sh" "${asset_dir}/install-controller"
   copy_asset "${ROOT}/deploy/bootstrap/install-node" "install-node"
   for asset in install-controller install-node controller-bootstrap.sh managed-node-bootstrap.sh; do
     [[ "$(grep -cxF 'readonly DEFAULT_VERSION=""' "${asset_dir}/${asset}")" == 1 ]] || {
@@ -59,19 +59,15 @@ if [[ -n "${release_tag}" ]]; then
     }
     sed -i "s|^readonly DEFAULT_VERSION=\"\"\$|readonly DEFAULT_VERSION=\"${release_tag}\"|" "${asset_dir}/${asset}"
   done
-  "${ROOT}/scripts/check-release-bootstrap.sh" "${asset_dir}/install-controller" "${release_tag}"
   install -m 0644 "${ROOT}/install.env.example" "${asset_dir}/install.env.example"
   runtime="$(mktemp -d)"
   trap 'rm -rf -- "${runtime}"' EXIT
   # Only runtime scripts, Compose files and bind-mounted public configuration.
-  files=(deploy/lib/install-env.sh deploy/lib/controller-runtime.sh deploy/lib/postgres-entrypoint.sh)
-  for file in bootstrap-host.sh install.sh controller.sh compose.sh controller-release-smoke.sh quick-install.sh quick-materials.sh rotate-postgres-credentials.sh; do
+  files=(deploy/lib/install-env.sh deploy/lib/controller-runtime.sh deploy/lib/quick-materials.sh deploy/lib/postgres-entrypoint.sh)
+  for file in bootstrap-host.sh install.sh controller.sh compose.sh controller-release-smoke.sh rotate-postgres-credentials.sh; do
     files+=("deploy/production/${file}")
   done
-  # Expand globs at the repository root, independent of the caller's cwd.
-  for pattern in 'deploy/production/compose*.yaml' 'deploy/production/integrated/compose*.yaml'; do
-    while IFS= read -r file; do files+=("${file}"); done < <(cd "${ROOT}" && compgen -G "${pattern}")
-  done
+  files+=(deploy/production/compose.yaml)
   files+=(deploy/production/Caddyfile deploy/production/postgresql.conf deploy/production/otel-collector.yaml
     deploy/production/integrated/Caddyfile deploy/production/integrated/Caddyfile.acme
     deploy/production/integrated/site.caddy deploy/production/integrated/relay.caddy

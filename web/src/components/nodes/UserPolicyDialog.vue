@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { workspaceContext } from "../../api/workspace";
+import { cachedWorkspaceId } from "../../api/workspace";
 import {
   expiryInputType,
   loadUserPolicy,
@@ -35,7 +35,7 @@ let open = true;
 const policyWorkflow = createNodeWorkflow(
   () => props.nodeId,
   () => open,
-  workspaceContext,
+  cachedWorkspaceId,
 );
 const policyContext = props.nodeId
   ? policyWorkflow.begin(props.nodeId)
@@ -59,7 +59,7 @@ async function loadPolicy(): Promise<void> {
   } catch (error) {
     if (!policyWorkflow.isCurrent(context)) return;
     policyError.value =
-      error instanceof Error ? error.message : t("policyLoadFailed");
+      (error instanceof Error && error.message) || t("policyLoadFailed");
   } finally {
     if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
   }
@@ -90,7 +90,7 @@ async function submitPolicy(): Promise<void> {
   } catch (error) {
     if (!policyWorkflow.isCurrent(context)) return;
     policyError.value =
-      error instanceof Error ? error.message : t("policyUpdateFailed");
+      (error instanceof Error && error.message) || t("policyUpdateFailed");
   } finally {
     if (policyWorkflow.isCurrent(context)) policyLoading.value = false;
   }

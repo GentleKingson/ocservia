@@ -1,4 +1,5 @@
 """Shared runtime for the release business acceptance drivers."""
+from contextlib import contextmanager
 from functools import cache, cached_property
 import http.cookiejar
 import json
@@ -84,6 +85,19 @@ def api(path, body=None, *, role='requester', status=200, headers=None, method=N
         raise RuntimeError(f'{request.get_method()} {path}: HTTP {response.status}, expected {status}')
     jar.save(ignore_discard=True)
     return payload if raw else (json.loads(payload) if payload else None)
+
+
+@contextmanager
+def timed(name):
+    started = time.monotonic_ns()
+    status = 'FAIL'
+    try:
+        yield
+        status = 'PASS'
+    finally:
+        elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
+        with (environment().evidence / 'scenario-timings.jsonl').open('a') as output:
+            output.write(json.dumps({'name': name, 'elapsed_ms': elapsed_ms, 'status': status}) + '\n')
 
 
 def wait_for(description, fn, seconds=120):

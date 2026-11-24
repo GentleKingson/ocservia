@@ -96,9 +96,14 @@ pgpass_escape() {
   printf '%s' "${value}"
 }
 
+if [[ -n "${COMPOSE_FILE}" && "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated ]]; then
+  export OCSERV_SIGNER_CA_SECRET=certificate_signer_ca
+  export OCSERV_CERTIFICATE_SIGNER_CA_FILE=/run/secrets/certificate_signer_ca
+fi
+
 compose() {
   if [[ -n "${COMPOSE_FILE}" ]]; then
-    docker compose -f "${COMPOSE_FILE}" "$@"
+    docker compose --env-file /dev/null -p ocservia-production -f "${COMPOSE_FILE}" --profile bundled-postgres "$@"
   else
     "${ROOT}/deploy/production/compose.sh" "$@"
   fi

@@ -29,7 +29,7 @@ var blockedPasswords = func() map[string]struct{} {
 }()
 
 // ValidateNewPassword applies only when setting a password, never at login.
-// Future self-service password changes must use this same policy via hashPassword.
+// Bootstrap and self-service password changes share this policy.
 func ValidateNewPassword(password string) error {
 	if len(password) > maxPasswordBytes {
 		return fmt.Errorf("%w: use at most 1024 UTF-8 bytes", ErrPasswordPolicy)
@@ -37,8 +37,8 @@ func ValidateNewPassword(password string) error {
 	if !utf8.ValidString(password) {
 		return fmt.Errorf("%w: use valid Unicode text", ErrPasswordPolicy)
 	}
-	if utf8.RuneCountInString(password) < 15 {
-		return fmt.Errorf("%w: use at least 15 Unicode characters", ErrPasswordPolicy)
+	if utf8.RuneCountInString(password) < 8 {
+		return fmt.Errorf("%w: use at least 8 Unicode characters", ErrPasswordPolicy)
 	}
 	// Compare the whole candidate, case-insensitively, without changing the
 	// password passed to Argon2id. Do not trim, normalize or match substrings.

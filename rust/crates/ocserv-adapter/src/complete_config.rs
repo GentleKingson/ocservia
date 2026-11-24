@@ -3,12 +3,11 @@ use super::{
     StagingFile, authoritative_user_owner, lock_config_file, redacted_candidate_diff,
     write_new_synced,
 };
-use ocservia_contracts::{
-    config_profile,
-    generated::ocserv::platform::agent::v1::{
-        CompleteConfigApply, CompleteConfigCandidate, CompleteConfigPlan,
-        complete_config_directive::Value,
-    },
+use ocservia_command_authorization::VerifiedCommand;
+use ocservia_contracts::config_profile;
+use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    CompleteConfigApply, CompleteConfigCandidate, CompleteConfigPlan, command_envelope,
+    complete_config_directive::Value,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -19,6 +18,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use x509_parser::{parse_x509_certificate, pem::parse_x509_pem};
 
 const FIXED_WORKER_CONFIG: &str =
     "run-as-user = ocservia-vpn\nrun-as-group = ocservia-vpn\nuse-occtl = true\n";
@@ -192,18 +192,38 @@ fn read_public_file(path: &Path, max: u64) -> Result<Vec<u8>, AdapterError> {
     Ok(bytes)
 }
 
+fn pinned_certificate(
+    pem: &[u8],
+    expected_digest: &[u8],
+    is_ca: bool,
+) -> Result<Vec<u8>, AdapterError> {
+    let (_, pem) = parse_x509_pem(pem).map_err(|_| AdapterError::InvalidResource)?;
+    if pem.label != "CERTIFICATE" || Sha256::digest(&pem.contents).as_slice() != expected_digest {
+        return Err(AdapterError::InvalidResource);
+    }
+    let (remaining, certificate) =
+        parse_x509_certificate(&pem.contents).map_err(|_| AdapterError::InvalidResource)?;
+    let Some(constraints) = certificate
+        .basic_constraints()
+        .map_err(|_| AdapterError::InvalidResource)?
+    else {
+        return Err(AdapterError::InvalidResource);
+    };
+    if !remaining.is_empty()
+        || constraints.value.ca != is_ca
+        || (!is_ca && constraints.value.path_len_constraint.is_some())
+    {
+        return Err(AdapterError::InvalidResource);
+    }
+    Ok(certificate.public_key().raw.to_vec())
+}
+
 impl Adapter {
     #[allow(clippy::too_many_lines)]
     async fn materialize_complete(
         &self,
         candidate: &CompleteConfigCandidate,
-        hash: &[u8],
     ) -> Result<Materialized, AdapterError> {
-        let canonical =
-            config_profile::canonical(candidate).map_err(|_| AdapterError::InvalidRequest)?;
-        if Sha256::digest(canonical).as_slice() != hash {
-            return Err(AdapterError::InvalidRequest);
-        }
         let lock = safe_file(&self.resources.config_tls_root.join(".lock"), 0o600)?;
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared)
             .map_err(|_| AdapterError::Unavailable)?;
@@ -248,51 +268,15 @@ impl Adapter {
         }
         let cert_path = cert.to_str().ok_or(AdapterError::InvalidResource)?;
         let key_path = key.to_str().ok_or(AdapterError::InvalidResource)?;
-        let der = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &["x509", "-outform", "DER"],
-                &cert_pem,
-            )
-            .await?;
-        if Sha256::digest(&der.stdout).as_slice() != reference.certificate_sha256 {
-            return Err(AdapterError::InvalidResource);
-        }
-        let public_pem = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &["x509", "-pubkey", "-noout"],
-                &cert_pem,
-            )
-            .await?;
-        let public_der = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &["pkey", "-pubin", "-outform", "DER"],
-                &public_pem.stdout,
-            )
-            .await?;
+        let public_der = pinned_certificate(&cert_pem, &reference.certificate_sha256, false)?;
         let key_public = self
             .execute(
                 &self.resources.openssl,
                 &["pkey", "-in", key_path, "-pubout", "-outform", "DER"],
             )
             .await?;
-        if public_der.stdout != key_public.stdout
-            || Sha256::digest(&public_der.stdout).as_slice() != reference.spki_sha256
-        {
-            return Err(AdapterError::InvalidResource);
-        }
-        let constraints = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &["x509", "-noout", "-ext", "basicConstraints"],
-                &cert_pem,
-            )
-            .await?;
-        if !String::from_utf8_lossy(&constraints.stdout)
-            .lines()
-            .any(|line| line.trim() == "CA:FALSE")
+        if public_der != key_public.stdout
+            || Sha256::digest(&public_der).as_slice() != reference.spki_sha256
         {
             return Err(AdapterError::InvalidResource);
         }
@@ -314,29 +298,7 @@ impl Adapter {
         .await?;
         if !reference.ca_sha256.is_empty() {
             let ca_pem = read_public_file(&ca, 256 * 1024)?;
-            let ca_der = self
-                .execute_with_input(
-                    &self.resources.openssl,
-                    &["x509", "-outform", "DER"],
-                    &ca_pem,
-                )
-                .await?;
-            if Sha256::digest(&ca_der.stdout).as_slice() != reference.ca_sha256 {
-                return Err(AdapterError::InvalidResource);
-            }
-            let constraints = self
-                .execute_with_input(
-                    &self.resources.openssl,
-                    &["x509", "-noout", "-ext", "basicConstraints"],
-                    &ca_pem,
-                )
-                .await?;
-            if !String::from_utf8_lossy(&constraints.stdout)
-                .lines()
-                .any(|line| line.trim().split(',').next() == Some("CA:TRUE"))
-            {
-                return Err(AdapterError::InvalidResource);
-            }
+            pinned_certificate(&ca_pem, &reference.ca_sha256, true)?;
             let ca_path = ca.to_str().ok_or(AdapterError::InvalidResource)?;
             self.execute(
                 &self.resources.openssl,
@@ -426,19 +388,36 @@ impl Adapter {
     ///
     /// # Errors
     /// Rejects unsafe resources, stale bindings, TLS or native parser failures.
-    pub async fn complete_config_plan(
+    pub async fn complete_config_plan_verified(
+        &self,
+        verified: &VerifiedCommand<'_>,
+    ) -> Result<ConfigPlanResult, AdapterError> {
+        let Some(command_envelope::Payload::CompleteConfigPlan(request)) =
+            verified.envelope().payload.as_ref()
+        else {
+            return Err(AdapterError::InvalidRequest);
+        };
+        self.plan_complete_config(request).await
+    }
+
+    #[cfg(test)]
+    async fn complete_config_plan(
         &self,
         request: &CompleteConfigPlan,
     ) -> Result<ConfigPlanResult, AdapterError> {
-        let materialized = self
-            .materialize_complete(
-                request
-                    .candidate
-                    .as_ref()
-                    .ok_or(AdapterError::InvalidRequest)?,
-                &request.candidate_hash,
-            )
-            .await?;
+        validate_test_candidate(request.candidate.as_ref(), &request.candidate_hash)?;
+        self.plan_complete_config(request).await
+    }
+
+    async fn plan_complete_config(
+        &self,
+        request: &CompleteConfigPlan,
+    ) -> Result<ConfigPlanResult, AdapterError> {
+        let candidate = request
+            .candidate
+            .as_ref()
+            .ok_or(AdapterError::InvalidRequest)?;
+        let materialized = self.materialize_complete(candidate).await?;
         let _guard = self.config_plan_lock.lock().await;
         let _config_file = safe_file(&self.resources.config, 0o600)?;
         let _file_lock = lock_config_file(&self.resources.config)?;
@@ -495,7 +474,30 @@ impl Adapter {
     ///
     /// # Errors
     /// Rejects changed TLS, expired plans or stale fingerprints, preserving uncertain effects.
-    pub async fn complete_config_apply(
+    pub async fn complete_config_apply_verified(
+        &self,
+        verified: &VerifiedCommand<'_>,
+        effect: EffectIdentity<'_>,
+    ) -> Result<ConfigApplyResult, AdapterError> {
+        let Some(command_envelope::Payload::CompleteConfigApply(request)) =
+            verified.envelope().payload.as_ref()
+        else {
+            return Err(AdapterError::InvalidRequest);
+        };
+        self.apply_complete_config(request, effect).await
+    }
+
+    #[cfg(test)]
+    async fn complete_config_apply(
+        &self,
+        request: &CompleteConfigApply,
+        effect: EffectIdentity<'_>,
+    ) -> Result<ConfigApplyResult, AdapterError> {
+        validate_test_candidate(request.candidate.as_ref(), &request.candidate_hash)?;
+        self.apply_complete_config(request, effect).await
+    }
+
+    async fn apply_complete_config(
         &self,
         request: &CompleteConfigApply,
         effect: EffectIdentity<'_>,
@@ -504,9 +506,7 @@ impl Adapter {
             .candidate
             .as_ref()
             .ok_or(AdapterError::InvalidRequest)?;
-        let materialized = self
-            .materialize_complete(candidate, &request.candidate_hash)
-            .await?;
+        let materialized = self.materialize_complete(candidate).await?;
         let expiry = request
             .plan_expires_at
             .as_ref()
@@ -542,17 +542,33 @@ impl Adapter {
 }
 
 #[cfg(test)]
+fn validate_test_candidate(
+    candidate: Option<&CompleteConfigCandidate>,
+    digest: &[u8],
+) -> Result<(), AdapterError> {
+    let candidate = candidate.ok_or(AdapterError::InvalidRequest)?;
+    let canonical = ocservia_contracts::config_profile::canonical(candidate)
+        .map_err(|_| AdapterError::InvalidRequest)?;
+    if Sha256::digest(canonical).as_slice() == digest {
+        Ok(())
+    } else {
+        Err(AdapterError::InvalidRequest)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{FixedResources, Limits};
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         CompleteConfigDirective, NodeLocalTlsReference,
     };
+    use ocservia_test_support::PrivateTempDir;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
 
     struct Fixture {
-        directory: PathBuf,
+        directory: PrivateTempDir,
         bundle: PathBuf,
         adapter: Adapter,
         plan: CompleteConfigPlan,
@@ -590,15 +606,12 @@ mod tests {
         #[allow(clippy::too_many_lines)]
         fn new() -> Self {
             // /tmp is deliberately not trusted by the production ancestry checks.
-            let directory = std::env::current_dir()
-                .expect("cwd")
-                .join(format!(".complete-config-{}", Uuid::now_v7()));
-            std::fs::create_dir(&directory).expect("fixture directory");
-            let tls = directory.join("tls");
+            let directory = PrivateTempDir::new("cc");
+            let tls = directory.create_subdir_all("tls");
             let node = Uuid::now_v7();
             let reference = Uuid::now_v7();
-            let bundle = tls.join(reference.to_string()).join("v1");
-            std::fs::create_dir_all(&bundle).expect("TLS bundle");
+            let bundle = directory
+                .create_subdir_all(PathBuf::from("tls").join(reference.to_string()).join("v1"));
             write(&tls.join(".lock"), [], 0o600);
             let cert = bundle.join("server-cert.pem");
             let key = bundle.join("server-key.pem");
@@ -738,7 +751,7 @@ mod tests {
             assert!(
                 !result
                     .diff_redacted
-                    .contains(self.directory.to_str().expect("directory"))
+                    .contains(self.directory.path().to_str().expect("directory"))
             );
             assert!(!result.diff_redacted.contains("PRIVATE KEY"));
             let mut request = CompleteConfigApply {
@@ -752,12 +765,6 @@ mod tests {
             };
             request.plan_expires_at.get_or_insert_default().seconds = i64::MAX;
             request
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.directory).expect("remove owned fixture");
         }
     }
 

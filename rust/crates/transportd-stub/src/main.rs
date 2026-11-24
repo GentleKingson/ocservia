@@ -344,17 +344,10 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use ocservia_test_support::PrivateTempDir;
 
-    fn socket_test_directory() -> PathBuf {
-        static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
-        std::env::current_dir()
-            .expect("current test directory")
-            .join(format!(
-                ".s-{}-{}",
-                std::process::id(),
-                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ))
+    fn socket_test_directory() -> PrivateTempDir {
+        PrivateTempDir::new("s")
     }
 
     fn empty_stats() -> StubStats {
@@ -371,13 +364,10 @@ mod tests {
     #[tokio::test]
     async fn bind_socket_requires_private_ancestry() {
         let parent = socket_test_directory();
-        std::fs::create_dir(&parent).expect("create test directory");
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
-            .expect("set test directory permissions");
         let socket = parent.join("s");
 
         let (listener, identity) = bind_socket(&socket).expect("bind socket");
-        let mode = std::fs::metadata(&parent)
+        let mode = std::fs::metadata(parent.path())
             .expect("inspect test directory")
             .permissions()
             .mode()
@@ -386,14 +376,12 @@ mod tests {
         assert_eq!(mode, 0o700);
         drop(listener);
         remove_socket(&socket, identity).expect("remove socket");
-        std::fs::remove_dir(parent).expect("remove test directory");
     }
 
     #[tokio::test]
     async fn bind_socket_rejects_client_writable_ancestry() {
         let parent = socket_test_directory();
-        std::fs::create_dir(&parent).expect("create test directory");
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770))
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o770))
             .expect("set test directory permissions");
         let socket = parent.join("s");
         assert_eq!(
@@ -402,7 +390,6 @@ mod tests {
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
-        std::fs::remove_dir(parent).expect("remove test directory");
     }
 
     #[test]

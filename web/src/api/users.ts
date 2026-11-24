@@ -1,34 +1,38 @@
-import {
-  OperationsApi,
-  NodesApi,
-  type Operation,
-  type UserPolicy,
-  type UserPolicyRequest,
-  type UserPasswordSealingKey,
-} from "@ocservia/api-client";
-import { configuration, newIdempotencyKey, requestInit } from "./transport";
+import type { UserPolicyRequest } from "./models";
+import { client, newIdempotencyKey, read } from "./transport";
 
-const operations = new OperationsApi(configuration);
-const nodes = new NodesApi(configuration);
-
-export async function getUserPasswordSealingKey(
+export function getUserPasswordSealingKey(
   nodeId: string,
   signal?: AbortSignal,
-): Promise<UserPasswordSealingKey> {
-  return nodes.getNodeUserPasswordSealingKey({ nodeId }, requestInit(signal));
+) {
+  return read(
+    client.GET("/nodes/{node_id}/user-password-sealing-key", {
+      params: { path: { node_id: nodeId } },
+      signal: signal ?? null,
+    }),
+  );
 }
 
 function desiredRequest(version: number, reason: string) {
   return {
-    idempotencyKey: newIdempotencyKey(),
-    ifMatch: `"revision-${String(version)}"`,
-    reason,
-    expectedVersion: version,
-    ttlSeconds: 86400,
+    header: {
+      "Idempotency-Key": newIdempotencyKey(),
+      "If-Match": `"revision-${String(version)}"`,
+    },
+    body: { reason, expected_version: version, ttl_seconds: 86400 },
   };
 }
 
-export async function createUser(
+function passwordEnvelope(ciphertext: string, keyId: string) {
+  return {
+    version: 1,
+    purpose: "user_password",
+    key_id: keyId,
+    ciphertext,
+  } as const;
+}
+
+export function createUser(
   nodeId: string,
   name: string,
   version: number,
@@ -36,79 +40,56 @@ export async function createUser(
   secretKeyId: string,
   reason: string,
   signal?: AbortSignal,
-): Promise<Operation> {
-  const request = desiredRequest(version, reason);
-  return operations.createNodeUser(
-    {
-      nodeId,
-      idempotencyKey: request.idempotencyKey,
-      ifMatch: request.ifMatch,
-      userCreateRequest: {
+) {
+  const { header, body } = desiredRequest(version, reason);
+  return read(
+    client.POST("/nodes/{node_id}/users", {
+      params: { path: { node_id: nodeId }, header },
+      body: {
+        ...body,
         name,
-        sealedPassword: {
-          version: 1,
-          purpose: "user_password",
-          keyId: secretKeyId,
-          ciphertext: sealedPassword,
-        },
-        reason: request.reason,
-        expectedVersion: request.expectedVersion,
-        ttlSeconds: request.ttlSeconds,
+        sealed_password: passwordEnvelope(sealedPassword, secretKeyId),
       },
-    },
-    requestInit(signal),
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function disableUser(
+export function disableUser(
   nodeId: string,
   username: string,
   version: number,
   reason: string,
   signal?: AbortSignal,
-): Promise<Operation> {
-  const request = desiredRequest(version, reason);
-  return operations.disableNodeUser(
-    {
-      nodeId,
-      username,
-      idempotencyKey: request.idempotencyKey,
-      ifMatch: request.ifMatch,
-      desiredMutationRequest: {
-        reason: request.reason,
-        expectedVersion: version,
-        ttlSeconds: request.ttlSeconds,
-      },
-    },
-    requestInit(signal),
+) {
+  const { header, body } = desiredRequest(version, reason);
+  return read(
+    client.POST("/nodes/{node_id}/users/{username}:disable", {
+      params: { path: { node_id: nodeId, username }, header },
+      body,
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function enableUser(
+export function enableUser(
   nodeId: string,
   username: string,
   version: number,
   reason: string,
   signal?: AbortSignal,
-): Promise<Operation> {
-  const request = desiredRequest(version, reason);
-  return operations.enableNodeUser(
-    {
-      nodeId,
-      username,
-      idempotencyKey: request.idempotencyKey,
-      ifMatch: request.ifMatch,
-      desiredMutationRequest: {
-        reason: request.reason,
-        expectedVersion: version,
-        ttlSeconds: request.ttlSeconds,
-      },
-    },
-    requestInit(signal),
+) {
+  const { header, body } = desiredRequest(version, reason);
+  return read(
+    client.POST("/nodes/{node_id}/users/{username}:enable", {
+      params: { path: { node_id: nodeId, username }, header },
+      body,
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function rotateUserPassword(
+export function rotateUserPassword(
   nodeId: string,
   username: string,
   version: number,
@@ -116,77 +97,72 @@ export async function rotateUserPassword(
   secretKeyId: string,
   reason: string,
   signal?: AbortSignal,
-): Promise<Operation> {
-  const request = desiredRequest(version, reason);
-  return operations.rotateNodeUserPassword(
-    {
-      nodeId,
-      username,
-      idempotencyKey: request.idempotencyKey,
-      ifMatch: request.ifMatch,
-      passwordRotateRequest: {
-        sealedPassword: {
-          version: 1,
-          purpose: "user_password",
-          keyId: secretKeyId,
-          ciphertext: sealedPassword,
-        },
-        reason: request.reason,
-        expectedVersion: version,
-        ttlSeconds: request.ttlSeconds,
+) {
+  const { header, body } = desiredRequest(version, reason);
+  return read(
+    client.POST("/nodes/{node_id}/users/{username}:rotate-password", {
+      params: { path: { node_id: nodeId, username }, header },
+      body: {
+        ...body,
+        sealed_password: passwordEnvelope(sealedPassword, secretKeyId),
       },
-    },
-    requestInit(signal),
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function applyGroup(
+export function applyGroup(
   nodeId: string,
   groupName: string,
   version: number,
   members: string[],
   reason: string,
   signal?: AbortSignal,
-): Promise<Operation> {
-  const request = desiredRequest(version, reason);
-  return operations.applyNodeGroup(
-    {
-      nodeId,
-      groupName,
-      idempotencyKey: request.idempotencyKey,
-      ifMatch: request.ifMatch,
-      groupApplyRequest: {
-        members: new Set(members),
-        reason: request.reason,
-        expectedVersion: version,
-        ttlSeconds: request.ttlSeconds,
-      },
-    },
-    requestInit(signal),
+) {
+  const { header, body } = desiredRequest(version, reason);
+  return read(
+    client.PUT("/nodes/{node_id}/groups/{group_name}", {
+      params: { path: { node_id: nodeId, group_name: groupName }, header },
+      body: { ...body, members: [...new Set(members)] },
+      signal: signal ?? null,
+    }),
   );
 }
 
-export async function getUserPolicy(
+export function getUserPolicy(
   nodeId: string,
   username: string,
   signal?: AbortSignal,
-): Promise<UserPolicy> {
-  return nodes.getNodeUserPolicy({ nodeId, username }, requestInit(signal));
+) {
+  return read(
+    client.GET("/nodes/{node_id}/users/{username}/policy", {
+      params: { path: { node_id: nodeId, username } },
+      signal: signal ?? null,
+    }),
+  );
 }
 
-export async function setUserPolicy(
+export function setUserPolicy(
   nodeId: string,
   username: string,
   policy: UserPolicyRequest,
   signal?: AbortSignal,
-): Promise<UserPolicy> {
-  return operations.setNodeUserPolicy(
-    {
-      nodeId,
-      username,
-      idempotencyKey: newIdempotencyKey(),
-      userPolicyRequest: policy,
-    },
-    requestInit(signal),
+) {
+  return read(
+    client.PUT("/nodes/{node_id}/users/{username}/policy", {
+      params: {
+        path: { node_id: nodeId, username },
+        header: { "Idempotency-Key": newIdempotencyKey() },
+      },
+      body: {
+        quota_period: policy.quotaPeriod,
+        quota_direction: policy.quotaDirection,
+        quota_bytes: policy.quotaBytes,
+        expected_version: policy.expectedVersion,
+        reason: policy.reason,
+        ...(policy.expiresAt ? { expires_at: policy.expiresAt } : {}),
+      },
+      signal: signal ?? null,
+    }),
   );
 }

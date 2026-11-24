@@ -4,7 +4,7 @@ import type {
   Certificate,
   ConfigPlan,
   Operation,
-} from "@ocservia/api-client";
+} from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => {
   return {
     fleet,
     route: { params: { nodeId: "node-a" } },
-    workspaceContext: vi.fn(),
+    cachedWorkspaceId: vi.fn(),
     createConfigPlan: vi.fn(),
     getConfigPlan: vi.fn(),
     applyConfigPlan: vi.fn(),
@@ -34,7 +34,7 @@ vi.mock("vue-router", () => ({ useRoute: () => mocks.route }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("../src/api/workspace", async (original) => ({
   ...(await original<typeof import("../src/api/workspace")>()),
-  workspaceContext: mocks.workspaceContext,
+  cachedWorkspaceId: mocks.cachedWorkspaceId,
 }));
 vi.mock("../src/api/configuration", async (original) => ({
   ...(await original<typeof import("../src/api/configuration")>()),
@@ -220,7 +220,7 @@ beforeEach(() => {
     stop: vi.fn(),
     trackOperation: vi.fn().mockResolvedValue(undefined),
   });
-  mocks.workspaceContext.mockReturnValue({ id: "workspace-a", generation: 1 });
+  mocks.cachedWorkspaceId.mockReturnValue("workspace-a");
   mocks.createConfigPlan.mockResolvedValue(plan);
   mocks.getConfigPlan.mockResolvedValue(plan);
   mocks.applyConfigPlan.mockResolvedValue(operation);
@@ -437,7 +437,7 @@ describe("node workflow context isolation", () => {
     },
   );
 
-  it("invalidates a same-tick A to B to A navigation and removes its workspace listener", async () => {
+  it("invalidates a same-tick A to B to A navigation", async () => {
     const view = await mount();
     await view.configuration.openConfigPlan();
     const old = Promise.withResolvers<ConfigPlan>();
@@ -464,10 +464,7 @@ describe("node workflow context isolation", () => {
     await view.configuration.openConfigPlan();
     view.configuration.configReason = "plan";
     await view.configuration.submitConfigPlan();
-    mocks.workspaceContext.mockReturnValue({
-      id: "workspace-b",
-      generation: 2,
-    });
+    mocks.cachedWorkspaceId.mockReturnValue("workspace-b");
     await nextTick();
     await view.configuration.openConfigPlan();
     expect(mocks.getConfigPlan).not.toHaveBeenCalled();
@@ -538,10 +535,7 @@ describe("node workflow context isolation", () => {
       view.certificates.certificateReason = "request";
       const pending = view.certificates[method]();
       await changeContext(view, "workspace");
-      mocks.workspaceContext.mockReturnValue({
-        id: "workspace-b",
-        generation: 4,
-      });
+      mocks.cachedWorkspaceId.mockReturnValue("workspace-b");
       await view.certificates.openCertificate();
       accepted.resolve(
         method === "submitCertificateIssue"
@@ -671,7 +665,7 @@ describe("node workflow context isolation", () => {
     (kind) => {
       const context: NodeWorkflowContext = {
         nodeId: "node-a",
-        workspace: { id: "workspace-a", generation: 1 },
+        workspaceId: "workspace-a",
         signal: new AbortController().signal,
       };
       const first = beginNodeMutation(context, kind);
@@ -751,7 +745,7 @@ describe("node workflow context isolation", () => {
     await view.certificates.createP12();
     const context: NodeWorkflowContext = {
       nodeId: "node-a",
-      workspace: { id: "workspace-a", generation: 1 },
+      workspaceId: "workspace-a",
       signal: new AbortController().signal,
     };
     const response = (await mocks.createCertificateP12.mock.results[0]
@@ -761,7 +755,7 @@ describe("node workflow context isolation", () => {
     ).toBeUndefined();
     expect(
       readCertificateGrant(
-        { ...context, workspace: { id: "workspace-b", generation: 2 } },
+        { ...context, workspaceId: "workspace-b" },
         certificate.id,
       ),
     ).toBeUndefined();

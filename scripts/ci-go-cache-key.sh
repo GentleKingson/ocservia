@@ -17,10 +17,11 @@ identity="$(
       read -r -a compiler <<<"$(go env CC)"
       "${compiler[@]}" --version
     fi
-    sha256sum toolchains.lock scripts/checksums.txt scripts/bootstrap.sh scripts/env.sh \
-      scripts/ci-go-cache-key.sh scripts/go-check.sh scripts/required-go-tests.sh \
-      scripts/database-integration.sh scripts/database-postgres-smoke.sh \
-      go.work go.work.sum control-plane/go.mod control-plane/go.sum signer/go.mod signer/go.sum
-  } | sha256sum
+    git hash-object go.work go.work.sum control-plane/go.mod control-plane/go.sum signer/go.mod signer/go.sum
+  } | git hash-object --stdin
 )"
-printf 'identity=%s\n' "${identity%% *}"
+mod_identity="$(
+  git hash-object go.work go.work.sum control-plane/go.mod control-plane/go.sum signer/go.mod signer/go.sum |
+    git hash-object --stdin
+)"
+printf 'identity=%s\nmod_identity=%s\n' "${identity%% *}" "${mod_identity%% *}"

@@ -29,11 +29,11 @@ func TestMutationValidationAndPasswordFingerprintRedaction(t *testing.T) {
 	if err := validateMutation(withoutSecret); err == nil {
 		t.Fatal("accepted missing sealed password")
 	}
-	first := desiredFingerprint(UserCreate, "alice", nil)
-	second := desiredFingerprint(UserPasswordRotate, "alice", nil)
-	if first != second {
-		t.Fatal("password material affected public desired fingerprint")
-	}
+}
+
+func requestHash(r MutationRequest) [32]byte {
+	r.Members = normalizeMembers(r.Members)
+	return requestDigest(r).Current
 }
 
 func TestMembersAreCanonicalAndRequestHashBindsCiphertext(t *testing.T) {
@@ -70,12 +70,14 @@ func TestMutationValidationEnforcesTransportSafeGroupCapacity(t *testing.T) {
 
 func TestConvergenceRequiresAppliedRevisionAndPendingWins(t *testing.T) {
 	desired, observed := int64(2), int64(1)
+	enabled := true
 	state := ResourceState{
-		DesiredVersion:      &desired,
-		DesiredRevision:     &desired,
-		ObservedRevision:    &observed,
-		DesiredFingerprint:  "same",
-		ObservedFingerprint: "same",
+		Kind:             "user",
+		DesiredEnabled:   &enabled,
+		ObservedEnabled:  &enabled,
+		DesiredVersion:   &desired,
+		DesiredRevision:  &desired,
+		ObservedRevision: &observed,
 	}
 	if got := convergence(state, "active"); got != "drifted" {
 		t.Fatalf("stale applied revision reported %q", got)
@@ -88,7 +90,7 @@ func TestConvergenceRequiresAppliedRevisionAndPendingWins(t *testing.T) {
 	state.OperationState = nil
 	state.ObservedRevision = &desired
 	if got := convergence(state, "active"); got != "converged" {
-		t.Fatalf("matching revision and fingerprint reported %q", got)
+		t.Fatalf("matching revision and enabled state reported %q", got)
 	}
 }
 

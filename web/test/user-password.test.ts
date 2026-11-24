@@ -4,7 +4,7 @@ import {
   privateDecrypt,
   constants,
 } from "node:crypto";
-import type { UserPasswordSealingKey } from "@ocservia/api-client";
+import type { UserPasswordSealingKey } from "@/api/models";
 import { describe, expect, it } from "vitest";
 import { sealUserPassword } from "../src/features/user-password";
 
@@ -46,7 +46,6 @@ describe("browser password envelope", () => {
     { purpose: "certificate_p12_password" },
     { version: 2 },
     { keyId: "" },
-    { publicKeySha256: "0".repeat(64) },
     { publicKeyDer: "malformed" },
     { endpointId: "invalid" },
   ])("rejects an invalid binding %j and clears input", async (change) => {
@@ -54,6 +53,18 @@ describe("browser password envelope", () => {
     await expect(
       sealUserPassword(bytes, { ...binding, ...change }, "workspace", "node"),
     ).rejects.toThrow("passwordKeyChanged");
+    expect(bytes.every((byte) => byte === 0)).toBe(true);
+  });
+  it("uses the authenticated response key without a second digest check", async () => {
+    const bytes = new TextEncoder().encode("temporary secret");
+    await expect(
+      sealUserPassword(
+        bytes,
+        { ...binding, publicKeySha256: "" },
+        "workspace",
+        "node",
+      ),
+    ).resolves.toHaveProperty("ciphertext");
     expect(bytes.every((byte) => byte === 0)).toBe(true);
   });
   it("uses the OAEP byte boundary rather than character count", async () => {

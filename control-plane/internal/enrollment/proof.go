@@ -4,25 +4,50 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 )
 
 const (
 	EnrollmentProofVersionV1 = 1
 	EnrollmentProtocolMajor  = 1
 	EnrollmentProtocolMinor  = 1
+
+	enrollmentProofDomainV1 = "ocservia/agent-enrollment/cbor.v1\x00"
 )
 
-var enrollmentProofDomainV1 = []byte("ocservia/agent-enrollment/v1\x00")
+type cborSealingKey struct {
+	Version         uint32 `cbor:"version"`
+	Purpose         uint32 `cbor:"purpose"`
+	KeyID           string `cbor:"key_id"`
+	PublicKeySHA256 []byte `cbor:"public_key_sha256"`
+}
 
-// EnrollmentCanonicalV1 returns the independent, domain-separated signing
-// input for EndpointID proof of possession. It never serializes Protobuf.
+type cborEnrollmentProofV1 struct {
+	ProofVersion    uint32           `cbor:"proof_version"`
+	ProtocolMajor   uint32           `cbor:"protocol_major"`
+	ProtocolMinor   uint32           `cbor:"protocol_minor"`
+	TokenSHA256     []byte           `cbor:"token_sha256"`
+	EndpointID      []byte           `cbor:"endpoint_id"`
+	AgentVersion    string           `cbor:"agent_version"`
+	OSRelease       string           `cbor:"os_release"`
+	OcservVersion   string           `cbor:"ocserv_version"`
+	BootID          string           `cbor:"boot_id"`
+	AgentInstanceID []byte           `cbor:"agent_instance_id"`
+	Capabilities    []string         `cbor:"capabilities"`
+	SealingKeys     []cborSealingKey `cbor:"sealing_keys"`
+	Environment     string           `cbor:"environment"`
+	Nonce           []byte           `cbor:"nonce"`
+	TimeSeconds     int64            `cbor:"time_seconds"`
+	TimeNanos       uint32           `cbor:"time_nanos"`
+}
+
+// EnrollmentCanonicalV1 returns the independent, domain-separated RFC 8949 Core
+// Deterministic CBOR signing input for EndpointID proof of possession.
 func EnrollmentCanonicalV1(request *agentv1.EnrollRequest) ([]byte, error) {
 	if request == nil || request.GetEnrollmentProtocolMajor() != EnrollmentProtocolMajor ||
 		request.GetEnrollmentProtocolMinor() != EnrollmentProtocolMinor || len(request.GetEndpointId()) != ed25519.PublicKeySize ||
@@ -46,46 +71,33 @@ func EnrollmentCanonicalV1(request *agentv1.EnrollRequest) ([]byte, error) {
 		return nil, err
 	}
 	tokenHash := sha256.Sum256([]byte(request.GetToken()))
-	var encoded bytes.Buffer
-	encoded.Grow(1024)
-	encoded.Write(enrollmentProofDomainV1)
-	writeEnrollmentUint32(&encoded, EnrollmentProofVersionV1)
-	writeEnrollmentUint32(&encoded, request.GetEnrollmentProtocolMajor())
-	writeEnrollmentUint32(&encoded, request.GetEnrollmentProtocolMinor())
-	encoded.Write(tokenHash[:])
-	encoded.Write(request.GetEndpointId())
-	for _, value := range []string{request.GetAgentVersion(), request.GetOsRelease(), request.GetOcservVersion(), request.GetBootId()} {
-		if err := writeEnrollmentBytes(&encoded, []byte(value)); err != nil {
-			return nil, err
-		}
-	}
-	encoded.Write(request.GetAgentInstanceId())
-	writeEnrollmentUint32(&encoded, uint32(len(capabilities)))
-	for _, capability := range capabilities {
-		if err := writeEnrollmentBytes(&encoded, []byte(capability)); err != nil {
-			return nil, err
-		}
-	}
-	writeEnrollmentUint32(&encoded, uint32(len(sealingKeys)))
+	keys := make([]cborSealingKey, 0, len(sealingKeys))
 	for _, key := range sealingKeys {
-		writeEnrollmentUint32(&encoded, uint32(key.GetVersion()))
-		writeEnrollmentUint32(&encoded, uint32(key.GetPurpose()))
-		if err := writeEnrollmentBytes(&encoded, []byte(key.GetKeyId())); err != nil {
-			return nil, err
-		}
-		if err := writeEnrollmentBytes(&encoded, key.GetPublicKeySha256()); err != nil {
-			return nil, err
-		}
+		keys = append(keys, cborSealingKey{
+			Version:         key.GetVersion(),
+			Purpose:         uint32(key.GetPurpose()),
+			KeyID:           key.GetKeyId(),
+			PublicKeySHA256: key.GetPublicKeySha256(),
+		})
 	}
-	if err := writeEnrollmentBytes(&encoded, []byte(request.GetEnvironment())); err != nil {
-		return nil, err
-	}
-	if err := writeEnrollmentBytes(&encoded, request.GetNonce()); err != nil {
-		return nil, err
-	}
-	writeEnrollmentUint64(&encoded, uint64(request.GetTime().Seconds))
-	writeEnrollmentUint32(&encoded, uint32(request.GetTime().Nanos))
-	return encoded.Bytes(), nil
+	return canonicalcbor.Marshal(enrollmentProofDomainV1, cborEnrollmentProofV1{
+		ProofVersion:    EnrollmentProofVersionV1,
+		ProtocolMajor:   request.GetEnrollmentProtocolMajor(),
+		ProtocolMinor:   request.GetEnrollmentProtocolMinor(),
+		TokenSHA256:     tokenHash[:],
+		EndpointID:      request.GetEndpointId(),
+		AgentVersion:    request.GetAgentVersion(),
+		OSRelease:       request.GetOsRelease(),
+		OcservVersion:   request.GetOcservVersion(),
+		BootID:          request.GetBootId(),
+		AgentInstanceID: request.GetAgentInstanceId(),
+		Capabilities:    capabilities,
+		SealingKeys:     keys,
+		Environment:     request.GetEnvironment(),
+		Nonce:           request.GetNonce(),
+		TimeSeconds:     request.GetTime().GetSeconds(),
+		TimeNanos:       uint32(request.GetTime().GetNanos()),
+	})
 }
 
 func validateSealingKeys(keys []*agentv1.SealingKeyDescriptorV1) error {
@@ -93,7 +105,7 @@ func validateSealingKeys(keys []*agentv1.SealingKeyDescriptorV1) error {
 		return errors.New("enrollment sealing keys are invalid")
 	}
 	for _, key := range keys {
-		if key.GetVersion() != agentv1.SealedSecretVersion_SEALED_SECRET_VERSION_V1 || !validKeyID(key.GetKeyId()) || len(key.GetPublicKeySha256()) != sha256.Size {
+		if key.GetVersion() != 1 || !validKeyID(key.GetKeyId()) || len(key.GetPublicKeySha256()) != sha256.Size {
 			return errors.New("enrollment sealing keys are invalid")
 		}
 	}
@@ -128,25 +140,4 @@ func verifyEnrollmentProof(request *agentv1.EnrollRequest) error {
 		return ErrEndpointProof
 	}
 	return nil
-}
-
-func writeEnrollmentBytes(buffer *bytes.Buffer, value []byte) error {
-	if uint64(len(value)) > math.MaxUint32 {
-		return errors.New("enrollment proof field exceeds uint32")
-	}
-	writeEnrollmentUint32(buffer, uint32(len(value)))
-	buffer.Write(value)
-	return nil
-}
-
-func writeEnrollmentUint32(buffer *bytes.Buffer, value uint32) {
-	var raw [4]byte
-	binary.BigEndian.PutUint32(raw[:], value)
-	buffer.Write(raw[:])
-}
-
-func writeEnrollmentUint64(buffer *bytes.Buffer, value uint64) {
-	var raw [8]byte
-	binary.BigEndian.PutUint64(raw[:], value)
-	buffer.Write(raw[:])
 }

@@ -190,7 +190,13 @@ func TestCorruptionAndRestoreFloor(t *testing.T) {
 	must(t, s.backup(dir+"/old.db"))
 	must(t, s.revoke(id.String(), r.Serial, "compromised"))
 	var latest uint64
-	must(t, s.db.View(func(tx *bolt.Tx) error { latest = tx.Bucket([]byte("audit")).Sequence(); return nil }))
+	must(t, s.db.View(func(tx *bolt.Tx) error {
+		latest = tx.Bucket([]byte("audit")).Sequence()
+		if key, _ := tx.Bucket([]byte("meta")).Cursor().Seek([]byte("sha256:")); bytes.HasPrefix(key, []byte("sha256:")) {
+			t.Fatalf("redundant record checksum written: %q", key)
+		}
+		return nil
+	}))
 	old, err := openStore(dir+"/old.db", s.ca, false)
 	must(t, err)
 	defer old.db.Close()

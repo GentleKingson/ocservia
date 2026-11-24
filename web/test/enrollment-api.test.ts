@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { createNodeBootstrapToken } from "../src/api/enrollment";
+import { beforeEach } from "vitest";
+import { requestOrigin, stubRequestOrigin } from "./request-origin";
 
+let createNodeBootstrapToken: typeof import("../src/api/enrollment").createNodeBootstrapToken;
+
+beforeEach(async () => {
+  vi.resetModules();
+  stubRequestOrigin();
+  ({ createNodeBootstrapToken } = await import("../src/api/enrollment"));
+});
 afterEach(() => vi.unstubAllGlobals());
 it("sends exactly one scoped POST with the generated JSON content type and body", async () => {
   const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
@@ -23,20 +31,17 @@ it("sends exactly one scoped POST with the generated JSON content type and body"
     controller.signal,
   );
   expect(fetch).toHaveBeenCalledTimes(1);
-  const call = fetch.mock.calls[0];
-  if (!call?.[1]) throw new Error("Missing request");
-  const [url, init] = call;
-  if (typeof init.body !== "string") throw new Error("Missing JSON request");
-  expect(url).toBe("/api/v1/node-bootstrap-tokens");
-  expect(init.method).toBe("POST");
-  expect(new Headers(init.headers).get("X-Workspace-ID")).toBe("workspace-b");
-  expect(new Headers(init.headers).get("Content-Type")).toBe(
-    "application/json",
-  );
-  expect(init.credentials).toBe("same-origin");
-  expect(init.cache).toBe("no-store");
-  expect(init.signal).toBe(controller.signal);
-  expect(JSON.parse(init.body)).toEqual({
+  const request = fetch.mock.calls[0]?.[0];
+  if (!(request instanceof Request)) throw new Error("Missing request");
+  expect(request.url).toBe(requestOrigin + "/api/v1/node-bootstrap-tokens");
+  expect(request.method).toBe("POST");
+  expect(request.headers.get("X-Workspace-ID")).toBe("workspace-b");
+  expect(request.headers.get("Content-Type")).toBe("application/json");
+  expect(request.credentials).toBe("same-origin");
+  expect(request.cache).toBe("no-store");
+  controller.abort();
+  expect(request.signal.aborted).toBe(true);
+  expect(await request.json()).toEqual({
     workspace_id: "workspace-b",
     installation: true,
     environment: "production",
