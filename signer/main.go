@@ -49,6 +49,7 @@ func run() error {
 	workspace := f.String("workspace", "", "expected workspace UUID")
 	endpoint := f.String("endpoint", "", "expected endpoint hex identity")
 	output := f.String("output", "", "new backup destination")
+	verifyBeforeBackup := f.Bool("verify", false, "run full ledger verification before writing a backup")
 	minimumRevision := f.Int64("minimum-revision", -1, "independently reconciled minimum restore revision")
 	healthURL := f.String("url", "https://signer:9443/healthz", "health URL with verified SAN")
 	trustFile := f.String("tls-ca", "/run/secrets/tls-ca.pem", "health client trust")
@@ -57,6 +58,9 @@ func run() error {
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected arguments")
+	}
+	if *verifyBeforeBackup && command != "backup" {
+		return errors.New("--verify is only supported with backup")
 	}
 	if command == "health" {
 		b, err := os.ReadFile(*trustFile)
@@ -131,6 +135,9 @@ func run() error {
 		}
 		return s.disable(*node)
 	case "backup":
+		if *verifyBeforeBackup {
+			return s.backupVerified(*output)
+		}
 		return s.backup(*output)
 	case "restore":
 		return s.restore(*output, *minimumRevision)

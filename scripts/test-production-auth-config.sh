@@ -73,6 +73,9 @@ jq -e --arg dir "${OCSERV_SECRET_DIR}" '
   any(.services.transportd.secrets[]; .source == "controller_command_verification_key" and .uid == "0" and .gid == "65532") and
   all(.services.transportd.secrets[]; .source != "controller_command_signing_key") and
   .secrets.controller_command_verification_key.file == ($dir + "/controller-command-verification-key.pem") and
+  (.services["telemetry-retention"].command == ["--telemetry-retention-only", "--telemetry-retention-interval=24h"]) and
+  ([.services["telemetry-retention"].secrets[].source] | sort) == ["database_owner_url", "system_ca"] and
+  ([.services["telemetry-retention"].networks | keys[]] == ["database"]) and
   all(.services[].environment // {} | keys[]; endswith("_PASSWORD") | not)
 ' "${work}/mode-1.json" >/dev/null
 

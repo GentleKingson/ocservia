@@ -211,6 +211,35 @@ services:
           memory: 256M
           pids: 128
 
+  telemetry-retention:
+    <<: *service-defaults
+    image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}
+    command:
+      - "--telemetry-retention-only"
+      - "--telemetry-retention-interval=${OCSERV_TELEMETRY_RETENTION_INTERVAL:-24h}"
+    environment:
+      GOMEMLIMIT: 128MiB
+      GOMAXPROCS: "1"
+      OCSERV_ENVIRONMENT: production
+      OCSERV_DATABASE_BUNDLED_POSTGRES: ${OCSERV_DATABASE_BUNDLED_POSTGRES:-true}
+      OCSERV_DATABASE_TLS_CA_FILE: ${OCSERV_DATABASE_TLS_CA_FILE:-}
+      OCSERV_DATABASE_URL_FILE: /run/secrets/database_owner_url
+    secrets:
+      - source: ${OCSERV_DATABASE_CA_SECRET:-system_ca}
+        target: database_ca
+      - database_owner_url
+    tmpfs:
+      - /tmp:size=8m,mode=0700
+    networks: ["${OCSERV_DATABASE_NETWORK:-database}"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+          pids: 64
+
   control-plane:
     <<: *service-defaults
     image: ${OCSERV_CONTROL_IMAGE:?set OCSERV_CONTROL_IMAGE to a digest-pinned image}

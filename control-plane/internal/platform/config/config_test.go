@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"golang.org/x/sys/unix"
@@ -132,6 +133,44 @@ func TestProductionConfigurationAndFailClosedGates(t *testing.T) {
 	}
 	if _, err := loadEnv([]string{"--telemetry-retention-only", "--migrate-only"}, migrateEnv); err == nil {
 		t.Fatal("telemetry retention and migration flags were accepted together")
+	}
+
+	minimalRetentionEnv := map[string]string{
+		"OCSERV_ENVIRONMENT":               "production",
+		"OCSERV_DATABASE_BUNDLED_POSTGRES": "true",
+		"OCSERV_DATABASE_URL":              "postgres://owner:secret@postgres:5432/ocservia?sslmode=disable",
+	}
+	if cfg, err := loadEnv([]string{"--telemetry-retention-only", "--telemetry-retention-interval=24h"}, minimalRetentionEnv); err != nil || !cfg.TelemetryRetentionOnly || cfg.TelemetryRetentionInterval != 24*time.Hour {
+		t.Fatalf("minimal production scheduled telemetry retention rejected: err=%v cfg=%+v", err, cfg)
+	}
+	minimalRetentionEnv["OCSERV_TELEMETRY_RETENTION_INTERVAL"] = "12h"
+	if cfg, err := loadEnv([]string{"--telemetry-retention-only"}, minimalRetentionEnv); err != nil || cfg.TelemetryRetentionInterval != 12*time.Hour {
+		t.Fatalf("env telemetry retention interval rejected: err=%v interval=%v", err, cfg.TelemetryRetentionInterval)
+	}
+	if cfg, err := loadEnv([]string{"--telemetry-retention-only", "--telemetry-retention-interval=48h"}, minimalRetentionEnv); err != nil || cfg.TelemetryRetentionInterval != 48*time.Hour {
+		t.Fatalf("flag did not override telemetry retention interval: err=%v interval=%v", err, cfg.TelemetryRetentionInterval)
+	}
+	if _, err := loadEnv(nil, minimalRetentionEnv); err == nil {
+		t.Fatal("OCSERV_TELEMETRY_RETENTION_INTERVAL accepted without --telemetry-retention-only")
+	}
+	for _, invalidInterval := range []string{"30m", "169h", "-1h", "not-a-duration"} {
+		badEnv := map[string]string{
+			"OCSERV_ENVIRONMENT":                  "production",
+			"OCSERV_DATABASE_BUNDLED_POSTGRES":    "true",
+			"OCSERV_DATABASE_URL":                 "postgres://owner:secret@postgres:5432/ocservia?sslmode=disable",
+			"OCSERV_TELEMETRY_RETENTION_INTERVAL": invalidInterval,
+		}
+		if _, err := loadEnv([]string{"--telemetry-retention-only"}, badEnv); err == nil {
+			t.Fatalf("invalid telemetry retention interval %q accepted", invalidInterval)
+		}
+	}
+	if _, err := loadEnv([]string{"--telemetry-retention-only"}, map[string]string{
+		"OCSERV_ENVIRONMENT":               "production",
+		"OCSERV_DATABASE_BUNDLED_POSTGRES": "true",
+		"OCSERV_DATABASE_URL":              "postgres://owner:secret@postgres:5432/ocservia?sslmode=disable",
+		"OCSERV_PUBLIC_ORIGIN":             "http://insecure.example.test",
+	}); err == nil {
+		t.Fatal("telemetry retention ignored invalid OCSERV_PUBLIC_ORIGIN")
 	}
 
 	mutations := []struct {

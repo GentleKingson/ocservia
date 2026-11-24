@@ -218,6 +218,19 @@ func TestCorruptionAndRestoreFloor(t *testing.T) {
 	if _, err := reopened.sign(id, der); !errors.Is(err, invalidState) {
 		t.Fatalf("sign replay used corrupt record: %v", err)
 	}
+	if err := reopened.backupVerified(dir + "/verified-backup.db"); !errors.Is(err, invalidState) {
+		t.Fatalf("verified backup accepted corrupt record: %v", err)
+	}
+	if err := reopened.restore(dir+"/corrupt-restored.db", 0); !errors.Is(err, invalidState) {
+		t.Fatalf("restore accepted corrupt record: %v", err)
+	}
+	must(t, reopened.backup(dir+"/fast-backup.db"))
+	snap, err := openLedger(dir+"/fast-backup.db", s.ca, false, true)
+	must(t, err)
+	defer snap.db.Close()
+	if err := snap.verify(); !errors.Is(err, invalidState) {
+		t.Fatalf("snapshot verify did not catch copied corruption: %v", err)
+	}
 }
 
 func TestPolicyAndBounds(t *testing.T) {

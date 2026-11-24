@@ -1252,19 +1252,22 @@ The running Controller uses its restricted database account to provision the
 current UTC telemetry month and the next two. Startup also provisions a
 missing current month after a long outage. If the ingestion window reaches
 into a missing previous month, run the owner `--migrate-only` command before
-starting the Controller. Schedule the one-shot owner task daily using the installed bundle's Compose wrapper under the account
-that manages database migration secrets:
+starting the Controller. The production Compose bundle runs a dedicated
+`telemetry-retention` owner service every `24h` by default (configurable from
+`1h` to `168h` via `OCSERV_TELEMETRY_RETENTION_INTERVAL`), and you can also
+trigger a one-shot pass manually using the installed bundle's Compose wrapper
+under the account that manages database migration secrets:
 
 ```bash
 deploy/production/compose.sh run --rm migrate --telemetry-retention-only
 ```
 
-Each run retires at most one calendar month once its upper bound is more than
-14 days and five minutes old. Rerun the same command after interruption. It
-finishes a pending detach and preserves applicable rollups before deleting an
-already detached table. Complete any interrupted retirement before running
-another schema migration. Historical samples from the former default
-partition remain available for reads.
+Each pass retires at most one calendar month once its upper bound is more than
+14 days and five minutes old. When running manually after an interruption, rerun
+the same command. It finishes a pending detach and preserves applicable rollups
+before deleting an already detached table. Complete any interrupted retirement
+before running another schema migration. Historical samples from the former
+default partition remain available for reads.
 
 ## Relay and networking
 

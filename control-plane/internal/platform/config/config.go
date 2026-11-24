@@ -25,52 +25,53 @@ import (
 )
 
 type Config struct {
-	InstallationRelayURL     string
-	InstallationRelayToken   string
-	HistoryRetention         historyretention.Policy
-	MigrateOnly              bool
-	TelemetryRetentionOnly   bool
-	ProvisionWorkspace       bool
-	BootstrapLocalAdmin      bool
-	LocalBootstrapUsername   string
-	LocalBootstrapPassword   string
-	LocalBootstrapWorkspace  string
-	RuntimeDBRole            string
-	Environment              string
-	EnvironmentSet           bool
-	HTTPAddress              string
-	AuthTrustedProxyCIDRs    []netip.Prefix
-	DatabaseURL              string
-	DatabaseTLSCAFile        string
-	DatabaseBundledPostgres  bool
-	OTLPEndpoint             string
-	DevAuth                  bool
-	DevAuthToken             string
-	LocalAuth                bool
-	PublicOrigin             string
-	SessionKey               []byte
-	SessionTTL               time.Duration
-	AuditCheckpointKey       []byte
-	AuditEventKeyID          string
-	AuditEventKey            []byte
-	CommandSigningKeyFile    string
-	BreakGlassEnabled        bool
-	BreakGlassTokenHash      []byte
-	BodyLimit                int64
-	RequestTimeout           time.Duration
-	ShutdownTimeout          time.Duration
-	LogLevelName             string
-	TransportSocket          string
-	TrustSocket              string
-	TransportUID             uint32
-	TransportGID             uint32
-	TransportIdentitySet     bool
-	ControllerEndpointID     string
-	TransportTimeout         time.Duration
-	TransportQueue           int
-	UserOperationConcurrency int
-	LocalSimulator           bool
-	PprofAddress             string
+	InstallationRelayURL       string
+	InstallationRelayToken     string
+	HistoryRetention           historyretention.Policy
+	MigrateOnly                bool
+	TelemetryRetentionOnly     bool
+	TelemetryRetentionInterval time.Duration
+	ProvisionWorkspace         bool
+	BootstrapLocalAdmin        bool
+	LocalBootstrapUsername     string
+	LocalBootstrapPassword     string
+	LocalBootstrapWorkspace    string
+	RuntimeDBRole              string
+	Environment                string
+	EnvironmentSet             bool
+	HTTPAddress                string
+	AuthTrustedProxyCIDRs      []netip.Prefix
+	DatabaseURL                string
+	DatabaseTLSCAFile          string
+	DatabaseBundledPostgres    bool
+	OTLPEndpoint               string
+	DevAuth                    bool
+	DevAuthToken               string
+	LocalAuth                  bool
+	PublicOrigin               string
+	SessionKey                 []byte
+	SessionTTL                 time.Duration
+	AuditCheckpointKey         []byte
+	AuditEventKeyID            string
+	AuditEventKey              []byte
+	CommandSigningKeyFile      string
+	BreakGlassEnabled          bool
+	BreakGlassTokenHash        []byte
+	BodyLimit                  int64
+	RequestTimeout             time.Duration
+	ShutdownTimeout            time.Duration
+	LogLevelName               string
+	TransportSocket            string
+	TrustSocket                string
+	TransportUID               uint32
+	TransportGID               uint32
+	TransportIdentitySet       bool
+	ControllerEndpointID       string
+	TransportTimeout           time.Duration
+	TransportQueue             int
+	UserOperationConcurrency   int
+	LocalSimulator             bool
+	PprofAddress               string
 
 	CertificateSignerURL     string
 	CertificateSignerCAFile  string
@@ -212,6 +213,9 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	if err := setDuration(lookup, "OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT", &cfg.AgentUpgradeReconcile); err != nil {
 		return Config{}, err
 	}
+	if err := setDuration(lookup, "OCSERV_TELEMETRY_RETENTION_INTERVAL", &cfg.TelemetryRetentionInterval); err != nil {
+		return Config{}, err
+	}
 	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
 		return Config{}, err
 	}
@@ -293,6 +297,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	role := fs.String("role", "all", "legacy compatibility flag; only all is supported")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	telemetryRetentionOnly := fs.Bool("telemetry-retention-only", false, "prune expired telemetry partitions as the database owner, then exit")
+	telemetryRetentionInterval := fs.Duration("telemetry-retention-interval", cfg.TelemetryRetentionInterval, "periodic telemetry partition retention interval (1h to 168h)")
 	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, errors.New("invalid command-line flags")
@@ -319,6 +324,7 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	}
 	cfg.MigrateOnly = *migrateOnly
 	cfg.TelemetryRetentionOnly = *telemetryRetentionOnly
+	cfg.TelemetryRetentionInterval = *telemetryRetentionInterval
 	cfg.ProvisionWorkspace = *provisionWorkspace
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -336,6 +342,14 @@ func (c Config) Validate() error {
 	}
 	if c.TelemetryRetentionOnly && (c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin) {
 		return errors.New("telemetry retention cannot be combined with other one-shot commands")
+	}
+	if c.TelemetryRetentionInterval != 0 {
+		if !c.TelemetryRetentionOnly {
+			return errors.New("--telemetry-retention-interval requires --telemetry-retention-only")
+		}
+		if c.TelemetryRetentionInterval < time.Hour || c.TelemetryRetentionInterval > 7*24*time.Hour {
+			return errors.New("telemetry retention interval must be between 1h and 168h")
+		}
 	}
 	if c.Environment != "development" && c.Environment != "test" && c.Environment != "production" {
 		return fmt.Errorf("invalid environment %q", c.Environment)
@@ -377,7 +391,7 @@ func (c Config) Validate() error {
 	if c.PublicOrigin != "" && publicOrigin == "" {
 		return errors.New("OCSERV_PUBLIC_ORIGIN must be a valid HTTP(S) origin without userinfo, query, or fragment")
 	}
-	if c.Environment == "production" && !strings.HasPrefix(publicOrigin, "https://") {
+	if c.Environment == "production" && (!c.TelemetryRetentionOnly || c.PublicOrigin != "") && !strings.HasPrefix(publicOrigin, "https://") {
 		return errors.New("OCSERV_PUBLIC_ORIGIN must be an HTTPS origin in production")
 	}
 	if c.LocalAuthEnabled() || len(c.SessionKey) != 0 {
@@ -385,20 +399,20 @@ func (c Config) Validate() error {
 			return errors.New("browser sessions require a 32-byte session key and a session TTL from 1m to 24h")
 		}
 	}
-	if c.Environment == "production" && !c.LocalAuthEnabled() {
+	if c.Environment == "production" && !c.TelemetryRetentionOnly && !c.LocalAuthEnabled() {
 		return errors.New("Local authentication is required in production")
 	}
 	if len(c.AuditCheckpointKey) != 0 && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key must be 32 bytes")
 	}
-	if c.Environment == "production" && len(c.AuditCheckpointKey) != 32 {
+	if c.Environment == "production" && !c.TelemetryRetentionOnly && len(c.AuditCheckpointKey) != 32 {
 		return errors.New("audit checkpoint key is required in production")
 	}
 	auditEventConfigured := c.AuditEventKeyID != "" || len(c.AuditEventKey) != 0
 	if auditEventConfigured && (!validKeyID(c.AuditEventKeyID) || len(c.AuditEventKey) != 32) {
 		return errors.New("audit event authentication requires a valid key ID and 32-byte key file")
 	}
-	if c.Environment == "production" && !auditEventConfigured {
+	if c.Environment == "production" && !c.TelemetryRetentionOnly && !auditEventConfigured {
 		return errors.New("audit event authentication key is required in production")
 	}
 	if len(c.AuditEventKey) == 32 && len(c.AuditCheckpointKey) == 32 && bytes.Equal(c.AuditEventKey, c.AuditCheckpointKey) {
