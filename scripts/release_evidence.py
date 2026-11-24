@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reuse checks and immutable build artifacts from the same release candidate."""
+"""Reuse same-commit checks and qualify the exact artifacts from Release Check."""
 
 import hashlib
 import io
@@ -162,28 +162,33 @@ def coordinates(run, version):
     return {'sha': run['head_sha'], 'version': version, 'run_id': run['id'], 'attempt': run['run_attempt']}
 
 
-def read_record(repo, items, run, version, kind):
-    name = f'release-{kind}-{run["id"]}-{run["run_attempt"]}'
+def read_record(repo, items, run, version):
+    name = f'release-check-{run["id"]}-{run["run_attempt"]}'
     matching = [item for item in items.values() if item['name'] == name]
     require(len(matching) == 1, f'Expected one {name} artifact: {run["html_url"]}')
     item = artifact(items, matching[0]['id'], name)
     data = gh(repo, f'actions/artifacts/{item["id"]}/zip')
     require(artifact_digest(data) == item['digest'], f'Artifact digest mismatch: {name}')
-    filename = f'release-{kind}.json'
+    filename = 'release-check.json'
     with ZipFile(io.BytesIO(data)) as archive:
         require(archive.namelist() == [filename], f'Unexpected files in {name}')
         record = json.loads(archive.read(filename))
-    require(record['schema'] == 1 and record['candidate'] == coordinates(run, version),
+    require(record['schema'] == 2 and record['candidate'] == coordinates(run, version),
             f'Candidate mismatch in {name}')
     return record, item['id']
 
 
-def build_record(repo, run, version):
+def qualify(repo, sha, version):
+    def gate(run):
+        return matches(run, repo, sha, ('workflow_dispatch',), f'Release Check v{version}')
+
+    run = latest(repo, 'release-check.yml', sha, gate)
+    require(run is not None, f'No Release Check on main for {sha} / v{version}')
     succeeded(run)
     items = artifacts(repo, run['id'])
-    record, receipt_id = read_record(repo, items, run, version, 'build')
-    outputs = {'build_run_id': run['id'], 'build_attempt': run['run_attempt'],
-               'build_receipt_id': receipt_id, 'build_url': run['html_url']}
+    record, receipt_id = read_record(repo, items, run, version)
+    outputs = {'qualification_run_id': run['id'], 'qualification_id': receipt_id,
+               'qualification_url': run['html_url']}
     for key in PRODUCTS:
         kind, arch = key.split('_')
         product = record['products'][key]
@@ -199,32 +204,6 @@ def build_record(repo, run, version):
     return outputs
 
 
-def build_matches(run, repo, sha, version):
-    return matches(run, repo, sha, ('workflow_dispatch',), f'Release build v{version}')
-
-
-def qualify(repo, sha, version):
-    def gate(run):
-        return matches(run, repo, sha, ('workflow_dispatch',), f'Release Check v{version}')
-
-    run = latest(repo, 'release-check.yml', sha, gate)
-    require(run is not None, f'No Release Check on main for {sha} / v{version}')
-    succeeded(run)
-    record, receipt_id = read_record(repo, artifacts(repo, run['id']), run, version, 'check')
-    build = record['build']
-    require(all(positive(build[key]) for key in ('run_id', 'attempt', 'receipt_id')),
-            'Invalid qualified build coordinates')
-    producer = api(repo, f'actions/runs/{build["run_id"]}/attempts/{build["attempt"]}')
-    require(build_matches(producer, repo, sha, version)
-            and producer['path'].split('@', 1)[0] == '.github/workflows/release.yml'
-            and producer['id'] == build['run_id'] and producer['run_attempt'] == build['attempt'],
-            'Qualified build run does not match the candidate')
-    outputs = build_record(repo, producer, version)
-    require(outputs['build_receipt_id'] == build['receipt_id'], 'Qualified build evidence changed')
-    outputs.update(qualification_id=receipt_id, qualification_url=run['html_url'])
-    return outputs
-
-
 def write_outputs(values):
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         for key, value in values.items():
@@ -234,28 +213,27 @@ def write_outputs(values):
             print(f'{key}={value}', file=stream)
 
 
-def write_record(kind, sha, version):
+def write_record(sha, version):
     env = os.environ
     run = {'head_sha': sha, 'id': int(env['GITHUB_RUN_ID']), 'run_attempt': int(env['GITHUB_RUN_ATTEMPT'])}
-    record = {'schema': 1, 'candidate': coordinates(run, version)}
-    if kind == 'build':
-        record['products'] = {
+    record = {
+        'schema': 2,
+        'candidate': coordinates(run, version),
+        'products': {
             key: {'id': int(env[f'{key.upper()}_ID']), 'manifest_sha256': env[f'{key.upper()}_SHA256']}
-            for key in PRODUCTS}
-        record['assets'] = {'id': int(env['ASSETS_ID']), 'sha256': env['ASSETS_SHA256']}
-    else:
-        record['build'] = {key: int(env[f'BUILD_{key.upper()}']) for key in ('run_id', 'attempt', 'receipt_id')}
-        record['checks'] = {key: env[key.upper()]
-                            for key in ('contract_base_sha', 'quick_url', 'full_url', 'security_url')}
-    (Path(env['RUNNER_TEMP']) / f'release-{kind}.json').write_text(json.dumps(record) + '\n')
+            for key in PRODUCTS},
+        'assets': {'id': int(env['ASSETS_ID']), 'sha256': env['ASSETS_SHA256']},
+        'checks': {key: env[key.upper()] for key in ('contract_base_sha', 'quick_url', 'full_url', 'security_url')},
+    }
+    (Path(env['RUNNER_TEMP']) / 'release-check.json').write_text(json.dumps(record) + '\n')
 
 
 def main():
     phase = sys.argv[1]
     sha, version = os.environ['GITHUB_SHA'], os.environ['VERSION']
     require(SHA.fullmatch(sha) and VERSION.fullmatch(version), 'Invalid candidate SHA or version')
-    if phase in ('record-build', 'record-check'):
-        write_record(phase.removeprefix('record-'), sha, version)
+    if phase == 'record-check':
+        write_record(sha, version)
         return
     repo = os.environ['GH_REPO']
     deadline = time.monotonic() + WAIT_SECONDS
@@ -270,12 +248,6 @@ def main():
         run = find_or_dispatch(repo, 'security.yml', sha, security, {}, deadline)
         succeeded(run)
         write_outputs({'security_url': run['html_url']})
-    elif phase == 'products':
-        def candidate_build(run):
-            return build_matches(run, repo, sha, version)
-
-        run = find_or_dispatch(repo, 'release.yml', sha, candidate_build, {'version': version}, deadline)
-        write_outputs(build_record(repo, run, version))
     else:
         raise RuntimeError(f'Unknown evidence phase: {phase}')
 

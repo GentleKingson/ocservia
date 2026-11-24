@@ -264,7 +264,6 @@ def qualify(repo, tag, sha):
     release_evidence.write_outputs(evidence)
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
         summary.write(f"Release Check: {evidence['qualification_url']} (SHA: {source_commit}, tag: {tag})\n")
-        summary.write(f"Release build: {evidence['build_url']}\n")
 
 
 def main():

@@ -31,11 +31,11 @@ def job(name, conclusion='success', attempt=1, steps=()):
     return {'name': name, 'conclusion': conclusion, 'run_attempt': attempt, 'steps': steps}
 
 
-def receipt(kind, producer, version, **record):
+def receipt(producer, version, **record):
     buffer = io.BytesIO()
     with ZipFile(buffer, 'w') as archive:
-        archive.writestr(f'release-{kind}.json', json.dumps({
-            'schema': 1, 'candidate': evidence.coordinates(producer, version), **record,
+        archive.writestr('release-check.json', json.dumps({
+            'schema': 2, 'candidate': evidence.coordinates(producer, version), **record,
         }))
     return buffer.getvalue()
 
@@ -100,41 +100,35 @@ class Dispatch(unittest.TestCase):
     def test_moved_main_fails_before_dispatch(self):
         with patch.object(evidence, 'api', return_value={'object': {'sha': BASE}}) as api:
             with self.assertRaisesRegex(RuntimeError, 'main moved'):
-                evidence.dispatch(REPO, 'release.yml', SHA, {'version': '2.0.0'})
+                evidence.dispatch(REPO, 'security.yml', SHA, {})
         api.assert_called_once_with(REPO, 'git/ref/heads/main')
 
 
 class Publication(unittest.TestCase):
-    def fixture(self, version, *, candidate_changes=None, record_version=None, corrupt=False, expire=False):
-        check = run(10, f'Release Check v{version}')
-        build = run(11, f'Release build v{version}', path='.github/workflows/release.yml', run_attempt=2)
+    def fixture(self, version, *, candidate_changes=None, record_version=None, corrupt=False,
+                expire=False, artifact_run_id=10, asset_digest=ASSET_DIGEST):
+        check = run(10, f'Release Check v{version}', run_attempt=2)
         products = {key: {'id': index, 'manifest_sha256': MANIFEST_DIGEST}
                     for index, key in enumerate(evidence.PRODUCTS, 20)}
-        build_records = receipt('build', {**build, **(candidate_changes or {})}, record_version or version,
-                                products=products, assets={'id': 25, 'sha256': ASSET_DIGEST})
-        check_records = receipt('check', check, version, build={'run_id': 11, 'attempt': 2, 'receipt_id': 31})
-        build_artifacts = [
-            {'id': item['id'], 'name': f'{prefix}-{arch}-11-1', 'expired': expire}
+        record = receipt({**check, **(candidate_changes or {})}, record_version or version,
+                         products=products, assets={'id': 25, 'sha256': ASSET_DIGEST})
+        artifacts = [
+            {'id': item['id'], 'name': f'{prefix}-{arch}-{artifact_run_id}-1', 'expired': expire}
             for index, (key, item) in enumerate(products.items())
             for prefix, arch in [('agent-packages' if index < 2 else 'controller-images', key.split('_')[1])]
         ]
-        build_artifacts.extend([
-            {'id': 25, 'name': 'release-assets-11-2', 'expired': False, 'digest': f'sha256:{ASSET_DIGEST}'},
-            {'id': 31, 'name': 'release-build-11-2', 'expired': False,
-             'digest': evidence.artifact_digest(build_records if not corrupt else b'other bytes')},
+        artifacts.extend([
+            {'id': 25, 'name': 'release-assets-10-1', 'expired': False, 'digest': f'sha256:{asset_digest}'},
+            {'id': 30, 'name': 'release-check-10-2', 'expired': False,
+             'digest': evidence.artifact_digest(record if not corrupt else b'other bytes')},
         ])
-        check_artifacts = [{'id': 30, 'name': 'release-check-10-1', 'expired': False,
-                            'digest': evidence.artifact_digest(check_records)}]
 
         def gh(repo, path, *args, data=None):
             self.assertIsNone(data)
-            if path == 'actions/runs/11/attempts/2':
-                return json.dumps(build).encode()
-            if path.endswith('/zip'):
-                return {'actions/artifacts/30/zip': check_records, 'actions/artifacts/31/zip': build_records}[path]
+            if path == 'actions/artifacts/30/zip':
+                return record
             listings = {
-                'actions/runs/10/artifacts': check_artifacts,
-                'actions/runs/11/artifacts': build_artifacts,
+                'actions/runs/10/artifacts': artifacts,
                 'actions/workflows/release-check.yml/runs': [check, run(12, 'Release Check v8.0.0', conclusion='failure')],
             }
             self.assertIn('--paginate', args)
@@ -142,7 +136,7 @@ class Publication(unittest.TestCase):
 
         return gh
 
-    def test_tag_publish_uses_the_same_build_for_final_and_rc(self):
+    def test_tag_publish_uses_qualification_artifacts_for_final_and_rc(self):
         spec = importlib.util.spec_from_file_location('publish_release', Path(__file__).with_name('publish-release.py'))
         publisher = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(publisher)
@@ -155,7 +149,7 @@ class Publication(unittest.TestCase):
                                REQUIRE_QUALIFICATION_ID='30'):
                 publisher.qualify(REPO, f'v{version}', SHA)
                 outputs = dict(line.split('=', 1) for line in Path(f'{tmp}/output').read_text().splitlines())
-                self.assertEqual(outputs['build_run_id'], '11')
+                self.assertEqual(outputs['qualification_run_id'], '10')
                 self.assertEqual(outputs['controller_amd64_id'], '22')
                 self.assertEqual(outputs['controller_arm64_id'], '23')
                 self.assertEqual(outputs['assets_id'], '25')
@@ -174,11 +168,13 @@ class Publication(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'successful run'):
                     evidence.qualify(REPO, SHA, '2.0.0')
 
-    def test_invalid_build_record_or_expired_product_blocks_qualification(self):
+    def test_invalid_qualification_or_artifact_blocks_publication(self):
         for kwargs, message in [(dict(candidate_changes={'head_sha': BASE}), 'Candidate mismatch'),
                                 (dict(record_version='2.1.0'), 'Candidate mismatch'),
                                 (dict(corrupt=True), 'Artifact digest mismatch'),
-                                (dict(expire=True), 'expired')]:
+                                (dict(expire=True), 'expired'),
+                                (dict(artifact_run_id=11), 'unexpected artifact'),
+                                (dict(asset_digest=MANIFEST_DIGEST), 'Release assets digest mismatch')]:
             with self.subTest(kwargs=kwargs), patch.object(evidence, 'gh', side_effect=self.fixture('2.0.0', **kwargs)):
                 with self.assertRaisesRegex(RuntimeError, message):
                     evidence.qualify(REPO, SHA, '2.0.0')
