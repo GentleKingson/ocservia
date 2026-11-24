@@ -657,6 +657,7 @@ impl TrustAuthority {
         &self,
         endpoint: EndpointId,
         handshake: SessionHandshake,
+        connection_id: [u8; 16],
     ) -> Result<SessionHandshakeResponse, AcceptError> {
         let _permit = self
             .budgets
@@ -669,6 +670,7 @@ impl TrustAuthority {
             client.authorize_session(AuthorizeSessionRequest {
                 remote_endpoint_id: endpoint.as_bytes().to_vec(),
                 handshake: Some(handshake),
+                connection_id: connection_id.to_vec(),
             }),
         )
         .await

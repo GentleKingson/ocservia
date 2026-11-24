@@ -1485,8 +1485,10 @@ type AuthorizeSessionRequest struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	RemoteEndpointId []byte                 `protobuf:"bytes,1,opt,name=remote_endpoint_id,json=remoteEndpointId,proto3" json:"remote_endpoint_id,omitempty"`
 	Handshake        *v1.SessionHandshake   `protobuf:"bytes,2,opt,name=handshake,proto3" json:"handshake,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// UUIDv7 assigned by transportd and used for the exact owner term.
+	ConnectionId  []byte `protobuf:"bytes,3,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AuthorizeSessionRequest) Reset() {
@@ -1529,6 +1531,13 @@ func (x *AuthorizeSessionRequest) GetRemoteEndpointId() []byte {
 func (x *AuthorizeSessionRequest) GetHandshake() *v1.SessionHandshake {
 	if x != nil {
 		return x.Handshake
+	}
+	return nil
+}
+
+func (x *AuthorizeSessionRequest) GetConnectionId() []byte {
+	if x != nil {
+		return x.ConnectionId
 	}
 	return nil
 }
@@ -1774,10 +1783,11 @@ const file_ocserv_platform_transport_v1_transport_proto_rawDesc = "" +
 	"enrollment\x18\x01 \x01(\v2'.ocserv.platform.agent.v1.EnrollRequestR\n" +
 	"enrollment\":\n" +
 	"\x1aValidateEnrollmentResponse\x12\x1c\n" +
-	"\tpermitted\x18\x01 \x01(\bR\tpermitted\"\x91\x01\n" +
+	"\tpermitted\x18\x01 \x01(\bR\tpermitted\"\xb6\x01\n" +
 	"\x17AuthorizeSessionRequest\x12,\n" +
 	"\x12remote_endpoint_id\x18\x01 \x01(\fR\x10remoteEndpointId\x12H\n" +
-	"\thandshake\x18\x02 \x01(\v2*.ocserv.platform.agent.v1.SessionHandshakeR\thandshake\":\n" +
+	"\thandshake\x18\x02 \x01(\v2*.ocserv.platform.agent.v1.SessionHandshakeR\thandshake\x12#\n" +
+	"\rconnection_id\x18\x03 \x01(\fR\fconnectionId\":\n" +
 	"\x12WatchEventsRequest\x12$\n" +
 	"\x0eafter_event_id\x18\x01 \x01(\fR\fafterEventId\"\xee\x02\n" +
 	"\x0eTransportEvent\x12\x19\n" +
