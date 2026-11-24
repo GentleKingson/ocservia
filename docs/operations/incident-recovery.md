@@ -168,8 +168,11 @@ high-water mark outside the state volume alongside your backup manifest and CA
 fingerprint. Running `backup --output /protected/new-snapshot.db` opens a
 consistent read transaction, creates the destination file exclusively, and
 fsyncs both the file and its parent directory without ever overwriting an
-existing snapshot. A partial file left by an interrupted backup is unusable, so
-always validate a new snapshot by running `inspect --state` against it.
+existing snapshot. By default `backup` checks ledger metadata and structure
+without scanning every historical certificate (`--verify` runs the full
+cryptographic verification before copying). A partial file left by an
+interrupted backup is unusable, so always validate a new snapshot by running
+read-only `verify --state` and `inspect --state` against it.
 
 For exclusive Signer maintenance in an Integrated deployment, quiesce mutations
 and reconcile in-flight results first. The existing non-purging uninstall is a
@@ -194,6 +197,7 @@ signer_admin() {
 umask 077
 signer_admin inspect > "$BACKUP_DIR/ledger-inspect.json"
 signer_admin backup --output /backup/snapshot.db
+signer_admin verify --state /backup/snapshot.db
 signer_admin inspect --state /backup/snapshot.db > "$BACKUP_DIR/snapshot-inspect.json"
 ```
 

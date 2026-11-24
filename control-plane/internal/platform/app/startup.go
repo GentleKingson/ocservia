@@ -36,6 +36,13 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 	databaseCtx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
 	if cfg.TelemetryRetentionOnly {
+		if cfg.TelemetryRetentionInterval > 0 {
+			return nil, runTelemetryRetentionSchedule(ctx, cfg.TelemetryRetentionInterval, min(cfg.TelemetryRetentionInterval, 15*time.Minute), func(passCtx context.Context) error {
+				passTimeout, cancel := context.WithTimeout(passCtx, 10*time.Minute)
+				defer cancel()
+				return conn.PruneTelemetryPartitions(passTimeout)
+			}, logger)
+		}
 		if err := conn.PruneTelemetryPartitions(databaseCtx); err != nil {
 			return nil, fmt.Errorf("retire expired telemetry partitions: %w", err)
 		}
@@ -100,6 +107,37 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 	}
 
 	return auditManager, nil
+}
+
+func runTelemetryRetentionSchedule(ctx context.Context, interval, retryInterval time.Duration, prune func(context.Context) error, logger *slog.Logger) error {
+	for {
+		err := prune(ctx)
+		if ctx.Err() != nil {
+			if logger != nil {
+				logger.Info("telemetry partition retention stopped")
+			}
+			return nil
+		}
+		wait := interval
+		if err != nil {
+			wait = retryInterval
+			if logger != nil {
+				logger.Warn("telemetry partition retention failed; retrying", "retry_in", wait, "error", err)
+			}
+		} else if logger != nil {
+			logger.Info("telemetry partition retention complete")
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if logger != nil {
+				logger.Info("telemetry partition retention stopped")
+			}
+			return nil
+		case <-timer.C:
+		}
+	}
 }
 
 func newAuditManager(backend database.Backend, cfg config.Config) (*audit.Manager, error) {

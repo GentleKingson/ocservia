@@ -340,7 +340,19 @@ func (s *service) revoke(id, serial, reason string) error {
 }
 
 func (s *service) backup(path string) error {
-	if err := s.verify(); err != nil {
+	return s.backupSnapshot(path, false)
+}
+
+func (s *service) backupVerified(path string) error {
+	return s.backupSnapshot(path, true)
+}
+
+func (s *service) backupSnapshot(path string, verify bool) error {
+	if verify {
+		if err := s.verify(); err != nil {
+			return err
+		}
+	} else if err := s.db.View(s.checkMetadata); err != nil {
 		return err
 	}
 	if err := protectedParent(path); err != nil {
@@ -377,7 +389,7 @@ func (s *service) restore(path string, minimum int64) error {
 	}); err != nil {
 		return err
 	}
-	return s.backup(path)
+	return s.backupVerified(path)
 }
 
 func (s *service) crl(w io.Writer) error {

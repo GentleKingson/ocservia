@@ -49,7 +49,7 @@ func Run(ctx context.Context, cfg config.Config, build BuildInfo, logger, access
 		return err
 	}
 	defer conn.Close()
-	if cfg.MigrateOnly || cfg.ProvisionWorkspace || cfg.BootstrapLocalAdmin {
+	if cfg.MigrateOnly || cfg.ProvisionWorkspace || cfg.BootstrapLocalAdmin || cfg.TelemetryRetentionOnly {
 		_, err := initializeDatabase(ctx, conn, cfg, logger)
 		return err
 	}
