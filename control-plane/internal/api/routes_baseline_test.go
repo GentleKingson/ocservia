@@ -226,3 +226,38 @@ func TestOpenAPIRouteConformance(t *testing.T) {
 		})
 	}
 }
+
+func TestMissingCertificatesCapabilityReturnsServiceUnavailable(t *testing.T) {
+	s := baselineServer(t, true)
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/api/v1/nodes/" + baselineID + "/certificates", `{"common_name":"alice"}`},
+		{http.MethodGet, "/api/v1/nodes/" + baselineID + "/certificates", ""},
+		{http.MethodGet, "/api/v1/certificates/" + baselineID, ""},
+		{http.MethodPost, "/api/v1/certificates/" + baselineID + ":issue", `{}`},
+		{http.MethodPost, "/api/v1/certificates/" + baselineID + ":revoke", `{}`},
+		{http.MethodPost, "/api/v1/certificates/" + baselineID + ":p12", `{}`},
+		{http.MethodGet, "/api/v1/artifacts/" + baselineID, ""},
+		{http.MethodPost, "/api/v1/secret-provider-refs", `{}`},
+		{http.MethodGet, "/api/v1/secret-provider-refs/" + baselineID, ""},
+		{http.MethodPost, "/api/v1/secret-provider-refs/" + baselineID + ":rotate", `{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := baselineRequest(tc.method, tc.path, body)
+			if body != nil {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			w := httptest.NewRecorder()
+			s.http.Handler.ServeHTTP(w, req)
+			assertBaselineProblem(t, w, tc.path, http.StatusServiceUnavailable, "service-unavailable", "Service unavailable", "certificate service is unavailable")
+		})
+	}
+}

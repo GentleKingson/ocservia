@@ -168,6 +168,10 @@ func (s transportIngressStore) LockTrust(ctx context.Context, node uuid.UUID, en
 	err = s.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND k.endpoint_id=$2 FOR NO KEY UPDATE OF n,k`, node, endpoint).Scan(&v.WorkspaceID, &v.NodeStatus, &v.EndpointState)
 	return
 }
+func (s transportIngressStore) LockTrustShared(ctx context.Context, node uuid.UUID, endpoint []byte) (v transportstore.IngressTrust, err error) {
+	err = s.QueryRow(ctx, `SELECT n.workspace_id,n.status,k.state FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE n.id=$1 AND k.endpoint_id=$2 FOR SHARE OF n,k`, node, endpoint).Scan(&v.WorkspaceID, &v.NodeStatus, &v.EndpointState)
+	return
+}
 func (s transportIngressStore) InsertEvent(ctx context.Context, v transportstore.TransportEvent) (bool, error) {
 	n, err := s.Exec(ctx, `INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload)VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(event_id) DO NOTHING`, v.ID, v.NodeID, v.Type, v.At, v.Traceparent, v.Payload)
 	return n != 0, err

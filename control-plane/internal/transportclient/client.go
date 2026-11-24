@@ -36,7 +36,28 @@ const (
 	maxGapBufferedEventBytes = 64 << 20
 )
 
-var errEventGapBufferExceeded = errors.New("transport event gap buffer exceeded")
+var (
+	// ErrDispatchAmbiguous marks SendCommand failures where the command may have
+	// already been written to or received by the target node transport stream.
+	ErrDispatchAmbiguous      = errors.New("command dispatch outcome is ambiguous")
+	errEventGapBufferExceeded = errors.New("transport event gap buffer exceeded")
+)
+
+type ambiguousDispatchError struct{ err error }
+
+func (e *ambiguousDispatchError) Error() string           { return e.err.Error() }
+func (e *ambiguousDispatchError) Unwrap() error           { return e.err }
+func (e *ambiguousDispatchError) AmbiguousDispatch() bool { return true }
+func (e *ambiguousDispatchError) Is(target error) bool    { return target == ErrDispatchAmbiguous }
+
+func isAmbiguousGRPCCode(code codes.Code) bool {
+	switch code {
+	case codes.DeadlineExceeded, codes.Canceled, codes.Unavailable, codes.Unknown, codes.Internal, codes.Aborted, codes.DataLoss:
+		return true
+	default:
+		return false
+	}
+}
 
 type CursorStore interface {
 	LastEventID(context.Context) ([]byte, error)
@@ -128,7 +149,11 @@ func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).SendCommand(rpcCtx, &transportv1.SendCommandRequest{NodeId: nodeID, CommandEnvelope: envelope})
 	if err != nil {
-		return fmt.Errorf("send simulator command: %w", err)
+		wrapped := fmt.Errorf("send simulator command: %w", err)
+		if isAmbiguousGRPCCode(status.Code(err)) {
+			return &ambiguousDispatchError{err: wrapped}
+		}
+		return wrapped
 	}
 	if !response.GetAccepted() {
 		return errors.New("transport rejected simulator command")

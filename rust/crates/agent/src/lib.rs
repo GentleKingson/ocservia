@@ -1269,6 +1269,9 @@ impl Backoff {
 }
 
 /// Fixed privd client over `AF_UNIX`.
+/// Maximum command lifetime budget for `CompleteConfigApply` (up to 60s apply/rollback).
+const CONFIG_APPLY_PRIVD_TIMEOUT: Duration = Duration::from_secs(75);
+
 #[derive(Clone, Debug)]
 pub struct PrivdClient {
     socket: std::path::PathBuf,
@@ -1277,6 +1280,16 @@ pub struct PrivdClient {
 }
 
 impl PrivdClient {
+    fn command_timeout(&self, command: &CommandEnvelope) -> Duration {
+        if matches!(
+            command.payload,
+            Some(command_envelope::Payload::CompleteConfigApply(_))
+        ) {
+            self.desired_timeout.max(CONFIG_APPLY_PRIVD_TIMEOUT)
+        } else {
+            self.desired_timeout
+        }
+    }
     /// Creates a client with a bounded request deadline.
     ///
     /// # Errors
@@ -1356,7 +1369,7 @@ impl PrivdClient {
             Some(command),
             PrivilegedRequestMode::Execute,
             Some(session_grant),
-            self.desired_timeout,
+            self.command_timeout(command),
             Some(prost_types::Timestamp {
                 seconds: accepted_at,
                 nanos: 0,
@@ -1380,7 +1393,7 @@ impl PrivdClient {
             Some(command),
             PrivilegedRequestMode::Reconcile,
             None,
-            self.desired_timeout,
+            self.command_timeout(command),
             None,
         )
         .await

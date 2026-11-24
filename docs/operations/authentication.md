@@ -341,13 +341,14 @@ continue to validate.
 
 ## Authentication request budgets and proxy trust
 
-Local login enforces a per-process budget of 5 requests per source IP per
+Local login enforces a per-process budget of 5 requests per source key per
 minute, 120 total requests per minute, and 4 concurrent in-flight requests.
 These rate limits apply before and independently of password verification. Each
-source table tracks up to 4096 addresses and keeps live one-minute windows in
-place until they expire so an attacker cannot gain fresh quota by forcing table
-evictions. The cross-Controller account failure backoff described below
-provides a second, account-keyed layer.
+source table tracks up to 4096 keys (exact IPv4 addresses and normalized `/64`
+IPv6 prefixes) and keeps live one-minute windows in place until they expire so
+an attacker cannot gain fresh quota by cycling IPv6 interface identifiers or
+forcing table evictions. The cross-Controller account failure backoff described
+below provides a second, account-keyed layer.
 
 In production Compose deployments, the shipped Caddy gateway overwrites
 `X-Ocservia-Client-IP` with the client IP it observes: the direct TCP peer in
@@ -366,15 +367,15 @@ front of Caddy, all clients behind that proxy share its source IP budget at
 Caddy; enforce per-client rate limits at the outer proxy and do not configure
 the Controller to trust arbitrary forwarded headers.
 
-Break-glass authentication uses a dedicated budget of 4 concurrent in-flight
-requests and allows at most 5 invalid token attempts per source IP per minute.
-Presenting a valid, enabled emergency credential bypasses the failed-request
-rate and source-table limits while still enforcing `Origin` validation,
-rotation checks, audit logging, and session creation rules, so exhausted Local
-rate limits cannot block emergency access. Keep the offline Break-glass
-credential accessible and alert on authentication `429` responses via HTTP
-telemetry. Application rate limiting complements external DDoS mitigation and
-does not protect a compromised emergency credential.
+Break-glass authentication uses an isolated budget of 4 concurrent in-flight
+requests and at most 5 requests per source key (exact IPv4 or `/64` IPv6) per
+minute. Rate limiting runs before JSON token validation so valid and invalid
+tokens face identical admission limits with no online credential oracle, while
+isolated budgets prevent Local login floods from saturating break-glass
+recovery. Keep the offline Break-glass credential accessible and alert on
+authentication `429` responses via HTTP telemetry. Application rate limiting
+complements external DDoS mitigation and does not protect a compromised
+emergency credential.
 
 For gateway addresses and subnet overrides, see
 [deployment networking](production-deployment.md#relay-and-networking).

@@ -2,6 +2,7 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -97,7 +98,7 @@ func TestControllerLockSessionLoss(t *testing.T) {
 	if dsn == "" {
 		t.Skip("OCSERV_TEST_DATABASE_URL is not set")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	conn, err := Open(ctx, Options{Environment: "test", URL: dsn})
 	if err != nil {
@@ -162,4 +163,40 @@ func TestControllerLockSessionLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	nextRelease()
+}
+
+func TestMonitorControllerLockGraceAndImmediateLoss(t *testing.T) {
+	t.Run("recovers after two transient errors then fails on third", func(t *testing.T) {
+		outcomes := []struct {
+			held bool
+			err  error
+		}{
+			{false, errors.New("blip 1")},
+			{false, errors.New("blip 2")},
+			{true, nil}, // resets consecutive failure counter
+			{false, errors.New("fail 1")},
+			{false, errors.New("fail 2")},
+			{false, errors.New("fail 3")},
+		}
+		idx := 0
+		err := monitorControllerLock(context.Background(), time.Millisecond, func(context.Context) (bool, error) {
+			cur := outcomes[idx]
+			idx++
+			return cur.held, cur.err
+		})
+		if err == nil || !strings.Contains(err.Error(), "fail 3") || idx != 6 {
+			t.Fatalf("unexpected monitor outcome: idx=%d err=%v", idx, err)
+		}
+	})
+
+	t.Run("exits immediately on confirmed lock loss", func(t *testing.T) {
+		calls := 0
+		err := monitorControllerLock(context.Background(), time.Millisecond, func(context.Context) (bool, error) {
+			calls++
+			return false, nil
+		})
+		if err == nil || calls != 1 {
+			t.Fatalf("expected immediate exit on held=false: calls=%d err=%v", calls, err)
+		}
+	})
 }

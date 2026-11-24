@@ -12,8 +12,8 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use uuid::Uuid;
 
-use crate::MAX_REQUEST_LIFETIME;
 use crate::effect_binding::{effect_binding, error};
+use crate::request_lifetime;
 
 pub(crate) enum ValidatedRequest<'a> {
     Read,
@@ -50,7 +50,7 @@ pub(crate) fn validate_request<'a>(
         ));
     }
     let remaining = Duration::from_millis(request.deadline_unix_ms - now_ms);
-    if remaining > MAX_REQUEST_LIFETIME {
+    if remaining > request_lifetime(request) {
         return Err(error(
             ErrorKind::InvalidRequest,
             "request deadline too far in future",

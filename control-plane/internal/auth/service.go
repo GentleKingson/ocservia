@@ -141,8 +141,8 @@ func (s *Service) Logout(ctx context.Context, principal Principal) error {
 	})
 }
 
-// ValidBreakGlassToken is only an admission hint, not session authorization.
-// BreakGlass must still enforce rotation and commit the audited session.
+// ValidBreakGlassToken checks the configured break-glass digest in constant time.
+// BreakGlass must still enforce single-use rotation and commit the audited session.
 func (s *Service) ValidBreakGlassToken(token string) bool {
 	if !s.breakGlassEnabled || len(s.breakGlassTokenHash) != sha256.Size {
 		return false

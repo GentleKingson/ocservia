@@ -1383,30 +1383,26 @@ async fn saturated_clients_wait_for_capacity_and_direct_socket_blocks_forgery() 
     assert!(!fx.counter.exists());
     drop(forge);
 
-    // Saturated slots queue valid clients instead of resetting.
-    let mut held = Vec::with_capacity(MAX_CONCURRENT_CLIENTS);
-    for _ in 0..MAX_CONCURRENT_CLIENTS {
+    // Idle connections (> MAX_CONCURRENT_CLIENTS) waiting in frame-read must
+    // not occupy execution permits or block valid requests.
+    let mut held = Vec::with_capacity(MAX_CONCURRENT_CLIENTS + 1);
+    for _ in 0..=MAX_CONCURRENT_CLIENTS {
         held.push(UnixStream::connect(&socket).await.expect("held"));
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let mut queued = UnixStream::connect(&socket).await.expect("queued");
+    let mut active_client = UnixStream::connect(&socket).await.expect("active");
     let req = unsigned_request(Some(privd_request::Operation::ServiceStatus(
         ReadRequest {},
     )));
     let req_id = req.request_id.clone();
-    write_frame(&mut queued, &req).await.expect("write");
-    let task = tokio::spawn(async move { read_frame::<PrivdResponse, _>(&mut queued).await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !task.is_finished(),
-        "saturated client was reset instead of queued"
-    );
-    drop(held.pop());
-    let resp = tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .expect("timeout")
-        .expect("join")
-        .expect("read");
+    write_frame(&mut active_client, &req).await.expect("write");
+    let resp = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_frame::<PrivdResponse, _>(&mut active_client),
+    )
+    .await
+    .expect("idle connections blocked legitimate client")
+    .expect("read");
     assert_eq!(resp.request_id, req_id);
     assert!(resp.result.is_some());
 
@@ -1431,6 +1427,7 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
             Arc::from(verification_key_id(&attestation_key.verifying_key()));
         let task = tokio::spawn(handle_client(
             server,
+            Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS)),
             peer_uid,
             node_id,
             TEST_ENDPOINT_ID,
@@ -1724,4 +1721,77 @@ async fn distinct_commands_at_same_revision_allocate_unique_monotonic_effect_seq
         .expect("third receipt")
         .effect_sequence;
     assert_eq!(third_seq, 3);
+}
+
+#[test]
+fn attested_upgrade_results_isolate_corrupt_sibling_and_clamp_clock_rollback() {
+    let dir = ocservia_test_support::PrivateTempDir::new("privd-upg-resilient");
+    let ops = dir.create_subdir_all("var/lib/ocservia-upgrade/operations");
+    let scheduler = UpgradeScheduler::new(ops.clone(), UpgradeTrigger::Disabled);
+
+    // 1. Create one valid operation whose completed_unix is slightly ahead of now
+    //    (simulating an NTP backward clock jump).
+    let valid = UpgradeIntent::new(
+        *Uuid::now_v7().as_bytes(),
+        *Uuid::now_v7().as_bytes(),
+        "2.0.1",
+        [0x11; 32],
+        host_architecture(),
+        [0x22; 32],
+    )
+    .expect("valid intent");
+    scheduler
+        .schedule_and_trigger(&valid)
+        .expect("schedule valid");
+    let valid_dir = ops.join(valid.operation_id.to_string());
+    let future_unix = unix_seconds().cast_unsigned() + 600;
+    let future_result = format!(
+        "schema=1\nstate=succeeded\noperation_id={}\ntarget_version=2.0.1\npackage_sha256={}\ncompleted_unix={future_unix}\ndetail=activated release\n",
+        valid.operation_id,
+        hex::encode(valid.package_sha256)
+    );
+    let result_path = valid_dir.join("result");
+    let state_path = valid_dir.join("state");
+    fs::write(&result_path, future_result.as_bytes()).expect("write future result");
+    fs::set_permissions(&result_path, fs::Permissions::from_mode(0o600)).expect("mode result");
+    fs::write(&state_path, b"succeeded\n").expect("write state");
+    fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600)).expect("mode state");
+
+    // 2. Create a second sibling directory with a corrupt 0644 result file.
+    let corrupt = UpgradeIntent::new(
+        *Uuid::now_v7().as_bytes(),
+        *Uuid::now_v7().as_bytes(),
+        "2.0.2",
+        [0x33; 32],
+        host_architecture(),
+        [0x44; 32],
+    )
+    .expect("corrupt intent");
+    scheduler
+        .schedule_and_trigger(&corrupt)
+        .expect("schedule corrupt");
+    let corrupt_res = ops.join(corrupt.operation_id.to_string()).join("result");
+    fs::write(&corrupt_res, b"corrupt-content").expect("write corrupt");
+    fs::set_permissions(&corrupt_res, fs::Permissions::from_mode(0o644)).expect("mode 644");
+
+    let node_id = *Uuid::now_v7().as_bytes();
+    let key = SigningKey::from_bytes(&[41; 32]);
+    let key_id_str = verification_key_id(&key.verifying_key());
+    let result = read_attested_upgrade_results(&ops, &node_id, &key, &key_id_str)
+        .expect("resilient read must succeed despite corrupt sibling");
+    let privd_response::Result::UpgradeResultList(list) = result else {
+        panic!("expected UpgradeResultList");
+    };
+    assert_eq!(list.results.len(), 1);
+    assert_eq!(list.results[0].target_version, "2.0.1");
+    let proof = list.results[0]
+        .privileged_result_proof
+        .as_ref()
+        .expect("proof");
+    assert!(
+        proof.attested_unix_ms >= proof.completed_unix_ms,
+        "attested_unix_ms ({}) must clamp >= completed_unix_ms ({})",
+        proof.attested_unix_ms,
+        proof.completed_unix_ms
+    );
 }

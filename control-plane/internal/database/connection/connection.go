@@ -173,7 +173,12 @@ func (c *Connection) ValidateRuntime(ctx context.Context) error {
 	return postgres.WrapPool(c.pg).ValidateTelemetryRuntime(ctx)
 }
 
-const controllerLockID int64 = 764057383691829797
+const (
+	controllerLockID                int64 = 764057383691829797
+	controllerLockProbeInterval           = 2 * time.Second
+	controllerLockProbeTimeout            = 2 * time.Second
+	maxConsecutiveLockProbeFailures       = 3
+)
 
 // AcquireControllerLock reserves a dedicated PostgreSQL session for this Controller.
 func (c *Connection) AcquireControllerLock(ctx context.Context) (monitor func(context.Context) error, release func(), err error) {
@@ -197,33 +202,46 @@ func (c *Connection) AcquireControllerLock(ctx context.Context) (monitor func(co
 		return nil, nil, errors.New("another Controller instance already holds the database advisory lock")
 	}
 	return func(ctx context.Context) error {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-ticker.C:
-				probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-				var held bool
-				err := conn.QueryRow(probe, `SELECT EXISTS (
+		return monitorControllerLock(ctx, controllerLockProbeInterval, func(probeCtx context.Context) (bool, error) {
+			probe, cancel := context.WithTimeout(probeCtx, controllerLockProbeTimeout)
+			defer cancel()
+			var held bool
+			err := conn.QueryRow(probe, `SELECT EXISTS (
 					SELECT 1 FROM pg_locks WHERE locktype='advisory'
 					AND pid=pg_backend_pid() AND granted AND mode='ExclusiveLock'
 					AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
 					AND classid=($1::bigint >> 32)::oid
 					AND objid=($1::bigint & 4294967295)::oid AND objsubid=1
 				)`, controllerLockID).Scan(&held)
-				cancel()
-				if ctx.Err() != nil {
-					return nil
-				}
-				if err != nil {
+			return held, err
+		})
+	}, release, nil
+}
+
+func monitorControllerLock(ctx context.Context, interval time.Duration, probe func(context.Context) (bool, error)) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	consecutiveFailures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			held, err := probe(ctx)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				consecutiveFailures++
+				if consecutiveFailures >= maxConsecutiveLockProbeFailures {
 					return fmt.Errorf("check controller advisory lock: %w", err)
 				}
-				if !held {
-					return errors.New("controller advisory lock ownership was lost")
-				}
+				continue
 			}
+			if !held {
+				return errors.New("controller advisory lock ownership was lost")
+			}
+			consecutiveFailures = 0
 		}
-	}, release, nil
+	}
 }

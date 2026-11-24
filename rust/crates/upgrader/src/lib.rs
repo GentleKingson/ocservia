@@ -20,9 +20,10 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write as _};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use rustix::io::Errno;
@@ -40,6 +41,10 @@ pub const UPGRADE_UNIT_TEMPLATE: &str = "ocservia-upgrader@{operation}.service";
 
 const MAX_DETAIL_BYTES: usize = 160;
 const MAX_SPOOL_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+const DEFAULT_UPGRADE_BASE_URL: &str =
+    "https://github.com/GentleKingson/ocservia/releases/download";
+const DEFAULT_PRIVD_SOCKET_PATH: &str = "/run/ocserv-platform/privd.sock";
 const SCHEDULE_LOCK_FILE: &str = ".schedule.lock";
 const EXECUTION_LOCK_FILE: &str = ".run.lock";
 
@@ -542,24 +547,53 @@ pub fn read_recent_results(
     operations_dir: &Path,
     limit: usize,
 ) -> Result<Vec<DurableUpgradeResult>, UpgradeStoreError> {
+    read_recent_results_inner(operations_dir, limit, false).map(|(results, _)| results)
+}
+
+/// Reads the bounded most-recent terminal upgrade outcomes while isolating
+/// individual corrupt or unsafe operation subdirectories instead of discarding
+/// all historical outcomes. Returns `(results, skipped_corrupt_entries)`.
+///
+/// # Errors
+///
+/// Still fails closed if the top-level operations hierarchy itself cannot be
+/// opened or fails safety validation.
+pub fn read_recent_results_resilient(
+    operations_dir: &Path,
+    limit: usize,
+) -> Result<(Vec<DurableUpgradeResult>, usize), UpgradeStoreError> {
+    read_recent_results_inner(operations_dir, limit, true)
+}
+
+fn read_recent_results_inner(
+    operations_dir: &Path,
+    limit: usize,
+    isolate_entry_errors: bool,
+) -> Result<(Vec<DurableUpgradeResult>, usize), UpgradeStoreError> {
     let limit = limit.clamp(1, 32);
     let mut results = Vec::new();
+    let mut skipped = 0usize;
     match open_operations_root(operations_dir, false) {
         Ok(()) => {}
         Err(UpgradeStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(results);
+            return Ok((results, 0));
         }
         Err(error) => return Err(error),
     }
     let entries = match fs::read_dir(operations_dir) {
         Ok(entries) => entries,
         // A node that never ran an upgrade has no durable evidence at all.
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(results),
+        Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok((results, 0)),
         Err(failure) => return Err(UpgradeStoreError::Io(failure)),
     };
     for entry in entries {
         let entry = entry.map_err(UpgradeStoreError::Io)?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            if isolate_entry_errors {
+                skipped = skipped.saturating_add(1);
+                tracing::warn!("skipping non-UTF-8 durable upgrade operation entry");
+                continue;
+            }
             return Err(UpgradeStoreError::Unsafe(
                 "durable operations hierarchy has a non-UTF-8 entry",
             ));
@@ -570,64 +604,19 @@ pub fn read_recent_results(
         if name != candidate.to_string() || candidate.get_version_num() != 7 {
             continue;
         }
-        let record_dir = entry.path();
-        validate_directory_strict(&record_dir)?;
-        let bytes = match read_record(&record_dir.join("result"), 1024) {
-            Err(UpgradeStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                continue;
+        match read_operation_result(&entry.path(), candidate) {
+            Ok(Some(record)) => results.push(record),
+            Ok(None) => {}
+            Err(error) if isolate_entry_errors => {
+                skipped = skipped.saturating_add(1);
+                tracing::warn!(
+                    operation = %candidate,
+                    error = %error,
+                    "skipping corrupt historical upgrade operation record"
+                );
             }
-            result => result?,
-        };
-        let OperationPieces::Complete { intent, .. } = read_operation_pieces(&record_dir)? else {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable result has no committed operation",
-            ));
-        };
-        if intent.operation_id != candidate {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable intent operation identity does not match its directory",
-            ));
+            Err(error) => return Err(error),
         }
-        let lines = decode_record_lines(&bytes, 7)?;
-        expect_line(&lines[0], "schema", &RECORD_SCHEMA_VERSION.to_string())?;
-        let state = OperationState::parse(parse_line_value(&lines[1], "state")?.as_bytes())?;
-        let operation_id = parse_line_uuid(&lines[2], "operation_id")?;
-        if operation_id != candidate {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable result operation identity does not match its directory",
-            ));
-        }
-        let target_version = parse_line_value(&lines[3], "target_version")?;
-        let package_sha256 = parse_line_digest(&lines[4], "package_sha256")?;
-        if target_version != intent.target_version || package_sha256 != intent.package_sha256 {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable result release identity does not match its intent",
-            ));
-        }
-        let completed_unix = parse_line_value(&lines[5], "completed_unix")?
-            .parse::<u64>()
-            .map_err(|_| UpgradeStoreError::Unsafe("durable result completion time malformed"))?;
-        let detail = parse_line_value(&lines[6], "detail")?;
-        if !state.is_terminal() {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable result records a non-terminal state",
-            ));
-        }
-        if completed_unix == 0 || completed_unix > i64::MAX as u64 {
-            return Err(UpgradeStoreError::Unsafe(
-                "durable result completion time malformed",
-            ));
-        }
-        let result_sha256 = Sha256::digest(&bytes).into();
-        results.push(DurableUpgradeResult {
-            operation_id,
-            state,
-            target_version,
-            package_sha256,
-            completed_unix,
-            detail,
-            result_sha256,
-        });
     }
     // UUIDv7 ordering is creation-time ordering, so the newest outcomes win
     // the bounded report window deterministically.
@@ -638,7 +627,87 @@ pub fn read_recent_results(
             .cmp(&left.operation_id.as_u128())
     });
     results.truncate(limit);
-    Ok(results)
+    Ok((results, skipped))
+}
+
+fn read_operation_result(
+    record_dir: &Path,
+    candidate: Uuid,
+) -> Result<Option<DurableUpgradeResult>, UpgradeStoreError> {
+    validate_directory_strict(record_dir)?;
+    let bytes = match read_record(&record_dir.join("result"), 1024) {
+        Err(UpgradeStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        result => result?,
+    };
+    let OperationPieces::Complete { intent, .. } = read_operation_pieces(record_dir)? else {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable result has no committed operation",
+        ));
+    };
+    if intent.operation_id != candidate {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable intent operation identity does not match its directory",
+        ));
+    }
+    let lines = decode_record_lines(&bytes, 7)?;
+    expect_line(&lines[0], "schema", &RECORD_SCHEMA_VERSION.to_string())?;
+    let state = OperationState::parse(parse_line_value(&lines[1], "state")?.as_bytes())?;
+    let operation_id = parse_line_uuid(&lines[2], "operation_id")?;
+    if operation_id != candidate {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable result operation identity does not match its directory",
+        ));
+    }
+    let target_version = parse_line_value(&lines[3], "target_version")?;
+    let package_sha256 = parse_line_digest(&lines[4], "package_sha256")?;
+    if target_version != intent.target_version || package_sha256 != intent.package_sha256 {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable result release identity does not match its intent",
+        ));
+    }
+    let completed_unix = parse_line_value(&lines[5], "completed_unix")?
+        .parse::<u64>()
+        .map_err(|_| UpgradeStoreError::Unsafe("durable result completion time malformed"))?;
+    let detail = parse_line_value(&lines[6], "detail")?;
+    if !state.is_terminal() {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable result records a non-terminal state",
+        ));
+    }
+    if completed_unix == 0 || completed_unix > i64::MAX as u64 {
+        return Err(UpgradeStoreError::Unsafe(
+            "durable result completion time malformed",
+        ));
+    }
+    let result_sha256 = Sha256::digest(&bytes).into();
+    Ok(Some(DurableUpgradeResult {
+        operation_id,
+        state,
+        target_version,
+        package_sha256,
+        completed_unix,
+        detail,
+        result_sha256,
+    }))
+}
+
+enum NativeApplyError {
+    TransientDownload(UpgradeStoreError),
+    Terminal(UpgradeStoreError),
+}
+
+impl From<UpgradeStoreError> for NativeApplyError {
+    fn from(error: UpgradeStoreError) -> Self {
+        Self::Terminal(error)
+    }
+}
+
+impl From<io::Error> for NativeApplyError {
+    fn from(error: io::Error) -> Self {
+        Self::Terminal(UpgradeStoreError::Io(error))
+    }
 }
 
 /// The standalone runner bound to one filesystem root. Production always uses
@@ -646,12 +715,48 @@ pub fn read_recent_results(
 #[derive(Clone, Debug)]
 pub struct UpgradeRunner {
     root: PathBuf,
+    base_url_override: Option<String>,
+    probe_checks: usize,
+    probe_interval: Duration,
+    privd_socket: Option<PathBuf>,
 }
 
 impl UpgradeRunner {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        let is_production = root == Path::new("/");
+        Self {
+            base_url_override: std::env::var("OCSERV_UPGRADE_BASE_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            probe_checks: if is_production { 4 } else { 2 },
+            probe_interval: if is_production {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(10)
+            },
+            privd_socket: is_production.then(|| PathBuf::from(DEFAULT_PRIVD_SOCKET_PATH)),
+            root,
+        }
+    }
+
+    #[must_use]
+    pub fn with_base_url_override(mut self, base_url: Option<String>) -> Self {
+        self.base_url_override = base_url;
+        self
+    }
+
+    #[must_use]
+    pub fn with_probe_schedule(mut self, checks: usize, interval: Duration) -> Self {
+        self.probe_checks = checks.max(1);
+        self.probe_interval = interval;
+        self
+    }
+
+    #[must_use]
+    pub fn with_privd_socket(mut self, socket: Option<PathBuf>) -> Self {
+        self.privd_socket = socket;
+        self
     }
 
     #[must_use]
@@ -668,8 +773,9 @@ impl UpgradeRunner {
     ///
     /// # Errors
     ///
-    /// Every refusal is persisted as a durable `failed` result before the
-    /// error is returned, except refusals of the operation identity itself.
+    /// Refusals are persisted as a durable `failed` result before the error is
+    /// returned, except refusals of the operation identity itself and bounded
+    /// transient pre-install download retries.
     pub fn run(&self, operation: &str) -> Result<OperationState, UpgradeStoreError> {
         let operation_id = parse_canonical_operation(operation)?;
         let operations_root = self.operations_dir();
@@ -689,6 +795,7 @@ impl UpgradeRunner {
         }
         let _execution = UpgradeLock::acquire_execution(&operations_root)?;
         cleanup_stale_temporaries(&operation_dir, TempOwner::Run)?;
+        cleanup_stale_downloads(&self.spool_dir())?;
         let state = load_state(&operation_dir)?;
         if state.is_terminal() {
             return Ok(state);
@@ -703,7 +810,45 @@ impl UpgradeRunner {
     ) -> Result<OperationState, UpgradeStoreError> {
         let (state, detail) = match self.apply_native(operation_dir, intent) {
             Ok(result) => result,
-            Err(failure) => return refuse(operation_dir, intent, failure),
+            Err(NativeApplyError::TransientDownload(failure)) => {
+                let attempts_path = operation_dir.join("download-attempts");
+                let prior = match optional_text_record(&attempts_path, 32) {
+                    Ok(Some(raw)) => match raw.trim().parse::<u32>() {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return refuse(
+                                operation_dir,
+                                intent,
+                                UpgradeStoreError::Unsafe(
+                                    "durable download attempt count malformed",
+                                ),
+                            );
+                        }
+                    },
+                    Ok(None) => 0,
+                    Err(err) => return refuse(operation_dir, intent, err),
+                };
+                let next_attempt = prior.saturating_add(1);
+                if next_attempt < MAX_DOWNLOAD_ATTEMPTS {
+                    write_atomic(
+                        &attempts_path,
+                        format!("{next_attempt}\n").as_bytes(),
+                        TempOwner::Run,
+                    )?;
+                    tracing::warn!(
+                        operation = %intent.operation_id,
+                        attempt = next_attempt,
+                        max_attempts = MAX_DOWNLOAD_ATTEMPTS,
+                        error = %failure,
+                        "transient upgrade package download failed; leaving operation non-terminal for retry"
+                    );
+                    return Err(failure);
+                }
+                return refuse(operation_dir, intent, failure);
+            }
+            Err(NativeApplyError::Terminal(failure)) => {
+                return refuse(operation_dir, intent, failure);
+            }
         };
         write_terminal(operation_dir, intent, state, &detail)?;
         Ok(state)
@@ -713,13 +858,14 @@ impl UpgradeRunner {
         &self,
         operation_dir: &Path,
         intent: &UpgradeIntent,
-    ) -> Result<(OperationState, String), UpgradeStoreError> {
+    ) -> Result<(OperationState, String), NativeApplyError> {
         if ocservia_contracts::agent_upgrade::runtime_architecture()
             != Some(intent.architecture.as_str())
         {
             return Err(UpgradeStoreError::Package(
                 "intent architecture mismatches this host".into(),
-            ));
+            )
+            .into());
         }
         let manager = if self.root.join("var/lib/dpkg/status").is_file() {
             NativePackage::Deb
@@ -737,7 +883,7 @@ impl UpgradeRunner {
             version
         };
         if !ocservia_contracts::agent_upgrade::valid_target_version(&previous_version) {
-            return Err(UpgradeStoreError::Unsafe("invalid cached package version"));
+            return Err(UpgradeStoreError::Unsafe("invalid cached package version").into());
         }
         let previous = spool.join(manager.filename(&previous_version, &intent.architecture));
         open_spool_file(&previous)?;
@@ -773,52 +919,63 @@ impl UpgradeRunner {
         Ok((OperationState::RolledBack, failure))
     }
 
+    fn effective_base_url(&self) -> Result<String, UpgradeStoreError> {
+        match self.base_url_override.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => validate_upgrade_base_url(raw),
+            _ => Ok(DEFAULT_UPGRADE_BASE_URL.to_owned()),
+        }
+    }
+
     fn authorized_package(
         &self,
         manager: NativePackage,
         intent: &UpgradeIntent,
-    ) -> Result<PathBuf, UpgradeStoreError> {
+    ) -> Result<PathBuf, NativeApplyError> {
         let name = manager.filename(&intent.target_version, &intent.architecture);
         let target = self.spool_dir().join(&name);
         if target.try_exists()? {
             verify_digest(&target, intent)?;
         } else {
-            let url = format!(
-                "https://github.com/GentleKingson/ocservia/releases/download/v{}/{}",
-                intent.target_version, name
-            );
+            let base_url = self.effective_base_url()?;
+            let url = format!("{base_url}/v{}/{}", intent.target_version, name);
             let temporary = self
                 .spool_dir()
                 .join(format!(".download-{}", intent.operation_id));
-            let download = (|| {
-                checked(
-                    Command::new(self.root.join("usr/bin/curl"))
-                        .args([
-                            "--fail",
-                            "--silent",
-                            "--show-error",
-                            "--location",
-                            "--proto",
-                            "=https",
-                            "--proto-redir",
-                            "=https",
-                            "--max-time",
-                            "600",
-                            "--max-filesize",
-                            &MAX_SPOOL_PACKAGE_BYTES.to_string(),
-                            "--output",
-                        ])
-                        .arg(&temporary)
-                        .arg(url),
-                )?;
+            let curl_res = checked(
+                Command::new(self.root.join("usr/bin/curl"))
+                    .args([
+                        "--fail",
+                        "--silent",
+                        "--show-error",
+                        "--location",
+                        "--proto",
+                        "=https",
+                        "--proto-redir",
+                        "=https",
+                        "--max-time",
+                        "600",
+                        "--max-filesize",
+                        &MAX_SPOOL_PACKAGE_BYTES.to_string(),
+                        "--output",
+                    ])
+                    .arg(&temporary)
+                    .arg(url),
+            );
+            if let Err(err) = curl_res {
+                if temporary.try_exists()? {
+                    let _ = fs::remove_file(&temporary);
+                }
+                return Err(NativeApplyError::TransientDownload(err));
+            }
+            let verify_and_rename = (|| {
                 verify_digest(&temporary, intent)?.sync_all()?;
                 fs::rename(&temporary, &target)?;
                 sync_directory(&self.spool_dir())
             })();
-            if download.is_err() && temporary.try_exists()? {
+            if verify_and_rename.is_err() && temporary.try_exists()? {
                 fs::remove_file(temporary)?;
             }
-            download?;
+            verify_and_rename?;
         }
         Ok(target)
     }
@@ -880,14 +1037,99 @@ impl UpgradeRunner {
         let systemctl = self.root.join("usr/bin/systemctl");
         let units = ["ocservia-privd.service", "ocservia-agent.service"];
         checked(Command::new(&systemctl).arg("start").args(units))?;
-        // Give both daemons time to run their startup probes. Query individually:
+        // Verify both daemons survive a sustained startup window and confirm
+        // privd is accepting connections on its UDS socket. Query individually:
         // systemctl is-active with multiple arguments succeeds if *any* is active.
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        for unit in units {
-            checked(Command::new(&systemctl).args(["is-active", "--quiet", unit]))?;
+        for _ in 0..self.probe_checks {
+            std::thread::sleep(self.probe_interval);
+            for unit in units {
+                checked(Command::new(&systemctl).args(["is-active", "--quiet", unit]))?;
+            }
+        }
+        if matches!(
+            Command::new(&systemctl)
+                .args(["is-enabled", "--quiet", "ocservia-network-audit.service"])
+                .status(),
+            Ok(status) if status.success()
+        ) {
+            checked(Command::new(&systemctl).args([
+                "is-active",
+                "--quiet",
+                "ocservia-network-audit.service",
+            ]))?;
+        }
+        if let Some(socket_path) = &self.privd_socket {
+            UnixStream::connect(socket_path).map_err(|err| {
+                UpgradeStoreError::Lifecycle(format!(
+                    "privd socket {} unreachable: {err}",
+                    socket_path.display()
+                ))
+            })?;
         }
         Ok(())
     }
+}
+
+fn validate_upgrade_base_url(raw: &str) -> Result<String, UpgradeStoreError> {
+    if raw
+        .bytes()
+        .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return Err(UpgradeStoreError::Unsafe(
+            "upgrade base URL contains whitespace or control characters",
+        ));
+    }
+    let trimmed = raw.trim_end_matches('/');
+    let Some(rest) = trimmed.strip_prefix("https://") else {
+        return Err(UpgradeStoreError::Unsafe(
+            "upgrade base URL must use https://",
+        ));
+    };
+    if rest.is_empty()
+        || trimmed.contains('@')
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('\\')
+    {
+        return Err(UpgradeStoreError::Unsafe(
+            "upgrade base URL contains forbidden characters",
+        ));
+    }
+    let mut parts = rest.split('/');
+    let Some(host) = parts.next() else {
+        return Err(UpgradeStoreError::Unsafe("upgrade base URL host missing"));
+    };
+    if host.is_empty() {
+        return Err(UpgradeStoreError::Unsafe("upgrade base URL host missing"));
+    }
+    if parts.any(|segment| segment.is_empty() || segment == "." || segment == "..") {
+        return Err(UpgradeStoreError::Unsafe(
+            "upgrade base URL path segment invalid",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn cleanup_stale_downloads(spool_dir: &Path) -> Result<(), UpgradeStoreError> {
+    let entries = match fs::read_dir(spool_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(UpgradeStoreError::Io(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(UpgradeStoreError::Io)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with(".download-") {
+            continue;
+        }
+        let path = entry.path();
+        if fs::symlink_metadata(&path)?.file_type().is_file() {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -1943,5 +2185,193 @@ mod tests {
             read_recent_results(&root.ops(), 8),
             Err(UpgradeStoreError::Unsafe(_))
         ));
+
+        // Resilient reader isolates the drifted sibling and still returns valid b.
+        let (resilient, skipped) =
+            read_recent_results_resilient(&root.ops(), 8).expect("resilient");
+        assert_eq!(skipped, 1);
+        assert_eq!(resilient.len(), 1);
+        assert_eq!(resilient[0].operation_id, b.operation_id);
+    }
+
+    #[test]
+    fn upgrade_base_url_override_validation() {
+        assert_eq!(
+            validate_upgrade_base_url("https://mirror.example.com:8443/ocservia/").expect("valid"),
+            "https://mirror.example.com:8443/ocservia"
+        );
+        for bad in [
+            "http://mirror.example.com/ocservia",
+            "https://user:pass@mirror.example.com/ocservia",
+            "https://mirror.example.com/ocservia?token=x",
+            "https://mirror.example.com/ocservia#frag",
+            "https://mirror.example.com/ocservia/../other",
+            "https://mirror.example.com/ocservia\n",
+            "https://",
+        ] {
+            assert!(
+                matches!(
+                    validate_upgrade_base_url(bad),
+                    Err(UpgradeStoreError::Unsafe(_))
+                ),
+                "unexpectedly accepted {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_download_retries_before_terminal_and_cleans_orphan_downloads() {
+        let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("architecture");
+        let root = TempRoot::new("dl-retry");
+        let runner = root
+            .runner()
+            .with_base_url_override(Some("https://mirror.example.test/releases".to_owned()));
+        let spool = runner.spool_dir();
+        ensure_operations_root(&spool).expect("spool");
+        let stale_dl = spool.join(format!(".download-{}", Uuid::now_v7()));
+        plant_tmp(&stale_dl, b"partial-bytes");
+
+        let status = root.path().join("var/lib/dpkg/status");
+        fs::create_dir_all(status.parent().unwrap()).expect("dpkg");
+        fs::write(&status, b"1.0.0").expect("status");
+        let bin = root.path().join("usr/bin");
+        fs::create_dir_all(&bin).expect("bin");
+        for (name, script) in [
+            (
+                "dpkg-query",
+                format!(
+                    "#!/bin/sh\nprintf 'install ok installed %s-1' \"$(cat '{}')\"\n",
+                    status.display()
+                ),
+            ),
+            (
+                "curl",
+                "#!/bin/sh\necho 'network timeout' >&2\nexit 28\n".to_owned(),
+            ),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, script).expect("tool");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let old = spool.join(NativePackage::Deb.filename("1.0.0", arch));
+        fs::write(&old, b"1.0.0").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let intent = new_intent([0x77; 32]);
+        root.scheduler()
+            .schedule_and_trigger(&intent)
+            .expect("sched");
+        let op_str = intent.operation_id.to_string();
+        let op_dir = root.ops().join(&op_str);
+
+        // Attempt 1 & 2 stay non-terminal (accepted) so systemd Restart=on-failure retries.
+        assert!(runner.run(&op_str).is_err());
+        assert!(!stale_dl.exists(), "orphan .download-* must be cleaned");
+        assert_eq!(load_state(&op_dir).expect("s1"), OperationState::Accepted);
+
+        assert!(runner.run(&op_str).is_err());
+        assert_eq!(load_state(&op_dir).expect("s2"), OperationState::Accepted);
+
+        // Attempt 3 exhausts retry budget and writes terminal failed.
+        assert!(runner.run(&op_str).is_err());
+        assert_eq!(load_state(&op_dir).expect("s3"), OperationState::Failed);
+
+        // Bad digest after download is immediate terminal failed (no retries).
+        let bad_curl = bin.join("curl");
+        fs::write(
+            &bad_curl,
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do if [ \"$1\" = '--output' ]; then out=\"$2\"; shift 2; else shift; fi; done\nprintf 'tampered' > \"$out\"\n",
+        )
+        .expect("curl write");
+        fs::set_permissions(&bad_curl, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let digest_intent = new_intent([0x88; 32]);
+        root.scheduler()
+            .schedule_and_trigger(&digest_intent)
+            .expect("sched2");
+        let digest_dir = root.ops().join(digest_intent.operation_id.to_string());
+        assert!(runner.run(&digest_intent.operation_id.to_string()).is_err());
+        assert_eq!(
+            load_state(&digest_dir).expect("digest terminal"),
+            OperationState::Failed
+        );
+    }
+
+    #[test]
+    fn install_and_probe_verifies_socket_and_enabled_network_audit() {
+        let arch = ocservia_contracts::agent_upgrade::runtime_architecture().expect("architecture");
+        let root = TempRoot::new("probe-extra");
+        let sock_path = root.path().join("privd.sock");
+        let spool = root.runner().spool_dir();
+        ensure_operations_root(&spool).expect("spool");
+        let status = root.path().join("var/lib/dpkg/status");
+        fs::create_dir_all(status.parent().unwrap()).expect("dpkg");
+        fs::write(&status, b"1.0.0").expect("status");
+        let audit_fail = root.path().join("audit-fail");
+        let bin = root.path().join("usr/bin");
+        fs::create_dir_all(&bin).expect("bin");
+        let systemctl_script = format!(
+            "#!/bin/sh\nset -eu\nstatus='{}'\naudit_fail='{}'\ncmd=\"$1\"\ncase \"$cmd\" in\n  start) exit 0 ;;\n  is-enabled) test -f \"$audit_fail\" ;;\n  is-active)\n    if [ \"$3\" = ocservia-network-audit.service ] && [ -f \"$audit_fail\" ]; then\n      test \"$(cat \"$status\")\" = 1.0.0\n    fi\n    exit 0 ;;\n  *) exit 1 ;;\nesac\n",
+            status.display(),
+            audit_fail.display()
+        );
+        for (name, script) in [
+            (
+                "dpkg-query",
+                format!(
+                    "#!/bin/sh\nprintf 'install ok installed %s-1' \"$(cat '{}')\"\n",
+                    status.display()
+                ),
+            ),
+            (
+                "dpkg",
+                format!(
+                    "#!/bin/sh\ntest \"$1\" = -i && cat \"$2\" > '{}'\n",
+                    status.display()
+                ),
+            ),
+            ("systemctl", systemctl_script),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, script).expect("tool");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let old = spool.join(NativePackage::Deb.filename("1.0.0", arch));
+        let target = spool.join(NativePackage::Deb.filename("1.2.3", arch));
+        fs::write(&old, b"1.0.0").unwrap();
+        fs::write(&target, b"1.2.3").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let sha = sha256_reader(&mut open_spool_file(&target).expect("target")).expect("sha");
+
+        // Bind a real UDS listener so the UDS connect probe passes; enabled audit missing fails -> rollback.
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).expect("bind");
+        let runner = root
+            .runner()
+            .with_probe_schedule(2, Duration::from_millis(5))
+            .with_privd_socket(Some(sock_path.clone()));
+
+        fs::write(&audit_fail, b"1").unwrap();
+        let fail_intent = new_intent(sha);
+        root.scheduler()
+            .schedule_and_trigger(&fail_intent)
+            .expect("sched1");
+        assert_eq!(
+            runner
+                .run(&fail_intent.operation_id.to_string())
+                .expect("rb"),
+            OperationState::RolledBack
+        );
+
+        // Disabled network-audit + reachable UDS -> Succeeded.
+        fs::remove_file(&audit_fail).unwrap();
+        let ok_intent = new_intent(sha);
+        root.scheduler()
+            .schedule_and_trigger(&ok_intent)
+            .expect("sched2");
+        assert_eq!(
+            runner.run(&ok_intent.operation_id.to_string()).expect("ok"),
+            OperationState::Succeeded
+        );
+        drop(listener);
     }
 }

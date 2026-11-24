@@ -310,6 +310,25 @@ fn basic_executor_limits_uid_jitter_and_expiry_rules() {
         (client.timeout, client.desired_timeout),
         (Duration::from_secs(5), Duration::from_secs(20))
     );
+    let regular_cmd = CommandEnvelope {
+        payload: Some(command_envelope::Payload::ServiceReload(
+            ocservia_contracts::generated::ocserv::platform::agent::v1::ServiceReload {},
+        )),
+        ..CommandEnvelope::default()
+    };
+    let apply_cmd = CommandEnvelope {
+        payload: Some(command_envelope::Payload::CompleteConfigApply(
+            ocservia_contracts::generated::ocserv::platform::agent::v1::CompleteConfigApply {
+                ..Default::default()
+            },
+        )),
+        ..CommandEnvelope::default()
+    };
+    assert_eq!(
+        client.command_timeout(&regular_cmd),
+        Duration::from_secs(20)
+    );
+    assert_eq!(client.command_timeout(&apply_cmd), Duration::from_secs(75));
 
     let oversized_group = CommandEnvelope {
         payload: Some(command_envelope::Payload::GroupApply(GroupApply {
