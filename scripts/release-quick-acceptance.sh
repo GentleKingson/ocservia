@@ -67,6 +67,9 @@ cleanup() {
     for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
       docker inspect --format '== {{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container}"
     done >&2
+    if [[ -f "${work}/run-lifecycle.log" ]]; then
+      grep '^controller lifecycle:' "${work}/run-lifecycle.log" >&2 || true
+    fi
     # Only export the event name and timestamp; Caddy log fields can contain credentials.
     docker logs "$(docker ps -aq --filter label=com.docker.compose.project=ocservia-production --filter label=com.docker.compose.service=gateway-acme)" 2>&1 | jq -Rc 'fromjson? |
       select(.logger == "tls.obtain" or .logger == "tls.renew") |
@@ -331,6 +334,14 @@ if [[ "${scenario}" == lifecycle ]]; then
   pass "upgrade keeps material, certificates and accounts"
   lifecycle rollback
   pass "rollback keeps material, certificates and accounts"
+  # Rollback starts Backup asynchronously. Upgrade requires it to be healthy.
+  backup_id="$(docker ps -aq --filter label=com.docker.compose.project=ocservia-production \
+    --filter label=com.docker.compose.service=backup)"
+  backup_ready_by=$((SECONDS + 120))
+  until [[ "$(docker inspect --format '{{.State.Health.Status}}' "${backup_id}")" == healthy ]]; do
+    ((SECONDS < backup_ready_by)) || { echo 'Backup did not become healthy after rollback' >&2; exit 1; }
+    sleep 1
+  done
   lifecycle upgrade --release-file "${upgrade_manifest}"
   pass "upgrade after rollback keeps material, certificates and accounts"
   check_output
@@ -388,7 +399,10 @@ quick_api node-bootstrap-tokens -H "X-Workspace-ID: ${workspace}" \
   jq -er '.token | select(startswith("oit1_"))' >"${work}/join-token"
 bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --root-lifecycle \
   --version "v${VERSION}" --join-token-file "${work}/join-token" >"${work}/run-native-enrollment.log" 2>&1
-[[ ! -e "${work}/join-token" && ! -e /etc/ocservia-agent/enrollment-token ]]
+# The harness owns the supplied installation token. The installer consumes its
+# derived enrollment credential and keeps separate protected resume state.
+rm -f -- "${work}/join-token"
+[[ ! -e /etc/ocservia-agent/enrollment-token ]]
 grep -Fxq ONLINE "${work}/run-native-enrollment.log"
 node="$(sed -nE 's/^NODE_ID: ([0-9a-f-]{36})$/\1/p' "${work}/run-native-enrollment.log")"
 [[ "${node}" =~ ^[0-9a-f-]{36}$ ]]
