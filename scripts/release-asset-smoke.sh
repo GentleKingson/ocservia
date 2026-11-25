@@ -57,8 +57,10 @@ if [[ -n "${RELEASE_JOIN_TOKEN_FILE:-}" ]]; then
     exit 1
   fi
   : "${RELEASE_DEB_SHA256:?supply the independently verified release DEB SHA-256}"
-  sudo bash "${work}/managed-node-bootstrap.sh" --non-interactive --join-token-file "${RELEASE_JOIN_TOKEN_FILE}" \
-    --package-sha256 "${RELEASE_DEB_SHA256}" >"${work}/enrollment.log"
+  {
+    sudo bash "${work}/managed-node-bootstrap.sh" --non-interactive --join-token-file "${RELEASE_JOIN_TOKEN_FILE}" \
+      --package-sha256 "${RELEASE_DEB_SHA256}"
+  } >"${work}/enrollment.log"
   grep -Fxq ONLINE "${work}/enrollment.log"
   printf 'published_arm64_enrollment=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
   result=PASS

@@ -29,22 +29,15 @@ run_guards() {
 
 run_release() {
   local idx status
-  local -a pids=() logs=() cmds=()
+  local -a pids=() logs=()
   bash -n scripts/release-common.sh scripts/release-business-probe.sh scripts/release-quick-acceptance.sh
-  cmds=(
-    "node scripts/test-release-upgrade.mjs"
-    "bash scripts/test-controller-release-manifest.sh"
-    "python3 scripts/test-release-signer-window.py"
-    "python3 scripts/test-managed-tls-rotation.py"
-    "bash scripts/test-release-image-security.sh"
-    "bash scripts/test-release-package-security.sh"
-    "bash scripts/test-controller-quick-materials.sh"
-  )
-  for idx in "${!cmds[@]}"; do
+  local -a command
+  while read -r -a command; do
+    idx=${#pids[@]}
     logs[idx]="${work}/release-${idx}.log"
-    bash -euo pipefail -c "${cmds[idx]}" >"${logs[idx]}" 2>&1 &
+    "${command[@]}" >"${logs[idx]}" 2>&1 &
     pids[idx]=$!
-  done
+  done < scripts/ci-release-tests.txt
   status=0
   for idx in "${!pids[@]}"; do
     if ! wait "${pids[idx]}"; then

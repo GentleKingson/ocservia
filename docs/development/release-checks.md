@@ -438,6 +438,14 @@ acceptance or license compliance.
 
 ### Path routing
 
+From a clean candidate commit, run `scripts/ci-preflight.sh origin/main` to
+print the PR routing decisions and run the selected CI tool suites locally.
+Use the same base commit as the PR and install its selected tool profiles
+with `scripts/bootstrap.sh`. GitHub runs CodeQL and the other selected jobs.
+Register release tests in `scripts/ci-release-tests.txt`, one interpreter,
+script path and optional whitespace-separated arguments per line. The suite
+executes each entry directly and the router uses its path to select release checks.
+
 [`scripts/ci-relevance.sh`](../../scripts/ci-relevance.sh) evaluates changed
 paths with ordered first-match patterns instead of package or call-graph
 analysis and is the source of the exact rule order:

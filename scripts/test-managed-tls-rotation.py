@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import ssl
 import subprocess
 from pathlib import Path
 import tempfile
@@ -17,6 +18,23 @@ spec.loader.exec_module(rotate)
 
 
 class KeyValidationTest(unittest.TestCase):
+    def test_tls_policy_for_activation_and_rollback(self):
+        for rollback in (False, True):
+            context = rotate.probe_context(rollback)
+            self.assertGreaterEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+            self.assertEqual(context.check_hostname, not rollback)
+            self.assertEqual(context.verify_mode, ssl.CERT_NONE if rollback else ssl.CERT_REQUIRED)
+
+    def test_both_probes_reject_a_different_leaf(self):
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback), patch.object(rotate, 'probe_context') as factory, \
+                    patch.object(rotate.socket, 'create_connection'), \
+                    patch.object(rotate.time, 'monotonic', side_effect=[0, 21]):
+                tls = factory.return_value.wrap_socket.return_value.__enter__.return_value
+                tls.getpeercert.return_value = b'unexpected leaf'
+                with self.assertRaisesRegex(ValueError, 'different leaf'):
+                    rotate.handshake('vpn.example.test', 443, '0' * 64, rollback=rollback)
+
     def test_leaf_must_match_renewed_private_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             cert, key, other = (Path(tmp) / f for f in ('leaf.pem', 'key.pem', 'other.pem'))

@@ -24,6 +24,10 @@ changed=()
 ci_suites=()
 controller_images=(gateway control transport backup edge relay signer)
 controller_cache_images=()
+declare -A release_tests=()
+while read -r _ entry _; do
+  release_tests["${entry}"]=1
+done < scripts/ci-release-tests.txt
 
 tools_suite() {
   # shellcheck disable=SC2034 # Read indirectly via ${!flag} when writing outputs.
@@ -54,6 +58,7 @@ fail_closed() {
 # shellcheck disable=SC2034
 classify_path() {
   local path="$1"
+  if [[ -v 'release_tests[$path]' ]]; then tools_suite release; fi
   case "${path}" in
     # Shared contracts, toolchains and base CI action fail closed.
     proto/*|openapi/*|control-plane/gen/*) fail_closed shared_contract_changed ;;
@@ -62,7 +67,7 @@ classify_path() {
     .github/actions/setup-tools/*) fail_closed shared_ci_action_changed ;;
 
     # CI tooling, guards, contracts and style runners.
-    scripts/ci-tools-check.sh)
+    scripts/ci-tools-check.sh|scripts/ci-release-tests.txt|scripts/ci-preflight.sh)
       for suite in guards release source-style contracts; do tools_suite "${suite}"; done ;;
     scripts/ci-go-cache-key.sh) run_go=true; tools_suite guards ;;
     scripts/*required-go-tests*)
@@ -81,7 +86,7 @@ classify_path() {
     scripts/lint.sh) tools_suite source-style; tools_suite contracts ;;
     scripts/format.sh) run_go=true; run_rust=true; run_web=true; tools_suite contracts ;;
 
-    scripts/release_business_runtime.py|scripts/release_business_scenarios.py|scripts/test-release-signer-window.py)
+    scripts/release_business_runtime.py|scripts/release_business_scenarios.py)
       tools_suite release; run_installers=true ;;
 
     # Release, build-cache, secret-scan and manual acceptance contract suites.
@@ -163,7 +168,7 @@ classify_path() {
     docs/*.md|docs/upstream/*|*.md|LICENSE|LICENSE.*)
       run_docs=true ;;
 
-    *) fail_closed "unknown_path:${path}" ;;
+    *) if [[ ! -v 'release_tests[$path]' ]]; then fail_closed "unknown_path:${path}"; fi ;;
   esac
 
   # Orthogonal checks independent of each file's primary behavior suite.

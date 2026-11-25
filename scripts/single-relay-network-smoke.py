@@ -118,7 +118,9 @@ for name in ('example.com',):
         result['dns_error'] = str(e)
 try:
     with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5) as sock:
-        with ssl.create_default_context(cafile='/ca.crt').wrap_socket(sock, server_hostname='relay.single.test') as tls:
+        context = ssl.create_default_context(cafile='/ca.crt')
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        with context.wrap_socket(sock, server_hostname='relay.single.test') as tls:
             result['tls'] = tls.version()
 except OSError as e:
     result['tls'] = False

@@ -53,12 +53,18 @@ def config_binding(text):
     return bundle, bindings
 
 
-def handshake(host, port, expected, *, rollback=False):
-    # Rollback may need to restore a just-expired certificate. Pin its DER hash.
+def probe_context(rollback):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if rollback else ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     if rollback:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def handshake(host, port, expected, *, rollback=False):
+    # Rollback may need to restore a just-expired certificate. Pin its DER hash.
+    ctx = probe_context(rollback)
     deadline = time.monotonic() + 20
     while True:
         try:
