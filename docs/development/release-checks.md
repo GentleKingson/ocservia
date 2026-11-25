@@ -554,6 +554,8 @@ checks cache `.cache/npm` instead of `node_modules`, and Web jobs still run
 `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`, prune incremental/stale
 workspace test binaries before saving only on passing pushes to main, and fall
 back to the matching Rust toolchain prefix when manifests or lockfiles change.
+Rust bootstrap resolves the components declared in `rust/rust-toolchain.toml`
+before parallel security checks start, including after a tool cache restore.
 Native Agent release builds key their isolated Rocky 9 compilation cache
 (`release-agent-target-v3`) deterministically by Rocky glibc/gcc ABI, save only
 on `main` (pruning older ABI directories), and `smoke-rc-lifecycle` restores it
@@ -561,6 +563,9 @@ read-only when running `RC_LIFECYCLE=true`. Image builds use per-image,
 per-architecture BuildKit GitHub Actions caches. No workflow caches runtime
 state or credentials, and build caches are never accepted release products or
 qualification evidence.
+Gateway and Edge release builds refresh all installed Alpine packages from the
+pinned base image’s configured repositories. BuildKit bypasses the package
+upgrade stage cache while retaining compiler and dependency caches.
 Release Controller jobs cache image-security scanner binaries and overlap a
 fresh uncached Grype vulnerability database download in `$RUNNER_TEMP` with
 parallel image builds: each run fetches fresh advisory data and fails if the

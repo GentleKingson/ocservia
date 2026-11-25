@@ -20,9 +20,9 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: .tools
-        key: tooling-v6-${{ inputs.cache-label || inputs.profiles }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}${{ inputs.key-suffix }}
+        key: tooling-v6-${{ inputs.cache-label || inputs.profiles }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}${{ inputs.key-suffix }}
         restore-keys: |
-          tooling-v6-${{ inputs.cache-label || inputs.profiles }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
+          tooling-v6-${{ inputs.cache-label || inputs.profiles }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains.lock', 'rust/rust-toolchain.toml', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh') }}
     - name: Cache npm downloads
       if: inputs.cache-npm == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

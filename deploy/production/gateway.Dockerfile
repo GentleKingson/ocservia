@@ -5,12 +5,13 @@ RUN npm install --global npm@11.19.0 && npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e AS runtime
+FROM caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e AS runtime-base
+RUN apk upgrade --no-cache
+
+FROM runtime-base AS runtime
 # The upstream image has no caddy account. Seed ACME volume ownership and
 # remove the file capability so Caddy can start with all capabilities dropped.
-RUN apk upgrade --no-cache brotli-libs curl libcurl zlib \
-    && apk add --no-cache --upgrade 'musl>=1.2.5-r24' 'musl-utils>=1.2.5-r24' \
-    && addgroup -S -g 65532 caddy && adduser -S -D -H -u 65532 -G caddy caddy \
+RUN addgroup -S -g 65532 caddy && adduser -S -D -H -u 65532 -G caddy caddy \
     && install -d -o caddy -g caddy -m 0700 /var/lib/caddy-acme \
     && setcap -r /usr/bin/caddy
 COPY deploy/production/Caddyfile /etc/caddy/Caddyfile

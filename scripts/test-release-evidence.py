@@ -98,6 +98,16 @@ class Dispatch(unittest.TestCase):
                                                        {}, float('inf')), completed)
         dispatch.assert_not_called()
 
+    def test_failed_security_scan_blocks_release_evidence(self):
+        failed = run(1, 'Security Checks', conclusion='failure')
+        with patch.dict(os.environ, {'GITHUB_SHA': SHA, 'GH_REPO': REPO, 'VERSION': '2.0.0-rc.1'}), \
+                patch.object(evidence.sys, 'argv', ['release_evidence.py', 'security']), \
+                patch.object(evidence, 'find_or_dispatch', return_value=failed), \
+                patch.object(evidence, 'write_outputs') as outputs:
+            with self.assertRaisesRegex(RuntimeError, 'Expected a successful run'):
+                evidence.main()
+        outputs.assert_not_called()
+
     def test_moved_main_fails_before_dispatch(self):
         with patch.object(evidence, 'api', return_value={'object': {'sha': BASE}}) as api:
             with self.assertRaisesRegex(RuntimeError, 'main moved'):
