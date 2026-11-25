@@ -26,6 +26,22 @@ fi
 unset SUDO_USER
 umask 077
 
+scenario="${1:?expected lifecycle or renewal}"
+renew_check_seconds=$((10 * 60))  # CertMagic default in the candidate Caddy image
+job_budget=$((60 * 60))
+renewal_budget=$((22 * 60))
+case "${scenario}" in
+  lifecycle)
+    leaf_seconds=$((24 * 60 * 60))
+    ((leaf_seconds / 2 > job_budget + 5 * renew_check_seconds))
+    ;;
+  renewal)
+    leaf_seconds=$((15 * 60))
+    ((renew_check_seconds < leaf_seconds && leaf_seconds < 5 * renew_check_seconds && renewal_budget > leaf_seconds))
+    ;;
+  *) echo "Unknown Quick Install scenario: ${scenario}" >&2; exit 2 ;;
+esac
+
 PEBBLE_IMAGE=ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
 CREDENTIALS_DIR=/root/ocservia-initial-credentials
 # controller.sh refuses a release file under a group/world-writable ancestor
@@ -51,6 +67,10 @@ cleanup() {
     for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
       docker inspect --format '== {{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "${container}"
     done >&2
+    # Only export the event name and timestamp; Caddy log fields can contain credentials.
+    docker logs "$(docker ps -aq --filter label=com.docker.compose.project=ocservia-production --filter label=com.docker.compose.service=gateway-acme)" 2>&1 | jq -Rc 'fromjson? |
+      select(.logger == "tls.obtain" or .logger == "tls.renew") |
+      {ts, logger, msg}' >&2
   fi
   if [[ "${native_services}" == true ]]; then
     systemctl stop ocservia-agent ocservia-privd ocserv
@@ -69,7 +89,7 @@ trap 'exit 143' TERM
 trap 'echo "Quick acceptance failed at line ${LINENO}" >&2' ERR
 pass() { echo "PASS: $1"; }
 # errexit ignores negated commands, so absence is asserted explicitly.
-absent() { if grep -qF -- "$@"; then echo "unexpected: $1" >&2; return 1; fi; }
+absent() { if grep -qF -- "$@"; then echo "Unexpected sensitive content in checked output" >&2; return 1; fi; }
 
 release_verify_native_runner "${CONTROLLER_ARCH}" >/dev/null
 test -s "${IMAGES_DIR}/product-identity.json"
@@ -123,10 +143,10 @@ openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=pe
 printf 'subjectAltName=IP:%s,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' "${gateway}" >"${work}/pebble.ext"
 openssl x509 -req -days 1 -in "${work}/pebble.csr" -CA "${pebble_dir}/ca.pem" -CAkey "${work}/pebble-ca.key" \
   -CAcreateserial -extfile "${work}/pebble.ext" -out "${pebble_dir}/cert.pem" 2>/dev/null
-jq -n '{pebble: {listenAddress: "0.0.0.0:14000", managementListenAddress: "0.0.0.0:15000",
+jq -n --argjson lifetime "${leaf_seconds}" '{pebble: {listenAddress: "0.0.0.0:14000", managementListenAddress: "0.0.0.0:15000",
   certificate: "/pebble/cert.pem", privateKey: "/pebble/key.pem", httpPort: 5002, tlsPort: 443,
   ocspResponderURL: "", externalAccountBindingRequired: false,
-  profiles: {default: {description: "Quick renewal fixture", validityPeriod: 900}}}}' >"${pebble_dir}/config.json"
+  profiles: {default: {description: "Quick acceptance fixture", validityPeriod: $lifetime}}}}' >"${pebble_dir}/config.json"
 chmod 0444 "${pebble_dir}"/*
 docker run -d --restart unless-stopped --name "${pebble}" --network host \
   -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -v "${pebble_dir}:/pebble:ro" \
@@ -163,9 +183,12 @@ until capture_leaf "${work}/first-leaf.pem"; do
   ((SECONDS < serve_before))
   sleep 1
 done
-# Fail early if Pebble ignored the short certificate profile.
-if openssl x509 -in "${work}/first-leaf.pem" -noout -checkend 1200 >/dev/null; then
-  echo 'Pebble issued a certificate outside the renewal test window' >&2
+# Check the actual issued lifetime so an ignored Pebble profile fails at setup.
+leaf_start="$(openssl x509 -in "${work}/first-leaf.pem" -noout -startdate)"
+leaf_end="$(openssl x509 -in "${work}/first-leaf.pem" -noout -enddate)"
+issued_seconds=$(( $(date -d "${leaf_end#*=}" +%s) - $(date -d "${leaf_start#*=}" +%s) ))
+if ((issued_seconds < leaf_seconds - 1 || issued_seconds > leaf_seconds)); then
+  echo "Pebble issued ${issued_seconds}s for the ${leaf_seconds}s ${scenario} profile" >&2
   exit 1
 fi
 grep -qxF "OCSERV_RELAY_PUBLIC_HOST=${controller}" /etc/ocservia/install.env
@@ -176,10 +199,26 @@ relay_http_ready() {
     [[ "${status}" == 204 ]]
 }
 relay_http_ready
-check_original_certificate() {
-  capture_leaf "${work}/current-leaf.pem"
-  cmp --silent "${work}/first-leaf.pem" "${work}/current-leaf.pem"
+gateway_container() {
+  docker ps -q --filter label=com.docker.compose.project=ocservia-production \
+    --filter label=com.docker.compose.service=gateway-acme
 }
+certificate_snapshot() {
+  local gateway_id volume account
+  gateway_id="$(gateway_container)"
+  volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/caddy-acme"}}{{.Name}}{{end}}{{end}}' "${gateway_id}")"
+  docker volume inspect --format 'volume={{.Name}} created={{.CreatedAt}}' "${volume}"
+  account="$(docker exec "${gateway_id}" find /var/lib/caddy-acme/acme -path '*/users/*/*.json' -exec cat '{}' ';' |
+    jq -esr 'map(.location | select(type == "string" and length > 0)) | select(length == 1) | first')"
+  echo "account=${account}"
+  openssl x509 -in "$1" -noout -serial -dates -fingerprint -sha256
+}
+check_continuity() {
+  capture_leaf "${work}/current-leaf.pem"
+  certificate_snapshot "${work}/current-leaf.pem" | tee "${work}/current-state"
+  diff -u "${work}/first-state" "${work}/current-state"
+}
+certificate_snapshot "${work}/first-leaf.pem" | tee "${work}/first-state"
 pass "Gateway and Relay respond on the shared HTTPS hostname"
 
 stage=accounts
@@ -237,22 +276,25 @@ check_materials() {
   diff -qr -- "${work}/config.before" /etc/ocservia
   diff -qr --exclude=complete -- "${work}/credentials.before" "${CREDENTIALS_DIR}"
 }
-"${quick[@]}" >"${work}/run-rerun.log" 2>&1
-grep -qF "initial Local administrator already exists" "${work}/run-rerun.log"
-check_materials
-check_original_certificate
-accounts
-pass "a rerun keeps material and certificates"
+if [[ "${scenario}" == lifecycle ]]; then
+  "${quick[@]}" >"${work}/run-rerun.log" 2>&1
+  grep -qF "initial Local administrator already exists" "${work}/run-rerun.log"
+  check_materials
+  check_continuity
+  accounts
+  pass "a rerun keeps material and certificates"
 
-stage=bootstrap_resume
-# An interruption after Local bootstrap committed but before completion was
-# recorded: the rerun reuses the kept passwords and records completion.
-rm -- "${CREDENTIALS_DIR}/complete"
-"${quick[@]}" >"${work}/run-resume.log" 2>&1
-grep -qF "Local authentication was already initialized by an earlier run" "${work}/run-resume.log"
-check_materials
-accounts
-pass "a rerun resumes an unrecorded Local bootstrap"
+  stage=bootstrap_resume
+  # An interruption after Local bootstrap committed but before completion was
+  # recorded: the rerun reuses the kept passwords and records completion.
+  rm -- "${CREDENTIALS_DIR}/complete"
+  "${quick[@]}" >"${work}/run-resume.log" 2>&1
+  grep -qF "Local authentication was already initialized by an earlier run" "${work}/run-resume.log"
+  check_materials
+  accounts
+  pass "a rerun resumes an unrecorded Local bootstrap"
+  check_continuity
+fi
 
 stage=lifecycle
 config_keys=(OCSERV_DEPLOYMENT_MODE OCSERV_DATABASE_BACKEND OCSERV_DATABASE_DEPLOYMENT OCSERV_TLS_MODE
@@ -269,15 +311,31 @@ lifecycle() {
   curl -fsS --cacert "${work}/acme-root.pem" "https://${controller}/api/v1/version" |
     jq -e --arg commit "${SOURCE_COMMIT}" --arg version "${VERSION}" '.commit == $commit and .version == $version' >/dev/null
   check_materials
-  check_original_certificate
+  if [[ "${scenario}" == lifecycle ]]; then check_continuity; fi
   accounts
 }
 lifecycle upgrade --release-file "${upgrade_manifest}"
-pass "upgrade keeps material, certificates and accounts"
-lifecycle rollback
-pass "rollback keeps material, certificates and accounts"
-lifecycle upgrade --release-file "${upgrade_manifest}"
-pass "upgrade after rollback keeps material, certificates and accounts"
+check_output() {
+  stage=output
+  password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/admin.txt")"
+  [[ -n "${password}" ]]
+  absent "${password}" "${work}"/run-*.log
+  for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
+    docker logs "${container}" >"${work}/container.log" 2>&1
+    absent "${password}" "${work}/container.log"
+  done
+
+  pass "passwords appear in no installer output or container log"
+}
+if [[ "${scenario}" == lifecycle ]]; then
+  pass "upgrade keeps material, certificates and accounts"
+  lifecycle rollback
+  pass "rollback keeps material, certificates and accounts"
+  lifecycle upgrade --release-file "${upgrade_manifest}"
+  pass "upgrade after rollback keeps material, certificates and accounts"
+  check_output
+  exit 0
+fi
 
 stage=native_agent
 dpkg -i "${deb}" >"${work}/run-native-package.log" 2>&1
@@ -365,13 +423,15 @@ done
 pass "native Agent executed reload through the shared Relay"
 
 stage=renewal
-renewed_by=$((SECONDS + 22 * 60))
+capture_leaf "${work}/renewal-baseline.pem"
+certificate_snapshot "${work}/renewal-baseline.pem"
+renewed_by=$((SECONDS + renewal_budget))
 while ! capture_leaf "${work}/renewed-leaf.pem" ||
-      cmp --silent "${work}/first-leaf.pem" "${work}/renewed-leaf.pem"; do
+      cmp --silent "${work}/renewal-baseline.pem" "${work}/renewed-leaf.pem"; do
   ((SECONDS < renewed_by))
   sleep 5
 done
-openssl x509 -in "${work}/renewed-leaf.pem" -noout -serial
+certificate_snapshot "${work}/renewed-leaf.pem"
 relay_container="$(docker ps -q --filter label=com.docker.compose.project=ocservia-production \
   --filter label=com.docker.compose.service=relay-acme)"
 [[ "${relay_container}" =~ ^[0-9a-f]+$ ]]
@@ -398,14 +458,5 @@ while ! relay_node | jq -e --arg before "${heartbeat}" \
 done
 pass "Gateway renewed its certificate, QUIC serves the same leaf, and the Agent reconnected"
 
-stage=output
-password="$(sed -n 's/^Password: //p' "${CREDENTIALS_DIR}/admin.txt")"
-[[ -n "${password}" ]]
-absent "${password}" "${work}"/run-*.log
-for container in $(docker ps -aq --filter label=com.docker.compose.project=ocservia-production); do
-  docker logs "${container}" >"${work}/container.log" 2>&1
-  absent "${password}" "${work}/container.log"
-done
-
-pass "passwords appear in no installer output or container log"
-echo "Quick acceptance passed"
+check_output
+echo "Quick renewal acceptance passed"

@@ -62,7 +62,6 @@ unset OCSERV_OTEL_BACKEND_ENDPOINT OCSERV_CONTROLLER_COMPOSE_SH OCSERV_CONTROLLE
 
 registry="business-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}-registry"
 export OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="business-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-relay"
-export OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER="business-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-signer"
 
 compose() { "${ROOT}/deploy/production/compose.sh" "$@"; }
 scenario() { python3 "${ROOT}/scripts/release_business_scenarios.py" "$@"; }
@@ -91,14 +90,13 @@ cleanup() {
         compose exec -T postgres psql -XAt -U ocservia_owner -d ocservia -c \
           "SELECT observed_at, event_id, node_id, event_type, reason_code, reason_detail FROM transport_event_quarantine ORDER BY observed_at DESC LIMIT 50"
       fi
-      for service in control-plane transportd; do
+      for service in control-plane transportd signer; do
         container="$(compose ps -a -q "${service}")"
         if [[ -n "${container}" ]]; then
           docker inspect --format '{{json .State}}' "${container}"
         fi
       done
       sudo journalctl --no-pager -o short-iso-precise -u ocservia-agent -u ocservia-privd -u ocserv
-      docker logs "$OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER"
     } >>"${work}/private.log" 2>&1
     # Never export environment, cookies, raw databases, passwords or raw logs.
     sudo "$(command -v node)" "${ROOT}/scripts/redact-release-upgrade-log.mjs" \
@@ -140,7 +138,6 @@ cleanup() {
   if [[ "$relay_ipv6_rule" == true ]]; then
     sudo ip6tables -D OUTPUT -m owner --uid-owner "$(id -u ocserv-agent)" -p udp ! --dport 53 -j REJECT
   fi
-  docker rm -f "$OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER" >/dev/null 2>&1
   sudo ip netns pids business-test-client 2>/dev/null | xargs -r sudo kill
   sudo ip netns del business-test-client >/dev/null 2>&1
   compose down --volumes --remove-orphans >/dev/null 2>&1
@@ -251,7 +248,6 @@ openssl x509 -req -days 1 -in "$work/relay.csr" -CA "$work/ca.crt" -CAkey "$work
   -CAcreateserial -extfile "$work/relay.ext" -out "$OCSERV_RELAY_SECRET_DIR/tls.crt"
 install -m 444 "$work/private/relay-tls.key" "$OCSERV_RELAY_SECRET_DIR/tls.key"
 chmod 444 "$OCSERV_RELAY_SECRET_DIR/tls.crt"
-scenario signer_prepare
 
 infra_status=0
 wait "${prefetch_infra_pid}" || infra_status=$?
@@ -263,9 +259,16 @@ manifest="${DEPLOYMENT_CONFIG_DIR}/controller-release-${CONTROLLER_ARCH}.json"
 release_publish_local_manifest "${ROOT}" "localhost:5000" "" "${VERSION}" "${CONTROLLER_ARCH}" "${SOURCE_COMMIT}" "${manifest}"
 export OCSERVIA_BUSINESS_TEST_SIGNER_IMAGE="${OCSERV_SIGNER_IMAGE:?}"
 
+# Render the candidate before the launcher validates its (as yet unbuilt) secrets.
+signer_ttl="$(docker compose --env-file /dev/null -f "${ROOT}/deploy/production/compose.yaml" \
+  --profile manual --profile bundled-postgres config --format json signer |
+  jq -er '.services.signer.environment.OCSERV_SIGNER_CERT_TTL')"
+scenario signer_prepare "${signer_ttl}"
+
 next_stage controller_install
 "${ROOT}/deploy/production/controller.sh" install --release-file "$manifest"
 OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER="$(compose ps -q signer)"
+export OCSERVIA_BUSINESS_TEST_SIGNER_CONTAINER
 OCSERVIA_BUSINESS_TEST_RELAY_CONTAINER="$(compose ps -q relay)"
 curl --fail --silent --show-error "$OCSERV_CONTROLLER_PUBLIC_URL/api/v1/version" | \
   jq -e --arg sha "${SOURCE_COMMIT}" --arg v "${VERSION}" '.commit == $sha and .version == $v' >/dev/null
