@@ -47,6 +47,7 @@ jobs:
           - name: Rust advisories
             profile: rust-security
             command: |
+              export RUSTUP_AUTO_INSTALL=0
               work="$(mktemp -d)"
               trap 'rm -rf -- "${work}"' EXIT
               (cd rust && cargo audit --file ../deploy/production/relay.Cargo.lock) >"${work}/relay.log" 2>&1 &

@@ -208,16 +208,13 @@ install_rust() {
       "${rustup_init}" -y --no-modify-path --profile minimal \
       --default-toolchain "$(version rust)"
   fi
-  [[ "$(rustc --version | awk '{print $2}')" == "$(version rust)" ]]
-  cargo --version >/dev/null
-}
-
-install_rust_validation_components() {
-  if ! cargo clippy --version >/dev/null 2>&1 || ! rustfmt --version >/dev/null 2>&1; then
-    rustup component add --toolchain "$(version rust)" clippy rustfmt
-  fi
-  cargo clippy --version >/dev/null
-  rustfmt --version >/dev/null
+  # Resolve the workspace manifest once before parallel Cargo consumers start.
+  (
+    cd "${ROOT}/rust"
+    rustup toolchain install --no-update --no-self-update
+    [[ "$(rustc --version | awk '{print $2}')" == "$(version rust)" ]]
+    cargo --version >/dev/null
+  )
 }
 
 install_buf() {
@@ -363,7 +360,6 @@ install_go_quality_tools() {
 }
 
 install_rust_quality_tools() {
-  install_rust_validation_components
   install_cargo_audit
   install_cargo_deny
 }
@@ -427,12 +423,10 @@ case "${PROFILE}" in
     ;;
   rust-basic)
     install_rust
-    install_rust_validation_components
     ;;
   rust-security)
     install_rust
-    install_cargo_audit
-    install_cargo_deny
+    install_rust_quality_tools
     ;;
   native-packages)
     install_rust
