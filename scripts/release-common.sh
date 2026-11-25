@@ -3,8 +3,8 @@
 # pinned third-party runtime images, image loading, and local manifest generation).
 
 readonly RELEASE_CONTROLLER_ROLES=(gateway control transport backup edge relay signer)
-readonly OCSERV_POSTGRES_IMAGE="docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af"
-readonly OCSERV_OTEL_IMAGE="docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23"
+readonly OCSERV_POSTGRES_IMAGE="docker.io/library/postgres@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35"
+readonly OCSERV_OTEL_IMAGE="docker.io/otel/opentelemetry-collector@sha256:5dfb40297a8da893e4e9b6b98d3ddbdd9082f73611170d6381e355e08b235334"
 export OCSERV_POSTGRES_IMAGE OCSERV_OTEL_IMAGE
 
 release_verify_native_runner() {

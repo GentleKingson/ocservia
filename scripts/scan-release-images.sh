@@ -79,8 +79,27 @@ controller_dockerfile_for() {
   esac
 }
 
+pinned_third_party_image_ref() {
+  local name="$1" var_name
+  case "$name" in
+    postgres) var_name=OCSERV_POSTGRES_IMAGE ;;
+    otel) var_name=OCSERV_OTEL_IMAGE ;;
+    *) return 1 ;;
+  esac
+  sed -n "s/^readonly ${var_name}=\"\\([^\"]*\\)\"$/\\1/p" "${ROOT:?}/scripts/release-common.sh" | head -n 1
+}
+
 image_base_reference() {
-  local dockerfile="$1"
+  local name="$1" dockerfile ref
+  case "$name" in
+    postgres|otel)
+      ref="$(pinned_third_party_image_ref "$name")"
+      [[ "$ref" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || return 1
+      printf '%s\n' "$ref"
+      return 0
+      ;;
+  esac
+  dockerfile="$(controller_dockerfile_for "$name")"
   awk '
     /^FROM[ \t]/ && $2 ~ /^[^@[:space:]]+@sha256:[0-9a-f]{64}$/ { base = $2 }
     /^FROM[ \t]+scratch([ \t]|$)/ { base = "scratch" }
@@ -98,8 +117,7 @@ while IFS=$'\t' read -r name arch archive; do
   [[ "$name" =~ ^[a-z][a-z0-9_-]*$ && ( "$arch" == amd64 || "$arch" == arm64 ) ]] || exit 2
   [[ -f "$archive" && ! -L "$archive" && -s "$archive" && -z "${seen[$name/$arch]:-}" ]] || exit 2
   seen["$name/$arch"]=1
-  dockerfile="$(controller_dockerfile_for "$name")"
-  base_ref="$(image_base_reference "$dockerfile")"
+  base_ref="$(image_base_reference "$name")"
   row_names+=("$name")
   row_arches+=("$arch")
   row_archives+=("$archive")
@@ -111,30 +129,19 @@ rows="${#row_names[@]}"
 max_jobs="${IMAGE_SCAN_PARALLELISM:-4}"
 [[ "$max_jobs" =~ ^[1-9][0-9]*$ ]] || exit 2
 
-scan_one_archive() {
-  local idx="$1" name="$2" arch="$3" archive="$4" base_ref="$5"
-  local os_sbom_file="$work/row-${idx}.spdx.json"
-  local scan_file="$work/row-${idx}.scan.json"
-  local out_file="$work/row-${idx}.out"
-  local fail_file="$work/row-${idx}.fail"
-  local findings fixable_count started="${SECONDS}"
-  syft "docker-archive:$archive" \
-    --override-default-catalogers 'apk-db-cataloger,dpkg-db-cataloger,rpm-db-cataloger' \
-    -o spdx-json --file "$os_sbom_file" -q
-  grype "sbom:$os_sbom_file" -o json --file "$scan_file" -q
-  jq -c --arg image "$name" --arg arch "$arch" --slurpfile sbom "$os_sbom_file" '
-    {image:$image, arch:$arch, db_built:.descriptor.db.status.built, db_source:.descriptor.db.status.from,
-     pcre2:[$sbom[0].packages[] | select(.name == "pcre2") | .versionInfo]}
-  ' "$scan_file" >"$out_file"
-  findings="$(jq -c --arg image "${name}" --arg base "${base_ref}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
-    [.matches[]
-    | .artifact.name as $package | .artifact.version as $version
-    | .vulnerability.id as $id | .vulnerability.severity as $severity
-    | ((.vulnerability.fix.versions // []) | length > 0) as $fixable
-    | {package: $package, version: $version, id: $id, severity: $severity, fixable: $fixable,
-       exempted: any($_exemptions[];
-         .image == $image and .package == $package and .installed_version == $version
-         and .vulnerability_id == $id and .base_image == $base and .review_by >= $today)}]
+summarize_findings() {
+  local name="$1" base_ref="$2"
+  shift 2
+  jq -cs --arg image "${name}" --arg base "${base_ref}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
+    [.[].matches[]]
+    | [.[]
+      | .artifact.name as $package | .artifact.version as $version
+      | .vulnerability.id as $id | .vulnerability.severity as $severity
+      | ((.vulnerability.fix.versions // []) | length > 0) as $fixable
+      | {package: $package, version: $version, id: $id, severity: $severity, fixable: $fixable,
+         exempted: any($_exemptions[];
+           .image == $image and .package == $package and .installed_version == $version
+           and .vulnerability_id == $id and .base_image == $base and .review_by >= $today)}]
     | ([.[] | select(.exempted and .fixable and (.severity == "High" or .severity == "Critical"))]) as $exempted
     | ([.[] | select(.exempted | not)]) as $reportable
     | {
@@ -146,12 +153,71 @@ scan_one_archive() {
       }
       + (([$reportable[].severity] | group_by(.))
         | map({(.[0] | ascii_downcase): length}) | add // {})
-  ' "${scan_file}")"
+  ' "$@"
+}
+
+scan_one_archive() {
+  local idx="$1" name="$2" arch="$3" archive="$4" base_ref="$5"
+  local primary_sbom_file="$work/row-${idx}.spdx.json"
+  local scan_file="$work/row-${idx}.scan.json"
+  local out_file="$work/row-${idx}.out"
+  local fail_file="$work/row-${idx}.fail"
+  local catalogers='apk-db-cataloger,dpkg-db-cataloger,rpm-db-cataloger'
+  local findings fixable_count started="${SECONDS}"
+  local -a scan_files=("$scan_file")
+  if [[ "$name" == otel ]]; then
+    catalogers='go-module-binary-cataloger'
+  fi
+  syft "docker-archive:$archive" \
+    --override-default-catalogers "$catalogers" \
+    -o spdx-json --file "$primary_sbom_file" -q
+  grype "sbom:$primary_sbom_file" -o json --file "$scan_file" -q
+  jq -c --arg image "$name" --arg arch "$arch" --slurpfile sbom "$primary_sbom_file" '
+    {image:$image, arch:$arch, db_built:.descriptor.db.status.built, db_source:.descriptor.db.status.from,
+     pcre2:[$sbom[0].packages[] | select(.name == "pcre2") | .versionInfo]}
+  ' "$scan_file" >"$out_file"
+  # PGDG postgresql-18 packages are not tracked by Debian main security feeds;
+  # check the upstream PostgreSQL CPE explicitly when postgresql-18 is installed.
+  if [[ "$name" == postgres || "$name" == backup ]]; then
+    local pg_raw_version pg_upstream_version pg_cpe_sbom pg_scan_file
+    pg_raw_version="$(jq -r '[.packages[] | select(.name == "postgresql-18") | .versionInfo][0] // empty' "$primary_sbom_file")"
+    if [[ -n "$pg_raw_version" ]]; then
+      pg_upstream_version="${pg_raw_version%%-*}"
+      pg_cpe_sbom="$work/row-${idx}-pg.cdx.json"
+      pg_scan_file="$work/row-${idx}-pg.scan.json"
+      jq -n --arg version "$pg_upstream_version" '{
+        bomFormat: "CycloneDX",
+        specVersion: "1.5",
+        version: 1,
+        components: [{
+          type: "application",
+          name: "postgresql",
+          version: $version,
+          cpe: ("cpe:2.3:a:postgresql:postgresql:" + $version + ":*:*:*:*:*:*:*")
+        }]
+      }' >"$pg_cpe_sbom"
+      grype "sbom:$pg_cpe_sbom" -o json --file "$pg_scan_file" -q
+      scan_files+=("$pg_scan_file")
+    fi
+  fi
+  findings="$(summarize_findings "$name" "$base_ref" "${scan_files[@]}")"
   fixable_count="$(jq -r '.fixable_high_critical' <<<"$findings")"
   echo "$name linux/$arch: $findings" >>"$out_file"
+  # Keep Caddy Go module scanning advisory (non-blocking) until Caddy 2.11.10+ ships.
+  if [[ "$name" == gateway ]]; then
+    local go_sbom_file="$work/row-${idx}-go.spdx.json"
+    local go_scan_file="$work/row-${idx}-go.scan.json"
+    local go_findings
+    syft "docker-archive:$archive" \
+      --override-default-catalogers 'go-module-binary-cataloger' \
+      -o spdx-json --file "$go_sbom_file" -q
+    grype "sbom:$go_sbom_file" -o json --file "$go_scan_file" -q
+    go_findings="$(summarize_findings "$name" "$base_ref" "$go_scan_file")"
+    echo "$name linux/$arch go-advisory (non-blocking until Caddy 2.11.10+): $go_findings" >>"$out_file"
+  fi
   printf 'controller-scan-timing image=%s arch=%s seconds=%s\n' "$name" "$arch" "$((SECONDS - started))" >>"$out_file"
   if ((fixable_count > 0)); then
-    printf '%s\n' "$name linux/$arch: $fixable_count fixable High/Critical OS findings" >"$fail_file"
+    printf '%s\n' "$name linux/$arch: $fixable_count fixable High/Critical findings" >"$fail_file"
   fi
 }
 

@@ -427,6 +427,8 @@ case "${PROFILE}" in
   rust-security)
     install_rust
     install_rust_quality_tools
+    install_grype
+    verify_host_command jq
     ;;
   native-packages)
     install_rust

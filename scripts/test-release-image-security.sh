@@ -34,7 +34,12 @@ echo "scan|$GRYPE_DB_AUTO_UPDATE" >>"$TRACE"
 while (($#)); do
   case "$1" in --file) destination="$2"; shift 2 ;; *) shift ;; esac
 done
-printf '{"matches":[%s],"descriptor":{"db":{"status":%s}}}' "$REPORT" "$SCAN_DB_STATUS" >"$destination"
+matches="${REPORT:-}"
+case "$destination" in
+  *-go.scan.json) matches="${GO_REPORT-${REPORT:-}}" ;;
+  *-pg.scan.json) matches="${PG_REPORT-${REPORT:-}}" ;;
+esac
+printf '{"matches":[%s],"descriptor":{"db":{"status":%s}}}' "$matches" "$SCAN_DB_STATUS" >"$destination"
 EOF
 chmod 755 "$work/bin/"*
 export PATH="$work/bin:$PATH" TRACE="$trace"
@@ -54,9 +59,11 @@ export REPORT
 REPORT="$(finding package 1 CVE-new High true),$(finding other 1 CVE-unfixed Critical false),$(finding medium 1 CVE-medium Medium true)"
 expect_failure
 [[ "$(grep -c '^update$' "$trace")" == 1 ]]
-[[ "$(grep -c '^scan|false$' "$trace")" == 2 ]]
+[[ "$(grep -c '^scan|false$' "$trace")" == 4 ]]
 REPORT="$(finding package 1 CVE-unfixed Critical false),$(finding medium 1 CVE-medium Medium true)"
-run_scan
+GO_REPORT="$(finding golang.org/x/net v0.60.0 GO-2026-6860 High true)" run_scan
+grep -Fq 'gateway linux/amd64 go-advisory (non-blocking until Caddy 2.11.10+):' "$work/scan.log"
+grep -Fq 'GO-2026-6860' "$work/scan.log"
 # Evidence comes from this scan and its SBOM, not the DB status command or matches.
 evidence() { jq -Rsc '[split("\n")[] | fromjson? | select(has("db_built"))]' "$work/scan.log"; }
 evidence | jq -e '
@@ -77,6 +84,18 @@ evidence | jq -e '
 SCAN_DB_STATUS='{}' REPORT='' run_scan
 evidence | jq -e 'length == 2 and all(.[]; .db_built == null and .db_source == null)' >/dev/null
 SBOM_PACKAGES='[]'
+# PGDG postgresql-18 triggers an upstream PostgreSQL CPE scan on postgres and backup.
+for pg_image in postgres backup; do
+  printf '%s\tamd64\t%s\n' "$pg_image" "$work/image.tar" >"$archives"
+  SBOM_PACKAGES='[{"name":"postgresql-18","versionInfo":"18.6-1.pgdg12+2"}]'
+  REPORT='' PG_REPORT="$(finding postgresql 18.6 CVE-2026-116317 High true)" expect_failure
+  PG_REPORT='' REPORT='' run_scan
+done
+# Pinned otel third-party image fails on fixable High/Critical Go findings.
+printf 'otel\tamd64\t%s\n' "$work/image.tar" >"$archives"
+SBOM_PACKAGES='[]'
+REPORT="$(finding go.opentelemetry.io/collector/config/configgrpc v0.130.0 GHSA-vf52-ppm4-c35w High true)" expect_failure
+REPORT='' run_scan
 # Reviewed exceptions never transfer to another CVE, version, image or base.
 printf 'backup\tamd64\t%s\n' "$work/image.tar" >"$archives"
 base="$(awk '/^FROM / && $2 ~ /@sha256:/ {base=$2} END {print base}' deploy/production/backup.Dockerfile)"
@@ -114,19 +133,19 @@ DB_UPDATE_FAIL=true expect_failure
 DB_STATUS_FAIL=true expect_failure
 DB_BUILT='' expect_failure
 DB_BUILT='invalid"json' expect_failure
-# Every published role is scanned on both native architectures; one DB update.
+# Every published role and pinned third-party image is scanned on both native architectures; one DB update.
 : >"$archives"
 : >"$trace"
 for arch in amd64 arm64; do
-  for name in gateway control transport backup edge relay signer; do
+  for name in gateway control transport backup edge relay signer postgres otel; do
     printf '%s\t%s\t%s\n' "$name" "$arch" "$work/image.tar" >>"$archives"
   done
 done
 IMAGE_SCAN_EXEMPTIONS='' REPORT='' run_scan
 [[ "$(grep -c '^update$' "$trace")" == 1 ]]
-[[ "$(grep -c '^scan|false$' "$trace")" == 14 ]]
-[[ "$(grep -c 'linux/amd64:' "$work/scan.log")" == 7 ]]
-[[ "$(grep -c 'linux/arm64:' "$work/scan.log")" == 7 ]]
+[[ "$(grep -c '^scan|false$' "$trace")" == 20 ]]
+[[ "$(grep -c 'linux/amd64:' "$work/scan.log")" == 9 ]]
+[[ "$(grep -c 'linux/arm64:' "$work/scan.log")" == 9 ]]
 printf 'gateway\tamd64\t%s\n' "$work/image.tar" >>"$archives"
 REPORT='' expect_failure
 printf 'gateway\tamd64\t%s\n' "$work/missing.tar" >"$archives"
@@ -144,7 +163,7 @@ GRYPE_DB_CACHE_DIR="$work/grype-db" bash scripts/scan-release-images.sh --update
 [[ "$(grep -c '^scan|' "$trace")" == 0 ]]
 REPORT='' GRYPE_DB_CACHE_DIR="$work/grype-db" bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1
 [[ "$(grep -c '^update$' "$trace")" == 1 ]]
-[[ "$(grep -c '^scan|false$' "$trace")" == 2 ]]
+[[ "$(grep -c '^scan|false$' "$trace")" == 3 ]]
 if REPORT='' GRYPE_DB_CACHE_DIR='' bash scripts/scan-release-images.sh --use-prefetched-db >"$work/scan.log" 2>&1; then
   echo 'expected --use-prefetched-db without GRYPE_DB_CACHE_DIR to fail' >&2
   exit 1

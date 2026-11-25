@@ -170,6 +170,36 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	if events.Items[0].OccurredAt.IsZero() {
 		t.Fatal("missing maintenance event time")
 	}
+	const traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+	otherNode := uuid.Must(uuid.NewV7())
+	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'other read node','active',now(),now())`, otherNode, other)
+	otherEvent := uuid.Must(uuid.NewV7())
+	exec(`INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload) VALUES($1,$2,'connected',$3,$4,$5)`, otherEvent, otherNode, stamps[1], traceparent, []byte("{}"))
+	laterOwnEvent := uuid.Must(uuid.NewV7())
+	exec(`INSERT INTO transport_events(event_id,node_id,event_type,occurred_at,traceparent,payload) VALUES($1,$2,'heartbeat',$3,$4,$5)`, laterOwnEvent, node, stamps[2], traceparent, []byte("{}"))
+
+	type eventPage struct {
+		Items []transportevents.Event `json:"items"`
+		Page  struct {
+			HasMore    bool   `json:"has_more"`
+			NextCursor string `json:"next_cursor"`
+		} `json:"page"`
+	}
+	var ownAfter eventPage
+	w = get("/api/v1/events?after="+events.Items[0].ID+"&order=asc", workspace, cookie, http.StatusOK)
+	if err := json.Unmarshal(w.Body.Bytes(), &ownAfter); err != nil || len(ownAfter.Items) != 1 || ownAfter.Items[0].ID != laterOwnEvent.String() || ownAfter.Page.HasMore {
+		t.Fatalf("same-workspace cursor pagination: %s %v", w.Body, err)
+	}
+	missingEvent := uuid.Must(uuid.NewV7())
+	for _, cursor := range []uuid.UUID{otherEvent, missingEvent} {
+		for _, order := range []string{"asc", "desc"} {
+			var pageResult eventPage
+			w = get("/api/v1/events?after="+cursor.String()+"&order="+order, workspace, cookie, http.StatusOK)
+			if err := json.Unmarshal(w.Body.Bytes(), &pageResult); err != nil || len(pageResult.Items) != 0 || pageResult.Page.HasMore || pageResult.Page.NextCursor != "" {
+				t.Fatalf("foreign/missing cursor (%s, %s): %s %v", cursor, order, w.Body, err)
+			}
+		}
+	}
 	w = get("/api/v1/development/runtime", uuid.Nil, nil, http.StatusOK)
 	var metrics struct {
 		Available bool                     `json:"privd_attestation_key_states_available"`

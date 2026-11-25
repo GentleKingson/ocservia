@@ -143,8 +143,8 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	}
 	stream := call("GET", "/api/v1/events/stream")
 	defer stream.Body.Close()
-	if stream.StatusCode != 200 || stream.Header.Get("Content-Type") != "text/event-stream" {
-		t.Fatalf("first stream: %d", stream.StatusCode)
+	if stream.StatusCode != 200 || stream.Header.Get("Content-Type") != "text/event-stream" || stream.Header.Get("Cache-Control") != "no-cache, no-store" {
+		t.Fatalf("first stream: %d %v", stream.StatusCode, stream.Header)
 	}
 	rejected := call("GET", "/api/v1/events/stream")
 	rejected.Body.Close()

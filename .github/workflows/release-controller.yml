@@ -81,11 +81,20 @@ jobs:
           CONTROLLER_ARCH: ${{ inputs.arch }}
         run: |
           source scripts/env.sh
+          source scripts/release-common.sh
+          pinned_dir="${RUNNER_TEMP}/pinned-images"
+          mkdir -p "$pinned_dir"
+          docker pull --quiet --platform "linux/${CONTROLLER_ARCH}" "${OCSERV_POSTGRES_IMAGE}"
+          docker save -o "${pinned_dir}/postgres-linux-${CONTROLLER_ARCH}.tar" "${OCSERV_POSTGRES_IMAGE}"
+          docker pull --quiet --platform "linux/${CONTROLLER_ARCH}" "${OCSERV_OTEL_IMAGE}"
+          docker save -o "${pinned_dir}/otel-linux-${CONTROLLER_ARCH}.tar" "${OCSERV_OTEL_IMAGE}"
           scan_table="${RUNNER_TEMP}/controller-images.tsv"
           : >"$scan_table"
           for name in gateway control transport backup edge relay signer; do
             printf '%s\t%s\t%s\n' "$name" "$CONTROLLER_ARCH" "$RUNNER_TEMP/controller-images/$name-linux-$CONTROLLER_ARCH.tar" >>"$scan_table"
           done
+          printf 'postgres\t%s\t%s\n' "$CONTROLLER_ARCH" "${pinned_dir}/postgres-linux-${CONTROLLER_ARCH}.tar" >>"$scan_table"
+          printf 'otel\t%s\t%s\n' "$CONTROLLER_ARCH" "${pinned_dir}/otel-linux-${CONTROLLER_ARCH}.tar" >>"$scan_table"
           IMAGE_ARCHIVES_TSV="$scan_table" bash scripts/scan-release-images.sh --use-prefetched-db
       - name: Smoke Controller images on the native runner
         id: smoke-images
