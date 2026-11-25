@@ -58,6 +58,7 @@ pub(super) struct SessionContext<'a> {
     pub(super) endpoint_id: EndpointId,
     pub(super) privd: &'a PrivdClient,
     pub(super) command_executor: &'a mut CommandExecutor,
+    pub(super) host_metrics: crate::host_metrics::HostMetrics,
     pub(super) session_cache: crate::telemetry::SessionCache,
     pub(super) boot_id: &'a str,
     pub(super) os_release: &'a str,

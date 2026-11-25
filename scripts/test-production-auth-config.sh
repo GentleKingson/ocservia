@@ -70,7 +70,7 @@ jq -e --arg dir "${OCSERV_SECRET_DIR}" '
     all($service.secrets[]; .source != "oidc_client_secret")
   ) and .secrets.session_key.file == ($dir + "/session-key") and
   (.services.transportd.command | index("--controller-verification-key-file") != null) and
-  any(.services.transportd.secrets[]; .source == "controller_command_verification_key" and .uid == "0" and .gid == "65532") and
+  any(.services.transportd.secrets[]; .source == "controller_command_verification_key" and .target == "controller_command_verification_key") and
   all(.services.transportd.secrets[]; .source != "controller_command_signing_key") and
   .secrets.controller_command_verification_key.file == ($dir + "/controller-command-verification-key.pem") and
   (.services["telemetry-retention"].command == ["--telemetry-retention-only", "--telemetry-retention-interval=24h"]) and

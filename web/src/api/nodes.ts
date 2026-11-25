@@ -1,3 +1,4 @@
+import type { Schemas } from "./models";
 import { client, read } from "./transport";
 import { getWorkspaceId } from "./workspace";
 
@@ -52,6 +53,23 @@ export function listNodeUserGroupState(nodeId: string, signal?: AbortSignal) {
     client.GET("/nodes/{node_id}/user-group-state", {
       params: { path: { node_id: nodeId } },
       signal: signal ?? null,
+    }),
+  );
+}
+
+export function listNodeTelemetry(
+  nodeId: string,
+  metric: Schemas["TelemetryMetric"],
+  since: string,
+  signal: AbortSignal,
+) {
+  return read(
+    client.GET("/nodes/{node_id}/telemetry", {
+      params: {
+        path: { node_id: nodeId },
+        query: { metric, resolution: "raw", since },
+      },
+      signal,
     }),
   );
 }

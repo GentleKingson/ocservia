@@ -377,6 +377,39 @@ def config_prepare():
     record('complete_config_tls_provisioned', reference_id=reference['id'], version='v1', file_identity='0:0:400:1', overwrite_rejected=True)
 
 
+def config_renew():
+    work = environment().work
+    node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
+    lineage = Path('/etc/ocserv/business-test-renewal')
+    reference_file = work / 'config-reference.json'
+    old = json.loads(reference_file.read_bytes())
+    run('openssl', 'x509', '-req', '-days', '2', '-in', work / 'tls.csr', '-CA', work / 'ca.crt',
+        '-CAkey', work / 'private/ca.key', '-set_serial', str(secrets.randbits(120) + 1),
+        '-extfile', work / 'leaf.ext', '-out', work / 'renewed.crt')
+    der = subprocess.check_output(['openssl', 'x509', '-in', work / 'renewed.crt', '-outform', 'DER'])
+    version = hashlib.sha256(der).hexdigest()
+    bound_node, previous, spki, ca = old['key_path'].split('/')
+    assert bound_node == node and version != previous
+    new = api('secret-provider-refs', dict(provider='node-local-tls-v1', version=version,
+              key_path='/'.join([node, version, spki, ca]), reason='Business test: Certbot renewal'), status=201)
+    run('sudo', 'install', '-d', '-m', '700', lineage)
+    for src, name, mode in [(work / 'renewed.crt', 'fullchain.pem', '644'),
+                            (work / 'ca.crt', 'chain.pem', '644'),
+                            (work / 'private/tls.key', 'privkey.pem', '600')]:
+        run('sudo', 'install', '-m', mode, src, lineage / name)
+    hook = ['sudo', 'env', f'RENEWED_LINEAGE={lineage}', 'python3',
+            ROOT / 'deploy/managed-node/rotate-config-tls.py', node, 'localhost', '44443',
+            '--reference', new['id']]
+    run(*hook)
+    pid = run('systemctl', 'show', 'ocserv', '-p', 'MainPID', '--value').strip()
+    assert int(pid) > 0
+    run(*hook)
+    assert run('systemctl', 'show', 'ocserv', '-p', 'MainPID', '--value').strip() == pid
+    reference_file.write_text(json.dumps(new))
+    record('ocserv_certificate_renewed', previous_leaf=previous, served_leaf=version,
+           reference_id=new['id'], duplicate_restart=False)
+
+
 def smoke_user():
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     password = secrets.token_hex(24)
@@ -503,7 +536,7 @@ def smoke_relay_recovery(ping, outage_settle_seconds=10):
     try:
         run('docker', 'stop', relay)
         wait_for_relay_outage(node)
-        wait_for('node offline during Relay outage', lambda: api(prefix)['connection_state'] == 'offline')
+        assert api(prefix)['connection_state'] == 'offline', 'released owner still appears online'
         for _ in range(3):
             headers = {'Idempotency-Key': key, 'If-Match': f'"revision-{api(prefix)["version"]}"'}
             candidate = api(prefix + '/service:reload', body, headers=headers, status=(202, 409))
@@ -721,6 +754,7 @@ PHASES = {
     'bootstrap_verify': bootstrap_verify,
     'check_enrolled_identity': check_enrolled_identity,
     'config_prepare': config_prepare,
+    'config_renew': config_renew,
     'browser_prepare': browser_prepare,
     'browser_verify': browser_verify,
     'smoke_user': smoke_user,

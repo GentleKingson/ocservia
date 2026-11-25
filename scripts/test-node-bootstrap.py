@@ -118,6 +118,31 @@ class BootstrapTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('unattended token install requires', result.stderr)
 
+    def test_release_asset_ubuntu_arm64_package_url(self):
+        tag = 'v9.8.7-rc.2'
+        subprocess.run([ROOT / 'scripts/prepare-bootstrap-release-assets.sh', self.work, tag], check=True)
+        asset = self.work / 'managed-node-bootstrap.sh'
+        release = self.work / 'os-release'
+        release.write_text('ID=ubuntu\nVERSION="26.04 LTS (Resolute Raccoon)"\nVERSION_ID=26.04\n')
+        # Exercise the stamped asset up to its first network call, without root.
+        source = asset.read_text().split('# Every source enters the same root lifecycle', 1)[0]
+        source = source.replace('/etc/os-release', str(release))
+        asset.write_text(source + r'''
+uname() { echo aarch64; }
+install() { :; }
+curl() { echo "${!#}"; exit 42; }
+PACKAGE_SPOOL="$PWD"
+resolve_architecture
+detect_platform
+install_native_package
+''')
+        result = subprocess.run(['bash', asset, '--resume-install'], cwd=self.work,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         f'https://github.com/GentleKingson/ocservia/releases/download/{tag}/'
+                         'ocservia-agent_9.8.7-rc.2-1_arm64.deb')
+
     def test_config_request_and_recovery(self):
         self.run_action('init', self.token_file)
         self.assertEqual(self.run_action('origin').strip(), 'https://controller.example.test:8443')

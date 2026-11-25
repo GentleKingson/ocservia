@@ -872,8 +872,8 @@ At the bootstrap launcher layer, the script validates only argument syntax:
 lowercase DNS names (omitting `--relay-domain`, or passing the same value as
 `--controller-domain`, shares one domain between Controller and Relay), a
 well-formed email address, and absolute paths for the
-optional Root CA arguments (without reading the passphrase file or export
-directory). Passing `--quick` implies `--root-lifecycle`. Quick-specific flags
+Root CA arguments (without reading the passphrase file or export
+directory). Non-interactive Quick requires `--root-ca-passphrase-file PATH`, including with `--check`. Passing `--quick` implies `--root-lifecycle`. Quick-specific flags
 are rejected unless `--quick` is set, and the node bootstrap launcher script rejects all
 of them.
 

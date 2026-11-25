@@ -145,6 +145,7 @@ grep -Fq 'symlinks' "${fixture}/output"
 export OCSERV_CONTROLLER_SOURCE_ROOT="${fixture}/quick-releases"
 quick=(--quick --controller-domain vpn.example.test --relay-domain relay.example.test --acme-email ops@example.test)
 reject 'requires --root-ca-passphrase-file' --non-interactive "${quick[@]}"
+reject 'requires --root-ca-passphrase-file' --non-interactive "${quick[@]}" --check
 if DNS_FAIL=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
 grep -Fq 'has no IPv4' "${fixture}/output"
 if PORT_BUSY=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
@@ -195,7 +196,7 @@ run "${quick[@]}" --root-ca-export-dir /root/ocservia-root-ca
 cmp "${fixture}/handoff" "${fixture}/interactive-handoff"
 # Shared Controller and Relay domain: explicit, defaulted, interactive wizard,
 # launcher asset, and manual Integrated mode must all succeed.
-run --quick --controller-domain vpn.example.test --relay-domain vpn.example.test --acme-email ops@example.test --check
+run --non-interactive --root-ca-passphrase-file "${fixture}/passphrase" --quick --controller-domain vpn.example.test --relay-domain vpn.example.test --acme-email ops@example.test --check
 run --quick --controller-domain vpn.example.test --acme-email ops@example.test
 grep -Fq -- '--controller-domain vpn.example.test --acme-email ops@example.test --relay-domain vpn.example.test' "${fixture}/handoff"
 (

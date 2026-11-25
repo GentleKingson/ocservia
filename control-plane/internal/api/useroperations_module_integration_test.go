@@ -94,6 +94,7 @@ func TestUserOperationsModuleBackendHTTPIntegration(t *testing.T) {
 		before := f.counts()
 		assertApplyHTTPProblem(t, f.call("GET", path, "", "", f.reader.cookie, nil), 404, "not-found")
 		assertApplyHTTPProblem(t, f.call("PUT", path, body, key, f.reader.cookie, nil), 404, "not-found")
+		assertApplyHTTPProblem(t, f.call("PUT", path, body, "", f.requester.cookie, nil), 400, "idempotency-key-required")
 		f.unchanged(before)
 		w := f.call("PUT", path, body, key, f.requester.cookie, nil)
 		var policy useroperations.Policy

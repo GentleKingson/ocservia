@@ -118,6 +118,19 @@ afterEach(() => {
 });
 
 describe("API transport and session contracts", () => {
+  it("sends an idempotency key with quota updates", async () => {
+    await (
+      await loadApi()
+    ).setUserPolicy("node-a", "alice", {
+      quotaPeriod: "monthly",
+      quotaDirection: "rxtx",
+      quotaBytes: 4096,
+      expectedVersion: 0,
+      reason: "quota change",
+    });
+    expect(request().headers.get("Idempotency-Key")).toBeTruthy();
+  });
+
   it("keeps one 401 redirect and return path across generated and artifact requests", async () => {
     const api = await loadApi();
     fetchMock.mockImplementation(() => Promise.resolve(json({}, 401)));

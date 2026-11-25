@@ -1209,6 +1209,13 @@ After an RC's Release workflow has uploaded its assets, run
 published tag (`VERSION=<X.Y.Z-rc.N>`) on a disposable native runner to download the
 exact release's DEB, RPM, and managed-node bootstrap over HTTPS. The smoke check validates the embedded release tag and installs the downloaded native packages. The summary records the requested version, architecture, and asset URLs.
 
+For published Agent enrollment, use a separate Ubuntu 26.04 ARM64 systemd
+runner with ocserv configured and no Agent package installed. Set
+`RELEASE_JOIN_TOKEN_FILE` to the protected installation token and
+`RELEASE_DEB_SHA256` to the verified release digest, in addition to
+`RUN_ID` and `ARTIFACT_DIR`. The same script then runs the stamped installer
+through Controller-confirmed enrollment and leaves the test node enrolled.
+
 ### Existing checks
 
 | Behavior | Owner |

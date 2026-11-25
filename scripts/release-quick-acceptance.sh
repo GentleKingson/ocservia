@@ -414,6 +414,14 @@ until observed="$(relay_node)"; do
   ((SECONDS < connected_by))
   sleep 2
 done
+metrics_by=$((SECONDS + 120))
+for metric in cpu_usage_ratio memory_used_bytes network_rx_bytes network_tx_bytes connection_rtt_ms session_count; do
+  until quick_api "nodes/${node}/telemetry?metric=${metric}&resolution=raw" |
+    jq -e --arg metric "${metric}" 'any(.items[]; .metric == $metric and .count > 0)' >/dev/null; do
+    ((SECONDS < metrics_by))
+    sleep 2
+  done
+done
 revision="$(jq -er '.version' <<<"${observed}")"
 operation="$(quick_api "nodes/${node}/service:reload" -H "If-Match: \"revision-${revision}\"" \
   -H "Idempotency-Key: $(openssl rand -hex 16)" --data-binary '{"reason":"Quick shared Relay acceptance","ttl_seconds":300}')"
@@ -450,12 +458,24 @@ relay_container="$(docker ps -q --filter label=com.docker.compose.project=ocserv
   --filter label=com.docker.compose.service=relay-acme)"
 [[ "${relay_container}" =~ ^[0-9a-f]+$ ]]
 heartbeat="$(relay_node | jq -er '.last_heartbeat_at')"
+postgres_id="$(docker ps -q --filter label=com.docker.compose.project=ocservia-production \
+  --filter label=com.docker.compose.service=postgres)"
+stopped_at=${SECONDS}
 docker stop "${relay_container}" >/dev/null
 offline_by=$((SECONDS + 120))
-until quick_api "nodes/${node}" | jq -e '.connection_state == "offline"' >/dev/null; do
+until [[ "$(docker exec "${postgres_id}" psql -XAt -U ocservia_owner -d ocservia -c \
+  "SELECT NOT active FROM connection_owner_fencing WHERE node_id=uuid_send('${node}'::uuid)")" == t ]]; do
   ((SECONDS < offline_by))
   sleep 2
 done
+released_at=${SECONDS}
+quick_api "nodes/${node}" | jq -e '.connection_state == "offline" and .last_heartbeat_at != null' >/dev/null
+printf 'Relay stop=%ss ownership released=%ss API offline=%ss\n' "${stopped_at}" "${released_at}" "${SECONDS}"
+offline_revision="$(quick_api "nodes/${node}" | jq -er '.version')"
+queued="$(quick_api "nodes/${node}/service:reload" -H "If-Match: \"revision-${offline_revision}\"" \
+  -H "Idempotency-Key: $(openssl rand -hex 16)" --data-binary '{"reason":"shared-domain Relay recovery","ttl_seconds":300}')"
+queued_id="$(jq -er '.id' <<<"${queued}")"
+[[ "$(quick_api "operations/${queued_id}" | jq -r '.state')" == queued ]]
 docker start "${relay_container}" >/dev/null
 relay_ready_by=$((SECONDS + 120))
 until relay_http_ready; do
@@ -467,6 +487,10 @@ timeout 100 "${RELAY_NETWORK_PROBE}" "${origin}" "${work}/acme-root.pem" \
 connected_by=$((SECONDS + 120))
 while ! relay_node | jq -e --arg before "${heartbeat}" \
   '.last_heartbeat_at | type == "string" and . != $before' >/dev/null; do
+  ((SECONDS < connected_by))
+  sleep 2
+done
+until quick_api "operations/${queued_id}" | jq -e '.state == "succeeded"' >/dev/null; do
   ((SECONDS < connected_by))
   sleep 2
 done

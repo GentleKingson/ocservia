@@ -425,7 +425,7 @@ async function submitRollout(): Promise<void> {
                     $t("sessions")
                   }}</TableHead>
                   <TableHead :class="columnHead">{{
-                    $t("lastSeen")
+                    $t("lastHeartbeat")
                   }}</TableHead>
                   <TableHead v-if="showColumn('path')" :class="columnHead">{{
                     $t("path")

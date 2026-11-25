@@ -14,6 +14,7 @@ import (
 var ErrInvalidJSON = errors.New("telemetry JSON is not PostgreSQL-compatible")
 
 type Node struct {
+	OwnerActive                                                              *bool
 	ID                                                                       uuid.UUID
 	Name, Status                                                             string
 	Version                                                                  int64

@@ -30,6 +30,12 @@ This section covers the standard package-first installation. Use published node 
 - Host trust for the Controller HTTPS certificate. Install your private CA through
   the operating system trust store when needed; never disable TLS checks.
 - The DNS servers specified by the deployment in the ocserv configuration.
+  On Ubuntu, inspect the backport dependency transaction with
+  `apt-get -s --no-install-recommends install ocserv`. If it still pulls in
+  `dnsmasq`, select a compatible package before proceeding. Install using the
+  same package version and flags. With systemd-resolved, compare
+  `ss -lntup 'sport = :53'` and `resolvectl query <hostname>` before and
+  after installation and after reboot.
   Leave `dnsmasq` out of node provisioning. Before removing an existing
   `dnsmasq` installation, check whether another service depends on it.
   With a VPN client connected, resolve a hostname through the configured DNS
@@ -334,9 +340,37 @@ bash deploy/managed-node/provision-config-tls.sh \
 
 The helper refuses to overwrite an existing version directory. Under a shared resource lock coordinated with privd plan and apply operations, it writes a protected manifest and mode `0400 root:root` files inside `/etc/ocservia-agent/config-tls/<reference UUID>/<version>`, publishes the version directory atomically, and prints only public reference metadata. Keep previous bundle versions on disk so configuration rollback can reference them, and never edit or delete version directories by hand.
 
-Before starting a newly installed `ocserv` instance, write an initial `/etc/ocserv/ocserv.conf` (`0600 root:root`) that conforms to the finite profile. Point it to the bundle's `server-cert.pem`, `server-key.pem`, and optional `ca-cert.pem` paths, and configure the `ocservia-vpn` worker account, plain `/etc/ocserv/ocpasswd` authentication, and the target listener ports. Then verify it with `ocserv -t -c /etc/ocserv/ocserv.conf`. For a server that is already running, the restart requirements are in [Node-local TLS provisioning](../reference/stable-contracts.md#node-local-tls-provisioning). Keep the previous configuration and TLS bundle intact so both can be restored under the same maintenance window if the restart fails.
+Before starting a newly installed `ocserv` instance, write an initial `/etc/ocserv/ocserv.conf` (`0600 root:root`) that conforms to the finite profile. Point it to the bundle's `server-cert.pem`, `server-key.pem`, and optional `ca-cert.pem` paths, and configure the `ocservia-vpn` worker account, plain `/etc/ocserv/ocpasswd` authentication, and the target listener ports. Set `use-occtl = true` explicitly. Validate the configuration with `ocserv -t -c /etc/ocserv/ocserv.conf`, start ocserv, then verify its control socket with `sudo occtl --json show status`. For a server that is already running, the restart requirements are in [Node-local TLS provisioning](../reference/stable-contracts.md#node-local-tls-provisioning). Keep the previous configuration and TLS bundle intact so both can be restored under the same maintenance window if the restart fails.
 
 If an operator changes any startup-only setting during maintenance, `ocserv` must be restarted and verified locally before automated configuration plans resume.
+
+### Rotate an ocserv certificate after Certbot renewal
+
+Install `rotate-config-tls.py` and `provision-config-tls.sh` together in a root-owned directory.
+The deploy hook runs after a successful renewal. Scope it to this node's Certbot lineage.
+Register the new leaf through the workspace's existing authenticated reference workflow.
+Use the leaf DER SHA-256 (64 lowercase hex characters) as the immutable version, and
+the node UUID, leaf hash, SPKI hash and existing client CA hash (or `none`) as the
+public key path. Reuse that registration when retrying the same renewal.
+
+Install a root-owned Certbot deploy hook for the intended lineage. For unattended registration, configure a root-owned registrar executable through your authenticated management workflow. It takes the public JSON body for `POST /api/v1/secret-provider-refs` on stdin and returns the Controller response on stdout. The node caches the returned reference for subsequent retries.
+
+```sh
+[ "$RENEWED_LINEAGE" = /etc/letsencrypt/live/vpn.example.com ] || exit 0
+exec /usr/local/lib/ocservia/rotate-config-tls.py "$NODE_UUID" vpn.example.com 443 \
+  --registrar /usr/local/libexec/register-ocserv-tls
+```
+
+Supply `--client-ca /absolute/path/to/ca.pem` if the running profile has a client CA.
+The helper checks the renewed chain and hostname against system trust, publishes the
+bundle, locks the active configuration, validates it with ocserv, restarts the service,
+and checks the served leaf on loopback with SNI. A restart or handshake failure restores
+the previous configuration, restarts ocserv and checks the previous fingerprint.
+Schedule this hook where a restart is acceptable. After success, update the desired
+template to the returned reference and version before resuming automated plans.
+For a private listener, the node must accept the verification connection on loopback.
+A site without automated Controller reference registration can invoke the same
+helper with `--reference REFERENCE_UUID` after an administrator registers the public metadata.
 
 ## Upgrade and rollback
 
