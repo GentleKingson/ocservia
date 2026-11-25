@@ -460,7 +460,11 @@ jobs:
           retention-days: 7
 
   quick:
-    name: Shared-domain Quick Install (Pebble ACME, amd64)
+    name: Shared-domain Quick Install (${{ matrix.scenario }}, Pebble ACME, amd64)
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [lifecycle, renewal]
     needs: [agent-amd64, controller-amd64, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -492,15 +496,16 @@ jobs:
         run: |
           source scripts/env.sh
           cargo build --locked --manifest-path rust/Cargo.toml --package ocservia-relay-network-probe
-      - name: Verify shared-domain lifecycle, Agent and certificate renewal
+      - name: Verify shared-domain ${{ matrix.scenario }}
         env:
+          SCENARIO: ${{ matrix.scenario }}
           IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
           PRODUCTS_DIR: ${{ runner.temp }}/quick-agent-packages
           RELAY_NETWORK_PROBE: ${{ github.workspace }}/rust/target/debug/ocservia-relay-network-probe
           CONTROLLER_ARCH: amd64
         run: |
           sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR,PRODUCTS_DIR,RELAY_NETWORK_PROBE \
-            bash scripts/release-quick-acceptance.sh
+            bash scripts/release-quick-acceptance.sh "$SCENARIO"
 
   result:
     name: Release Check Result

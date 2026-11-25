@@ -81,7 +81,7 @@ classify_path() {
     scripts/lint.sh) tools_suite source-style; tools_suite contracts ;;
     scripts/format.sh) run_go=true; run_rust=true; run_web=true; tools_suite contracts ;;
 
-    scripts/release_business_runtime.py|scripts/release_business_scenarios.py)
+    scripts/release_business_runtime.py|scripts/release_business_scenarios.py|scripts/test-release-signer-window.py)
       tools_suite release; run_installers=true ;;
 
     # Release, build-cache, secret-scan and manual acceptance contract suites.

@@ -986,7 +986,15 @@ artifact ID, source, version, architecture, inventory and file digests. The
 final gate waits for these jobs and records the artifacts and upstream results
 in a single qualification record.
 
-Quick Install uses the same candidate's Agent package and Controller images. It checks
+Business Smoke reads the Signer client certificate lifetime from the rendered candidate
+Compose configuration. It generates a test issuer and root with enough remaining
+validity for issuance and checks both certificates before installing the Controller.
+
+Quick Install runs two isolated Pebble instances on separate runners. The lifecycle
+job uses a day-long certificate and checks the ACME volume, account and leaf across
+repeat install, upgrade and rollback. The renewal job uses 15-minute certificates
+and captures the served leaf after the Agent reload, immediately before waiting
+for rotation. Both jobs consume the same candidate artifacts. The renewal job checks
 the default shared hostname, verifies the node's execution receipts after a reload
 over Relay, and waits for Gateway to obtain a new certificate from Pebble. After a
 controlled Relay restart, the probe verifies the CA and hostname on UDP 7842 and

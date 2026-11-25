@@ -4,8 +4,10 @@ import base64
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import ssl
@@ -46,14 +48,36 @@ def _signer_health():
     raise RuntimeError('production Signer did not become healthy')
 
 
-def signer_prepare():
-    work = environment().work
+def signer_ttl_seconds(duration):
+    # The candidate uses Go time.ParseDuration, including compound and fractional units.
+    units = {'h': 3600, 'm': 60, 's': 1, 'ms': 1e-3, 'us': 1e-6,
+             'µs': 1e-6, 'μs': 1e-6, 'ns': 1e-9}
+    parts = re.findall(r'(\d+(?:\.\d*)?|\.\d+)(ms|us|µs|μs|ns|h|m|s)', duration)
+    if not parts or ''.join(n + unit for n, unit in parts) != duration.removeprefix('+'):
+        raise ValueError(f'Invalid candidate Signer certificate duration: {duration}')
+    return math.ceil(sum(float(n) * units[unit] for n, unit in parts))
+
+
+def verify_signer_window(work, ttl_seconds):
+    root = work / 'signer-root.pem'
+    issuer = work / 'issuer.pem'
+    now = int(time.time())
+    for cert in (root, issuer):
+        print(cert.name, run('openssl', 'x509', '-in', str(cert), '-noout', '-dates').strip(), flush=True)
+        for instant in (now, now + ttl_seconds):
+            verified = subprocess.run(['openssl', 'verify', '-attime', str(instant), '-CAfile',
+                                       str(root), str(cert)], capture_output=True)
+            if verified.returncode:
+                raise RuntimeError(f'{cert.name} does not cover the {ttl_seconds}s Signer issuance window: '
+                                   f'{verified.stderr.decode().strip()}')
+
+
+def prepare_signer_authority(work, duration):
     private = work / 'private'
-    state = _signer_state()
-    state.mkdir(mode=0o700)
-    for folder in ('secrets', 'input', 'data'):
-        run('sudo', 'install', '-d', '-o', '65532', '-g', '65532', '-m', '700', str(state / folder))
-    run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '7',
+    ttl = signer_ttl_seconds(duration)
+    issuer_days = math.ceil(ttl / 86400) + 1  # allow a full day for setup and execution
+    print(f'Candidate Signer certificate lifetime: {duration}', flush=True)
+    run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', str(issuer_days + 1),
         '-subj', '/CN=signer-offline-root', '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:1',
         '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
         '-keyout', str(private / 'signer-root.key'), '-out', str(work / 'signer-root.pem'))
@@ -62,11 +86,22 @@ def signer_prepare():
     (work / 'issuer.ext').write_text('basicConstraints=critical,CA:TRUE,pathlen:0\n'
                                      'keyUsage=critical,keyCertSign,cRLSign\n'
                                      'subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n')
-    run('openssl', 'x509', '-req', '-in', str(work / 'issuer.csr'), '-days', '3',
+    run('openssl', 'x509', '-req', '-in', str(work / 'issuer.csr'), '-days', str(issuer_days),
         '-CA', str(work / 'signer-root.pem'), '-CAkey', str(private / 'signer-root.key'),
         '-set_serial', '2', '-extfile', str(work / 'issuer.ext'), '-out', str(work / 'issuer.pem'))
+    verify_signer_window(work, ttl)
     (work / 'issuer-chain.pem').write_bytes((work / 'issuer.pem').read_bytes() +
                                             (work / 'signer-root.pem').read_bytes())
+
+
+def signer_prepare(duration):
+    work = environment().work
+    private = work / 'private'
+    state = _signer_state()
+    state.mkdir(mode=0o700)
+    for folder in ('secrets', 'input', 'data'):
+        run('sudo', 'install', '-d', '-o', '65532', '-g', '65532', '-m', '700', str(state / folder))
+    prepare_signer_authority(work, duration)
     run('openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=signer',
         '-keyout', str(private / 'signer-tls.key'), '-out', str(work / 'signer-tls.csr'))
     (work / 'signer-tls.ext').write_text('subjectAltName=DNS:signer\nextendedKeyUsage=serverAuth\n')
@@ -698,4 +733,4 @@ if __name__ == '__main__':
     phase = sys.argv[1] if len(sys.argv) > 1 else ''
     if phase not in PHASES:
         raise SystemExit('unknown phase')
-    PHASES[phase]()
+    PHASES[phase](*sys.argv[2:])
