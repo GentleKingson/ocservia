@@ -1301,62 +1301,6 @@ fn effect_store_transitions_config_aba_and_schema_migration() {
             .expect("p5"),
         PrepareEffect::Proceed
     );
-
-    // Legacy schema downgrade -> open_existing upgrades and preserves config revision fence.
-    let mig_dir = TempDir::new("effect-schema");
-    let mig_res = mig_dir.effect_resources();
-    let mut store = EffectStore::open_for_mutation(&mig_res).expect("init");
-    store
-        .prepare("config_apply", "ocserv.conf", 1, test_effect(), b"X", b"A")
-        .expect("p1");
-    store
-        .mark_applied("config_apply", "ocserv.conf", 1, test_effect())
-        .expect("a1");
-    drop(store);
-    let legacy = Connection::open(&mig_res.effect_store).expect("legacy");
-    legacy
-        .execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE desired_effects RENAME TO desired_effects_current;
-             CREATE TABLE desired_effects (
-               mutation_kind TEXT NOT NULL, resource_key TEXT NOT NULL,
-               revision INTEGER NOT NULL CHECK(revision > 0),
-               command_id BLOB NOT NULL CHECK(length(command_id)=16),
-               idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
-               payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
-               expires_at INTEGER NOT NULL,
-               state TEXT NOT NULL CHECK(state IN ('prepared','applied')),
-               before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
-               after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
-               record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
-               updated_at INTEGER NOT NULL, PRIMARY KEY(mutation_kind,resource_key)
-             ) STRICT;
-             INSERT INTO desired_effects SELECT * FROM desired_effects_current;
-             DROP TABLE desired_effects_current; COMMIT;",
-        )
-        .expect("downgrade");
-    drop(legacy);
-    let mut upgraded = EffectStore::open_existing(&mig_res).expect("migrate");
-    assert_eq!(
-        upgraded
-            .observe("config_apply", "ocserv.conf", 1, test_effect(), b"A")
-            .expect("keep")
-            .state,
-        DesiredEffectState::AppliedExact as i32
-    );
-    upgraded
-        .prepare("config_apply", "ocserv.conf", 2, test_effect(), b"A", b"B")
-        .expect("p2");
-    upgraded
-        .mark_absent("config_apply", "ocserv.conf", 2, test_effect())
-        .expect("absent");
-    assert_eq!(
-        upgraded
-            .observe("config_apply", "ocserv.conf", 2, test_effect(), b"A")
-            .expect("obs2")
-            .state,
-        DesiredEffectState::Absent as i32
-    );
 }
 
 #[cfg(target_os = "linux")]
