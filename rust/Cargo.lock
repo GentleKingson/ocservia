@@ -2390,13 +2390,19 @@ dependencies = [
 name = "ocservia-contracts"
 version = "0.1.0"
 dependencies = [
+ "iroh",
  "ocservia-canonical-cbor",
  "prost",
  "prost-types",
+ "rustix",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "tokio",
  "tonic",
  "tonic-prost",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2531,6 +2537,7 @@ name = "ocservia-transportd-stub"
 version = "0.1.0"
 dependencies = [
  "ocservia-contracts",
+ "ocservia-observability",
  "ocservia-test-support",
  "prost",
  "prost-types",

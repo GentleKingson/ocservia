@@ -1,6 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{ErrorKind, PrivdError, privd_response};
 use ocservia_command_authorization::CommandAuthorizationV1;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
@@ -11,16 +10,15 @@ use ocservia_privd_attestation::{result_payload_cbor_hash, sign_receipt_with_key
 use prost::Message as _;
 use sha2::{Digest as _, Sha256};
 
-#[allow(clippy::too_many_arguments)]
+use crate::PrivdContext;
+
 pub(crate) fn build_result_proof(
+    ctx: &PrivdContext,
     command: &CommandEnvelope,
     claims: &CommandAuthorizationV1,
     accepted_at: &prost_types::Timestamp,
-    node_id: &[u8; 16],
     effect_sequence: u64,
     result: &privd_response::Result,
-    key: &SigningKey,
-    attestation_key_id: &str,
 ) -> Result<PrivilegedResultProof, ()> {
     if effect_sequence == 0 {
         return Err(());
@@ -48,8 +46,8 @@ pub(crate) fn build_result_proof(
     let certificate = certificate_binding(command, result)?;
     let receipt = PrivdResultReceiptV1 {
         receipt_version: 1,
-        node_id: node_id.to_vec(),
-        privd_attestation_key_id: attestation_key_id.to_owned(),
+        node_id: ctx.node_id.to_vec(),
+        privd_attestation_key_id: ctx.attestation_key_id.to_string(),
         command_id: claims.command_id.to_vec(),
         operation_id: claims.operation_id.to_vec(),
         idempotency_key: claims.idempotency_key.to_vec(),
@@ -70,7 +68,7 @@ pub(crate) fn build_result_proof(
         replayed: false,
         certificate,
     };
-    sign_receipt_with_key_id(receipt, key, attestation_key_id).map_err(|_| ())
+    sign_receipt_with_key_id(receipt, &ctx.attestation_key, &ctx.attestation_key_id).map_err(|_| ())
 }
 
 fn exact_result_bytes(result: &privd_response::Result) -> Option<Vec<u8>> {

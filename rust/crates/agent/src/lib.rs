@@ -874,7 +874,10 @@ impl CommandExecutor {
     }
 }
 
-fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
+/// Returns the `(resource_type, resource_key, desired_revision)` tracked in
+/// local desired-state reconciliation for fixed resource mutations.
+#[must_use]
+pub fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &str, u64)> {
     match envelope.payload.as_ref()? {
         command_envelope::Payload::UserCreate(value) => {
             Some(("user", &value.username, value.desired_revision))
@@ -1180,12 +1183,7 @@ fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), Comma
 }
 
 fn validate_name(value: &str) -> Result<(), CommandError> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value.as_bytes().iter().enumerate().all(|(index, byte)| {
-            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
-        })
-    {
+    if !ocservia_contracts::unix::is_valid_resource_name(value) {
         return Err(CommandError::Rejected("name_invalid"));
     }
     Ok(())

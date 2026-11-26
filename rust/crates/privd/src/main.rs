@@ -80,7 +80,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
     tracing::info!(socket = %config.socket.display(), agent_uid = config.agent_uid, "privd serving on AF_UNIX");
-    let result = serve(listener, config.clone(), adapter, shutdown()).await;
+    let result = serve(
+        listener,
+        config.clone(),
+        adapter,
+        ocservia_observability::shutdown_signal(),
+    )
+    .await;
     cleanup_task.abort();
     let cleanup = remove_socket(&config.socket);
     result?;
@@ -134,21 +140,6 @@ fn decode_registration_digest(value: &str) -> io::Result<[u8; 32]> {
         .and_then(|bytes| bytes.try_into().ok())
         .filter(|_| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| invalid("digest must be 32-byte hex"))
-}
-
-async fn shutdown() {
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                let _ = signal.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        () = terminate => {}
-    }
 }
 
 #[allow(clippy::too_many_lines)]

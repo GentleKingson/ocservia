@@ -1,12 +1,9 @@
 use crate::HANDSHAKE_TIMEOUT;
-use crate::session::{SessionGrantAuthority, refresh_fence_epoch_floor};
+use crate::session::{SessionContext, SessionGrantAuthority, refresh_fence_epoch_floor};
 use crate::startup::invalid;
-use ocservia_agent::PrivdClient;
 use ocservia_agent_protocol::{
     ArtifactConsumeRequest, ArtifactReadRequest, privd_request, privd_response,
 };
-use ocservia_command_authorization::ControllerCommandKeyring;
-use ocservia_command_journal::Journal;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     ArtifactConsumeRequest as ArtifactConsumeFinalizeRequest,
     ArtifactConsumeResponse as ArtifactConsumeFinalizeResponse, ArtifactFetchRequest,
@@ -16,17 +13,12 @@ use prost::Message;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_artifact_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     length: u32,
-    node_id: Uuid,
-    command_keys: &ControllerCommandKeyring,
-    privd: &PrivdClient,
+    session: &mut SessionContext<'_>,
     authority: &SessionGrantAuthority,
-    journal: &mut Journal,
-    fence_epoch_floor: &mut u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let length = usize::try_from(length)?;
     if length == 0 || length > 64 * 1024 {
@@ -50,21 +42,25 @@ pub(super) async fn handle_artifact_stream(
     {
         return Err(invalid("artifact request invalid").into());
     }
-    refresh_fence_epoch_floor(journal, fence_epoch_floor)?;
-    if authority.session_epoch != *fence_epoch_floor {
+    refresh_fence_epoch_floor(
+        session.command_executor.journal_mut(),
+        session.fence_epoch_floor,
+    )?;
+    if authority.session_epoch != *session.fence_epoch_floor {
         return Err(invalid("artifact fetch from stale session epoch rejected").into());
     }
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let now_unix_seconds = i64::try_from(now.as_secs())?;
-    command_keys.verify_artifact_grant(
+    session.command_keys.verify_artifact_grant(
         grant,
-        node_id.as_bytes(),
+        session.node_id.as_bytes(),
         artifact.as_bytes(),
         &request.purpose,
         request.max_bytes,
         now_unix_seconds,
     )?;
-    let response = privd
+    let response = session
+        .privd
         .call_with_session(
             privd_request::Operation::ArtifactRead(ArtifactReadRequest {
                 grant: Some(grant.clone()),
@@ -107,17 +103,12 @@ pub(super) async fn handle_artifact_stream(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_artifact_consume(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     length: u32,
-    node_id: Uuid,
-    command_keys: &ControllerCommandKeyring,
-    privd: &PrivdClient,
+    session: &mut SessionContext<'_>,
     authority: &SessionGrantAuthority,
-    journal: &mut Journal,
-    fence_epoch_floor: &mut u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let length = usize::try_from(length)?;
     if length == 0 || length > 64 * 1024 {
@@ -145,32 +136,38 @@ pub(super) async fn handle_artifact_consume(
     {
         return Err(invalid("artifact finalize request invalid").into());
     }
-    refresh_fence_epoch_floor(journal, fence_epoch_floor)?;
-    if authority.session_epoch != *fence_epoch_floor {
+    refresh_fence_epoch_floor(
+        session.command_executor.journal_mut(),
+        session.fence_epoch_floor,
+    )?;
+    if authority.session_epoch != *session.fence_epoch_floor {
         return Err(invalid("artifact consume from stale session epoch rejected").into());
     }
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let now_unix_seconds = i64::try_from(now.as_secs())?;
     if request.confirm_only {
-        command_keys.verify_artifact_grant_for_confirmation(
-            grant,
-            node_id.as_bytes(),
-            artifact.as_bytes(),
-            "certificate_p12",
-            request.size,
-            now_unix_seconds,
-        )?;
+        session
+            .command_keys
+            .verify_artifact_grant_for_confirmation(
+                grant,
+                session.node_id.as_bytes(),
+                artifact.as_bytes(),
+                "certificate_p12",
+                request.size,
+                now_unix_seconds,
+            )?;
     } else {
-        command_keys.verify_artifact_grant(
+        session.command_keys.verify_artifact_grant(
             grant,
-            node_id.as_bytes(),
+            session.node_id.as_bytes(),
             artifact.as_bytes(),
             "certificate_p12",
             request.size,
             now_unix_seconds,
         )?;
     }
-    let response = privd
+    let response = session
+        .privd
         .call_with_session(
             privd_request::Operation::ArtifactConsume(ArtifactConsumeRequest {
                 grant: Some(grant.clone()),

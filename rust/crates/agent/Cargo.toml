@@ -13,7 +13,7 @@ hex.workspace = true
 ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol", features = ["identity"] }
 ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization" }
 ocservia-command-journal = { version = "=0.1.0", path = "../command-journal" }
-ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
+ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false, features = ["relay"] }
 ocservia-observability = { version = "=0.1.0", path = "../observability" }
 prost.workspace = true
 prost-types.workspace = true

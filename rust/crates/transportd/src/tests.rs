@@ -904,7 +904,7 @@ fn handshake_command_receipt_queue_and_artifact_deadline_invariants() {
             negotiated_capabilities: vec!["ocserv.status.read".into()],
             session_grant: None,
         };
-        assert!(validate_negotiated_session(&hs, key.public(), &resp).is_err());
+        assert!(validate_negotiated_session(&hs, &resp).is_err());
     }
 
     // Queue bounds, permit isolation, traceparent, and artifact grant deadlines.

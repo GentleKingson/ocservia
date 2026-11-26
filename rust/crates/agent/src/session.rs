@@ -1,5 +1,5 @@
 use crate::commands::handle_command_stream;
-use crate::startup::{invalid, system_dns_resolver, with_relay_tls_roots};
+use crate::startup::invalid;
 use crate::telemetry::{build_telemetry, send_telemetry};
 use crate::{AGENT_ALPN, HANDSHAKE_TIMEOUT};
 use iroh::endpoint::{QuicTransportConfig, RelayMode, presets};
@@ -12,6 +12,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     HandshakeResult, SealingKeyDescriptorV1, SessionGrantV1, SessionHandshake,
     SessionHandshakeResponse,
 };
+use ocservia_contracts::relay::{system_dns_resolver, with_relay_tls_roots};
 use ocservia_contracts::session::READ_ONLY_SESSION_CAPABILITIES;
 use prost::Message;
 use std::collections::HashSet;
@@ -161,27 +162,8 @@ async fn connect_once(
         nonce: Uuid::now_v7().as_bytes().to_vec(),
         sealing_keys: session.sealing_keys.to_vec(),
     };
-    let bytes = handshake.encode_to_vec();
-    let response = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        let (mut send, mut recv) = connection.open_bi().await?;
-        let length = u32::try_from(bytes.len()).map_err(|_| invalid("handshake too large"))?;
-        send.write_all(&length.to_be_bytes()).await?;
-        send.write_all(&bytes).await?;
-        send.finish()?;
-        let mut response_length = [0_u8; 4];
-        recv.read_exact(&mut response_length).await?;
-        let response_length = u32::from_be_bytes(response_length) as usize;
-        if response_length == 0 || response_length > 64 * 1024 {
-            return Err::<_, Box<dyn std::error::Error + Send + Sync>>(
-                invalid("handshake response size invalid").into(),
-            );
-        }
-        let mut response = vec![0_u8; response_length];
-        recv.read_exact(&mut response).await?;
-        Ok(SessionHandshakeResponse::decode(response.as_slice())?)
-    })
-    .await
-    .map_err(|_| invalid("handshake timed out"))??;
+    let response: SessionHandshakeResponse =
+        exchange_message(&connection, &handshake, "handshake").await?;
     if response.result != i32::from(HandshakeResult::Accepted) {
         return Err(invalid("controller refused agent handshake").into());
     }
@@ -429,9 +411,6 @@ pub(super) fn negotiate_session_mode_at_instant(
         endpoint_id.as_bytes(),
         now_unix_seconds,
     )?;
-    if negotiated_capabilities != response.negotiated_capabilities {
-        return Err(invalid("verified session capabilities do not match response").into());
-    }
     Ok(SessionGrantAuthority {
         raw_grant: grant.clone(),
         negotiated_capabilities: negotiated_capabilities.into_iter().collect(),

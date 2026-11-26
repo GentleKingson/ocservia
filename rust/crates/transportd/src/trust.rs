@@ -117,13 +117,29 @@ impl TrustBudgetConfig {
         class: TrustClass,
         limit: TrustClassLimit,
     ) -> Result<Self, &'static str> {
+        self.update_limit(class, |entry| *entry = limit)?;
+        Ok(self)
+    }
+
+    /// Updates one class limit in place after validating the complete safe range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either limit is outside the enforced safe range.
+    pub fn update_limit(
+        &mut self,
+        class: TrustClass,
+        update: impl FnOnce(&mut TrustClassLimit),
+    ) -> Result<(), &'static str> {
+        let mut limit = self.limits[class.index()];
+        update(&mut limit);
         if !(1..=10_000).contains(&limit.attempts_per_minute)
             || !(1..=512).contains(&limit.concurrency)
         {
             return Err("trust class limits are outside the safe range");
         }
         self.limits[class.index()] = limit;
-        Ok(self)
+        Ok(())
     }
 }
 

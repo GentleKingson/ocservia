@@ -287,6 +287,8 @@ impl Journal {
     }
 
     /// Moves a command to a new state and durably stores its bounded result.
+    /// Transitions a command between persisted states while holding the `SQLite`
+    /// `idempotency_key`+`state` guard.
     ///
     /// # Errors
     ///
@@ -300,32 +302,7 @@ impl Journal {
         error_code: Option<&str>,
         now: i64,
     ) -> Result<CommandRecord, rusqlite::Error> {
-        if from.is_empty()
-            || result.is_some_and(|value| value.len() > 1024 * 1024)
-            || error_code.is_some_and(|value| value.is_empty() || value.len() > 128)
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let current = self
-            .command(idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if !from.contains(&current.state) {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        self.connection
-            .prepare_cached(
-                "UPDATE command_journal SET state=?2,result=?3,error_code=?4,updated_at=?5 WHERE idempotency_key=?1 AND state=?6",
-            )?
-            .execute(rusqlite::params![
-                idempotency_key.as_slice(),
-                to.as_str(),
-                result,
-                error_code,
-                now,
-                current.state.as_str()
-            ])?;
-        self.command(idempotency_key)?
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+        self.transition_command_inner(idempotency_key, from, to, result, error_code, None, now)
     }
 
     /// Atomically persists a terminal result together with the exact privd proof.
@@ -344,12 +321,37 @@ impl Journal {
         proof: &[u8],
         now: i64,
     ) -> Result<CommandRecord, rusqlite::Error> {
-        if from.is_empty()
-            || !matches!(to, CommandState::Succeeded | CommandState::Failed)
-            || result.is_some_and(|value| value.len() > 1024 * 1024)
-            || error_code.is_some_and(|value| value.is_empty() || value.len() > 128)
+        if !matches!(to, CommandState::Succeeded | CommandState::Failed)
             || proof.is_empty()
             || proof.len() > 65_536
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.transition_command_inner(
+            idempotency_key,
+            from,
+            to,
+            result,
+            error_code,
+            Some(proof),
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transition_command_inner(
+        &self,
+        idempotency_key: &[u8; 16],
+        from: &[CommandState],
+        to: CommandState,
+        result: Option<&[u8]>,
+        error_code: Option<&str>,
+        proof: Option<&[u8]>,
+        now: i64,
+    ) -> Result<CommandRecord, rusqlite::Error> {
+        if from.is_empty()
+            || result.is_some_and(|value| value.len() > 1024 * 1024)
+            || error_code.is_some_and(|value| value.is_empty() || value.len() > 128)
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -359,19 +361,34 @@ impl Journal {
         if !from.contains(&current.state) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.connection
-            .prepare_cached(
-                "UPDATE command_journal SET state=?2,result=?3,error_code=?4,privileged_result_proof=?5,updated_at=?6 WHERE idempotency_key=?1 AND state=?7",
-            )?
-            .execute(rusqlite::params![
-                idempotency_key.as_slice(),
-                to.as_str(),
-                result,
-                error_code,
-                proof,
-                now,
-                current.state.as_str()
-            ])?;
+        if let Some(proof) = proof {
+            self.connection
+                .prepare_cached(
+                    "UPDATE command_journal SET state=?2,result=?3,error_code=?4,privileged_result_proof=?5,updated_at=?6 WHERE idempotency_key=?1 AND state=?7",
+                )?
+                .execute(rusqlite::params![
+                    idempotency_key.as_slice(),
+                    to.as_str(),
+                    result,
+                    error_code,
+                    proof,
+                    now,
+                    current.state.as_str()
+                ])?;
+        } else {
+            self.connection
+                .prepare_cached(
+                    "UPDATE command_journal SET state=?2,result=?3,error_code=?4,updated_at=?5 WHERE idempotency_key=?1 AND state=?6",
+                )?
+                .execute(rusqlite::params![
+                    idempotency_key.as_slice(),
+                    to.as_str(),
+                    result,
+                    error_code,
+                    now,
+                    current.state.as_str()
+                ])?;
+        }
         self.command(idempotency_key)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
@@ -729,6 +746,21 @@ fn has_column(connection: &Connection, column: &str) -> Result<bool, rusqlite::E
     Ok(names.iter().any(|name| name == column))
 }
 
+fn decode_command_row(row: &rusqlite::Row<'_>) -> Result<CommandRecord, rusqlite::Error> {
+    Ok(CommandRecord {
+        idempotency_key: fixed_blob::<16>(row.get(0)?)?,
+        command_id: fixed_blob::<16>(row.get(1)?)?,
+        payload_sha256: fixed_blob::<32>(row.get(2)?)?,
+        payload_hash_version: row.get(3)?,
+        state: CommandState::parse(&row.get::<_, String>(4)?)?,
+        result: row.get(5)?,
+        error_code: row.get(6)?,
+        privileged_result_proof: row.get(7)?,
+        accepted_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
 fn query_command(
     connection: &Connection,
     idempotency_key: &[u8; 16],
@@ -740,21 +772,7 @@ fn query_command(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    let key = fixed_blob::<16>(row.get(0)?)?;
-    let command_id = fixed_blob::<16>(row.get(1)?)?;
-    let payload_sha256 = fixed_blob::<32>(row.get(2)?)?;
-    Ok(Some(CommandRecord {
-        idempotency_key: key,
-        command_id,
-        payload_sha256,
-        payload_hash_version: row.get(3)?,
-        state: CommandState::parse(&row.get::<_, String>(4)?)?,
-        result: row.get(5)?,
-        error_code: row.get(6)?,
-        privileged_result_proof: row.get(7)?,
-        accepted_at: row.get(8)?,
-        updated_at: row.get(9)?,
-    }))
+    decode_command_row(row).map(Some)
 }
 
 fn query_command_by_id(
@@ -768,18 +786,7 @@ fn query_command_by_id(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    Ok(Some(CommandRecord {
-        idempotency_key: fixed_blob::<16>(row.get(0)?)?,
-        command_id: fixed_blob::<16>(row.get(1)?)?,
-        payload_sha256: fixed_blob::<32>(row.get(2)?)?,
-        payload_hash_version: row.get(3)?,
-        state: CommandState::parse(&row.get::<_, String>(4)?)?,
-        result: row.get(5)?,
-        error_code: row.get(6)?,
-        privileged_result_proof: row.get(7)?,
-        accepted_at: row.get(8)?,
-        updated_at: row.get(9)?,
-    }))
+    decode_command_row(row).map(Some)
 }
 
 fn query_effect(

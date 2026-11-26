@@ -831,15 +831,44 @@ impl Adapter {
             stderr: stderr.bytes,
         })
     }
+
+    pub(crate) async fn decrypt_sealed_password(
+        &self,
+        key_path: &Path,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
+        let key = key_path.to_str().ok_or(AdapterError::InvalidResource)?;
+        let output = self
+            .execute_with_input(
+                &self.resources.openssl,
+                &[
+                    "pkeyutl",
+                    "-decrypt",
+                    "-inkey",
+                    key,
+                    "-pkeyopt",
+                    "rsa_padding_mode:oaep",
+                    "-pkeyopt",
+                    "rsa_oaep_md:sha256",
+                ],
+                ciphertext,
+            )
+            .await?;
+        let password = Zeroizing::new(output.stdout);
+        if password.is_empty()
+            || password.len() > 1024
+            || password
+                .iter()
+                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+        {
+            return Err(AdapterError::MalformedOutput);
+        }
+        Ok(password)
+    }
 }
 
 fn validate_name(value: &str) -> Result<(), AdapterError> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
-        })
-    {
+    if !ocservia_contracts::unix::is_valid_resource_name(value) {
         return Err(AdapterError::InvalidRequest);
     }
     Ok(())
