@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-	backend := flag.String("backend", "postgres", "legacy compatibility flag; only postgres is supported")
 	dsnFile := flag.String("database-url-file", "", "protected Controller database credential file")
 	ca := flag.String("database-ca-file", "", "database trust CA")
 	bundled := flag.Bool("bundled-postgres", false, "the URL targets the bundled PostgreSQL service")
@@ -24,9 +23,6 @@ func main() {
 	endpoint := flag.String("endpoint", "", "expected endpoint hex identity")
 	flag.Parse()
 	fail := func() { fmt.Fprintln(os.Stderr, "sealing binding export rejected"); os.Exit(1) }
-	if *backend != "postgres" {
-		fail()
-	}
 	dsn, err := readCredentialFile(*dsnFile)
 	if err != nil {
 		fail()

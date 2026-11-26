@@ -51,12 +51,12 @@ func nullableBytes(raw []byte) any {
 }
 
 func (s auditStore) Append(ctx context.Context, v auditstore.EventRow) error {
-	_, err := s.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,source_session_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,approval_id,result,reason,before_summary,after_summary,error_type,previous_event_hash,event_hash,auth_version,event_key_id,event_mac) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
-		v.ID, v.WorkspaceID, v.At, v.ActorType, v.ActorID, v.SessionID, v.Action, v.ResourceType, nullableUUID(v.ResourceID), v.NodeID, v.RequestID, nullableText(v.TraceID), v.CommandID, v.ApprovalID, v.Result, nullableText(v.Reason), nullableBytes(v.BeforeSummary), nullableBytes(v.AfterSummary), nullableText(v.ErrorType), v.PreviousHash, v.EventHash, v.AuthVersion, v.EventKeyID, v.EventMAC)
+	_, err := s.Exec(ctx, `INSERT INTO audit_events (id,workspace_id,occurred_at,actor_type,actor_id,source_session_id,action,resource_type,resource_id,node_id,request_id,trace_id,command_id,result,reason,before_summary,after_summary,error_type,previous_event_hash,event_hash,auth_version,event_key_id,event_mac) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+		v.ID, v.WorkspaceID, v.At, v.ActorType, v.ActorID, v.SessionID, v.Action, v.ResourceType, nullableUUID(v.ResourceID), v.NodeID, v.RequestID, nullableText(v.TraceID), v.CommandID, v.Result, nullableText(v.Reason), nullableBytes(v.BeforeSummary), nullableBytes(v.AfterSummary), nullableText(v.ErrorType), v.PreviousHash, v.EventHash, v.AuthVersion, v.EventKeyID, v.EventMAC)
 	return err
 }
 
-const auditEventColumns = `id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac`
+const auditEventColumns = `id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac`
 
 func scanAuditEventRow(r Rows, workspace uuid.UUID, includeWorkspace bool) (v auditstore.EventRow, err error) {
 	v.WorkspaceID = workspace
@@ -64,7 +64,7 @@ func scanAuditEventRow(r Rows, workspace uuid.UUID, includeWorkspace bool) (v au
 	fields := []any{
 		&v.ID, &v.At, &v.ActorType, &v.ActorID, &v.Action,
 		&v.ResourceType, &resourceID, &v.RequestID, &v.TraceID, &v.Result,
-		&v.Reason, &v.SessionID, &v.NodeID, &v.CommandID, &v.ApprovalID,
+		&v.Reason, &v.SessionID, &v.NodeID, &v.CommandID,
 		&v.BeforeSummary, &v.AfterSummary, &v.ErrorType, &v.PreviousHash, &v.EventHash, &v.AuthVersion,
 		&v.EventKeyID, &v.EventMAC, &v.CompactedAt, &v.CompactionKeyID, &v.CompactionMAC,
 	}
