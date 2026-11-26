@@ -42,22 +42,16 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	row := func(query string, args ...any) postgres.Row {
 		return b.QueryRow(ctx, query, args...)
 	}
-	workspace, node, requester, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	workspace, node := uuid.New(), uuid.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	at, expires := now, now.Add(time.Hour)
+	at := now
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'policies',$2,now(),now())`, workspace, workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'policies','active',now(),now())`, node, workspace)
 	exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.users.write',true)`, node)
 	if _, err := testfixture.InstallKeyBackend(ctx, b, node); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []uuid.UUID{requester} {
-		exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'user-operations',$2,$3,$4)`, id, id.String(), at, at)
-		exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,$3)`, workspace, id, at)
-	}
-	for _, pair := range [][2]uuid.UUID{{session, requester}} {
-		exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, pair[0], pair[1], expires, at)
-	}
+	requester, session := testfixture.InsertWorkspaceAdminSession(t, ctx, b.Pool(), workspace, "user-operations")
 	for _, name := range []string{"alice", "bob", "charlie", "dave", "expired"} {
 		exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,$2,true,1,1,$3,$4)`, node, name, at, at)
 	}
