@@ -230,17 +230,6 @@ impl TrustBudgetSet {
             _permit: permit,
         })
     }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot(&self, class: TrustClass) -> TrustMetricsSnapshot {
-        let budget = &self.classes[class.index()];
-        TrustMetricsSnapshot {
-            accepted: budget.accepted.load(Ordering::Relaxed),
-            rate_rejected: budget.rate_rejected.load(Ordering::Relaxed),
-            capacity_rejected: budget.capacity_rejected.load(Ordering::Relaxed),
-            in_flight: budget.in_flight.load(Ordering::Relaxed),
-        }
-    }
 }
 
 pub(crate) struct TrustBudgetPermit {
@@ -255,20 +244,6 @@ impl Drop for TrustBudgetPermit {
             .in_flight
             .fetch_sub(1, Ordering::Relaxed);
     }
-}
-
-/// Bounded counters backing trust metrics. No `EndpointID` is recorded.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TrustMetricsSnapshot {
-    /// Accepted attempts.
-    pub accepted: u64,
-    /// Rolling-window refusals.
-    pub rate_rejected: u64,
-    /// Concurrency refusals.
-    pub capacity_rejected: u64,
-    /// Currently retained permits.
-    pub in_flight: u64,
 }
 
 /// A bounded, transport-only identity policy supplied at process startup.
@@ -386,44 +361,6 @@ impl IdentityPolicy {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .revoked
             .contains_key(&endpoint)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn revision(&self, endpoint: EndpointId) -> u64 {
-        self.state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .revisions
-            .get(&endpoint)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained_state(&self, endpoint: EndpointId) -> NodeTrustState {
-        let identities = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if identities.revoked.contains_key(&endpoint) {
-            NodeTrustState::Revoked
-        } else if identities.approved.contains_key(&endpoint) {
-            NodeTrustState::Active
-        } else {
-            NodeTrustState::Unspecified
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn update(
-        &self,
-        endpoint: EndpointId,
-        node_id: Vec<u8>,
-        state: NodeTrustState,
-        revision: u64,
-    ) -> PolicyUpdateDisposition {
-        self.update_with_status(endpoint, node_id, state, revision)
-            .0
     }
 
     /// Atomically applies one trust-policy update and returns
@@ -563,13 +500,6 @@ impl TrustAuthority {
             client: TrustServiceClient::new(channel),
             budgets: Arc::new(TrustBudgetSet::new(config)),
         }
-    }
-
-    /// Returns a bounded metric snapshot for one fixed class label.
-    #[cfg(test)]
-    #[must_use]
-    pub fn metrics(&self, class: TrustClass) -> TrustMetricsSnapshot {
-        self.budgets.snapshot(class)
     }
 
     pub(crate) async fn load_snapshot(&self, policy: &IdentityPolicy) -> Result<(), AcceptError> {

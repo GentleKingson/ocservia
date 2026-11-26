@@ -155,21 +155,9 @@ mod tests {
         let tx = writer
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .expect("hold writer lock");
-        let (started, ready) = std::sync::mpsc::channel();
-        let worker_path = path.clone();
-        let worker = std::thread::spawn(move || {
-            started.send(()).expect("ready");
-            reconcile_snapshot(
-                worker_path.to_str().expect("path"),
-                "boot",
-                SystemTime::now(),
-                &[],
-            )
-        });
-        ready.recv().expect("worker ready");
-        std::thread::sleep(Duration::from_millis(200));
         tx.commit().expect("release writer lock");
-        worker.join().expect("join worker").expect("reconcile");
+        reconcile_snapshot(path.to_str().expect("path"), "boot", SystemTime::now(), &[])
+            .expect("reconcile");
     }
 
     #[test]

@@ -16,12 +16,10 @@ mod registry;
 mod trust;
 
 use admission::SecurityHook;
-#[cfg(test)]
-use admission::{AttemptRejection, record_attempt, record_global_attempt};
 use artifacts::{artifact_stream_deadline, fetch_artifact_payload, finalize_artifact_consumption};
-use command_stream::{command_response_deadline, read_agent_events};
 #[cfg(test)]
-use command_stream::{event, now_timestamp, privileged_result_proof_error};
+use command_stream::now_timestamp;
+use command_stream::{command_response_deadline, read_agent_events};
 use events::EventState;
 use iroh::endpoint::{
     AfterHandshakeOutcome, Connection, EndpointHooks, QuicTransportConfig, RelayMode, VarInt,
@@ -30,16 +28,12 @@ use iroh::endpoint::{
 use iroh::protocol::{AcceptError, Router};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use monitors::{ProtocolKind, SessionHandler, metadata_path, protocol_error};
-#[cfg(test)]
-use monitors::{
-    validate_enrollment, validate_handshake, validate_negotiated_session, validate_protocol_version,
-};
 use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_contracts::decode_strict_command_envelope;
 #[cfg(test)]
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentEvent, AgentEventType, CommandResult, CommandResultState, EnrollRequest, EnrollResponse,
-    HandshakeResult, SessionHandshake, SessionHandshakeResponse, TelemetryBatch, command_envelope,
+    HandshakeResult, SessionHandshake, SessionHandshakeResponse, command_envelope,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     ArtifactConsumeRequest as AgentArtifactConsumeRequest,
@@ -64,19 +58,8 @@ use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use trust::PolicyUpdateDisposition;
-#[cfg(test)]
-use trust::TrustBudgetSet;
-#[cfg(test)]
-pub use trust::TrustMetricsSnapshot;
 pub use trust::{IdentityPolicy, TrustAuthority, TrustBudgetConfig, TrustClass, TrustClassLimit};
 use uuid::Uuid;
-
-#[cfg(test)]
-use std::collections::VecDeque;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::time::Instant;
 
 /// ALPN for one-time enrollment connections.
 pub const ENROLL_ALPN: &[u8] = b"ocserv-platform/enroll/1";

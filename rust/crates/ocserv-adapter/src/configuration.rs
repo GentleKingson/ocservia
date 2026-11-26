@@ -51,26 +51,6 @@ impl Adapter {
         .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn apply_validated_config_without_preflight(
-        &self,
-        candidate: &[u8],
-        candidate_hash: &[u8],
-        expected_current_hash: &[u8],
-        desired_revision: u64,
-        effect: EffectIdentity<'_>,
-    ) -> Result<ConfigApplyResult, AdapterError> {
-        self.apply_validated_config_inner(
-            candidate,
-            candidate_hash,
-            expected_current_hash,
-            desired_revision,
-            effect,
-            false,
-        )
-        .await
-    }
-
     async fn apply_validated_config_inner(
         &self,
         candidate: &[u8],

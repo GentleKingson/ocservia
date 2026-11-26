@@ -212,15 +212,15 @@ mod output_tests {
 mod runtime_stats_tests {
     use super::spawn_runtime_stats_writer;
     use ocservia_test_support::PrivateTempDir;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn runtime_stats_writer_publishes_live_task_counts() {
         let dir = PrivateTempDir::new("obs");
         let path = dir.join("runtime-stats.json");
+        let bg = tokio::spawn(std::future::pending::<()>());
         spawn_runtime_stats_writer(path.clone()).expect("writer starts");
-        tokio::time::sleep(Duration::from_millis(2500)).await;
         let body = std::fs::read_to_string(&path).expect("stats written");
+        bg.abort();
         let value: serde_json::Value = serde_json::from_str(body.trim()).expect("stats json");
         assert!(value["at"].as_u64().is_some_and(|at| at > 0));
         assert!(

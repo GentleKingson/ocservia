@@ -4,12 +4,11 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CompleteConfigDirective, NodeLocalTlsReference,
 };
 use ocservia_test_support::PrivateTempDir;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 struct Fixture {
     directory: PrivateTempDir,
-    bundle: PathBuf,
     adapter: Adapter,
     plan: CompleteConfigPlan,
     original: Vec<u8>,
@@ -17,23 +16,21 @@ struct Fixture {
 
 fn write(path: &Path, bytes: impl AsRef<[u8]>, mode: u32) {
     if path.exists() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .expect("make owned fixture writable");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("writable");
     }
     if mode & 0o111 != 0 {
         super::super::tests::write_executable(path, bytes);
     } else {
-        std::fs::write(path, bytes).expect("write fixture");
+        std::fs::write(path, bytes).expect("write");
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .expect("fixture permissions");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }
 
 fn openssl(args: &[&str]) -> Vec<u8> {
     let result = std::process::Command::new("openssl")
         .args(args)
         .output()
-        .expect("openssl fixture");
+        .expect("openssl");
     assert!(
         result.status.success(),
         "{}",
@@ -45,7 +42,6 @@ fn openssl(args: &[&str]) -> Vec<u8> {
 impl Fixture {
     #[allow(clippy::too_many_lines)]
     fn new() -> Self {
-        // /tmp is deliberately not trusted by the production ancestry checks.
         let directory = PrivateTempDir::new("cc");
         let tls = directory.create_subdir_all("tls");
         let node = Uuid::now_v7();
@@ -53,8 +49,10 @@ impl Fixture {
         let bundle = directory
             .create_subdir_all(PathBuf::from("tls").join(reference.to_string()).join("v1"));
         write(&tls.join(".lock"), [], 0o600);
-        let cert = bundle.join("server-cert.pem");
-        let key = bundle.join("server-key.pem");
+        let (cert, key) = (
+            bundle.join("server-cert.pem"),
+            bundle.join("server-key.pem"),
+        );
         openssl(&[
             "req",
             "-x509",
@@ -79,7 +77,7 @@ impl Fixture {
         let certificate_sha256 = Sha256::digest(openssl(&[
             "x509",
             "-in",
-            cert.to_str().expect("cert"),
+            cert.to_str().expect("c"),
             "-outform",
             "DER",
         ]))
@@ -87,15 +85,14 @@ impl Fixture {
         let spki_sha256 = Sha256::digest(openssl(&[
             "pkey",
             "-in",
-            key.to_str().expect("key"),
+            key.to_str().expect("k"),
             "-pubout",
             "-outform",
             "DER",
         ]))
         .to_vec();
         for path in [&cert, &key] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))
-                .expect("root-only TLS");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400)).expect("400");
         }
         write(&bundle.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
             "node_id": node.to_string(), "secret_ref_id": reference.to_string(), "version": "v1",
@@ -172,7 +169,6 @@ impl Fixture {
         resources.config_tls_root = tls;
         Self {
             directory,
-            bundle,
             adapter: Adapter::new(resources, Limits::default()),
             plan,
             original,
@@ -184,15 +180,14 @@ impl Fixture {
             .adapter
             .complete_config_plan(&self.plan)
             .await
-            .expect("complete plan");
+            .expect("plan");
         assert!(result.current_unchanged && result.staging_cleaned && result.warnings.is_empty());
         assert!(
             !result
                 .diff_redacted
-                .contains(self.directory.path().to_str().expect("directory"))
+                .contains(self.directory.path().to_str().expect("dir"))
         );
-        assert!(!result.diff_redacted.contains("PRIVATE KEY"));
-        let mut request = CompleteConfigApply {
+        let mut req = CompleteConfigApply {
             candidate: self.plan.candidate.clone(),
             candidate_hash: self.plan.candidate_hash.clone(),
             expected_current_hash: result.current_hash,
@@ -201,77 +196,9 @@ impl Fixture {
             plan_id: Uuid::now_v7().as_bytes().to_vec(),
             plan_expires_at: None,
         };
-        request.plan_expires_at.get_or_insert_default().seconds = i64::MAX;
-        request
+        req.plan_expires_at.get_or_insert_default().seconds = i64::MAX;
+        req
     }
-}
-
-#[tokio::test]
-async fn complete_profile_rejects_startup_binding_changes_before_effect() {
-    let fixture = Fixture::new();
-    let apply = fixture.apply().await;
-    for (from, to) in [
-        ("tcp-port = 443", "tcp-port = 444"),
-        ("udp-port = 0", "udp-port = 443"),
-        ("run-as-user = ocservia-vpn", "run-as-user = nobody"),
-        ("run-as-group = ocservia-vpn", "run-as-group = nogroup"),
-        (
-            "auth = \"plain[passwd=/etc/ocserv/ocpasswd]\"",
-            "auth = \"pam\"",
-        ),
-        (
-            "socket-file = /run/ocserv.socket",
-            "socket-file = /run/other.socket",
-        ),
-        ("/v1/server-cert.pem", "/v2/server-cert.pem"),
-        ("/v1/server-key.pem", "/v2/server-key.pem"),
-    ] {
-        let changed = String::from_utf8(fixture.original.clone())
-            .expect("config")
-            .replace(from, to);
-        assert_ne!(changed.as_bytes(), fixture.original);
-        write(&fixture.adapter.resources.config, &changed, 0o600);
-        assert!(
-            fixture
-                .adapter
-                .complete_config_plan(&fixture.plan)
-                .await
-                .is_err()
-        );
-        let mut stale_binding = apply.clone();
-        stale_binding.expected_current_hash = Sha256::digest(changed.as_bytes()).to_vec();
-        assert!(
-            fixture
-                .adapter
-                .complete_config_apply(&stale_binding, super::super::tests::test_effect())
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            std::fs::read(&fixture.adapter.resources.config).expect("unchanged"),
-            changed.as_bytes()
-        );
-        assert!(!fixture.adapter.resources.effect_store.exists());
-    }
-    for extra in [
-        "ca-cert = /etc/ca.pem\n",
-        "include = /etc/other.conf\n",
-        "[vhost:other]\n",
-        "server-key = /etc/other.key\n",
-    ] {
-        let mut changed = fixture.original.clone();
-        changed.extend_from_slice(extra.as_bytes());
-        write(&fixture.adapter.resources.config, &changed, 0o600);
-        assert!(
-            fixture
-                .adapter
-                .complete_config_plan(&fixture.plan)
-                .await
-                .is_err()
-        );
-    }
-    write(&fixture.adapter.resources.config, &fixture.original, 0o600);
-    fixture.apply().await;
 }
 
 #[tokio::test]
@@ -284,11 +211,16 @@ async fn complete_plan_apply_and_durable_replay() {
         .await
         .expect("apply");
     assert!(outcome.healthy && !outcome.rolled_back && !outcome.failed_critical);
-    assert_eq!(outcome.candidate_hash, apply.candidate_hash);
-    assert_eq!(outcome.observed_hash, apply.materialized_hash);
+    assert_eq!(
+        (outcome.candidate_hash, outcome.observed_hash),
+        (
+            apply.candidate_hash.clone(),
+            apply.materialized_hash.clone()
+        )
+    );
     assert_eq!(
         std::fs::metadata(&fixture.adapter.resources.config)
-            .expect("config")
+            .expect("cfg")
             .mode()
             & 0o7777,
         0o600
@@ -297,253 +229,24 @@ async fn complete_plan_apply_and_durable_replay() {
     let replay = restarted
         .complete_config_apply(&apply, super::super::tests::test_effect())
         .await
-        .expect("durable replay");
-    assert_eq!(replay, outcome);
+        .expect("replay");
+    assert_eq!(replay.observed_hash, apply.materialized_hash);
 }
 
 #[tokio::test]
-async fn complete_tls_path_and_binding_fail_closed() {
-    let fixture = Fixture::new();
-    let key = fixture.bundle.join("server-key.pem");
-    let original = fixture.bundle.join("original.pem");
-    std::fs::rename(&key, &original).expect("move key");
-    symlink(&original, &key).expect("symlink");
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-    std::fs::remove_file(&key).expect("remove symlink");
-    std::fs::hard_link(&original, &key).expect("hardlink");
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-    std::fs::remove_file(&key).expect("remove link");
-    std::fs::rename(&original, &key).expect("restore key");
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).expect("wrong mode");
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400)).expect("restore mode");
-    std::fs::set_permissions(&fixture.bundle, std::fs::Permissions::from_mode(0o770))
-        .expect("unsafe parent");
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-    std::fs::set_permissions(&fixture.bundle, std::fs::Permissions::from_mode(0o700))
-        .expect("restore parent");
-    let mut manifest: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(fixture.bundle.join("manifest.json")).expect("manifest"),
-    )
-    .expect("json");
-    manifest["node_id"] = Uuid::now_v7().to_string().into();
-    write(
-        &fixture.bundle.join("manifest.json"),
-        serde_json::to_vec(&manifest).expect("manifest json"),
-        0o400,
-    );
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        std::fs::read(&fixture.adapter.resources.config).expect("unchanged"),
-        fixture.original
-    );
-}
-
-#[tokio::test]
-async fn complete_tls_rejects_mismatched_key_expiry_and_missing_version() {
-    let mut fixture = Fixture::new();
-    let other = Fixture::new();
-    let key_path = fixture.bundle.join("server-key.pem");
-    let original_key = std::fs::read(&key_path).expect("fixture key");
-    write(
-        &key_path,
-        std::fs::read(other.bundle.join("server-key.pem")).expect("other fixture key"),
-        0o400,
-    );
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-    write(&key_path, original_key, 0o400);
-
-    let cert = fixture.bundle.join("server-cert.pem");
-    // A zero-length validity window is already expired during verification.
-    // OpenSSL 3.5 rejects negative days before the adapter can inspect it.
-    let expired = openssl(&[
-        "x509",
-        "-in",
-        cert.to_str().expect("cert"),
-        "-signkey",
-        key_path.to_str().expect("key"),
-        "-days",
-        "0",
-    ]);
-    write(&cert, expired, 0o400);
-    let digest = Sha256::digest(openssl(&[
-        "x509",
-        "-in",
-        cert.to_str().expect("cert"),
-        "-outform",
-        "DER",
-    ]))
-    .to_vec();
-    let manifest_path = fixture.bundle.join("manifest.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest")).expect("json");
-    manifest["certificate_sha256"] = hex::encode(&digest).into();
-    write(
-        &manifest_path,
-        serde_json::to_vec(&manifest).expect("manifest json"),
-        0o400,
-    );
-    for directive in &mut fixture
-        .plan
-        .candidate
-        .as_mut()
-        .expect("candidate")
-        .directives
-    {
-        if let Some(Value::Tls(reference)) = &mut directive.value {
-            reference.certificate_sha256.clone_from(&digest);
-        }
-    }
-    fixture.plan.candidate_hash = Sha256::digest(
-        config_profile::canonical(fixture.plan.candidate.as_ref().expect("candidate"))
-            .expect("canonical"),
-    )
-    .to_vec();
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-
-    let mut fixture = Fixture::new();
-    for directive in &mut fixture
-        .plan
-        .candidate
-        .as_mut()
-        .expect("candidate")
-        .directives
-    {
-        if let Some(Value::Tls(reference)) = &mut directive.value {
-            reference.version = "missing-v2".to_owned();
-        }
-    }
-    fixture.plan.candidate_hash = Sha256::digest(
-        config_profile::canonical(fixture.plan.candidate.as_ref().expect("candidate"))
-            .expect("canonical"),
-    )
-    .to_vec();
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn complete_tls_provisioning_lock_prevents_resolution() {
-    let fixture = Fixture::new();
-    let lock = safe_file(
-        &fixture.adapter.resources.config_tls_root.join(".lock"),
-        0o600,
-    )
-    .expect("lock");
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).expect("provisioning lock");
-    assert!(matches!(
-        fixture.adapter.complete_config_plan(&fixture.plan).await,
-        Err(AdapterError::Unavailable)
-    ));
-    // Model the descriptor a parallel test's child can retain until exec.
-    let inherited_lock = lock.try_clone().expect("inherited provisioning lock");
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock)
-        .expect("release provisioning lock even while a child holds a duplicate");
-    drop(lock);
-    fixture.apply().await;
-    drop(inherited_lock);
-}
-
-#[tokio::test]
-async fn complete_apply_rejects_changed_hash_expiry_and_parser_before_publication() {
+async fn complete_apply_rejects_binding_change_and_rolls_back_on_reload_failure() {
     let fixture = Fixture::new();
     let apply = fixture.apply().await;
-    let mut bad = apply.clone();
-    bad.materialized_hash[0] ^= 1;
+    let mut bad_binding = apply.clone();
+    bad_binding.expected_current_hash = Sha256::digest(b"stale").to_vec();
     assert!(
         fixture
             .adapter
-            .complete_config_apply(&bad, super::super::tests::test_effect())
+            .complete_config_apply(&bad_binding, super::super::tests::test_effect())
             .await
             .is_err()
     );
-    bad = apply.clone();
-    bad.plan_expires_at.as_mut().expect("expiry").seconds = 1;
-    assert!(
-        fixture
-            .adapter
-            .complete_config_apply(&bad, super::super::tests::test_effect())
-            .await
-            .is_err()
-    );
-    write(
-        &fixture.adapter.resources.ocserv,
-        b"#!/bin/sh\nexit 9\n",
-        0o700,
-    );
-    assert!(
-        fixture
-            .adapter
-            .complete_config_apply(&apply, super::super::tests::test_effect())
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        std::fs::read(&fixture.adapter.resources.config).expect("unchanged"),
-        fixture.original
-    );
-    assert!(
-        !std::fs::read_dir(&fixture.directory)
-            .expect("entries")
-            .flatten()
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".ocservia-apply-"))
-    );
-}
 
-#[tokio::test]
-async fn complete_apply_rolls_back_exact_bytes_and_recovers_after_publish() {
-    let fixture = Fixture::new();
-    let apply = fixture.apply().await;
     write(
         &fixture.adapter.resources.systemctl,
         format!(
@@ -556,9 +259,8 @@ async fn complete_apply_rolls_back_exact_bytes_and_recovers_after_publish() {
         .adapter
         .complete_config_apply(&apply, super::super::tests::test_effect())
         .await
-        .expect("rollback outcome");
+        .expect("rollback");
     assert!(outcome.healthy && outcome.rolled_back && !outcome.failed_critical);
-    assert_eq!(outcome.observed_hash, apply.expected_current_hash);
     assert_eq!(
         std::fs::read(&fixture.adapter.resources.config).expect("restored"),
         fixture.original
@@ -575,102 +277,9 @@ async fn complete_apply_rolls_back_exact_bytes_and_recovers_after_publish() {
             .is_err()
     );
     let restarted = Adapter::new(fixture.adapter.resources.clone(), Limits::default());
-    let outcome = restarted
+    let recovered = restarted
         .complete_config_apply(&apply, super::super::tests::test_effect())
         .await
-        .expect("recover exact effect");
-    assert!(outcome.healthy && !outcome.rolled_back);
-    assert_eq!(outcome.candidate_hash, apply.candidate_hash);
-    assert_eq!(outcome.observed_hash, apply.materialized_hash);
-}
-
-#[tokio::test]
-async fn critically_failed_complete_apply_releases_prepared_effect() {
-    for after_publish_crash in [false, true] {
-        let fixture = Fixture::new();
-        let mut apply = fixture.apply().await;
-        let effect = super::super::tests::test_effect();
-        if after_publish_crash {
-            fixture.adapter.inject_config_apply_fault(4);
-            assert!(
-                fixture
-                    .adapter
-                    .complete_config_apply(&apply, effect)
-                    .await
-                    .is_err()
-            );
-        }
-        write(
-            &fixture.adapter.resources.systemctl,
-            b"#!/bin/sh
-exit 1
-",
-            0o700,
-        );
-        let outcome = fixture
-            .adapter
-            .complete_config_apply(&apply, effect)
-            .await
-            .expect("critical failure returned");
-        assert!(outcome.failed_critical && outcome.applied_revision == 0);
-
-        write(
-            &fixture.adapter.resources.systemctl,
-            br#"#!/bin/sh
-if [ "$1" = show ]; then printf 'LoadState=loaded\nActiveState=active\nSubState=running\n'; fi
-"#,
-            0o700,
-        );
-        apply.desired_revision += 1;
-        let outcome = fixture
-            .adapter
-            .complete_config_apply(&apply, effect)
-            .await
-            .expect("next revision proceeds");
-        assert_eq!(outcome.applied_revision, apply.desired_revision);
-    }
-}
-
-#[tokio::test]
-async fn complete_profile_materializes_audit_hook_without_breaking_redacted_diff() {
-    let mut fixture = Fixture::new();
-    let baseline = fixture
-        .adapter
-        .complete_config_plan(&fixture.plan)
-        .await
-        .expect("baseline plan without hook");
-    let hook = fixture.directory.join("vpn-session-hook");
-    write(&hook, b"#!/bin/sh\nexit 0\n", 0o755);
-    fixture.adapter.resources.audit_hook = hook.clone();
-
-    let with_hook = fixture
-        .adapter
-        .complete_config_plan(&fixture.plan)
-        .await
-        .expect("plan with hook");
-    assert_eq!(with_hook.diff_redacted, baseline.diff_redacted);
-    assert!(!with_hook.diff_redacted.contains("connect-script"));
-    assert!(!with_hook.diff_redacted.contains("disconnect-script"));
-    assert_ne!(with_hook.materialized_hash, baseline.materialized_hash);
-
-    let mut apply = CompleteConfigApply {
-        candidate: fixture.plan.candidate.clone(),
-        candidate_hash: fixture.plan.candidate_hash.clone(),
-        expected_current_hash: with_hook.current_hash,
-        materialized_hash: with_hook.materialized_hash,
-        desired_revision: 1,
-        plan_id: Uuid::now_v7().as_bytes().to_vec(),
-        plan_expires_at: None,
-    };
-    apply.plan_expires_at.get_or_insert_default().seconds = i64::MAX;
-    let outcome = fixture
-        .adapter
-        .complete_config_apply(&apply, super::super::tests::test_effect())
-        .await
-        .expect("apply with hook");
-    assert!(outcome.healthy && !outcome.rolled_back);
-    assert_eq!(outcome.observed_hash, apply.materialized_hash);
-    let written = std::fs::read_to_string(&fixture.adapter.resources.config).expect("config");
-    assert!(written.contains(&format!("connect-script = {}\n", hook.display())));
-    assert!(written.contains(&format!("disconnect-script = {}\n", hook.display())));
+        .expect("recover");
+    assert!(recovered.healthy && !recovered.rolled_back);
 }

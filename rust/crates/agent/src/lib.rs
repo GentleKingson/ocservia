@@ -879,8 +879,6 @@ mod validation;
 pub use crate::privd_client::{
     Backoff, PrivdClient, ensure_unprivileged, read_boot_id, read_os_release,
 };
-#[cfg(test)]
-use crate::validation::observed_result;
 use crate::validation::{ValidatedCommand, validate_command};
 pub use crate::validation::{desired_resource, semantic_payload_hash_v2};
 
