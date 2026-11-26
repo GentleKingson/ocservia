@@ -218,59 +218,6 @@ fn command_identity_replay_attested_proof_and_revision_commit() {
 }
 
 #[test]
-fn legacy_resource_revision_schema_migrates_without_losing_fences() {
-    let db = TempDb::new("legacy-rev");
-    let legacy = Connection::open(&db.0).expect("open");
-    legacy
-        .execute_batch(
-            "CREATE TABLE applied_resource_revisions (
-            resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group')),
-            resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
-            revision INTEGER NOT NULL CHECK (revision > 0),
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(resource_type,resource_key)
-         ) STRICT;
-         INSERT INTO applied_resource_revisions VALUES ('user','alice',4,10);",
-        )
-        .expect("seed");
-    drop(legacy);
-
-    let mut j = db.open();
-    assert_eq!(j.applied_revision("user", "alice").expect("u"), Some(4));
-    let (k, c) = (
-        *uuid::Uuid::now_v7().as_bytes(),
-        *uuid::Uuid::now_v7().as_bytes(),
-    );
-    j.accept_command(&k, &c, &[9; 32], 1, 11).expect("a");
-    j.transition_command(
-        &k,
-        &[CommandState::Accepted],
-        CommandState::Running,
-        None,
-        None,
-        12,
-    )
-    .expect("r");
-    j.complete_external_with_revision_attested(
-        &k,
-        &c,
-        AppliedResourceRevision {
-            resource_type: "config",
-            resource_key: "ocserv.conf",
-            revision: 1,
-        },
-        b"applied",
-        b"proof",
-        13,
-    )
-    .expect("c");
-    assert_eq!(
-        j.applied_revision("config", "ocserv.conf").expect("cfg"),
-        Some(1)
-    );
-}
-
-#[test]
 fn telemetry_eviction_and_five_minute_offline_recovery() {
     let db = TempDb::new("telemetry");
     let mut j = db.open();

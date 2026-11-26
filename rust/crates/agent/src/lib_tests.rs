@@ -100,11 +100,7 @@ fn authorize_test_command(envelope: &mut CommandEnvelope) {
             ("config.apply", config_profile::APPLY_CAPABILITY)
         }
         Some(command_envelope::Payload::AgentUpgrade(_)) => {
-            if envelope.required_capability == "ocserv.agent.upgrade.v1" {
-                ("agent.upgrade", "ocserv.agent.upgrade.v1")
-            } else {
-                ("agent.upgrade", "ocserv.agent.upgrade.v2")
-            }
+            ("agent.upgrade", "ocserv.agent.upgrade.v2")
         }
         _ => panic!("test command payload is unsupported"),
     };
@@ -1298,31 +1294,26 @@ fn agent_upgrade_capability_payload_auth_and_conflict() {
     let mut ctx = context(node, 100);
     ctx.capabilities = capabilities(&[AGENT_UPGRADE_CAPABILITY]);
 
-    // Capability negotiation & signature binding across v1/v2 upgrade capabilities.
+    // Capability negotiation & signature binding for upgrade v2 (legacy v1 rejected).
     let mut no_upgrade = context(node, 100);
     no_upgrade.capabilities = capabilities(&["ocserv.service.reload"]);
     assert_eq!(rejected_code(&base, &no_upgrade), "capability_rejected");
     validate_command(&base, &ctx).expect("valid upgrade");
-    for cap in ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITIES {
-        let mut signed = base.clone();
-        signed.required_capability = (*cap).into();
-        authorize_test_command(&mut signed);
-        let mut neg = context(node, 100);
-        neg.capabilities = capabilities(&[cap]);
-        validate_command(&signed, &neg).expect("negotiated");
-        let other = if *cap == "ocserv.agent.upgrade.v1" {
-            "ocserv.agent.upgrade.v2"
-        } else {
-            "ocserv.agent.upgrade.v1"
-        };
-        neg.capabilities = capabilities(&[other]);
-        assert_eq!(rejected_code(&signed, &neg), "capability_rejected");
-        signed.required_capability = other.into();
-        assert!(validate_command(&signed, &neg).is_err());
+
+    let mut signed = base.clone();
+    signed.required_capability = AGENT_UPGRADE_CAPABILITY.into();
+    authorize_test_command(&mut signed);
+    validate_command(&signed, &ctx).expect("negotiated");
+
+    let mut legacy_ctx = context(node, 100);
+    legacy_ctx.capabilities = capabilities(&["ocserv.agent.upgrade.v1"]);
+    assert_eq!(rejected_code(&signed, &legacy_ctx), "capability_rejected");
+
+    for retired_or_unknown in ["ocserv.agent.upgrade.v1", "ocserv.agent.upgrade.v999"] {
+        let mut unsupported_cap = base.clone();
+        unsupported_cap.required_capability = retired_or_unknown.into();
+        assert!(validate_command(&unsupported_cap, &ctx).is_err());
     }
-    let mut unknown_cap = base.clone();
-    unknown_cap.required_capability = "ocserv.agent.upgrade.v999".into();
-    assert!(validate_command(&unknown_cap, &ctx).is_err());
 
     // Payload-layer rejections.
     for (expected, ver, digest, arch) in [

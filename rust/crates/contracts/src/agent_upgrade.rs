@@ -12,9 +12,8 @@
 /// cross-version compatibility.
 pub const AGENT_UPGRADE_CAPABILITY: &str = "ocserv.agent.upgrade.v2";
 
-/// Both advertised names implement the same typed command payload.
-pub const AGENT_UPGRADE_CAPABILITIES: &[&str] =
-    &[AGENT_UPGRADE_CAPABILITY, "ocserv.agent.upgrade.v1"];
+/// Supported typed command capability name.
+pub const AGENT_UPGRADE_CAPABILITIES: &[&str] = &[AGENT_UPGRADE_CAPABILITY];
 
 /// Resolve only a real typed-command capability, never a version threshold.
 #[must_use]
