@@ -2,11 +2,11 @@ package transportevents
 
 import (
 	"bytes"
+	"context"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"errors"
-	"fmt"
 	"math"
 	"slices"
 	"sort"
@@ -19,26 +19,16 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const workspaceSlug = "local-simulator"
-
-var ErrInvalidScenario = errors.New("invalid simulation")
-
-type SimulationScenario struct {
-	HeartbeatCount  *uint32 `json:"heartbeat_count"`
-	DelayMillis     *uint32 `json:"delay_millis"`
-	DuplicateEvent  bool    `json:"duplicate_event"`
-	ReturnError     bool    `json:"return_error"`
-	DisconnectAfter bool    `json:"disconnect_after"`
-}
-
 type Event = eventstore.Event
-type SimulationJob = eventstore.SimulationJob
+
+type IngressHook func(ctx context.Context, tx database.Tx, nodeID uuid.UUID, eventType, traceparent string, occurredAt time.Time) error
+type GapHook func(ctx context.Context, readConnection transportclient.NodeConnectionReader) (func(context.Context, database.Tx) error, error)
 
 type Service struct {
 	backend           database.Backend
@@ -47,7 +37,8 @@ type Service struct {
 	commandRecovery   *operations.Service
 	recoveryAuthority *ownersession.Manager
 	resultCommitFault
-	localSimulator bool
+	ingressHook IngressHook
+	gapHook     GapHook
 }
 
 const (
@@ -70,7 +61,7 @@ func invalidEvent(reasonCode, detail string) error {
 }
 
 func New(backend database.Backend, signer *commandauth.Signer) *Service {
-	return &Service{backend: backend, signer: signer, localSimulator: true, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{backend: backend, signer: signer, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func NewWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery *operations.Service, authority *ownersession.Manager) *Service {
@@ -79,11 +70,10 @@ func NewWithCommandRecovery(backend database.Backend, signer *commandauth.Signer
 	return service
 }
 
-// SetLocalSimulator configures whether transport event ingestion projects
-// outcomes onto local_slice_jobs. Production disables the simulator path so
-// routine heartbeats do not run simulation updates.
-func (s *Service) SetLocalSimulator(enabled bool) {
-	s.localSimulator = enabled
+// SetHooks attaches optional development hooks for ingress projection and
+// retention-gap reconciliation. Production leaves both nil.
+func (s *Service) SetHooks(onIngress IngressHook, onGap GapHook) {
+	s.ingressHook, s.gapHook = onIngress, onGap
 }
 
 func invalidCommandResult(detail string) error {
@@ -249,54 +239,6 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 	default:
 		return "synthetic.command"
 	}
-}
-
-func newIDs() (uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, error) {
-	ids := make([]uuid.UUID, 5)
-	for index := range ids {
-		id, err := uuid.NewV7()
-		if err != nil {
-			return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, fmt.Errorf("generate UUIDv7: %w", err)
-		}
-		ids[index] = id
-	}
-	return ids[0], ids[1], ids[2], ids[3], ids[4], nil
-}
-
-func normalizeScenario(scenario SimulationScenario) (uint32, uint32, error) {
-	heartbeatCount := uint32(3)
-	if scenario.HeartbeatCount != nil {
-		heartbeatCount = *scenario.HeartbeatCount
-	}
-	delayMillis := uint32(100)
-	if scenario.DelayMillis != nil {
-		delayMillis = *scenario.DelayMillis
-	}
-	if heartbeatCount < 1 || heartbeatCount > 32 || delayMillis > 30_000 {
-		return 0, 0, fmt.Errorf("%w: simulation limits exceeded", ErrInvalidScenario)
-	}
-	return heartbeatCount, delayMillis, nil
-}
-
-func marshalEnvelope(nodeID, operationID, commandID uuid.UUID, traceparent string, scenario SimulationScenario, heartbeatCount, delayMillis uint32, now time.Time) ([]byte, error) {
-	messageID, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("generate message ID: %w", err)
-	}
-	envelope := &agentv1.CommandEnvelope{
-		ProtocolVersion: "1.0", MessageId: messageID[:], CommandId: commandID[:], IdempotencyKey: operationID[:], NodeId: nodeID[:],
-		Sequence: 1, IssuedAt: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Minute)), Traceparent: traceparent,
-		ActorId: "developer", Reason: "development simulation probe", DeliveryMode: agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY,
-		Payload: &agentv1.CommandEnvelope_SimulationProbe{SimulationProbe: &agentv1.SimulationProbe{
-			HeartbeatCount: heartbeatCount, DelayMillis: delayMillis, DuplicateEvent: scenario.DuplicateEvent,
-			ReturnError: scenario.ReturnError, DisconnectAfter: scenario.DisconnectAfter,
-		}},
-	}
-	data, err := proto.Marshal(envelope)
-	if err != nil {
-		return nil, fmt.Errorf("marshal simulator command: %w", err)
-	}
-	return data, nil
 }
 
 func eventName(value transportv1.TransportEventType) (string, error) {

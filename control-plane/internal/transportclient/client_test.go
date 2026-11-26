@@ -16,29 +16,22 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type termAwareGapHandler struct {
+type gapHandler struct {
 	called bool
 }
 
-func (*termAwareGapHandler) Ingest(context.Context, *transportv1.TransportEvent) error {
+func (*gapHandler) Ingest(context.Context, *transportv1.TransportEvent) error {
 	return nil
 }
 
-func (h *termAwareGapHandler) ReconcileOwnerEventGap(_ context.Context, reader NodeConnectionReader) error {
+func (h *gapHandler) ReconcileEventGap(_ context.Context, reader NodeConnectionReader) error {
 	h.called = reader != nil
 	return nil
 }
 
-type presenceGapHandler struct {
-	called bool
-}
+type nonGapHandler struct{}
 
-func (*presenceGapHandler) Ingest(context.Context, *transportv1.TransportEvent) error {
-	return nil
-}
-
-func (h *presenceGapHandler) ReconcileEventGap(_ context.Context, reader func(context.Context, []byte) (bool, error)) error {
-	h.called = reader != nil
+func (*nonGapHandler) Ingest(context.Context, *transportv1.TransportEvent) error {
 	return nil
 }
 
@@ -75,7 +68,7 @@ func TestClientRejectsForeignOwnedUnixServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.NodeConnected(context.Background(), make([]byte, 16)); err == nil {
+	if _, err := client.NodeConnection(context.Background(), make([]byte, 16)); err == nil {
 		t.Fatal("foreign-owned transport socket was accepted")
 	}
 }
@@ -89,21 +82,17 @@ func TestFullJitterStaysWithinBound(t *testing.T) {
 	}
 }
 
-func TestClientSelectsTermAwareAndPresenceGapReconcilers(t *testing.T) {
+func TestClientSelectsGapReconcilerAndRejectsMissing(t *testing.T) {
 	client := &Client{}
-	termAware := &termAwareGapHandler{}
-	if err := client.reconcileEventGap(context.Background(), termAware); err != nil {
-		t.Fatalf("term-aware reconciliation: %v", err)
+	reconciler := &gapHandler{}
+	if err := client.reconcileEventGap(context.Background(), reconciler); err != nil {
+		t.Fatalf("gap reconciliation: %v", err)
 	}
-	if !termAware.called {
-		t.Fatal("term-aware reconciliation did not receive the connection metadata reader")
+	if !reconciler.called {
+		t.Fatal("gap reconciliation did not receive the connection metadata reader")
 	}
-	presence := &presenceGapHandler{}
-	if err := client.reconcileEventGap(context.Background(), presence); err != nil {
-		t.Fatalf("presence reconciliation: %v", err)
-	}
-	if !presence.called {
-		t.Fatal("legacy presence reconciliation did not receive the bool reader")
+	if err := client.reconcileEventGap(context.Background(), &nonGapHandler{}); err == nil {
+		t.Fatal("non-reconciling handler was accepted")
 	}
 }
 

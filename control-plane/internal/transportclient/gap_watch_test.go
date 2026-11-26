@@ -91,7 +91,7 @@ type bufferedGapHandler struct {
 	ingested   [][]byte
 }
 
-func (h *bufferedGapHandler) ReconcileOwnerEventGap(ctx context.Context, reader NodeConnectionReader) error {
+func (h *bufferedGapHandler) ReconcileEventGap(ctx context.Context, reader NodeConnectionReader) error {
 	if reader == nil {
 		return errors.New("connection reader is missing")
 	}
@@ -259,7 +259,7 @@ type retryingGapHandler struct {
 	ingested atomic.Int64
 }
 
-func (h *retryingGapHandler) ReconcileOwnerEventGap(ctx context.Context, _ NodeConnectionReader) error {
+func (h *retryingGapHandler) ReconcileEventGap(ctx context.Context, _ NodeConnectionReader) error {
 	if h.attempts.Add(1) == 1 {
 		<-ctx.Done()
 		return ctx.Err()
