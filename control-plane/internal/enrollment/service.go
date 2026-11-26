@@ -84,7 +84,7 @@ type Service struct {
 	controllerEndpointID string
 	controllerVersion    string
 	signer               *commandauth.Signer
-	ownerSessions        ownersession.SessionOpener
+	ownerSessions        *ownersession.Manager
 	publicKeys           userPasswordPublicKeySource
 }
 
@@ -92,7 +92,7 @@ func New(backend database.Backend, controllerEndpointID, controllerVersion strin
 	return &Service{backend: backend, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
 }
 
-func NewWithOwnerSessions(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
+func NewWithOwnerSessions(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions *ownersession.Manager) *Service {
 	service := New(backend, controllerEndpointID, controllerVersion, signer)
 	service.ownerSessions = ownerSessions
 	return service
@@ -564,13 +564,12 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 }
 
 func (s *Service) closeOpenedSession(ctx context.Context, nodeID uuid.UUID, opened ownersession.Session) {
-	closer, ok := s.ownerSessions.(ownersession.SessionCloser)
-	if !ok {
+	if s.ownerSessions == nil {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	_ = closer.CloseSession(cleanupCtx, nodeID, opened.ConnectionID, opened.SessionEpoch)
+	_ = s.ownerSessions.CloseSession(cleanupCtx, nodeID, opened.ConnectionID, opened.SessionEpoch)
 }
 
 func validateEnrollment(request *agentv1.EnrollRequest) error {

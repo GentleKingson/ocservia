@@ -62,7 +62,7 @@ type Server struct {
 	authLogs            authLogState
 	audit               *audit.Manager
 	userstate           *userstate.Service
-	userOperations      UserOperations
+	userOperations      *useroperations.Service
 	configPlans         ConfigPlans
 	certificates        *certificates.Service
 	eventStreamsMu      sync.Mutex
@@ -95,7 +95,7 @@ type Modules struct {
 	AccessLogger    *slog.Logger
 	Nodes           NodeReader
 	ConfigPlans     ConfigPlans
-	UserOperations  UserOperations
+	UserOperations  *useroperations.Service
 	Certificates    *certificates.Service
 	Operations      *operations.Service
 	ReleaseCatalog  *releasecatalog.Catalog
@@ -121,9 +121,6 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 	}
 	if service, ok := modules.ConfigPlans.(*configplan.Service); ok && service == nil {
 		modules.ConfigPlans = nil
-	}
-	if service, ok := modules.UserOperations.(*useroperations.Service); ok && service == nil {
-		modules.UserOperations = nil
 	}
 	if modules.AccessLogger == nil {
 		modules.AccessLogger = logger

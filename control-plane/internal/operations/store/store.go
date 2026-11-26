@@ -2,12 +2,15 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
+
+const ReconciliationAttemptLimit = 64
 
 var ErrIdempotencyConflict = errors.New("idempotency key was reused with different input")
 
@@ -53,6 +56,92 @@ type QueuedCommand struct {
 	Envelope                                                []byte
 	ExpectedVersion                                         int64
 	ExpiresAt, CreatedAt, AvailableAt                       time.Time
+}
+
+type Dispatch struct {
+	AttemptID, CommandID, OperationID, OutboxID, NodeID, LeaseToken uuid.UUID
+	Envelope                                                        []byte
+	Traceparent                                                     string
+}
+
+type DispatchStatus struct {
+	LeaseValid, AttemptValid, OwnsOutboxLock, ResultAfterAttempt bool
+	CommandState                                                 string
+	Envelope                                                     []byte
+}
+
+type QueueMetrics struct {
+	Unpublished          int64   `json:"outbox_unpublished_total"`
+	OldestAge            float64 `json:"outbox_oldest_age_seconds"`
+	Queued               int64   `json:"command_queue_depth"`
+	Unknown              int64   `json:"command_unknown_total"`
+	ConfigRollbacks      int64   `json:"config_rollback_total"`
+	ConfigFailedCritical int64   `json:"config_failed_critical_total"`
+}
+
+type RecoveryCommand struct {
+	CommandID, OperationID, NodeID, OutboxID, AttemptID uuid.UUID
+	Envelope                                            []byte
+	CommandState, OperationState                        string
+	Attempts, AttemptLimit                              int
+	ExpiresAt                                           time.Time
+}
+
+type RecoveryUpdate struct {
+	Command       RecoveryCommand
+	Envelope      []byte
+	ExpiresAt, At time.Time
+	Schedule      bool
+}
+
+type AmbiguousDispatch struct {
+	OperationID uuid.UUID
+	Envelope    []byte
+	ExpiresAt   time.Time
+}
+
+type RecoveryProjection struct {
+	OperationID, CertificateID uuid.UUID
+	ConfigApply, Artifact      bool
+	At                         time.Time
+}
+
+type Rollout struct {
+	ID, WorkspaceID, CreatedBy, ActorSession uuid.UUID
+	TargetVersion, State, Reason, PauseCode  string
+	BatchSize, CurrentBatch                  int
+	StopOnFailure                            bool
+	RequestHash                              []byte
+	Excluded                                 []json.RawMessage
+	CreatedAt, UpdatedAt                     time.Time
+}
+
+type RolloutNode struct {
+	NodeID          uuid.UUID
+	Ordinal, Batch  int
+	State           string
+	OperationID     uuid.UUID
+	FromVersion     string
+	FailureCode     string
+	DispatchVersion int64
+	DispatchAttempt int
+	DispatchLease   *time.Time
+}
+
+type PendingRollout struct {
+	ID, WorkspaceID, CreatedBy, ActorSession uuid.UUID
+	TargetVersion, Reason, IdempotencyKey    string
+	BatchSize                                int
+	RequestHash                              []byte
+	Exclusions                               json.RawMessage
+	CreatedAt                                time.Time
+}
+
+type RolloutTerminalNode struct {
+	NodeID         uuid.UUID
+	Ordinal, Batch int
+	OperationID    uuid.UUID
+	Outcome        string
 }
 
 type NodeState struct {

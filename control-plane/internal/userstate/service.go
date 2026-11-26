@@ -13,10 +13,9 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationdata "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
@@ -34,7 +33,7 @@ var (
 	ErrNodeUnavailable     = errors.New("node is unavailable")
 	ErrCapabilityMissing   = operations.ErrCapabilityMissing
 	ErrIdempotencyConflict = operations.ErrIdempotencyConflict
-	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
+	ErrBacklogExceeded     = operationdata.ErrBacklogExceeded
 )
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
@@ -393,7 +392,7 @@ func sealedSecretProto(secret *SealedSecret) *agentv1.SealedSecretV1 {
 	return &agentv1.SealedSecretV1{Version: secret.Version, Purpose: agentv1.SealedSecretPurpose_SEALED_SECRET_PURPOSE_USER_PASSWORD, KeyId: secret.KeyID, Ciphertext: append([]byte(nil), secret.Ciphertext...)}
 }
 
-func requestDigest(request MutationRequest) idempotency.Digest {
+func requestDigest(request MutationRequest) canonicalcbor.IntentDigest {
 	var key string
 	var secret []byte
 	if request.SealedPassword != nil {
@@ -410,7 +409,7 @@ func requestDigest(request MutationRequest) idempotency.Digest {
 		TTL           int64
 		Actor, Reason string
 	}{request.NodeID, request.Kind, request.Name, key, request.Members, secret, request.ExpectedVersion, int64(request.TTL / time.Second), request.ActorID, request.Reason}
-	return idempotency.New("desired-state", struct {
+	return canonicalcbor.NewIntentDigest("desired-state", struct {
 		Intent                      any
 		ActorIdentity, ActorSession uuid.UUID
 	}{value, request.ActorIdentityID, request.ActorSessionID})
