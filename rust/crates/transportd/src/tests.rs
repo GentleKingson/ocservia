@@ -380,7 +380,7 @@ fn identity_policy(key: &SecretKey, hs: &SessionHandshake) -> IdentityPolicy {
 
 fn command_envelope(node_id: &[u8], traceparent: &str, reason: String) -> Vec<u8> {
     CommandEnvelope {
-        protocol_version: "1.1".into(),
+        protocol_version: "1.2".into(),
         message_id: Uuid::now_v7().as_bytes().to_vec(),
         command_id: Uuid::now_v7().as_bytes().to_vec(),
         idempotency_key: Uuid::now_v7().as_bytes().to_vec(),

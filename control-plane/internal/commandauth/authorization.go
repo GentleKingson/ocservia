@@ -27,9 +27,8 @@ import (
 
 const (
 	// ProtocolVersion keeps the signed execution deadline immutable during recovery.
-	ProtocolVersion       = "1.2"
-	LegacyProtocolVersion = "1.1"
-	keyIDPrefix           = "ed25519-sha256:"
+	ProtocolVersion = "1.2"
+	keyIDPrefix     = "ed25519-sha256:"
 
 	authorizationV1Domain = "ocservia/controller-command/cbor.v1\x00"
 	sessionGrantV1Domain  = "ocservia/controller-session-grant/cbor.v1\x00"
@@ -398,7 +397,7 @@ func ClaimsFromEnvelopeV1(envelope *agentv1.CommandEnvelope) (ClaimsV1, error) {
 	if authorization.GetVersion() != 1 {
 		return ClaimsV1{}, errors.New("command authorization version is unsupported")
 	}
-	if envelope.GetProtocolVersion() != ProtocolVersion && envelope.GetProtocolVersion() != LegacyProtocolVersion {
+	if envelope.GetProtocolVersion() != ProtocolVersion {
 		return ClaimsV1{}, errors.New("command protocol version does not require authorization v1")
 	}
 	payloadKind, expectedAction, expectedCapability, err := payloadAuthorization(envelope)
@@ -504,10 +503,6 @@ func payloadAuthorization(envelope *agentv1.CommandEnvelope) (uint32, string, st
 		return 101, "user.create", "ocserv.users.write", nil
 	case *agentv1.CommandEnvelope_UserDisable:
 		return 102, "user.disable", "ocserv.users.write", nil
-	case *agentv1.CommandEnvelope_ConfigPlan:
-		return 103, "config.plan", "ocserv.config.plan", nil
-	case *agentv1.CommandEnvelope_ConfigApply:
-		return 104, "config.apply", "ocserv.config.apply", nil
 	case *agentv1.CommandEnvelope_CompleteConfigPlan:
 		return 129, "config.plan", "ocserv.config.complete.plan", nil
 	case *agentv1.CommandEnvelope_CompleteConfigApply:

@@ -42,7 +42,7 @@ func TestStrictWireCommandFixtures(t *testing.T) {
 		commands["full_"+name] = command
 	}
 	for _, command := range commands {
-		command.ProtocolVersion = "1.1"
+		command.ProtocolVersion = ProtocolVersion
 	}
 	assertStrictWireFieldCoverage(t, commands)
 	// The generated Rust package descriptor omits imported well-known types.

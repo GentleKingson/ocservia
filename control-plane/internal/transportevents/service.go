@@ -174,9 +174,6 @@ type configApplyIdentity struct {
 }
 
 func configApplyBinding(envelope *agentv1.CommandEnvelope) *configApplyIdentity {
-	if apply := envelope.GetConfigApply(); apply != nil {
-		return &configApplyIdentity{apply.GetCandidateHash(), apply.GetExpectedCurrentHash(), apply.GetCandidateHash(), apply.GetDesiredRevision()}
-	}
 	if apply := envelope.GetCompleteConfigApply(); apply != nil {
 		return &configApplyIdentity{apply.GetCandidateHash(), apply.GetExpectedCurrentHash(), apply.GetMaterializedHash(), apply.GetDesiredRevision()}
 	}
@@ -249,9 +246,9 @@ func commandAuditAction(envelope *agentv1.CommandEnvelope) string {
 		return "user.password.rotate"
 	case *agentv1.CommandEnvelope_GroupApply:
 		return "group.apply"
-	case *agentv1.CommandEnvelope_ConfigPlan, *agentv1.CommandEnvelope_CompleteConfigPlan:
+	case *agentv1.CommandEnvelope_CompleteConfigPlan:
 		return "config.plan"
-	case *agentv1.CommandEnvelope_ConfigApply, *agentv1.CommandEnvelope_CompleteConfigApply:
+	case *agentv1.CommandEnvelope_CompleteConfigApply:
 		return "config.apply"
 	case *agentv1.CommandEnvelope_CertificateCsr:
 		return "certificate.csr.generate"

@@ -12,7 +12,9 @@ import (
 	"runtime"
 	"testing"
 
+	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type goldenDocument struct {
@@ -282,4 +284,36 @@ func testFixed16(t *testing.T, value string) [16]byte {
 func testFixed32(t *testing.T, value string) [32]byte {
 	t.Helper()
 	return [32]byte(testHex(t, value, 32))
+}
+
+func TestClaimsFromEnvelopeV1RejectsLegacyProtocolAndConfigPayloads(t *testing.T) {
+	base := func(protocol string, payload *agentv1.CommandEnvelope) *agentv1.CommandEnvelope {
+		id := make([]byte, 16)
+		hash := make([]byte, 32)
+		payload.ProtocolVersion = protocol
+		payload.CommandId = id
+		payload.IdempotencyKey = id
+		payload.NodeId = id
+		payload.OperationId = id
+		payload.ActorId = "operator:test"
+		payload.Action = "config.plan"
+		payload.RequiredCapability = "ocserv.config.complete.plan"
+		payload.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2
+		payload.SemanticPayloadSha256 = hash
+		payload.DeliveryMode = agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_EXECUTE_OR_REPLAY
+		payload.IssuedAt = &timestamppb.Timestamp{Seconds: 1786320000}
+		payload.ExpiresAt = &timestamppb.Timestamp{Seconds: 1786320300}
+		payload.Authorization = &agentv1.CommandAuthorizationProof{Version: 1, KeyId: "k", Signature: make([]byte, 64)}
+		return payload
+	}
+	cases := []*agentv1.CommandEnvelope{
+		base("1.1", &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_CompleteConfigPlan{CompleteConfigPlan: &agentv1.CompleteConfigPlan{}}}),
+		base(ProtocolVersion, &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{}}}),
+		base(ProtocolVersion, &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{}}}),
+	}
+	for i, env := range cases {
+		if _, err := ClaimsFromEnvelopeV1(env); err == nil {
+			t.Fatalf("case %d unexpectedly accepted", i)
+		}
+	}
 }

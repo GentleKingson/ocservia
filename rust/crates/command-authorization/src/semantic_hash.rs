@@ -66,19 +66,6 @@ struct CborGroupApply<'a> {
 }
 
 #[derive(Serialize)]
-struct CborConfigPlan<'a> {
-    candidate_hash: Bytes<'a>,
-    expected_revision: u64,
-}
-
-#[derive(Serialize)]
-struct CborConfigApply<'a> {
-    candidate_hash: Bytes<'a>,
-    expected_current_hash: Bytes<'a>,
-    desired_revision: u64,
-}
-
-#[derive(Serialize)]
 struct CborCompleteConfigPlan<'a> {
     candidate_hash: Bytes<'a>,
 }
@@ -177,36 +164,6 @@ pub fn semantic_payload_hash_v2(
         }
         Some(command_envelope::Payload::ServiceReload(_)) => {
             hash_envelope(envelope, 105_u32, CborEmpty {})
-        }
-        Some(command_envelope::Payload::ConfigPlan(payload)) => {
-            if payload.candidate_hash.len() != 32 {
-                return Err(invalid_claim("candidate_hash_invalid"));
-            }
-            hash_envelope(
-                envelope,
-                103_u32,
-                CborConfigPlan {
-                    candidate_hash: Bytes(&payload.candidate_hash),
-                    expected_revision: payload.expected_revision,
-                },
-            )
-        }
-        Some(command_envelope::Payload::ConfigApply(payload)) => {
-            if payload.candidate_hash.len() != 32
-                || payload.expected_current_hash.len() != 32
-                || payload.desired_revision == 0
-            {
-                return Err(invalid_claim("config_apply_invalid"));
-            }
-            hash_envelope(
-                envelope,
-                104_u32,
-                CborConfigApply {
-                    candidate_hash: Bytes(&payload.candidate_hash),
-                    expected_current_hash: Bytes(&payload.expected_current_hash),
-                    desired_revision: payload.desired_revision,
-                },
-            )
         }
         Some(command_envelope::Payload::CompleteConfigPlan(payload)) => {
             let candidate = payload
