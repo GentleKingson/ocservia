@@ -271,8 +271,7 @@ mod tests {
 
     #[test]
     fn stats_are_published_atomically_and_replace_existing_snapshot() {
-        let parent = PathBuf::from("/tmp").join(format!("ocservia-stats-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&parent).expect("create stats test directory");
+        let parent = PrivateTempDir::new("stats");
         let path = parent.join("stats.json");
         std::fs::write(&path, br#"{"old":true}"#).expect("write old snapshot");
         let document = stats_json(StubStats {
@@ -295,24 +294,20 @@ mod tests {
         assert_eq!(value["active_tasks"], 5);
         assert_eq!(value["task_capacity"], 8);
         assert!(!parent.join("stats.json.tmp").exists());
-        std::fs::remove_dir_all(parent).expect("remove stats test directory");
     }
 
     #[test]
     fn stats_publish_errors_do_not_leave_temporary_file() {
-        let parent = PathBuf::from("/tmp").join(format!("ocservia-stats-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&parent).expect("create stats test directory");
+        let parent = PrivateTempDir::new("stats");
         let path = parent.join("missing").join("stats.json");
 
         assert!(publish_stats(&path, br"{}").is_err());
         assert!(!parent.join("missing").join("stats.json.tmp").exists());
-        std::fs::remove_dir_all(parent).expect("remove stats test directory");
     }
 
     #[test]
     fn concurrent_stats_reads_never_observe_partial_json() {
-        let parent = PathBuf::from("/tmp").join(format!("ocservia-stats-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&parent).expect("create stats test directory");
+        let parent = PrivateTempDir::new("stats");
         let path = parent.join("stats.json");
         publish_stats(&path, &stats_json(empty_stats())).expect("publish initial stats");
         let writer_path = path.clone();
@@ -336,6 +331,5 @@ mod tests {
         }
         writer.join().expect("stats writer thread");
         assert!(!parent.join("stats.json.tmp").exists());
-        std::fs::remove_dir_all(parent).expect("remove stats test directory");
     }
 }

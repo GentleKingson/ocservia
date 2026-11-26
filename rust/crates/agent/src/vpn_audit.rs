@@ -140,10 +140,12 @@ pub(super) async fn upload_loop(connection: iroh::endpoint::Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocservia_test_support::PrivateTempDir;
+
     #[test]
     fn lease_reconciliation_waits_for_the_wal_writer() {
-        let path =
-            std::env::temp_dir().join(format!("ocservia-audit-{}.sqlite", uuid::Uuid::now_v7()));
+        let dir = PrivateTempDir::new("agt-aud");
+        let path = dir.join("audit.sqlite");
         let mut writer = Connection::open(&path).expect("open writer");
         writer
             .execute_batch(
@@ -168,15 +170,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         tx.commit().expect("release writer lock");
         worker.join().expect("join worker").expect("reconcile");
-        drop(writer);
-        std::fs::remove_file(path).expect("cleanup database");
     }
 
     #[test]
     fn spool_survives_reopen_and_requires_exact_commit_receipt() {
-        let path =
-            std::env::temp_dir().join(format!("ocservia-audit-{}.sqlite", uuid::Uuid::now_v7()));
-        let path = path.to_str().unwrap();
+        let dir = PrivateTempDir::new("agt-aud-sp");
+        let path_buf = dir.join("audit.sqlite");
+        let path = path_buf.to_str().unwrap();
         let db = Connection::open(path).unwrap();
         db.execute_batch(r#"PRAGMA journal_mode=WAL;
             CREATE TABLE pending(event_id TEXT PRIMARY KEY,body TEXT);
@@ -195,6 +195,5 @@ mod tests {
         )
         .unwrap();
         assert!(pending(path).unwrap().is_empty());
-        std::fs::remove_file(path).unwrap();
     }
 }

@@ -211,16 +211,12 @@ fn read_endpoint(file: &mut File) -> Result<EndpointId, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn test_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("ocservia-agent-identity-{}", std::process::id()))
-    }
+    use ocservia_test_support::PrivateTempDir;
 
     #[test]
     fn endpoint_key_is_stable_and_controller_substitution_is_rejected() {
-        let directory = test_dir();
-        let _ = std::fs::remove_dir_all(&directory);
+        let root = PrivateTempDir::new("agt-id");
+        let directory = root.join("id");
         let controller = SecretKey::generate().public();
         let first = Identity::provision(&directory, controller).expect("provision identity");
         let second = Identity::provision(&directory, controller).expect("reload identity");
@@ -228,13 +224,12 @@ mod tests {
         let error = Identity::provision(&directory, SecretKey::generate().public())
             .expect_err("substitution rejected");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        std::fs::remove_dir_all(directory).expect("remove identity fixture");
     }
 
     #[test]
     fn partial_identity_is_rejected_instead_of_rotated() {
-        let directory = test_dir().with_extension("partial");
-        let _ = std::fs::remove_dir_all(&directory);
+        let root = PrivateTempDir::new("agt-id-partial");
+        let directory = root.join("id");
         let controller = SecretKey::generate().public();
         Identity::provision(&directory, controller).expect("provision identity");
         std::fs::remove_file(directory.join(KEY_FILE)).expect("remove endpoint key");
@@ -243,7 +238,6 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!directory.join(KEY_FILE).exists());
         assert!(directory.join(CONTROLLER_FILE).exists());
-        std::fs::remove_dir_all(directory).expect("remove identity fixture");
     }
 
     #[test]
@@ -252,8 +246,8 @@ mod tests {
             ocservia_contracts::unix::O_NOFOLLOW,
             i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
         );
-        let directory = test_dir().with_extension("symlink");
-        let _ = std::fs::remove_dir_all(&directory);
+        let root = PrivateTempDir::new("agt-id-sym");
+        let directory = root.join("id");
         let controller = SecretKey::generate().public();
         Identity::provision(&directory, controller).expect("provision identity");
         let real_key = directory.join("real.key");
@@ -263,6 +257,5 @@ mod tests {
             Identity::provision(&directory, controller).is_err(),
             "symlinked endpoint key must be rejected"
         );
-        std::fs::remove_dir_all(directory).expect("remove identity fixture");
     }
 }

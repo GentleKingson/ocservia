@@ -93,7 +93,7 @@ async fn dispatch_upgrade(
 }
 
 struct PrivdFixture {
-    dir: PathBuf,
+    dir: ocservia_test_support::PrivateTempDir,
     adapter: Adapter,
     resources: FixedResources,
     counter: PathBuf,
@@ -101,9 +101,7 @@ struct PrivdFixture {
 
 impl PrivdFixture {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("ocp-{}", Uuid::now_v7().simple()));
-        fs::create_dir(&dir).expect("create test dir");
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod dir");
+        let dir = ocservia_test_support::PrivateTempDir::new("ocp");
         let counter = dir.join("reload-count");
         let systemctl = dir.join("systemctl");
         fs::write(
@@ -160,12 +158,6 @@ impl PrivdFixture {
             attestation_key: Arc::new(SigningKey::from_bytes(&attest)),
             upgrades: UpgradeScheduler::disabled(),
         }
-    }
-}
-
-impl Drop for PrivdFixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -1308,8 +1300,8 @@ async fn root_execution_and_artifacts_require_their_own_unexpired_session_grant(
 
 #[tokio::test]
 async fn socket_binding_requires_trusted_parent_and_preserves_socket_access() {
-    let dir = PathBuf::from("/tmp").join(format!("ocp-socket-{}", Uuid::now_v7().simple()));
-    fs::create_dir(&dir).expect("dir");
+    let root = ocservia_test_support::PrivateTempDir::new("ocp-sock");
+    let dir = root.create_subdir_all("parent");
     let signing = SigningKey::from_bytes(&[42; 32]);
     let mut cfg = ServerConfig {
         socket: dir.join("privd.sock"),
@@ -1366,8 +1358,6 @@ async fn socket_binding_requires_trusted_parent_and_preserves_socket_access() {
         bind_socket(&cfg).unwrap_err().kind(),
         io::ErrorKind::AlreadyExists
     );
-    fs::remove_file(&cfg.socket).expect("rm");
-    fs::remove_dir(dir).expect("rmdir");
 }
 
 #[tokio::test]

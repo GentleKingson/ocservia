@@ -211,14 +211,13 @@ mod output_tests {
 #[cfg(test)]
 mod runtime_stats_tests {
     use super::spawn_runtime_stats_writer;
+    use ocservia_test_support::PrivateTempDir;
     use std::time::Duration;
 
     #[tokio::test]
     async fn runtime_stats_writer_publishes_live_task_counts() {
-        let path = std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!("ocservia-runtime-stats-{}.json", unique_suffix()));
+        let dir = PrivateTempDir::new("obs");
+        let path = dir.join("runtime-stats.json");
         spawn_runtime_stats_writer(path.clone()).expect("writer starts");
         tokio::time::sleep(Duration::from_millis(2500)).await;
         let body = std::fs::read_to_string(&path).expect("stats written");
@@ -229,27 +228,12 @@ mod runtime_stats_tests {
                 .as_u64()
                 .is_some_and(|alive| alive >= 1)
         );
-        std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]
     async fn runtime_stats_writer_fails_fast_on_unwritable_path() {
-        let path = std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!(
-                "ocservia-runtime-stats-missing-{0}-{1}/stats.json",
-                unique_suffix(),
-                unique_suffix()
-            ));
+        let dir = PrivateTempDir::new("obs-missing");
+        let path = dir.join("missing/stats.json");
         assert!(spawn_runtime_stats_writer(path).is_err());
-    }
-
-    fn unique_suffix() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-            + u128::from(std::process::id())
     }
 }
