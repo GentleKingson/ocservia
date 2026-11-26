@@ -143,18 +143,16 @@ func TestCertificateIssueArtifactAndRevokeIntegration(t *testing.T) {
 	if os.Getenv("OCSERV_TEST_OWNER_DATABASE_URL") != "" {
 		owner = testfixture.OpenOwnerPool(t)
 	}
-	workspaceID, nodeID, requesterID, requesterSession := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	workspaceID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	requesterID, requesterSession := testfixture.InsertWorkspaceAdminSession(t, ctx, pool, workspaceID, "certificate-requester")
 	for _, setup := range []struct {
 		query string
 		args  []any
 	}{
 		{`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'Certificate lifecycle test',$2,now(),now())`, []any{workspaceID, "certificate-" + workspaceID.String()}},
 		{`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at)VALUES($1,$2,$3,'offline',1,now(),now())`, []any{nodeID, workspaceID, "node-" + nodeID.String()}},
-		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'test',$2,now(),now())`, []any{requesterID, "certificate-requester-" + requesterID.String()}},
-		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, []any{requesterSession, requesterID}},
 		{`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,'ocserv.certificate.issue',true),($1,'ocserv.certificate.revoke',true)`, []any{nodeID}},
 		{`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'fixture-user-key',decode(repeat('11',32),'hex'),now()),($1,2,1,'fixture-p12-key',decode(repeat('22',32),'hex'),now())`, []any{nodeID}},
-		{`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now()-interval '1 minute')`, []any{workspaceID, requesterID}},
 	} {
 		testutil.Exec(t, ctx, pool, setup.query, setup.args...)
 	}
