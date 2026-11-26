@@ -109,36 +109,9 @@ impl Adapter {
             return Err(AdapterError::CapacityExceeded);
         }
         drop(records);
-        let key = self
-            .resources
-            .user_secret_key
-            .to_str()
-            .ok_or(AdapterError::InvalidResource)?;
-        let output = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &[
-                    "pkeyutl",
-                    "-decrypt",
-                    "-inkey",
-                    key,
-                    "-pkeyopt",
-                    "rsa_padding_mode:oaep",
-                    "-pkeyopt",
-                    "rsa_oaep_md:sha256",
-                ],
-                sealed_password,
-            )
+        let mut password = self
+            .decrypt_sealed_password(&self.resources.user_secret_key, sealed_password)
             .await?;
-        let mut password = Zeroizing::new(output.stdout);
-        if password.is_empty()
-            || password.len() > 1024
-            || password
-                .iter()
-                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
-        {
-            return Err(AdapterError::MalformedOutput);
-        }
         let mut input = Zeroizing::new(Vec::with_capacity(password.len() * 2 + 2));
         input.extend_from_slice(&password);
         input.push(b'\n');

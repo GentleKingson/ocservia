@@ -520,12 +520,7 @@ fn validate_session_payload(session_id: &str, boot_id: &str) -> Result<(), Autho
 }
 
 fn validate_semantic_name(value: &str) -> Result<(), AuthorizationError> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
-        })
-    {
+    if !ocservia_contracts::unix::is_valid_resource_name(value) {
         return Err(invalid_claim("name_invalid"));
     }
     Ok(())

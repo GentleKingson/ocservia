@@ -8,6 +8,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     TransportEvent, TransportEventType,
 };
+use ocservia_contracts::traceparent::generate as new_traceparent;
 use prost::Message;
 use tonic::Status;
 use uuid::Uuid;
@@ -299,39 +300,6 @@ fn event_with_traceparent(
         connection_id: Vec::new(),
         session_epoch: 0,
     }
-}
-
-fn is_lower_hex(bytes: &[u8]) -> bool {
-    bytes
-        .iter()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-}
-
-pub(crate) fn validate_traceparent(value: &str) -> Result<(), Status> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 55
-        || &bytes[0..3] != b"00-"
-        || bytes[35] != b'-'
-        || bytes[52] != b'-'
-        || !is_lower_hex(&bytes[3..35])
-        || !is_lower_hex(&bytes[36..52])
-        || !is_lower_hex(&bytes[53..55])
-        || bytes[3..35].iter().all(|&b| b == b'0')
-        || bytes[36..52].iter().all(|&b| b == b'0')
-    {
-        return Err(Status::invalid_argument("invalid traceparent"));
-    }
-    Ok(())
-}
-
-pub(crate) fn new_traceparent() -> String {
-    let trace_id = Uuid::now_v7();
-    let span_id = Uuid::now_v7();
-    format!(
-        "00-{}-{}-01",
-        hex::encode(trace_id.as_bytes()),
-        hex::encode(&span_id.as_bytes()[..8])
-    )
 }
 
 pub(crate) fn now_timestamp() -> prost_types::Timestamp {

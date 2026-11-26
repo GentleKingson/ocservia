@@ -44,6 +44,24 @@ pub fn init_with_default_filter(
     Ok(())
 }
 
+/// Waits for either `SIGTERM` or `Ctrl-C` (`SIGINT`) so daemons shut down cleanly.
+pub async fn shutdown_signal() {
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    let Ok(mut terminate) = terminate else {
+        tracing::error!("failed to install SIGTERM handler");
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if result.is_err() {
+                tracing::error!("failed to install Ctrl-C handler");
+            }
+        }
+        _ = terminate.recv() => {}
+    }
+}
+
 /// Spawns a background task that periodically publishes the process's live
 /// tokio task count to `path` as a single-line JSON object
 /// `{"at":<unix_millis>,"tasks_alive":<count>}`. Each publication replaces

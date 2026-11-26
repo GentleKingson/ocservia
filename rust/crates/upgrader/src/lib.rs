@@ -323,16 +323,7 @@ impl UpgradeScheduler {
                     if self.active_sibling(Some(intent.operation_id))?.is_some() {
                         return Err(UpgradeStoreError::ActiveConflict);
                     }
-                    write_atomic(
-                        &operation_dir.join("intent"),
-                        &intent_bytes,
-                        TempOwner::Schedule,
-                    )?;
-                    write_atomic(
-                        &operation_dir.join("state"),
-                        format!("{}\n", OperationState::Accepted.as_str()).as_bytes(),
-                        TempOwner::Schedule,
-                    )?;
+                    commit_intent(&operation_dir, &intent_bytes)?;
                     ScheduleOutcome::Scheduled
                 }
                 OperationPieces::Partial {

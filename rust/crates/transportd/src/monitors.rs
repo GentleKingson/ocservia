@@ -5,8 +5,8 @@ use iroh::EndpointId;
 use iroh::endpoint::{Connection, PathEvent, VarInt};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    EnrollRequest, HandshakeResult, SessionHandshake, SessionHandshakeResponse, TelemetryBatch,
-    TelemetryPriority,
+    EnrollRequest, HandshakeResult, SessionGrantV1, SessionHandshake, SessionHandshakeResponse,
+    TelemetryBatch, TelemetryPriority,
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     ConnectionPath, NodeConnection, TransportEventType,
@@ -103,12 +103,7 @@ impl SessionHandler {
         {
             return Err(protocol_error("negotiated message size is invalid"));
         }
-        let negotiated_capabilities =
-            validate_negotiated_session(&handshake, connection.remote_id(), &response)?;
-        let grant = response
-            .session_grant
-            .as_ref()
-            .ok_or_else(|| protocol_error("Controller session grant is required"))?;
+        let (negotiated_capabilities, grant) = validate_negotiated_session(&handshake, &response)?;
         let node_id: [u8; 16] = handshake
             .node_id
             .as_slice()
@@ -444,11 +439,10 @@ async fn wait_for_delivery(send: &iroh::endpoint::SendStream) -> Result<(), Acce
     Ok(())
 }
 
-pub(crate) fn validate_negotiated_session(
+pub(crate) fn validate_negotiated_session<'a>(
     handshake: &SessionHandshake,
-    endpoint: EndpointId,
-    response: &SessionHandshakeResponse,
-) -> Result<HashSet<String>, AcceptError> {
+    response: &'a SessionHandshakeResponse,
+) -> Result<(HashSet<String>, &'a SessionGrantV1), AcceptError> {
     if response.protocol_major != PROTOCOL_MAJOR
         || response.protocol_minor != PROTOCOL_MINOR
         || response.protocol_minor > handshake.protocol_minor
@@ -473,21 +467,16 @@ pub(crate) fn validate_negotiated_session(
         .ok_or_else(|| protocol_error("Controller session grant is required"))?;
     if grant.protocol_major != response.protocol_major
         || grant.protocol_minor != response.protocol_minor
-        || grant.node_id != handshake.node_id
-        || grant.endpoint_id != endpoint.as_bytes()
-        || grant.authorization_revision == 0
-        || grant.session_epoch == 0
-        || grant.key_id.is_empty()
-        || grant.signature.len() != 64
         || grant.negotiated_capabilities != response.negotiated_capabilities
-        || grant.issued_at.is_none()
-        || grant.expires_at.is_none()
     {
         return Err(protocol_error(
             "Controller session grant claims are inconsistent",
         ));
     }
-    Ok(response.negotiated_capabilities.iter().cloned().collect())
+    Ok((
+        response.negotiated_capabilities.iter().cloned().collect(),
+        grant,
+    ))
 }
 
 pub(crate) fn validate_enrollment(

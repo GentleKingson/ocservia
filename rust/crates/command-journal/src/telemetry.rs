@@ -88,13 +88,7 @@ impl Journal {
                 }
             }
         }
-        for (idx, count) in evicted_drops.into_iter().enumerate() {
-            if count > 0 {
-                let evicted_priority =
-                    u8::try_from(idx + 1).map_err(|_| rusqlite::Error::InvalidQuery)?;
-                increment_drop(&transaction, evicted_priority, count)?;
-            }
-        }
+        flush_drops(&transaction, evicted_drops)?;
         transaction.commit()?;
         Ok(!self_evicted)
     }
@@ -182,6 +176,19 @@ impl Journal {
     }
 }
 
+fn flush_drops(
+    transaction: &rusqlite::Transaction<'_>,
+    drops: [u64; 4],
+) -> Result<(), rusqlite::Error> {
+    for (idx, count) in drops.into_iter().enumerate() {
+        if count > 0 {
+            let priority = u8::try_from(idx + 1).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            increment_drop(transaction, priority, count)?;
+        }
+    }
+    Ok(())
+}
+
 fn increment_drop(
     transaction: &rusqlite::Transaction<'_>,
     priority: u8,
@@ -216,12 +223,5 @@ fn prune_expired_telemetry(
             }
         }
     }
-    for (idx, count) in expired_drops.into_iter().enumerate() {
-        if count > 0 {
-            let expired_priority =
-                u8::try_from(idx + 1).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            increment_drop(transaction, expired_priority, count)?;
-        }
-    }
-    Ok(())
+    flush_drops(transaction, expired_drops)
 }

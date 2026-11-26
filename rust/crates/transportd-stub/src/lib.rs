@@ -19,6 +19,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
     transport_service_server::TransportService,
 };
+use ocservia_contracts::traceparent::validate_status as validate_traceparent;
 use prost::Message;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
@@ -661,26 +662,6 @@ fn validate_id(value: &[u8], name: &'static str) -> Result<Vec<u8>, Status> {
     Ok(value.to_vec())
 }
 
-fn validate_traceparent(value: &str) -> Result<(), Status> {
-    let parts: Vec<_> = value.split('-').collect();
-    if parts.len() != 4
-        || parts[0] != "00"
-        || parts[1].len() != 32
-        || parts[2].len() != 16
-        || parts[3].len() != 2
-        || !parts.iter().all(|part| {
-            part.bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    {
-        return Err(Status::invalid_argument("invalid traceparent"));
-    }
-    if parts[1] == "00000000000000000000000000000000" || parts[2] == "0000000000000000" {
-        return Err(Status::invalid_argument("invalid traceparent"));
-    }
-    Ok(())
-}
-
 fn validate_command_times(
     issued_at: Option<&prost_types::Timestamp>,
     expires_at: Option<&prost_types::Timestamp>,
@@ -750,11 +731,7 @@ fn now_timestamp() -> prost_types::Timestamp {
 }
 
 #[cfg(test)]
-fn new_traceparent() -> String {
-    let trace_id = Uuid::now_v7().simple().to_string();
-    let span_id = &Uuid::now_v7().simple().to_string()[..16];
-    format!("00-{trace_id}-{span_id}-01")
-}
+use ocservia_contracts::traceparent::generate as new_traceparent;
 
 #[cfg(test)]
 #[allow(clippy::too_many_lines)]

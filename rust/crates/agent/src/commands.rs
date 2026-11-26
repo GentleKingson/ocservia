@@ -38,12 +38,8 @@ pub(super) async fn handle_command_stream(
             send,
             recv,
             framed_length & !ARTIFACT_FRAME_MASK,
-            session.node_id,
-            session.command_keys,
-            session.privd,
+            session,
             authority,
-            session.command_executor.journal_mut(),
-            session.fence_epoch_floor,
         )
         .await;
     }
@@ -52,12 +48,8 @@ pub(super) async fn handle_command_stream(
             send,
             recv,
             framed_length & !ARTIFACT_FRAME_MASK,
-            session.node_id,
-            session.command_keys,
-            session.privd,
+            session,
             authority,
-            session.command_executor.journal_mut(),
-            session.fence_epoch_floor,
         )
         .await;
     }
@@ -286,14 +278,16 @@ pub(super) fn settle_privd_response(
     let mut applied_revision = None;
     let terminal = match response.result {
         Some(privd_response::Result::Mutation(result)) if result.applied => {
-            applied_revision = desired_resource(envelope);
+            applied_revision = ocservia_agent::desired_resource(envelope)
+                .map(|(kind, key, revision)| (kind, key.to_owned(), revision));
             Ok(Vec::new())
         }
         Some(privd_response::Result::ConfigPlan(result)) => Ok(result.encode_to_vec()),
         Some(privd_response::Result::ConfigApply(result)) => {
             if !result.rolled_back && !result.failed_critical && result.applied_revision != 0 {
                 applied_revision = Some(
-                    desired_resource(envelope)
+                    ocservia_agent::desired_resource(envelope)
+                        .map(|(kind, key, revision)| (kind, key.to_owned(), revision))
                         .ok_or(CommandError::Rejected("config_apply_invalid"))?,
                 );
             }
@@ -351,30 +345,6 @@ pub(super) fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
     ErrorKind::try_from(kind)
         .ok()
         .and_then(ErrorKind::terminal_code)
-}
-
-fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String, u64)> {
-    match envelope.payload.as_ref()? {
-        command_envelope::Payload::UserCreate(value) => {
-            Some(("user", value.username.clone(), value.desired_revision))
-        }
-        command_envelope::Payload::UserDisable(value) => {
-            Some(("user", value.username.clone(), value.desired_revision))
-        }
-        command_envelope::Payload::UserEnable(value) => {
-            Some(("user", value.username.clone(), value.desired_revision))
-        }
-        command_envelope::Payload::UserPasswordRotate(value) => {
-            Some(("user", value.username.clone(), value.desired_revision))
-        }
-        command_envelope::Payload::GroupApply(value) => {
-            Some(("group", value.group_name.clone(), value.desired_revision))
-        }
-        command_envelope::Payload::CompleteConfigApply(value) => {
-            Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
-        }
-        _ => None,
-    }
 }
 
 pub(super) async fn observe_external_effect_with_reconcile(
