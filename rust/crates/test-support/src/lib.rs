@@ -19,8 +19,8 @@ use ocservia_command_authorization::{
     verification_key_id,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandAuthorizationProof, CommandDeliveryMode, CommandEnvelope, SemanticPayloadHashVersion,
-    SessionGrantV1, command_envelope,
+    CommandAuthorizationProof, CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose,
+    SealedSecretV1, SemanticPayloadHashVersion, SessionGrantV1, command_envelope,
 };
 use prost_types::Timestamp;
 use uuid::Uuid;
@@ -63,6 +63,15 @@ pub fn foreign_architecture() -> &'static str {
         "arm64"
     } else {
         "amd64"
+    }
+}
+
+pub fn user_password_secret(ciphertext: Vec<u8>) -> SealedSecretV1 {
+    SealedSecretV1 {
+        version: 1,
+        purpose: SealedSecretPurpose::UserPassword as i32,
+        key_id: "node-key-1".into(),
+        ciphertext,
     }
 }
 

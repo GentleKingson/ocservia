@@ -8,6 +8,8 @@
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
+use ocservia_agent_protocol::{ErrorKind, PrivdError};
+
 use super::effect_store::*;
 use super::user_file::*;
 use super::*;

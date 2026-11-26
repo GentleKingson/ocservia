@@ -18,5 +18,8 @@ rustix.workspace = true
 serde.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+ocservia-test-support = { version = "=0.1.0", path = "../test-support" }
+
 [lints]
 workspace = true

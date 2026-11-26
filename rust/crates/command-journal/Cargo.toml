@@ -10,6 +10,7 @@ publish = false
 rusqlite.workspace = true
 
 [dev-dependencies]
+ocservia-test-support = { version = "=0.1.0", path = "../test-support" }
 uuid = { workspace = true, features = ["v7"] }
 
 [lints]
