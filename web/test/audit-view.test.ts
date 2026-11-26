@@ -12,7 +12,7 @@ let unmount: (() => void) | undefined;
 const record = {
   id: "audit-a",
   action: "node.approve",
-  occurredAt: "2026-09-30T00:00:00Z",
+  occurred_at: "2026-09-30T00:00:00Z",
 };
 interface View {
   items: object[];
@@ -26,11 +26,11 @@ interface View {
   loading: boolean;
   verifying: boolean;
   verification?: {
-    workspaceId: string;
+    workspace_id: string;
     events: number;
     valid: boolean;
-    checkpointValid: boolean;
-    compactedEvents?: number;
+    checkpoint_valid: boolean;
+    compacted_events?: number;
   };
   verifyError: string;
   refresh(): Promise<void>;
@@ -90,7 +90,7 @@ it("filters only the loaded slice", async () => {
   const failed = {
     id: "audit-b",
     action: "user.disable",
-    actorId: "admin",
+    actor_id: "admin",
     result: "failed",
   };
   mocks.listAuditEvents.mockResolvedValue({
@@ -115,10 +115,10 @@ it("filters only the loaded slice", async () => {
 });
 it("renders valid and invalid audit evidence decoded by the API", async () => {
   const validResult = {
-    workspaceId: "workspace-a",
+    workspace_id: "workspace-a",
     events: 12,
     valid: true,
-    checkpointValid: true,
+    checkpoint_valid: true,
   };
   mocks.verifyAuditChain.mockResolvedValueOnce(validResult);
   const view = await mount();
@@ -127,17 +127,17 @@ it("renders valid and invalid audit evidence decoded by the API", async () => {
   expect(view.verifyError).toBe("");
 
   mocks.verifyAuditChain.mockResolvedValueOnce({
-    workspaceId: "workspace-a",
+    workspace_id: "workspace-a",
     events: 12,
     valid: false,
-    checkpointValid: false,
+    checkpoint_valid: false,
   });
   await view.verifyChain();
   expect(view.verification).toEqual({
-    workspaceId: "workspace-a",
+    workspace_id: "workspace-a",
     events: 12,
     valid: false,
-    checkpointValid: false,
+    checkpoint_valid: false,
   });
   expect(view.verifyError).toBe("");
 

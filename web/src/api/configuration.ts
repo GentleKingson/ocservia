@@ -6,28 +6,13 @@ export function createConfigPlan(
   request: ConfigPlanRequest,
   signal?: AbortSignal,
 ) {
-  const { expectedRevision, template, ttlSeconds, reason } = request;
   return read(
     client.POST("/nodes/{node_id}/config-plans", {
       params: {
         path: { node_id: nodeId },
         header: { "Idempotency-Key": newIdempotencyKey() },
       },
-      body: {
-        expected_revision: expectedRevision,
-        template: {
-          name: template.name,
-          directives: template.directives.map(({ name, value, secretRef }) => ({
-            name,
-            ...(value === undefined ? {} : { value }),
-            ...(secretRef
-              ? { secret_ref: { secret_ref_id: secretRef.secretRefId } }
-              : {}),
-          })),
-        },
-        ttl_seconds: ttlSeconds,
-        reason,
-      },
+      body: request,
       signal: signal ?? null,
     }),
   );

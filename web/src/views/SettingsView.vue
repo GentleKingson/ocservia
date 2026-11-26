@@ -231,7 +231,7 @@ onBeforeUnmount(reads.cancel);
               {{
                 buildUnavailable
                   ? $t("recommendationUnavailable")
-                  : buildInfo?.recommendedAgentVersion ||
+                  : buildInfo?.recommended_agent_version ||
                     $t("recommendationNotConfigured")
               }}
             </dd>

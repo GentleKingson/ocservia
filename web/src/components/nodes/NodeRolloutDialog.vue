@@ -35,7 +35,7 @@ onBeforeUnmount(() => {
 });
 
 const rolloutTarget = computed(
-  () => props.selectedNodes[0]?.recommendedAgentVersion ?? "",
+  () => props.selectedNodes[0]?.recommended_agent_version ?? "",
 );
 
 // Only the stable Problem type selects a local message; server text is never

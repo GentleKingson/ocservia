@@ -15,7 +15,7 @@ const upgradeStateLabels: Record<string, string> = {
 };
 
 export function operationStatusKey(operation: Operation): string {
-  if (operation.agentUpgradeState)
+  if (operation.agent_upgrade_state)
     return (
       upgradeStateLabels[operation.state] ?? "operation_" + operation.state
     );

@@ -32,16 +32,16 @@ import RolloutDetailView from "../src/views/RolloutDetailView.vue";
 function rollout(id: string, state: string, workspaceId = "workspace-a") {
   return {
     id,
-    workspaceId,
-    targetVersion: "0.2.0",
+    workspace_id: workspaceId,
+    target_version: "0.2.0",
     state,
-    batchSize: 5,
-    stopOnFailure: true,
+    batch_size: 5,
+    stop_on_failure: true,
     reason: "rollout",
-    createdBy: "operator",
-    currentBatch: 0,
-    createdAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-01T00:00:00Z",
+    created_by: "operator",
+    current_batch: 0,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
     nodes: [],
   } as unknown as AgentRollout;
 }
@@ -240,7 +240,7 @@ describe("operations rollout list", () => {
   beforeEach(() => {
     mocks.listOperations.mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
   });
 

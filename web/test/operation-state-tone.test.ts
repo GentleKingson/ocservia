@@ -12,9 +12,9 @@ const operation = (state: Operation["state"], upgrade = false): Operation => ({
   id: "op",
   state,
   version: 1,
-  createdAt: "2026-10-04T00:00:00Z",
-  updatedAt: "2026-10-04T00:00:00Z",
-  ...(upgrade ? { agentUpgradeState: state as never } : {}),
+  created_at: "2026-10-04T00:00:00Z",
+  updated_at: "2026-10-04T00:00:00Z",
+  ...(upgrade ? { agent_upgrade_state: state as never } : {}),
 });
 
 describe("operation state tones", () => {

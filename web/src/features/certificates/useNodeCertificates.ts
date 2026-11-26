@@ -116,8 +116,8 @@ export function useNodeCertificates({
         ) ?? records.find((record) => record.state !== "revoked");
       if (record) {
         if (
-          record.nodeId !== context.nodeId ||
-          record.workspaceId !== context.workspaceId
+          record.node_id !== context.nodeId ||
+          record.workspace_id !== context.workspaceId
         )
           return;
         await pollCertificate(context, record);
@@ -137,7 +137,7 @@ export function useNodeCertificates({
       );
       if (
         certificateWorkflow.isCurrent(context) &&
-        operation.nodeId === context.nodeId
+        operation.node_id === context.nodeId
       )
         certificateOperation.value = operation;
     } catch (error) {
@@ -184,9 +184,9 @@ export function useNodeCertificates({
       fallbackError: () => t("certificateRequestFailed"),
       async run(ticket, context) {
         const value = await createCertificate(node.id, {
-          expectedVersion: node.version,
-          commonName: certificateCommonName.value.trim(),
-          dnsNames: [
+          expected_version: node.version,
+          common_name: certificateCommonName.value.trim(),
+          dns_names: [
             ...new Set(
               certificateDnsNames.value
                 .split(",")
@@ -194,12 +194,12 @@ export function useNodeCertificates({
                 .filter(Boolean),
             ),
           ],
-          keyBits: 3072,
+          key_bits: 3072,
           reason: certificateReason.value.trim(),
         });
         rememberNodeWorkflowReference(ticket, {
           resourceId: value.id,
-          operationId: value.operationId,
+          operationId: value.operation_id,
         });
         await pollCertificate(context, value);
       },
@@ -222,7 +222,7 @@ export function useNodeCertificates({
         });
         rememberNodeWorkflowReference(ticket, {
           resourceId: issued.id,
-          operationId: issued.operationId,
+          operationId: issued.operation_id,
         });
         if (certificateWorkflow.isCurrent(context)) certificate.value = issued;
       },
@@ -239,7 +239,7 @@ export function useNodeCertificates({
       !current ||
       !node ||
       !certificateReason.value.trim() ||
-      readCertificateGrant(context, current.id)?.downloadToken
+      readCertificateGrant(context, current.id)?.download_token
     )
       return;
     const exportKey = JSON.stringify([
@@ -258,9 +258,9 @@ export function useNodeCertificates({
         let request = pendingExports.get(exportKey);
         if (!request) {
           request = {
-            artifactRequestId: newArtifactRequestId(),
-            expectedVersion: node.version,
-            certificateVersion: current.version,
+            artifact_request_id: newArtifactRequestId(),
+            expected_version: node.version,
+            certificate_version: current.version,
             reason: certificateReason.value.trim(),
           };
           pendingExports.set(exportKey, request);
@@ -278,7 +278,7 @@ export function useNodeCertificates({
           current.id,
         );
         certificateOperation.value = grant.operation;
-        if (!grant.downloadToken)
+        if (!grant.download_token)
           certificateError.value = t("p12GrantUnavailable");
         await trackOperation(grant.operation.id);
       },
@@ -295,7 +295,7 @@ export function useNodeCertificates({
   async function downloadP12(): Promise<void> {
     const grant = certificateGrant.value;
     const certificateId = certificate.value?.id;
-    const token = grant?.downloadToken;
+    const token = grant?.download_token;
     if (!certificateId || !token) return;
     await runNodeMutation({
       workflow: certificateWorkflow,
@@ -305,10 +305,13 @@ export function useNodeCertificates({
       error: certificateError,
       fallbackError: () => t("p12DownloadFailed"),
       async run(_ticket, context) {
-        const blob = await downloadCertificateArtifact(grant.artifactId, token);
+        const blob = await downloadCertificateArtifact(
+          grant.artifact_id,
+          token,
+        );
         // The Controller consumes the artifact before sending its bytes. Finish
         // this user-initiated download even if its originating dialog has closed.
-        consumeCertificateGrant(context, certificateId, grant.artifactId);
+        consumeCertificateGrant(context, certificateId, grant.artifact_id);
         downloadBlob(blob, "certificate.p12");
       },
     });
@@ -327,8 +330,8 @@ export function useNodeCertificates({
       fallbackError: () => t("certificateRevokeFailed"),
       async run(ticket, context) {
         const operation = await revokeCertificate(current.id, {
-          expectedVersion: node.version,
-          certificateVersion: current.version,
+          expected_version: node.version,
+          certificate_version: current.version,
           reason: certificateReason.value.trim(),
         });
         rememberNodeWorkflowReference(ticket, {

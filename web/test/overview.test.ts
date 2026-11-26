@@ -34,15 +34,15 @@ const operation = (id: string, state: Operation["state"]): Operation => ({
   id,
   state,
   version: 1,
-  createdAt: new Date(0).toISOString(),
-  updatedAt: new Date(0).toISOString(),
+  created_at: new Date(0).toISOString(),
+  updated_at: new Date(0).toISOString(),
 });
 const platformEvent = (id: string, suffix: number): PlatformEvent => ({
   id,
-  nodeId: "019fc0a4-6d92-765c-a8a1-4af556614cc3",
+  node_id: "019fc0a4-6d92-765c-a8a1-4af556614cc3",
   type: "heartbeat",
   traceparent: "00-trace-span-01",
-  occurredAt: new Date(suffix).toISOString(),
+  occurred_at: new Date(suffix).toISOString(),
 });
 const operationPage = (items: Operation[], hasMore = false): OperationPage => {
   const last = items.at(-1);
@@ -50,8 +50,8 @@ const operationPage = (items: Operation[], hasMore = false): OperationPage => {
     items,
     page:
       hasMore && last
-        ? { hasMore: true, nextCursor: last.id }
-        : { hasMore: false },
+        ? { has_more: true, next_cursor: last.id }
+        : { has_more: false },
   };
 };
 const eventPage = (
@@ -63,26 +63,26 @@ const eventPage = (
     items,
     page:
       hasMore && last
-        ? { hasMore: true, nextCursor: last.id }
-        : { hasMore: false },
+        ? { has_more: true, next_cursor: last.id }
+        : { has_more: false },
   };
 };
 const node = (
   id: string,
-  state: NodeObservedState["connectionState"],
+  state: NodeObservedState["connection_state"],
   path?: "direct" | "relay",
   sessionCount = 0,
 ): NodeObservedState => ({
   id,
   name: `node-${id}`,
   version: 1,
-  trustStatus: "active",
-  connectionState: state,
+  trust_status: "active",
+  connection_state: state,
   freshness: state === "online" ? "fresh" : "stale",
   dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-  sessionCount,
+  session_count: sessionCount,
   ...(path
-    ? { path: { mode: path, rttMs: 12 } satisfies NodeObservedState["path"] }
+    ? { path: { mode: path, rtt_ms: 12 } satisfies NodeObservedState["path"] }
     : {}),
 });
 
@@ -98,7 +98,7 @@ describe("operational overview", () => {
     vi.mocked(listEvents).mockResolvedValue(eventPage([]));
     vi.mocked(listNodes).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
   });
 
@@ -114,7 +114,7 @@ describe("operational overview", () => {
         node("019fc0a4-6d92-765c-a8a1-4af556614cc2", "online", "relay", 2),
         node("019fc0a4-6d92-765c-a8a1-4af556614cc3", "offline", undefined, 1),
       ],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     const fleet = useFleetStore();
     await fleet.rebuild();
@@ -314,7 +314,7 @@ describe("operational overview", () => {
   it("records the node snapshot time only on a complete rebuild", async () => {
     vi.mocked(listNodes).mockResolvedValue({
       items: [node("019fc0a4-6d92-765c-a8a1-4af556614cc3", "offline")],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     const fleet = useFleetStore();
     await fleet.rebuild();

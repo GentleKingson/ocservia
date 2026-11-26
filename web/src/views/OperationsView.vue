@@ -59,8 +59,8 @@ async function loadOperations(reset = true): Promise<void> {
     operations.value = reset
       ? page.items
       : [...operations.value, ...page.items];
-    hasMore.value = page.page.hasMore && Boolean(page.page.nextCursor);
-    nextCursor.value = page.page.nextCursor;
+    hasMore.value = page.page.has_more && Boolean(page.page.next_cursor);
+    nextCursor.value = page.page.next_cursor;
     unavailable.value = false;
   } catch (cause) {
     if (!request.current()) return;
@@ -171,7 +171,7 @@ onBeforeUnmount(() => {
               <RouterLink
                 :to="{ name: 'rollout-detail', params: { rolloutId: item.id } }"
                 class="text-primary font-mono underline-offset-4 hover:underline"
-                >{{ item.targetVersion }}</RouterLink
+                >{{ item.target_version }}</RouterLink
               >
             </TableCell>
             <TableCell>
@@ -184,7 +184,7 @@ onBeforeUnmount(() => {
               item.reason
             }}</TableCell>
             <TableCell class="text-muted-foreground">{{
-              formatTimestamp(item.createdAt)
+              formatTimestamp(item.created_at)
             }}</TableCell>
           </TableRow>
         </TableBody>
@@ -256,31 +256,31 @@ onBeforeUnmount(() => {
                   :label="$t(operationStatusKey(operation))"
                 />
                 <code
-                  v-if="operation.agentUpgradeTargetVersion"
+                  v-if="operation.agent_upgrade_target_version"
                   class="text-xs"
-                  >{{ operation.agentUpgradeTargetVersion }}</code
+                  >{{ operation.agent_upgrade_target_version }}</code
                 >
               </span>
             </TableCell>
             <TableCell>
               <RouterLink
-                v-if="operation.nodeId"
+                v-if="operation.node_id"
                 :to="{
                   name: 'node-detail',
-                  params: { nodeId: operation.nodeId },
+                  params: { nodeId: operation.node_id },
                 }"
                 class="text-primary font-mono text-xs underline-offset-4 hover:underline"
-                :title="operation.nodeId"
-                >{{ operation.nodeId.slice(0, 8) }}</RouterLink
+                :title="operation.node_id"
+                >{{ operation.node_id.slice(0, 8) }}</RouterLink
               ><span v-else class="text-muted-foreground">{{
                 $t("notAvailable")
               }}</span>
             </TableCell>
             <TableCell class="text-muted-foreground">{{
-              formatTimestamp(operation.createdAt)
+              formatTimestamp(operation.created_at)
             }}</TableCell>
             <TableCell class="text-muted-foreground">{{
-              formatTimestamp(operation.updatedAt)
+              formatTimestamp(operation.updated_at)
             }}</TableCell>
           </TableRow>
         </TableBody>
@@ -337,20 +337,20 @@ onBeforeUnmount(() => {
             :label="$t(operationStatusKey(selectedOperation))"
           />
         </dd>
-        <template v-if="selectedOperation.agentUpgradeTargetVersion">
+        <template v-if="selectedOperation.agent_upgrade_target_version">
           <dt class="text-muted-foreground">
             {{ $t("targetVersion") }}
           </dt>
           <dd class="m-0 break-all">
-            <code>{{ selectedOperation.agentUpgradeTargetVersion }}</code>
+            <code>{{ selectedOperation.agent_upgrade_target_version }}</code>
           </dd>
         </template>
-        <template v-if="selectedOperation.configApplyFailureCode">
+        <template v-if="selectedOperation.config_apply_failure_code">
           <dt class="text-muted-foreground">
             {{ $t("failureCode") }}
           </dt>
           <dd class="text-destructive m-0 break-all">
-            <code>{{ selectedOperation.configApplyFailureCode }}</code>
+            <code>{{ selectedOperation.config_apply_failure_code }}</code>
           </dd>
         </template>
         <dt class="text-muted-foreground">
@@ -358,23 +358,23 @@ onBeforeUnmount(() => {
         </dt>
         <dd class="m-0 break-all">
           <RouterLink
-            v-if="selectedOperation.nodeId"
+            v-if="selectedOperation.node_id"
             :to="{
               name: 'node-detail',
-              params: { nodeId: selectedOperation.nodeId },
+              params: { nodeId: selectedOperation.node_id },
             }"
             class="text-primary font-mono underline-offset-4 hover:underline"
-            >{{ selectedOperation.nodeId }}</RouterLink
+            >{{ selectedOperation.node_id }}</RouterLink
           >
           <span v-else>{{ $t("notAvailable") }}</span>
         </dd>
         <dt class="text-muted-foreground">{{ $t("created") }}</dt>
         <dd class="m-0">
-          {{ formatTimestamp(selectedOperation.createdAt) }}
+          {{ formatTimestamp(selectedOperation.created_at) }}
         </dd>
         <dt class="text-muted-foreground">{{ $t("updated") }}</dt>
         <dd class="m-0">
-          {{ formatTimestamp(selectedOperation.updatedAt) }}
+          {{ formatTimestamp(selectedOperation.updated_at) }}
         </dd>
       </dl>
     </SectionCard>

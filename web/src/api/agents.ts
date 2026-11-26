@@ -1,20 +1,9 @@
-import {
-  fromWire,
-  type AgentRollout,
-  type NodeObservedState,
-  type Schemas,
-} from "./models";
-import {
-  client,
-  fencedHeaders,
-  newIdempotencyKey,
-  read,
-  unwrap,
-} from "./transport";
+import type { AgentRollout, NodeObservedState, Schemas } from "./models";
+import { client, fencedHeaders, newIdempotencyKey, read } from "./transport";
 import { getWorkspaceId } from "./workspace";
 
 export type RolloutDetail = Omit<AgentRollout, "excluded"> & {
-  excluded: Array<{ nodeId: string; reason: string; raw: string }>;
+  excluded: Array<{ node_id: string; reason: string; raw: string }>;
 };
 
 function rolloutDetail({
@@ -22,7 +11,7 @@ function rolloutDetail({
   ...rollout
 }: Schemas["AgentRollout"]): RolloutDetail {
   return {
-    ...fromWire(rollout),
+    ...rollout,
     excluded: (excluded ?? []).map((entry) => {
       if (
         entry !== null &&
@@ -32,9 +21,9 @@ function rolloutDetail({
         "reason" in entry &&
         typeof entry.reason === "string"
       ) {
-        return { nodeId: entry.node_id, reason: entry.reason, raw: "" };
+        return { node_id: entry.node_id, reason: entry.reason, raw: "" };
       }
-      return { nodeId: "", reason: "", raw: JSON.stringify(entry) };
+      return { node_id: "", reason: "", raw: JSON.stringify(entry) };
     }),
   };
 }
@@ -42,7 +31,7 @@ function rolloutDetail({
 async function readRollout(
   request: Promise<{ data?: Schemas["AgentRollout"]; response: Response }>,
 ) {
-  return rolloutDetail(await unwrap(request));
+  return rolloutDetail(await read(request));
 }
 
 export function upgradeNodeAgent(
@@ -90,7 +79,7 @@ export async function createAgentRollout(
 }
 
 export async function listAgentRollouts(limit?: number, signal?: AbortSignal) {
-  const data = await unwrap(
+  const data = await read(
     client.GET("/agent-rollouts", {
       params: {
         header: { "X-Workspace-ID": await getWorkspaceId() },

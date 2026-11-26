@@ -21,28 +21,28 @@ function node(
     id,
     name,
     version: 1,
-    trustStatus: "active",
-    connectionState: "online",
+    trust_status: "active",
+    connection_state: "online",
     freshness: "fresh",
     dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-    sessionCount: 0,
+    session_count: 0,
     ...extra,
   };
 }
 
 const fleet = [
   node("id-1", "alpha", {
-    path: { mode: "direct", rttMs: 3 },
-    agentVersionState: "current",
+    path: { mode: "direct", rtt_ms: 3 },
+    agent_version_state: "current",
   }),
   node("id-2", "beta", {
-    trustStatus: "pending",
-    connectionState: "offline",
+    trust_status: "pending",
+    connection_state: "offline",
     freshness: "stale",
-    path: { mode: "relay", rttMs: 40 },
-    agentVersionState: "upgrade_available",
+    path: { mode: "relay", rtt_ms: 40 },
+    agent_version_state: "upgrade_available",
   }),
-  node("id-3", "gamma", { trustStatus: "revoked", freshness: "never" }),
+  node("id-3", "gamma", { trust_status: "revoked", freshness: "never" }),
 ];
 
 const empty = readNodeListQuery({});
@@ -114,10 +114,10 @@ describe("sortNodes", () => {
   it("sorts heartbeats newest first with unknown values last", () => {
     const nodes = [
       node("e", "missing"),
-      node("d", "garbage", { lastHeartbeatAt: "not a time" }),
-      node("c", "old", { lastHeartbeatAt: "2026-01-01T00:00:00Z" }),
-      node("b", "new", { lastHeartbeatAt: "2026-02-01T00:00:00.123456Z" }),
-      node("a", "same", { lastHeartbeatAt: "2026-02-01T00:00:00.123456Z" }),
+      node("d", "garbage", { last_heartbeat_at: "not a time" }),
+      node("c", "old", { last_heartbeat_at: "2026-01-01T00:00:00Z" }),
+      node("b", "new", { last_heartbeat_at: "2026-02-01T00:00:00.123456Z" }),
+      node("a", "same", { last_heartbeat_at: "2026-02-01T00:00:00.123456Z" }),
       node("f", "unknown"),
     ];
     expect(sortNodes(nodes, "heartbeat").map((item) => item.id)).toEqual([
