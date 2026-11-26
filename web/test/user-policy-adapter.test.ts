@@ -1,6 +1,6 @@
-import { ResponseError } from "@/api/transport";
 import type { UserPolicy } from "@/api/models";
 import { describe, expect, it, vi } from "vitest";
+import { responseError } from "./helpers";
 
 vi.mock("../src/api/users", () => ({
   getUserPolicy: vi.fn(),
@@ -36,19 +36,14 @@ function makePolicy(overrides: Partial<UserPolicy> = {}): UserPolicy {
 
 describe("user policy feature", () => {
   it("loads the default form for a 404 ResponseError", async () => {
-    vi.mocked(getUserPolicy).mockRejectedValueOnce(
-      new ResponseError(new Response(null, { status: 404 })),
-    );
+    vi.mocked(getUserPolicy).mockRejectedValueOnce(responseError(404));
     await expect(loadUserPolicy("node", "alice")).resolves.toEqual(
       policyToForm(),
     );
   });
 
   it.each([
-    [
-      "generated non-404",
-      new ResponseError(new Response(null, { status: 403 })),
-    ],
+    ["generated non-404", responseError(403)],
     ["network", new TypeError("network unavailable")],
     ["abort", new DOMException("cancelled", "AbortError")],
   ])("preserves the original %s rejection", async (_kind, error) => {

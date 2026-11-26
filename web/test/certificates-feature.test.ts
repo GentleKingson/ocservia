@@ -2,8 +2,8 @@ import { effectScope, ref, type EffectScope } from "vue";
 import type { Certificate, NodeObservedState, Operation } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOperation } from "../src/api/operations";
-import { ResponseError } from "../src/api/transport";
 import { useNodeCertificates } from "../src/features/certificates/useNodeCertificates";
+import { responseError, stubSessionStorage } from "./helpers";
 
 const api = vi.hoisted(() => ({
   createCertificate: vi.fn(),
@@ -61,11 +61,7 @@ function setup() {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.resetAllMocks();
-  const storage = new Map<string, string>();
-  vi.stubGlobal("sessionStorage", {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => storage.set(key, value),
-  });
+  stubSessionStorage();
   api.listNodeCertificates.mockResolvedValue([]);
   api.createCertificate.mockResolvedValue(certificate);
   api.issueCertificate.mockResolvedValue({ ...certificate, state: "issued" });
@@ -109,9 +105,7 @@ describe("certificate feature without a page or store", () => {
       await feature.openCertificate();
       feature.certificateReason.value = "original reason";
       await feature.submitCertificateRequest();
-      api.createCertificateP12.mockRejectedValueOnce(
-        new ResponseError(new Response(null, { status })),
-      );
+      api.createCertificateP12.mockRejectedValueOnce(responseError(status));
       await feature.createP12();
       const original: unknown = api.createCertificateP12.mock.calls[0]?.[1];
       feature.certificateReason.value = "corrected reason";

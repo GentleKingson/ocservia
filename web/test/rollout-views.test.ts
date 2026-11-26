@@ -1,7 +1,7 @@
 import { nextTick, reactive } from "vue";
-import { ResponseError } from "@/api/transport";
 import type { AgentRollout } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushTimers as flush, responseError } from "./helpers";
 import { mountSetup } from "./renderer";
 
 const mocks = vi.hoisted(() => ({
@@ -46,18 +46,7 @@ function rollout(id: string, state: string, workspaceId = "workspace-a") {
   } as unknown as AgentRollout;
 }
 
-function responseError(status: number): ResponseError {
-  return new ResponseError(new Response("{}", { status }));
-}
-
 let unmount: (() => void) | undefined;
-
-// Foreground reads requested by a route or workspace change run on a 0 ms timer.
-async function flush() {
-  for (let i = 0; i < 8; i++) await nextTick();
-  await vi.advanceTimersByTimeAsync(0);
-  for (let i = 0; i < 8; i++) await nextTick();
-}
 
 async function mount<T>(component: object): Promise<T> {
   const mounted = mountSetup(component);
@@ -104,7 +93,7 @@ describe("rollout detail", () => {
       await flush();
       expect(view.rollout?.id).toBe("rollout-b");
       if (outcome === "resolve") slow.resolve(rollout("rollout-a", "paused"));
-      else slow.reject(responseError(404));
+      else slow.reject(responseError(404, "{}"));
       await flush();
       expect(view.rollout?.id).toBe("rollout-b");
       expect(view.loading).toBe(false);
@@ -142,7 +131,7 @@ describe("rollout detail", () => {
     [403, "unavailable"],
     [503, "unavailable"],
   ] as const)("maps a real %i ResponseError to %s", async (status, field) => {
-    mocks.getAgentRollout.mockRejectedValue(responseError(status));
+    mocks.getAgentRollout.mockRejectedValue(responseError(status, "{}"));
     const view = await mount<DetailView>(RolloutDetailView);
     expect(view[field]).toBe(true);
     expect(view.notFound).toBe(status === 404);

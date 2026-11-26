@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, test } from "./csp";
-import { installConsoleMocks } from "./fixtures";
+import { expectNoPageOverflow, installConsoleMocks } from "./fixtures";
 
 test("filters network audit, pages older flows and exports exact counters", async ({
   page,
@@ -60,11 +60,5 @@ test("filters network audit, pages older flows and exports exact counters", asyn
       expect.objectContaining({ bytesOut: "9007199254740993" }),
     ]),
   );
-  expect(
-    await page.evaluate(
-      () =>
-        document.documentElement.scrollWidth <=
-        document.documentElement.clientWidth,
-    ),
-  ).toBe(true);
+  await expectNoPageOverflow(page);
 });

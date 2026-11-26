@@ -1,7 +1,7 @@
 import { mountSetup } from "./renderer";
-import { nextTick } from "vue";
 import { ResponseError } from "@/api/transport";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { flushTicks } from "./helpers";
 
 const mocks = vi.hoisted(() => ({
   createAgentRollout: vi.fn(),
@@ -25,9 +25,6 @@ interface View {
 }
 
 let unmount: (() => void) | undefined;
-async function flush() {
-  for (let i = 0; i < 8; i++) await nextTick();
-}
 async function mount(): Promise<View> {
   const mounted = mountSetup(NodeRolloutDialog, {
     selectedNodes: [
@@ -41,7 +38,7 @@ async function mount(): Promise<View> {
     onStarted: mocks.onStarted,
   });
   unmount = mounted.unmount;
-  await flush();
+  await flushTicks();
   const view = mounted.view as View;
   view.rolloutDialog = true;
   view.rolloutReason = "first";
