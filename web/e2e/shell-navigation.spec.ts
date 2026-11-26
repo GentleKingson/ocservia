@@ -1,6 +1,5 @@
-import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
-import { installConsoleMocks } from "./fixtures";
+import { expectNoPageOverflow, installConsoleMocks } from "./fixtures";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614cc3";
@@ -11,16 +10,6 @@ test.beforeEach(async ({ page }) => {
     default404: true,
   });
 });
-
-async function expectNoPageOverflow(page: Page): Promise<void> {
-  expect(
-    await page.evaluate(
-      () =>
-        document.documentElement.scrollWidth -
-        document.documentElement.clientWidth,
-    ),
-  ).toBeLessThanOrEqual(0);
-}
 
 test("skip link moves focus to the main content", async ({ page }) => {
   await page.goto("/settings");

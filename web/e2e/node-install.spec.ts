@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
-import { installConsoleMocks } from "./fixtures";
+import { installConsoleMocks, wireNode } from "./fixtures";
 const alpha = "019fc0a4-6d92-765c-a8a1-4af556614fa1";
 const secret = "oit1_aHR0cHM6Ly9jb250cm9sbGVyLmV4YW1wbGU." + "b".repeat(43);
 
@@ -9,18 +9,7 @@ async function setup(page: Page, empty: boolean) {
     workspace: { id: alpha, name: "Alpha", slug: "alpha" },
     nodes: empty
       ? []
-      : [
-          {
-            id: "019fc0a4-6d92-765c-a8a1-4af556614fb1",
-            name: "existing-node",
-            version: 1,
-            trust_status: "active",
-            connection_state: "online",
-            freshness: "fresh",
-            dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-            session_count: 0,
-          },
-        ],
+      : [wireNode("019fc0a4-6d92-765c-a8a1-4af556614fb1", "existing-node")],
   });
 }
 async function prepare(page: Page) {
