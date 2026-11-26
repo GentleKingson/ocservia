@@ -73,24 +73,42 @@ download() {
   printf '%s\n' "${destination}"
 }
 
+version_output_matches() {
+  local mode="$1" expected="$2" executable="$3" output
+  shift 3
+  [[ -x "${executable}" ]] || return 1
+  output="$("$@" 2>&1)" || return 1
+  case "${mode}" in
+    contains) [[ "${output}" == *"${expected}"* ]] ;;
+    equals) [[ "${output}" == "${expected}" ]] ;;
+    *) return 2 ;;
+  esac
+}
+
 version_output_contains() {
   local expected="$1"
   shift
-  local executable="$1" output
-  shift
-  [[ -x "${executable}" ]] || return 1
-  output="$("$@" 2>&1)" || return 1
-  [[ "${output}" == *"${expected}"* ]]
+  version_output_matches contains "${expected}" "$@"
 }
 
 version_output_equals() {
   local expected="$1"
   shift
-  local executable="$1" output
-  shift
-  [[ -x "${executable}" ]] || return 1
-  output="$("$@" 2>&1)" || return 1
-  [[ "${output}" == "${expected}" ]]
+  version_output_matches equals "${expected}" "$@"
+}
+
+install_tar_binary() {
+  local match_mode="$1" expected="$2" dest="$3" version_arg="$4" url="$5" artifact="$6" member="$7" strip="${8:-0}"
+  local archive
+  local -a tar_args=(-xzf)
+  if ! version_output_matches "${match_mode}" "${expected}" "${dest}" "${dest}" "${version_arg}"; then
+    archive="$(download "${url}" "${artifact}")"
+    tar_args+=("${archive}")
+    (( strip == 0 )) || tar_args+=("--strip-components=${strip}")
+    tar "${tar_args[@]}" -C "$(dirname -- "${dest}")" "${member}"
+    chmod 0755 "${dest}"
+  fi
+  version_output_matches "${match_mode}" "${expected}" "${dest}" "${dest}" "${version_arg}"
 }
 
 platform="$(uname -s)-$(uname -m)"
@@ -229,63 +247,38 @@ install_buf() {
 }
 
 install_ruff() {
-  local artifact archive
-  artifact="ruff-$(version ruff)-${ruff_platform}.tar.gz"
-  if ! version_output_equals "ruff $(version ruff)" "${TOOLS}/bin/ruff" \
-    "${TOOLS}/bin/ruff" --version; then
-    archive="$(download "https://github.com/astral-sh/ruff/releases/download/$(version ruff)/ruff-${ruff_platform}.tar.gz" "${artifact}")"
-    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/bin" "ruff-${ruff_platform}/ruff"
-    chmod 0755 "${TOOLS}/bin/ruff"
-  fi
-  [[ "$(ruff --version)" == "ruff $(version ruff)" ]]
+  install_tar_binary equals "ruff $(version ruff)" "${TOOLS}/bin/ruff" --version \
+    "https://github.com/astral-sh/ruff/releases/download/$(version ruff)/ruff-${ruff_platform}.tar.gz" \
+    "ruff-$(version ruff)-${ruff_platform}.tar.gz" \
+    "ruff-${ruff_platform}/ruff" 1
 }
 
 install_gitleaks() {
-  local artifact archive
-  artifact="gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz"
-  if ! version_output_equals "$(version gitleaks)" "${TOOLS}/bin/gitleaks" \
-    "${TOOLS}/bin/gitleaks" version; then
-    archive="$(download "https://github.com/gitleaks/gitleaks/releases/download/v$(version gitleaks)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" -C "${TOOLS}/bin" gitleaks
-    chmod 0755 "${TOOLS}/bin/gitleaks"
-  fi
-  [[ "$(gitleaks version)" == "$(version gitleaks)" ]]
+  install_tar_binary equals "$(version gitleaks)" "${TOOLS}/bin/gitleaks" version \
+    "https://github.com/gitleaks/gitleaks/releases/download/v$(version gitleaks)/gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz" \
+    "gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz" \
+    gitleaks
 }
 
 install_syft() {
-  local artifact archive
-  artifact="syft_$(version syft)_${syft_platform}.tar.gz"
-  if ! version_output_contains "$(version syft)" "${TOOLS}/bin/syft" \
-    "${TOOLS}/bin/syft" --version; then
-    archive="$(download "https://github.com/anchore/syft/releases/download/v$(version syft)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" -C "${TOOLS}/bin" syft
-    chmod 0755 "${TOOLS}/bin/syft"
-  fi
-  [[ "$("${TOOLS}/bin/syft" --version)" == *"$(version syft)"* ]]
+  install_tar_binary contains "$(version syft)" "${TOOLS}/bin/syft" --version \
+    "https://github.com/anchore/syft/releases/download/v$(version syft)/syft_$(version syft)_${syft_platform}.tar.gz" \
+    "syft_$(version syft)_${syft_platform}.tar.gz" \
+    syft
 }
 
 install_grype() {
-  local artifact archive
-  artifact="grype_$(version grype)_${grype_platform}.tar.gz"
-  if ! version_output_contains "$(version grype)" "${TOOLS}/bin/grype" \
-    "${TOOLS}/bin/grype" --version; then
-    archive="$(download "https://github.com/anchore/grype/releases/download/v$(version grype)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" -C "${TOOLS}/bin" grype
-    chmod 0755 "${TOOLS}/bin/grype"
-  fi
-  [[ "$("${TOOLS}/bin/grype" --version)" == *"$(version grype)"* ]]
+  install_tar_binary contains "$(version grype)" "${TOOLS}/bin/grype" --version \
+    "https://github.com/anchore/grype/releases/download/v$(version grype)/grype_$(version grype)_${grype_platform}.tar.gz" \
+    "grype_$(version grype)_${grype_platform}.tar.gz" \
+    grype
 }
 
 install_oasdiff() {
-  local artifact archive
-  artifact="oasdiff_$(version oasdiff)_${oasdiff_platform}.tar.gz"
-  if ! version_output_contains "$(version oasdiff)" "${TOOLS}/bin/oasdiff" \
-    "${TOOLS}/bin/oasdiff" --version; then
-    archive="$(download "https://github.com/Tufin/oasdiff/releases/download/v$(version oasdiff)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" -C "${TOOLS}/bin" oasdiff
-    chmod 0755 "${TOOLS}/bin/oasdiff"
-  fi
-  [[ "$(oasdiff --version)" == *"$(version oasdiff)"* ]]
+  install_tar_binary contains "$(version oasdiff)" "${TOOLS}/bin/oasdiff" --version \
+    "https://github.com/Tufin/oasdiff/releases/download/v$(version oasdiff)/oasdiff_$(version oasdiff)_${oasdiff_platform}.tar.gz" \
+    "oasdiff_$(version oasdiff)_${oasdiff_platform}.tar.gz" \
+    oasdiff
 }
 
 install_govulncheck() {
@@ -310,29 +303,21 @@ install_go_licenses() {
 }
 
 install_cargo_audit() {
-  local artifact archive
-  artifact="cargo-audit-${cargo_audit_platform}-v$(version cargo_audit).tgz"
-  if ! version_output_contains "$(version cargo_audit)" "${TOOLS}/cargo/bin/cargo-audit" \
-    "${TOOLS}/cargo/bin/cargo-audit" --version; then
-    archive="$(download "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv$(version cargo_audit)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/cargo/bin" \
-      "cargo-audit-${cargo_audit_platform}-v$(version cargo_audit)/cargo-audit"
-    chmod 0755 "${TOOLS}/cargo/bin/cargo-audit"
-  fi
-  [[ "$(cargo audit --version)" == *"$(version cargo_audit)"* ]]
+  local v
+  v="$(version cargo_audit)"
+  install_tar_binary contains "${v}" "${TOOLS}/cargo/bin/cargo-audit" --version \
+    "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${v}/cargo-audit-${cargo_audit_platform}-v${v}.tgz" \
+    "cargo-audit-${cargo_audit_platform}-v${v}.tgz" \
+    "cargo-audit-${cargo_audit_platform}-v${v}/cargo-audit" 1
 }
 
 install_cargo_deny() {
-  local artifact archive
-  artifact="cargo-deny-$(version cargo_deny)-${cargo_deny_platform}.tar.gz"
-  if ! version_output_contains "$(version cargo_deny)" "${TOOLS}/cargo/bin/cargo-deny" \
-    "${TOOLS}/cargo/bin/cargo-deny" --version; then
-    archive="$(download "https://github.com/EmbarkStudios/cargo-deny/releases/download/$(version cargo_deny)/${artifact}" "${artifact}")"
-    tar -xzf "${archive}" --strip-components=1 -C "${TOOLS}/cargo/bin" \
-      "cargo-deny-$(version cargo_deny)-${cargo_deny_platform}/cargo-deny"
-    chmod 0755 "${TOOLS}/cargo/bin/cargo-deny"
-  fi
-  [[ "$(cargo deny --version)" == *"$(version cargo_deny)"* ]]
+  local v
+  v="$(version cargo_deny)"
+  install_tar_binary contains "${v}" "${TOOLS}/cargo/bin/cargo-deny" --version \
+    "https://github.com/EmbarkStudios/cargo-deny/releases/download/${v}/cargo-deny-${v}-${cargo_deny_platform}.tar.gz" \
+    "cargo-deny-${v}-${cargo_deny_platform}.tar.gz" \
+    "cargo-deny-${v}-${cargo_deny_platform}/cargo-deny" 1
 }
 
 install_nfpm() {

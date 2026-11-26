@@ -52,6 +52,7 @@ DOCKER_INSTALL_DOC=""
 # full: Docker may be installed from the official Docker apt repository.
 # existing-docker: only an already-installed compatible Docker is accepted.
 SUPPORT_MODE=""
+readonly LEGACY_UBUNTU_DOCKER_MSG="Ubuntu 20.04 can run ocservia with an existing compatible Docker installation, but automatic Docker bootstrap is unavailable on this legacy host (Ubuntu 20.04 is outside Docker's current official Ubuntu support matrix; standard security maintenance ended 2025-05-31 and requires Ubuntu Pro/ESM or an equivalent maintenance strategy, which this bootstrap never configures)"
 launcher_user=""
 launcher_uid=""
 launcher_gid=""
@@ -224,36 +225,28 @@ setup_docker_apt_repository() {
   apt-get update
 }
 
-validate_docker_readiness() {
+check_docker_status() {
+  local mode="$1" info_output
   if ! docker_client_present; then
-    record_failure "Docker is required but no usable docker client is installed"
+    case "${mode}" in
+      install)
+        record_failure "Docker is required but no usable docker client is installed"
+        ;;
+      check)
+        if [[ "${SUPPORT_MODE}" == "existing-docker" ]]; then
+          record_failure "${LEGACY_UBUNTU_DOCKER_MSG}"
+        else
+          record_failure "Docker is required but not installed; run 'bootstrap-host.sh install' to install it from the official Docker apt repository"
+        fi
+        ;;
+    esac
     return
   fi
   if ! docker_daemon_active; then
-    record_failure "Docker daemon is not active; investigate with 'systemctl status docker'"
-    return
-  fi
-  echo "docker: server $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo present)"
-  if ! docker compose version >/dev/null 2>&1; then
-    record_failure "Docker Compose v2 is required by the Controller lifecycle"
-    return
-  fi
-  echo "compose: $(docker compose version)"
-  compose_supports_wait ||
-    record_failure "Docker Compose must support 'docker compose up --wait'; upgrade the existing Compose installation deliberately (this bootstrap never upgrades an existing Docker installation)"
-}
-
-check_docker() {
-  local info_output
-  if ! docker_client_present; then
-    if [[ "${SUPPORT_MODE}" == "existing-docker" ]]; then
-      record_failure "Ubuntu 20.04 can run ocservia with an existing compatible Docker installation, but automatic Docker bootstrap is unavailable on this legacy host (Ubuntu 20.04 is outside Docker's current official Ubuntu support matrix; standard security maintenance ended 2025-05-31 and requires Ubuntu Pro/ESM or an equivalent maintenance strategy, which this bootstrap never configures)"
-    else
-      record_failure "Docker is required but not installed; run 'bootstrap-host.sh install' to install it from the official Docker apt repository"
+    if [[ "${mode}" == install ]]; then
+      record_failure "Docker daemon is not active; investigate with 'systemctl status docker'"
+      return
     fi
-    return
-  fi
-  if ! docker_daemon_active; then
     info_output="$(docker info 2>&1 || true)"
     if grep -q 'permission denied' <<<"${info_output}"; then
       record_failure "the invoking user cannot access the Docker daemon; either run the Controller lifecycle as root, or deliberately grant this user Docker access per Docker's official post-install steps — this bootstrap never modifies the Docker permission model or group membership"
@@ -264,12 +257,21 @@ check_docker() {
     echo "docker: server $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo present)"
   fi
   if ! docker compose version >/dev/null 2>&1; then
-    record_failure "Docker Compose v2 plugin is required; align the existing Docker installation deliberately (this bootstrap never upgrades an existing runtime)"
+    if [[ "${mode}" == install ]]; then
+      record_failure "Docker Compose v2 is required by the Controller lifecycle"
+    else
+      record_failure "Docker Compose v2 plugin is required; align the existing Docker installation deliberately (this bootstrap never upgrades an existing runtime)"
+    fi
     return
   fi
   echo "compose: $(docker compose version)"
-  compose_supports_wait ||
-    record_failure "Docker Compose must support 'docker compose up --wait'"
+  if ! compose_supports_wait; then
+    if [[ "${mode}" == install ]]; then
+      record_failure "Docker Compose must support 'docker compose up --wait'; upgrade the existing Compose installation deliberately (this bootstrap never upgrades an existing Docker installation)"
+    else
+      record_failure "Docker Compose must support 'docker compose up --wait'"
+    fi
+  fi
 }
 
 verify_launcher_docker_access() {
@@ -303,19 +305,31 @@ check_base_tools() {
   fi
 }
 
+validate_canonical_path() {
+  local path="$1" label="$2" mode="$3" message=""
+  if [[ "${path}" != /* ]]; then
+    message="${label} ${path} must be an absolute path"
+  else
+    case "${path}" in
+      /|*/|*/../*|*/..|*/./*|*/.)
+        message="${label} ${path} must be a canonical path without traversal" ;;
+    esac
+  fi
+  if [[ -n "${message}" ]]; then
+    if [[ "${mode}" == fail ]]; then
+      fail "${message}"
+    fi
+    record_failure "${message}"
+    return 1
+  fi
+  return 0
+}
+
 # The state root contract mirrors controller.sh prepare_state_root exactly so
 # a bootstrap pass can never be followed by a lifecycle ownership failure.
 state_root_absolute_canonical() {
   local resolved
-  if [[ "${STATE_ROOT}" != /* ]]; then
-    record_failure "state root ${STATE_ROOT} must be an absolute path"
-    return 1
-  fi
-  case "${STATE_ROOT}" in
-    /|*/|*/../*|*/..|*/./*|*/.)
-      record_failure "state root ${STATE_ROOT} must be a canonical path without traversal"
-      return 1 ;;
-  esac
+  validate_canonical_path "${STATE_ROOT}" "state root" record || return 1
   if ! resolved="$(realpath -e -- "${STATE_ROOT}" 2>/dev/null)"; then
     record_failure "state root ${STATE_ROOT} does not exist"
     return 1
@@ -365,15 +379,7 @@ state_root_ownership() {
 
 check_state_root() {
   # The path contract applies whether or not the directory exists yet.
-  if [[ "${STATE_ROOT}" != /* ]]; then
-    record_failure "state root ${STATE_ROOT} must be an absolute path"
-    return
-  fi
-  case "${STATE_ROOT}" in
-    /|*/|*/../*|*/..|*/./*|*/.)
-      record_failure "state root ${STATE_ROOT} must be a canonical path without traversal"
-      return ;;
-  esac
+  validate_canonical_path "${STATE_ROOT}" "state root" record || return
   if [[ ! -e "${STATE_ROOT}" && ! -L "${STATE_ROOT}" ]]; then
     record_pending "lifecycle state root ${STATE_ROOT} is not provisioned yet; 'bootstrap-host.sh install' (or controller.sh) creates it"
     return
@@ -402,10 +408,7 @@ ensure_state_root() {
     echo "state root validated: ${STATE_ROOT} (launcher-owned, mode 0700)"
     return
   fi
-  [[ "${STATE_ROOT}" == /* ]] || fail "state root ${STATE_ROOT} must be an absolute path"
-  case "${STATE_ROOT}" in
-    /|*/|*/../*|*/..|*/./*|*/.) fail "state root ${STATE_ROOT} must be a canonical path without traversal" ;;
-  esac
+  validate_canonical_path "${STATE_ROOT}" "state root" fail
   parent="$(dirname -- "${STATE_ROOT}")"
   [[ -d "${parent}" ]] || fail "state root parent ${parent} does not exist; create it first"
   [[ "$(realpath -e -- "${parent}")" == "${parent}" ]] ||
@@ -466,42 +469,40 @@ ensure_backup_dir() {
   echo "backup directory created: ${BACKUP_DIR} (999:999, mode 0700)"
 }
 
+report_operator_dir() {
+  local var_name="$1" dir_path="$2" stat_fmt="$3" expected_stat="$4" unset_msg="$5" invalid_msg="$6" ok_msg="$7"
+  local actual_stat
+  if [[ -z "${dir_path}" ]]; then
+    record_pending "${unset_msg}"
+  elif [[ ! -d "${dir_path}" || -L "${dir_path}" ]]; then
+    record_pending "${var_name} (${dir_path}) is not an existing real directory"
+  else
+    actual_stat="$(stat -c "${stat_fmt}" "${dir_path}" 2>/dev/null || echo unknown)"
+    if [[ "${actual_stat}" != "${expected_stat}" ]]; then
+      record_pending "${invalid_msg} (found ${actual_stat})"
+    else
+      echo "${ok_msg}"
+    fi
+  fi
+}
+
 print_operator_prerequisites() {
-  local secret_dir="${OCSERV_SECRET_DIR:-}" secret_stat secret_uid secret_mode
-  local backup_env="${OCSERV_BACKUP_DIR:-}" backup_stat
+  local secret_dir="${OCSERV_SECRET_DIR:-}" backup_env="${OCSERV_BACKUP_DIR:-}"
 
   echo
   echo "Operator prerequisites outside this bootstrap's scope:"
-  if [[ -z "${secret_dir}" ]]; then
-    record_pending "OCSERV_SECRET_DIR is not set; provision the launcher-owned mode-0700 secret directory described in docs/operations/production-deployment.md (this bootstrap never creates secrets)"
-  elif [[ ! -d "${secret_dir}" || -L "${secret_dir}" ]]; then
-    record_pending "OCSERV_SECRET_DIR (${secret_dir}) is not an existing real directory"
-  else
-    secret_stat="$(stat -c '%u:%a' "${secret_dir}" 2>/dev/null || echo unknown)"
-    secret_uid="${secret_stat%%:*}"
-    secret_mode="${secret_stat##*:}"
-    if [[ "${secret_uid}" != "${launcher_uid}" || "${secret_mode}" != 700 ]]; then
-      record_pending "OCSERV_SECRET_DIR (${secret_dir}) must be launcher-owned (uid ${launcher_uid}) with mode 0700, matching the compose.sh contract (found ${secret_stat})"
-    else
-      echo "- OCSERV_SECRET_DIR (${secret_dir}) is a compliant directory; the launcher still validates every secret file"
-    fi
-  fi
+  report_operator_dir OCSERV_SECRET_DIR "${secret_dir}" '%u:%a' "${launcher_uid}:700" \
+    "OCSERV_SECRET_DIR is not set; provision the launcher-owned mode-0700 secret directory described in docs/operations/production-deployment.md (this bootstrap never creates secrets)" \
+    "OCSERV_SECRET_DIR (${secret_dir}) must be launcher-owned (uid ${launcher_uid}) with mode 0700, matching the compose.sh contract" \
+    "- OCSERV_SECRET_DIR (${secret_dir}) is a compliant directory; the launcher still validates every secret file"
 
   if [[ -n "${BACKUP_DIR}" && -z "${backup_env}" ]]; then
     record_pending "export OCSERV_BACKUP_DIR=${BACKUP_DIR} for the lifecycle environment"
   fi
-  if [[ -z "${backup_env}" ]]; then
-    record_pending "OCSERV_BACKUP_DIR is not set; provision the 999:999 mode-0700 backup bind mount described in docs/operations/production-deployment.md"
-  elif [[ ! -d "${backup_env}" || -L "${backup_env}" ]]; then
-    record_pending "OCSERV_BACKUP_DIR (${backup_env}) is not an existing real directory"
-  else
-    backup_stat="$(stat -c '%u:%g:%a' "${backup_env}" 2>/dev/null || echo unknown)"
-    if [[ "${backup_stat}" != "999:999:700" ]]; then
-      record_pending "OCSERV_BACKUP_DIR (${backup_env}) must be owned by uid:gid 999:999 with mode 0700 (found ${backup_stat})"
-    else
-      echo "- OCSERV_BACKUP_DIR (${backup_env}) is compliant"
-    fi
-  fi
+  report_operator_dir OCSERV_BACKUP_DIR "${backup_env}" '%u:%g:%a' "999:999:700" \
+    "OCSERV_BACKUP_DIR is not set; provision the 999:999 mode-0700 backup bind mount described in docs/operations/production-deployment.md" \
+    "OCSERV_BACKUP_DIR (${backup_env}) must be owned by uid:gid 999:999 with mode 0700" \
+    "- OCSERV_BACKUP_DIR (${backup_env}) is compliant"
 
   if [[ ! -f "${ROOT}/RELEASE" ]] && ! command -v git >/dev/null 2>&1; then
     record_pending "git is required by controller.sh (a clean checkout matching the release manifest); install it before 'controller.sh install'"
@@ -535,7 +536,7 @@ run_check() {
   detect_platform
   resolve_launcher
   detect_conflicts
-  check_docker
+  check_docker_status check
   verify_launcher_docker_access
   check_base_tools
   check_state_root
@@ -559,7 +560,7 @@ run_install() {
     echo "existing Docker detected; preserving it without reinstall or upgrade"
     install_missing_base_tools
   elif [[ "${SUPPORT_MODE}" == "existing-docker" ]]; then
-    fail "Ubuntu 20.04 can run ocservia with an existing compatible Docker installation, but automatic Docker bootstrap is unavailable on this legacy host (Ubuntu 20.04 is outside Docker's current official Ubuntu support matrix; standard security maintenance ended 2025-05-31 and requires Ubuntu Pro/ESM or an equivalent maintenance strategy, which this bootstrap never configures)"
+    fail "${LEGACY_UBUNTU_DOCKER_MSG}"
   else
     echo "Docker is absent; installing Docker Engine and the Compose plugin from the official Docker apt repository"
     install_missing_base_tools
@@ -572,7 +573,7 @@ run_install() {
     echo "Docker daemon is not active; enabling and starting the docker service"
     systemctl enable --now docker
   fi
-  validate_docker_readiness
+  check_docker_status install
   verify_launcher_docker_access
   if ((${#failures[@]} > 0)); then
     echo "controller host bootstrap: refusing to create lifecycle directories while host prerequisite failures remain" >&2
