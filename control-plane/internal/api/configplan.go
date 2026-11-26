@@ -8,7 +8,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 )
@@ -38,9 +37,8 @@ func (s *Server) createConfigPlan(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service unavailable", "configuration plan service is unavailable")
 		return
 	}
-	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
 	idempotencyKey, ok := requireIdempotencyKey(w, r)
@@ -78,9 +76,8 @@ func (s *Server) createConfigPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getConfigPlan(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUIDv7(r.PathValue("plan_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "plan_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "plan_id", "")
+	if !ok {
 		return
 	}
 	if s.configPlans == nil {
@@ -96,9 +93,8 @@ func (s *Server) getConfigPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
-	planID, err := parseUUIDv7(r.PathValue("plan_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "plan_id must be UUIDv7")
+	planID, ok := requirePathUUIDv7(w, r, "plan_id", "")
+	if !ok {
 		return
 	}
 	key, ok := requireIdempotencyKey(w, r)
@@ -123,11 +119,7 @@ func (s *Server) applyConfigPlan(w http.ResponseWriter, r *http.Request) {
 		writeConfigPlanError(w, r, err)
 		return
 	}
-	if replayed {
-		w.Header().Set("Idempotency-Replayed", "true")
-	}
-	w.Header().Set("Location", "/api/v1/operations/"+value.ID)
-	writeJSON(w, http.StatusAccepted, value)
+	writeAcceptedOperation(w, value, replayed, false)
 }
 
 func (s *Server) allowConfigPlanSecret(w http.ResponseWriter, r *http.Request, id uuid.UUID) bool {
@@ -156,9 +148,10 @@ func (s *Server) allowConfigPlanSecret(w http.ResponseWriter, r *http.Request, i
 }
 
 func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
+	if writeCommonDomainError(w, r, err, "the configuration plan or node does not exist") {
+		return
+	}
 	switch {
-	case errors.Is(err, auth.ErrForbidden):
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, configplan.ErrInvalid), errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/config-plan-invalid", "Configuration plan is invalid", "the template, variables, revision, or lifetime is invalid")
 	case errors.Is(err, configplan.ErrStaleRevision), errors.Is(err, operations.ErrStaleRevision):
@@ -169,8 +162,6 @@ func writeConfigPlanError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the idempotency key was used for different configuration content")
 	case errors.Is(err, operations.ErrConfigApplyActive):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/config-apply-active", "Configuration apply already active", "wait for the active apply or its reconciliation to reach a terminal state")
-	case errors.Is(err, database.ErrNotFound):
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the configuration plan or node does not exist")
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/config-plan-unavailable", "Configuration planning unavailable", "configuration planning is temporarily unavailable")
 	}

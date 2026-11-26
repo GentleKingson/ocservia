@@ -4,6 +4,7 @@ package protectedfile
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,4 +47,49 @@ func Open(path string, uid uint32) (*os.File, error) {
 		return nil, fmt.Errorf("open protected file: %w", err)
 	}
 	return os.NewFile(uintptr(fd), path), nil
+}
+
+// OpenPrivate opens path under a safe directory hierarchy and verifies that it
+// is a single-linked regular private file (mode 0400 or 0600) owned by
+// expectedUID (or root when allowRoot is true) with size in 1..maxBytes.
+func OpenPrivate(path string, expectedUID uint32, allowRoot bool, maxBytes int64) (*os.File, error) {
+	file, err := Open(path, expectedUID)
+	if err != nil {
+		return nil, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("stat protected file: %w", err)
+	}
+	mode := stat.Mode & 0o7777
+	uidOK := stat.Uid == expectedUID || (allowRoot && stat.Uid == 0)
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || !uidOK || stat.Nlink != 1 || (mode != 0o400 && mode != 0o600) {
+		file.Close()
+		return nil, errors.New("protected file must be a private, regular, single-linked file owned by an authorized UID")
+	}
+	if stat.Size < 1 || stat.Size > maxBytes {
+		file.Close()
+		return nil, fmt.Errorf("protected file must contain 1..%d bytes", maxBytes)
+	}
+	return file, nil
+}
+
+// ReadPrivate opens path via OpenPrivate and reads its bounded contents.
+func ReadPrivate(path string, expectedUID uint32, allowRoot bool, maxBytes int64) ([]byte, error) {
+	file, err := OpenPrivate(path, expectedUID, allowRoot, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		clear(raw)
+		return nil, fmt.Errorf("read protected file: %w", err)
+	}
+	if len(raw) == 0 || int64(len(raw)) > maxBytes {
+		clear(raw)
+		return nil, fmt.Errorf("protected file must contain 1..%d bytes", maxBytes)
+	}
+	return raw, nil
 }

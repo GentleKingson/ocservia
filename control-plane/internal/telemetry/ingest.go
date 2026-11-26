@@ -270,25 +270,13 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 			return false, fmt.Errorf("record observed user usage: %w", err)
 		}
 
-		sessions := make([]telemetrystore.Session, 0, len(batch.Sessions))
-		for _, v := range batch.Sessions {
-			sessions = append(sessions, telemetrystore.Session{ID: v.ID, Username: v.Username, ClientIP: v.ClientIP, VPNIP: v.VPNIP, ConnectedAt: v.ConnectedAt, BytesIn: v.BytesIn, BytesOut: v.BytesOut})
-		}
-		if err := store.ReplaceSessions(ctx, batch.NodeID, snap.ObservedAt, sessions); err != nil {
+		if err := store.ReplaceSessions(ctx, batch.NodeID, snap.ObservedAt, batch.Sessions); err != nil {
 			return false, err
 		}
-		bans := make([]telemetrystore.IPBan, 0, len(batch.IPBans))
-		for _, v := range batch.IPBans {
-			bans = append(bans, telemetrystore.IPBan{IP: v.IP, SecondsRemaining: v.SecondsRemaining})
-		}
-		if err := store.ReplaceIPBans(ctx, batch.NodeID, snap.ObservedAt, bans); err != nil {
+		if err := store.ReplaceIPBans(ctx, batch.NodeID, snap.ObservedAt, batch.IPBans); err != nil {
 			return false, err
 		}
-		users := make([]telemetrystore.User, 0, len(batch.Users))
-		for _, v := range batch.Users {
-			users = append(users, telemetrystore.User{Username: v.Username, Enabled: v.Enabled, Revision: v.Revision})
-		}
-		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, users); err != nil {
+		if err := store.ReplaceUsers(ctx, batch.NodeID, snap.ObservedAt, batch.Users); err != nil {
 			return false, err
 		}
 		if err := replaceObservedGroups(ctx, store, batch); err != nil {
@@ -313,11 +301,7 @@ func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, pay
 			return false, err
 		}
 	}
-	samples := make([]telemetrystore.Sample, 0, len(batch.Samples))
-	for _, sample := range batch.Samples {
-		samples = append(samples, telemetrystore.Sample{SampledAt: sample.SampledAt, Metric: sample.Metric, Value: sample.Value})
-	}
-	if err := store.InsertHistory(ctx, batch.NodeID, batch.ID, samples); err != nil {
+	if err := store.InsertHistory(ctx, batch.NodeID, batch.ID, batch.Samples); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -364,28 +348,8 @@ func validateBatch(batch Batch, now time.Time) error {
 	if batch.Snapshot.Architecture != "" && !semanticpayload.ValidAgentUpgradeArchitecture(batch.Snapshot.Architecture) {
 		return errors.New("observed architecture is invalid")
 	}
-	if len(batch.Snapshot.UpgradeResults) > 8 {
-		return errors.New("upgrade result report count exceeds limit")
-	}
-	if len(batch.Snapshot.UpgradeResults) > 0 {
-		seenUpgradeOperations := make(map[uuid.UUID]struct{}, len(batch.Snapshot.UpgradeResults))
-		for _, report := range batch.Snapshot.UpgradeResults {
-			if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !validText(report.Detail, 160) || report.Proof == nil {
-				return errors.New("upgrade result report is invalid")
-			}
-			if _, err := privdattestation.CanonicalAgentUpgradeResultProofV1(report.Proof); err != nil ||
-				!bytes.Equal(report.Proof.GetNodeId(), batch.NodeID[:]) ||
-				!bytes.Equal(report.Proof.GetOperationId(), report.OperationID[:]) ||
-				report.Proof.GetState() != agentUpgradeOutcomeProtoState(report.State) ||
-				report.Proof.GetTargetVersion() != report.TargetVersion ||
-				!upgradeResultCompletedAtMatches(report.Proof, report.CompletedAt) {
-				return errors.New("upgrade result proof claims are invalid")
-			}
-			if _, duplicate := seenUpgradeOperations[report.OperationID]; duplicate {
-				return errors.New("duplicate upgrade result report")
-			}
-			seenUpgradeOperations[report.OperationID] = struct{}{}
-		}
+	if err := validateUpgradeResults(batch.NodeID, batch.Snapshot.UpgradeResults); err != nil {
+		return err
 	}
 	if !validObject(batch.Snapshot.Ocserv) || !validObject(batch.Snapshot.System) || !validObject(batch.Snapshot.Path) {
 		return errors.New("observed documents must be JSON objects")
@@ -399,6 +363,41 @@ func validateBatch(batch Batch, now time.Time) error {
 	if len(batch.Sessions) > 10000 || len(batch.IPBans) > 4096 || len(batch.Samples) > 8192 || len(batch.Security) > 1024 || len(batch.Users) > MaxManagedResources || len(batch.Groups) > MaxReportedGroups {
 		return errors.New("telemetry collection count exceeds limit")
 	}
+	if err := validateObservedResources(batch); err != nil {
+		return err
+	}
+	return validateTelemetryRecords(batch, earliest, latest)
+}
+
+func validateUpgradeResults(nodeID uuid.UUID, results []UpgradeResult) error {
+	if len(results) > 8 {
+		return errors.New("upgrade result report count exceeds limit")
+	}
+	if len(results) == 0 {
+		return nil
+	}
+	seenUpgradeOperations := make(map[uuid.UUID]struct{}, len(results))
+	for _, report := range results {
+		if report.OperationID.Version() != 7 || report.State == "" || !semanticpayload.ValidAgentUpgradeTargetVersion(report.TargetVersion) || !validText(report.Detail, 160) || report.Proof == nil {
+			return errors.New("upgrade result report is invalid")
+		}
+		if _, err := privdattestation.CanonicalAgentUpgradeResultProofV1(report.Proof); err != nil ||
+			!bytes.Equal(report.Proof.GetNodeId(), nodeID[:]) ||
+			!bytes.Equal(report.Proof.GetOperationId(), report.OperationID[:]) ||
+			report.Proof.GetState() != agentUpgradeOutcomeProtoState(report.State) ||
+			report.Proof.GetTargetVersion() != report.TargetVersion ||
+			!upgradeResultCompletedAtMatches(report.Proof, report.CompletedAt) {
+			return errors.New("upgrade result proof claims are invalid")
+		}
+		if _, duplicate := seenUpgradeOperations[report.OperationID]; duplicate {
+			return errors.New("duplicate upgrade result report")
+		}
+		seenUpgradeOperations[report.OperationID] = struct{}{}
+	}
+	return nil
+}
+
+func validateObservedResources(batch Batch) error {
 	if len(batch.Users) > 0 {
 		usernames := make(map[string]struct{}, len(batch.Users))
 		for _, user := range batch.Users {
@@ -446,6 +445,10 @@ func validateBatch(batch Batch, now time.Time) error {
 			}
 		}
 	}
+	return nil
+}
+
+func validateTelemetryRecords(batch Batch, earliest, latest time.Time) error {
 	if len(batch.Sessions) > 0 {
 		sessionIDs := make(map[string]struct{}, len(batch.Sessions))
 		for _, session := range batch.Sessions {

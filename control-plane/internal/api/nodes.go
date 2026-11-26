@@ -43,11 +43,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Nodes unavailable", "node state could not be read")
 		return
 	}
-	page := map[string]any{"has_more": hasMore}
-	if hasMore && len(nodes) > 0 {
-		page["next_cursor"] = nodes[len(nodes)-1].ID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": nodes, "page": page})
+	writeCursorPage(w, nodes, hasMore, func(node telemetry.Node) string { return node.ID })
 }
 
 func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
@@ -84,11 +80,7 @@ func (s *Server) listNodeSessions(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Sessions unavailable", "session state could not be read")
 		return
 	}
-	page := map[string]any{"has_more": hasMore}
-	if hasMore && len(items) > 0 {
-		page["next_cursor"] = items[len(items)-1].ID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "page": page})
+	writeCursorPage(w, items, hasMore, func(item telemetrystore.ReadSession) string { return item.ID })
 }
 
 func (s *Server) listNodeIPBans(w http.ResponseWriter, r *http.Request) {

@@ -26,11 +26,8 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 		return ArtifactGrant{}, false, ErrSignerUnavailable
 	}
 	var eligible certificatestore.ActionBinding
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(tx database.Tx, store certificatestore.Store) error {
+		var err error
 		eligible, err = store.P12Eligible(ctx, request.CertificateID)
 		if err != nil {
 			return err
@@ -88,11 +85,7 @@ func (s *Service) CreateP12(ctx context.Context, request P12Request) (ArtifactGr
 }
 
 func (s *Service) artifactByRequest(ctx context.Context, workspace uuid.UUID, key string) (v certificatestore.Artifact, err error) {
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 		v, err = store.ArtifactByRequest(ctx, workspace, key)
 		return err
 	})
@@ -117,11 +110,8 @@ func (s *Service) prepareP12Secrets(ctx context.Context, nodeID uuid.UUID) (stri
 		return "", "", nil, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
 	var registeredKey bool
-	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	if err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		registeredKey, err = store.SealingKeyExists(ctx, nodeID, uint32(sealed.GetVersion()), sealed.GetKeyId())
 		return err
 	}); err != nil {

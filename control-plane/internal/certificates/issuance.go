@@ -42,12 +42,9 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	}
 	result, err := s.signer.Sign(ctx, SignRequest{CertificateID: request.CertificateID, CSRDER: append([]byte(nil), csrDER...)})
 	if err != nil {
-		_ = database.Within(context.WithoutCancel(ctx), s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, storeErr := certificatestore.FromTransaction(tx)
-			if storeErr != nil {
-				return storeErr
-			}
-			return store.SignerUnavailable(context.WithoutCancel(ctx), request.CertificateID, issueVersion, s.now())
+		unavailableCtx := context.WithoutCancel(ctx)
+		_ = s.withStore(unavailableCtx, func(_ database.Tx, store certificatestore.Store) error {
+			return store.SignerUnavailable(unavailableCtx, request.CertificateID, issueVersion, s.now())
 		})
 		return Certificate{}, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
 	}
@@ -55,11 +52,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 	if err != nil {
 		return Certificate{}, err
 	}
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withStore(ctx, func(tx database.Tx, store certificatestore.Store) error {
 		now := s.now()
 		current, err := store.LockReceipt(ctx, request.CertificateID)
 		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || current.IssueVersion != issueVersion {
@@ -85,11 +78,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 }
 
 func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (workspaceID, nodeID uuid.UUID, csrDER []byte, issueVersion int64, err error) {
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withStore(ctx, func(tx database.Tx, store certificatestore.Store) error {
 		stored, err := store.LockIssue(ctx, request.CertificateID)
 		if errors.Is(err, database.ErrNotFound) {
 			return ErrNotReady
@@ -202,11 +191,8 @@ func (s *Service) Revoke(ctx context.Context, request RevokeRequest) (operations
 
 func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid.UUID, csrDER []byte, issueVersion int64) (certificatestore.IssueReceipt, error) {
 	var approved certificatestore.IssueReceipt
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		approved, err = store.SigningReceipt(ctx, certificateID)
 		return err
 	})
@@ -218,11 +204,8 @@ func (s *Service) signingReceipt(ctx context.Context, certificateID, nodeID uuid
 
 func (s *Service) pendingRevocations(ctx context.Context, operationID *uuid.UUID) ([]certificatestore.PendingRevocation, error) {
 	var pending []certificatestore.PendingRevocation
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		pending, err = store.PendingRevocations(ctx, operationID)
 		return err
 	})
@@ -250,11 +233,8 @@ func (s *Service) reconcileRevocations(ctx context.Context) error {
 
 func (s *Service) reconcileExpiredRevocations(ctx context.Context) error {
 	var pending []certificatestore.PendingRevocation
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		pending, err = store.ExpiredRevocations(ctx)
 		return err
 	})
@@ -269,11 +249,7 @@ func (s *Service) reconcileExpiredRevocations(ctx context.Context) error {
 		} else {
 			version = envelope.GetCertificateRevoke().GetCertificateVersion()
 		}
-		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := certificatestore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
+		if err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 			return store.ExpireRevocation(ctx, item.CommandID, certificateID, version, item.Envelope, s.now())
 		}); err != nil {
 			if ctx.Err() != nil {
@@ -326,11 +302,8 @@ func (s *Service) revokeAtSigner(ctx context.Context, item certificatestore.Pend
 	callCtx, stopCall := context.WithDeadline(ctx, envelope.GetExpiresAt().AsTime())
 	defer stopCall()
 	var serialNumber string
-	if err := database.Within(callCtx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	if err := s.withStore(callCtx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		serialNumber, err = store.RevocationSerial(callCtx, certificateID, item.WorkspaceID, item.NodeID, revoke.GetCertificateVersion())
 		return err
 	}); err != nil {
@@ -343,11 +316,7 @@ func (s *Service) revokeAtSigner(ctx context.Context, item certificatestore.Pend
 	settle, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err != nil {
-		if updateErr := database.Within(settle, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, storeErr := certificatestore.FromTransaction(tx)
-			if storeErr != nil {
-				return storeErr
-			}
+		if updateErr := s.withStore(settle, func(_ database.Tx, store certificatestore.Store) error {
 			return store.RevocationUnknown(settle, item.OperationID, certificateID, s.now())
 		}); updateErr != nil {
 			slog.WarnContext(ctx, "record failed Signer revocation", "operation_id", item.OperationID, "error", updateErr)

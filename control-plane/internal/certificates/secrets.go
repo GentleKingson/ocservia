@@ -39,11 +39,7 @@ func (s *Service) CreateSecretRef(ctx context.Context, request SecretRefRequest)
 	}
 	now, id := s.now().UTC().Truncate(time.Microsecond), uuid.Must(uuid.NewV7())
 	v := certificatestore.SecretReference{ID: id, WorkspaceID: request.WorkspaceID, Provider: request.Provider, KeyPath: request.KeyPath, Version: request.Version, State: "active", CreatedAt: now, UpdatedAt: now}
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(tx database.Tx, store certificatestore.Store) error {
 		if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorID, request.SessionID, request.WorkspaceID); err != nil {
 			return err
 		}
@@ -64,11 +60,7 @@ func (s *Service) RotateSecretRef(ctx context.Context, id uuid.UUID, request Sec
 		return SecretRef{}, ErrInvalid
 	}
 	var v certificatestore.SecretReference
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(tx database.Tx, store certificatestore.Store) error {
 		workspaceID, err := store.SecretReferenceResource(ctx, id)
 		if err != nil {
 			return err
@@ -92,11 +84,8 @@ func (s *Service) RotateSecretRef(ctx context.Context, id uuid.UUID, request Sec
 
 func (s *Service) GetSecretRef(ctx context.Context, id uuid.UUID) (SecretRef, error) {
 	var v certificatestore.SecretReference
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		v, err = store.GetSecretReference(ctx, id)
 		return err
 	})
@@ -104,11 +93,8 @@ func (s *Service) GetSecretRef(ctx context.Context, id uuid.UUID) (SecretRef, er
 }
 func (s *Service) SecretRefResource(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
 	var workspaceID uuid.UUID
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		workspaceID, err = store.SecretReferenceResource(ctx, id)
 		return err
 	})
