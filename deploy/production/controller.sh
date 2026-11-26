@@ -252,17 +252,16 @@ check_active_profile_supported() {
 map_manifest_images() {
   local manifest="$1"
   local mode="${OCSERV_DEPLOYMENT_MODE:-standalone}" profile="${STATE_ROOT}/deployment-profile.json"
-  local backend="${OCSERV_DATABASE_BACKEND:-postgres}" deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+  local deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
   local tls_mode="${OCSERV_TLS_MODE:-manual}"
   if [[ -e "${profile}" || -L "${profile}" ]]; then
     check_active_profile_supported
     mode="$(jq -r '.deployment_mode' "${profile}")"
-    backend="$(jq -r '.database_backend' "${profile}")"
     deployment="$(jq -r '.database_deployment' "${profile}")"
     tls_mode="$(jq -r '.tls_mode // "manual"' "${profile}")"
     [[ "${OCSERV_DEPLOYMENT_MODE:-${mode}}" == "${mode}" ]] ||
       fail "deployment mode cannot change during an existing installation"
-    [[ "${OCSERV_DATABASE_BACKEND:-${backend}}" == "${backend}" && "${OCSERV_DATABASE_DEPLOYMENT:-${deployment}}" == "${deployment}" ]] ||
+    [[ "${OCSERV_DATABASE_DEPLOYMENT:-${deployment}}" == "${deployment}" ]] ||
       fail "database deployment cannot change during an existing installation"
     [[ "${OCSERV_TLS_MODE:-${tls_mode}}" == "${tls_mode}" ]] ||
       fail "TLS mode cannot change during an existing installation"
@@ -270,12 +269,12 @@ map_manifest_images() {
     fail "existing standalone installation cannot be switched to Integrated"
   fi
   case "${mode}" in standalone|integrated) ;; *) fail "invalid deployment mode" ;; esac
-  case "${backend}:${deployment}" in
-    postgres:bundled|postgres:external) ;;
-    *) fail "invalid database deployment; expected postgres with bundled or external" ;;
+  case "${deployment}" in
+    bundled|external) ;;
+    *) fail "invalid database deployment; expected bundled or external" ;;
   esac
   export OCSERV_DEPLOYMENT_MODE="${mode}"
-  export OCSERV_DATABASE_BACKEND="${backend}" OCSERV_DATABASE_DEPLOYMENT="${deployment}"
+  export OCSERV_DATABASE_DEPLOYMENT="${deployment}"
   export OCSERV_TLS_MODE="${tls_mode}"
   if [[ "${mode}" == integrated && "$(jq -r '.manifest_version' "${manifest}")" != 2 ]]; then
     fail "Integrated deployment requires a v2 release manifest"
@@ -308,7 +307,7 @@ record_deployment_profile() {
   [[ ! -e "${STATE_ROOT}/deployment-profile.json" ]] || return 0
   local staged
   staged="$(mktemp "${STATE_ROOT}/.deployment-profile.XXXXXX")"
-  jq -n --arg mode "${OCSERV_DEPLOYMENT_MODE}" --arg backend "${OCSERV_DATABASE_BACKEND}" \
+  jq -n --arg mode "${OCSERV_DEPLOYMENT_MODE}" --arg backend "postgres" \
     --arg deployment "${OCSERV_DATABASE_DEPLOYMENT}" \
     --arg tls "${OCSERV_TLS_MODE}" '{deployment_mode:$mode, database_backend:$backend,
       database_deployment:$deployment} + (if $tls == "acme" then {tls_mode:$tls} else {} end)' >"${staged}"

@@ -159,22 +159,17 @@ database port. External PostgreSQL 18 requires `sslmode=verify-full` with
 | PostgreSQL 18 | bundled or external | Yes; bundled remains the default |
 | MySQL / MariaDB / PostgreSQL 17 | any | Retired and rejected |
 
-PostgreSQL is the only backend, so new configuration omits
-`OCSERV_DATABASE_BACKEND`. Existing `OCSERV_DATABASE_BACKEND=postgres` is
-validated at configuration and launcher entrypoints without becoming an
-internal backend selector. The sealing export CLI also accepts the legacy
-`--backend=postgres` argument; other values are rejected before opening files
-or connecting to the database.
+PostgreSQL 18 is the sole supported backend; `OCSERV_DATABASE_BACKEND` and
+`ocserv-sealing-export --backend` have been removed for `v2.0.0`. Non-PostgreSQL
+DSNs (`OCSERV_DATABASE_URL`) are rejected before opening connections.
 
-Support for MySQL 8.4 LTS, MariaDB, and PostgreSQL 17 has been removed.
-Existing MySQL configurations (`OCSERV_DATABASE_BACKEND=mysql`) and existing
+Support for MySQL 8.4 LTS, MariaDB, and PostgreSQL 17 has been removed. Existing
 hosts whose saved `deployment-profile.json` records `"database_backend": "mysql"`
-fail closed in `controller-bootstrap.sh`, `install.sh`, `compose.sh`, and every
-`controller.sh` lifecycle command (`install`, `upgrade`, `rollback`, `start`,
-and `uninstall`, including `uninstall --purge-data`) before modifying host
-packages, Compose stacks, volumes, or saved state, so existing MySQL deployments
-are never silently switched to PostgreSQL, overwritten, or deleted. Unverified
-cross-engine automatic migration is unsupported.
+fail closed in every `controller.sh` lifecycle command (`install`, `upgrade`,
+`rollback`, `start`, and `uninstall`, including `uninstall --purge-data`) before
+modifying host packages, Compose stacks, volumes, or saved state, so existing
+MySQL deployments are never silently switched to PostgreSQL, overwritten, or
+deleted. Unverified cross-engine automatic migration is unsupported.
 
 Application schema migrations never upgrade the database engine or its physical
 data format, so operators running PostgreSQL 17 must complete a controlled major

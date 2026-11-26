@@ -143,7 +143,7 @@ Exact rules and limits live in [Stable contracts](reference/stable-contracts.md)
 
 ### Controller assembly and roles
 
-`cmd/ocserv-control` starts [`platform/app`](../control-plane/internal/platform/app/), which opens the database, runs the startup checks for the requested mode, and wires the domain services. Domain packages do not import assembly packages. Normal startup runs the HTTP server, worker, and scheduler in one Controller process in every environment. The legacy `--role=all` argument is accepted only at the CLI boundary; `api`, `worker`, and `scheduler` values are rejected, including in tests. One-shot migration, workspace provisioning, and administrator bootstrap commands exit before runtime services are constructed.
+`cmd/ocserv-control` starts [`platform/app`](../control-plane/internal/platform/app/), which opens the database, runs the startup checks for the requested mode, and wires the domain services. Domain packages do not import assembly packages. Normal startup runs the HTTP server, worker, and scheduler in one Controller process in every environment; `--role` and split `api`, `worker`, and `scheduler` processes are unsupported, including in tests. One-shot migration, workspace provisioning, and administrator bootstrap commands exit before runtime services are constructed.
 
 - The HTTP server serves the API and event streams.
 - The worker runs the operation outbox worker, ingests transport events, runs trust convergence, and serves the trust socket that transportd calls.

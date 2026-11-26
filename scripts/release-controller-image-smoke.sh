@@ -90,8 +90,8 @@ check_control() {
   if control_output="$(docker run --rm "$(image_ref control)" --role=bogus 2>&1)"; then
     fail "control image accepted an invalid role"
   fi
-  grep -Fq 'invalid role' <<<"${control_output}" ||
-    fail "control image did not reach role validation: ${control_output}"
+  grep -Eq 'invalid (role|command-line flags)' <<<"${control_output}" ||
+    fail "control image did not reach flag validation: ${control_output}"
 }
 check_transport() {
   local transport_output
