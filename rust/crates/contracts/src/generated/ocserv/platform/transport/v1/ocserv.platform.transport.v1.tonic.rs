@@ -90,32 +90,6 @@ pub mod transport_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        pub async fn health(
-            &mut self,
-            request: impl tonic::IntoRequest<super::HealthRequest>,
-        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/ocserv.platform.transport.v1.TransportService/Health",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "ocserv.platform.transport.v1.TransportService",
-                        "Health",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
         pub async fn get_node_connection(
             &mut self,
             request: impl tonic::IntoRequest<super::GetNodeConnectionRequest>,
@@ -331,10 +305,6 @@ pub mod transport_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with TransportServiceServer.
     #[async_trait]
     pub trait TransportService: std::marker::Send + std::marker::Sync + 'static {
-        async fn health(
-            &self,
-            request: tonic::Request<super::HealthRequest>,
-        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status>;
         async fn get_node_connection(
             &self,
             request: tonic::Request<super::GetNodeConnectionRequest>,
@@ -464,51 +434,6 @@ pub mod transport_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/ocserv.platform.transport.v1.TransportService/Health" => {
-                    #[allow(non_camel_case_types)]
-                    struct HealthSvc<T: TransportService>(pub Arc<T>);
-                    impl<
-                        T: TransportService,
-                    > tonic::server::UnaryService<super::HealthRequest>
-                    for HealthSvc<T> {
-                        type Response = super::HealthResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::HealthRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as TransportService>::health(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = HealthSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
                 "/ocserv.platform.transport.v1.TransportService/GetNodeConnection" => {
                     #[allow(non_camel_case_types)]
                     struct GetNodeConnectionSvc<T: TransportService>(pub Arc<T>);

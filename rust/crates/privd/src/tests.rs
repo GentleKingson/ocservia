@@ -9,8 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, chown, symlink};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use ocservia_agent_protocol::{
-    ArtifactConsumeRequest, ArtifactReadRequest, PrivilegedRequestMode, ReadRequest,
-    UpgradeResultListRequest, privd_request,
+    ArtifactConsumeRequest, ArtifactReadRequest, PrivilegedRequestMode, ReadRequest, privd_request,
 };
 use ocservia_command_authorization::{
     ArtifactGrantClaimsV1, canonical_artifact_grant_v1, canonical_v1, claims_from_envelope_v1,
@@ -18,11 +17,11 @@ use ocservia_command_authorization::{
 };
 use ocservia_contracts::config_profile;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, ArtifactGrantV1, CertificateCsr, CertificateP12, CommandDeliveryMode,
-    CommandResultState, CompleteConfigApply, CompleteConfigCandidate, CompleteConfigDirective,
-    IpBanRemove, NodeLocalTlsReference, PrivilegedCommandKind, PrivilegedResultKind,
-    SealedSecretPurpose, SealedSecretV1, ServiceReload, SessionDisconnect, SessionGrantV1,
-    SessionTerminate, UserCreate, command_envelope, complete_config_directive,
+    AgentUpgrade, AgentUpgradeOutcomeState, ArtifactGrantV1, CertificateCsr, CertificateP12,
+    CommandDeliveryMode, CommandResultState, CompleteConfigApply, CompleteConfigCandidate,
+    CompleteConfigDirective, IpBanRemove, NodeLocalTlsReference, PrivilegedCommandKind,
+    PrivilegedResultKind, SealedSecretPurpose, SealedSecretV1, ServiceReload, SessionDisconnect,
+    SessionGrantV1, SessionTerminate, UserCreate, command_envelope, complete_config_directive,
 };
 use ocservia_ocserv_adapter::{FixedResources, Limits};
 use ocservia_test_support::{
@@ -1594,7 +1593,7 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
     );
 
     let req = unsigned_request(Some(privd_request::Operation::UpgradeResultList(
-        UpgradeResultListRequest {},
+        ReadRequest {},
     )));
     let attestation_key = Arc::new(SigningKey::from_bytes(&[41; 32]));
     let attestation_key_id: Arc<str> =
@@ -1617,10 +1616,14 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
     assert_eq!(
         (
             list.results[0].operation_id.as_slice(),
-            list.results[0].state.as_str(),
+            list.results[0].state,
             list.results[0].target_version.as_str()
         ),
-        (intent.operation_id.as_bytes().as_slice(), "failed", "2.0.0")
+        (
+            intent.operation_id.as_bytes().as_slice(),
+            i32::from(AgentUpgradeOutcomeState::Failed),
+            "2.0.0"
+        )
     );
     let proof = list.results[0]
         .privileged_result_proof

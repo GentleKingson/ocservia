@@ -20,7 +20,6 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TransportService_Health_FullMethodName            = "/ocserv.platform.transport.v1.TransportService/Health"
 	TransportService_GetNodeConnection_FullMethodName = "/ocserv.platform.transport.v1.TransportService/GetNodeConnection"
 	TransportService_SendCommand_FullMethodName       = "/ocserv.platform.transport.v1.TransportService/SendCommand"
 	TransportService_CloseNode_FullMethodName         = "/ocserv.platform.transport.v1.TransportService/CloseNode"
@@ -36,7 +35,6 @@ const (
 //
 // TransportService is the complete typed UDS boundary exposed to Go.
 type TransportServiceClient interface {
-	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 	GetNodeConnection(ctx context.Context, in *GetNodeConnectionRequest, opts ...grpc.CallOption) (*NodeConnection, error)
 	SendCommand(ctx context.Context, in *SendCommandRequest, opts ...grpc.CallOption) (*SendCommandResponse, error)
 	CloseNode(ctx context.Context, in *CloseNodeRequest, opts ...grpc.CallOption) (*CloseNodeResponse, error)
@@ -52,16 +50,6 @@ type transportServiceClient struct {
 
 func NewTransportServiceClient(cc grpc.ClientConnInterface) TransportServiceClient {
 	return &transportServiceClient{cc}
-}
-
-func (c *transportServiceClient) Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(HealthResponse)
-	err := c.cc.Invoke(ctx, TransportService_Health_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 func (c *transportServiceClient) GetNodeConnection(ctx context.Context, in *GetNodeConnectionRequest, opts ...grpc.CallOption) (*NodeConnection, error) {
@@ -149,7 +137,6 @@ func (c *transportServiceClient) ConsumeArtifact(ctx context.Context, in *Consum
 //
 // TransportService is the complete typed UDS boundary exposed to Go.
 type TransportServiceServer interface {
-	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	GetNodeConnection(context.Context, *GetNodeConnectionRequest) (*NodeConnection, error)
 	SendCommand(context.Context, *SendCommandRequest) (*SendCommandResponse, error)
 	CloseNode(context.Context, *CloseNodeRequest) (*CloseNodeResponse, error)
@@ -167,9 +154,6 @@ type TransportServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedTransportServiceServer struct{}
 
-func (UnimplementedTransportServiceServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
-}
 func (UnimplementedTransportServiceServer) GetNodeConnection(context.Context, *GetNodeConnectionRequest) (*NodeConnection, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetNodeConnection not implemented")
 }
@@ -210,24 +194,6 @@ func RegisterTransportServiceServer(s grpc.ServiceRegistrar, srv TransportServic
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&TransportService_ServiceDesc, srv)
-}
-
-func _TransportService_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HealthRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TransportServiceServer).Health(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TransportService_Health_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TransportServiceServer).Health(ctx, req.(*HealthRequest))
-	}
-	return interceptor(ctx, in, info, handler)
 }
 
 func _TransportService_GetNodeConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -356,10 +322,6 @@ var TransportService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "ocserv.platform.transport.v1.TransportService",
 	HandlerType: (*TransportServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "Health",
-			Handler:    _TransportService_Health_Handler,
-		},
 		{
 			MethodName: "GetNodeConnection",
 			Handler:    _TransportService_GetNodeConnection_Handler,

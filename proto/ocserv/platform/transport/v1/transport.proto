@@ -7,7 +7,6 @@ import "ocserv/platform/agent/v1/agent.proto";
 
 // TransportService is the complete typed UDS boundary exposed to Go.
 service TransportService {
-  rpc Health(HealthRequest) returns (HealthResponse);
   rpc GetNodeConnection(GetNodeConnectionRequest) returns (NodeConnection);
   rpc SendCommand(SendCommandRequest) returns (SendCommandResponse);
   rpc CloseNode(CloseNodeRequest) returns (CloseNodeResponse);
@@ -48,12 +47,6 @@ message ListNodeTrustResponse {
   repeated NodeTrustBinding bindings = 1;
 }
 
-enum HealthStatus {
-  HEALTH_STATUS_UNSPECIFIED = 0;
-  HEALTH_STATUS_SERVING = 1;
-  HEALTH_STATUS_NOT_SERVING = 2;
-}
-
 enum ConnectionPath {
   CONNECTION_PATH_UNSPECIFIED = 0;
   CONNECTION_PATH_DIRECT = 1;
@@ -70,13 +63,6 @@ enum TransportEventType {
   TRANSPORT_EVENT_TYPE_PATH_CHANGED = 6;
   TRANSPORT_EVENT_TYPE_TELEMETRY = 7;
   TRANSPORT_EVENT_TYPE_SIMULATION_RESULT = 8;
-}
-
-message HealthRequest {}
-
-message HealthResponse {
-  HealthStatus status = 1;
-  string version = 2;
 }
 
 message GetNodeConnectionRequest {
@@ -143,21 +129,16 @@ message UpdateNodeTrustResponse {
 }
 
 message FetchArtifactRequest {
-  bytes node_id = 1;
-  bytes artifact_id = 2;
-  string purpose = 3;
-  uint64 max_bytes = 4;
-  ocserv.platform.agent.v1.ArtifactGrantV1 grant = 5;
+  ocserv.platform.agent.v1.ArtifactGrantV1 grant = 1;
 }
 
 message ConsumeArtifactRequest {
-  bytes node_id = 1;
-  ocserv.platform.agent.v1.ArtifactGrantV1 grant = 2;
-  bytes sha256 = 3;
-  uint64 size = 4;
+  ocserv.platform.agent.v1.ArtifactGrantV1 grant = 1;
+  bytes sha256 = 2;
+  uint64 size = 3;
   // Never consumes bytes. It only confirms an exact already-consumed root
   // ledger record, including after the signed grant has expired.
-  bool confirm_only = 5;
+  bool confirm_only = 4;
 }
 
 message ConsumeArtifactResponse {

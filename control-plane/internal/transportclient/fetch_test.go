@@ -40,7 +40,7 @@ func (s *blockingFetchServer) FetchArtifact(ctx context.Context, request *transp
 	}
 	data := []byte("p12-fixture")
 	digest := sha256.Sum256(data)
-	return &agentv1.ArtifactPayload{ArtifactId: request.GetArtifactId(), Data: data, Sha256: digest[:]}, nil
+	return &agentv1.ArtifactPayload{ArtifactId: request.GetGrant().GetArtifactId(), Data: data, Sha256: digest[:]}, nil
 }
 
 func startFetchServer(t *testing.T, server transportv1.TransportServiceServer) string {

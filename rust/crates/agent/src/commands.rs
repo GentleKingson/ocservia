@@ -348,13 +348,9 @@ pub(super) fn response_proof(response: &PrivdResponse) -> Option<(Vec<u8>, i64)>
 }
 
 pub(super) fn terminal_privd_error_code(kind: i32) -> Option<&'static str> {
-    match ErrorKind::try_from(kind).unwrap_or(ErrorKind::Unspecified) {
-        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
-        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
-            Some("privd_rejected")
-        }
-        _ => None,
-    }
+    ErrorKind::try_from(kind)
+        .ok()
+        .and_then(ErrorKind::terminal_code)
 }
 
 fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String, u64)> {
