@@ -520,25 +520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frame_round_trip_and_oversize_rejection() {
-        let request = PrivdRequest {
-            request_id: vec![7; 16],
-            deadline_unix_ms: 42,
-            accepted_at: None,
-            authorization_command: None,
-            privileged_mode: PrivilegedRequestMode::Unspecified.into(),
-            session_grant: None,
-            operation: Some(privd_request::Operation::ServiceStatus(ReadRequest {})),
-        };
-        let mut bytes = Vec::new();
-        write_frame(&mut bytes, &request)
-            .await
-            .expect("encode request");
-        let decoded: PrivdRequest = read_frame(&mut bytes.as_slice())
-            .await
-            .expect("decode request");
-        assert_eq!(decoded.request_id, request.request_id);
-
+    async fn rejects_oversized_frame() {
         let mut oversized = (u32::try_from(MAX_FRAME_BYTES + 1).expect("bounded test"))
             .to_be_bytes()
             .to_vec();

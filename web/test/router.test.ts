@@ -1,8 +1,4 @@
-import {
-  createMemoryHistory,
-  createRouter,
-  type RouteRecordRaw,
-} from "vue-router";
+import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { routeRecords } from "../src/shared/routes";
@@ -29,34 +25,15 @@ describe("web information architecture routes", () => {
     );
   });
 
-  it("uses real pages for operations and settings", () => {
-    const pageNames = new Set(
-      routeRecords
-        .filter(
-          (route): route is RouteRecordRaw & { name: string } =>
-            typeof route.name === "string",
-        )
-        .map((route) => route.name),
-    );
+  it("resolves the Operations page on a direct navigation", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: routeRecords,
+    });
 
-    expect(pageNames).toEqual(
-      new Set([
-        "login",
-        "overview",
-        "nodes",
-        "node-detail",
-        "operations",
-        "rollout-detail",
-        "audit",
-        "settings",
-      ]),
-    );
-    expect(
-      routeRecords.find((route) => route.name === "operations")?.component,
-    ).toBeDefined();
-    expect(
-      routeRecords.find((route) => route.name === "settings")?.component,
-    ).toBeDefined();
+    await router.push("/operations");
+
+    expect(router.currentRoute.value.name).toBe("operations");
   });
 
   describe("failed page chunks", () => {
@@ -116,14 +93,6 @@ describe("web information architecture routes", () => {
       expect(reloadableNavigation.value).toBeUndefined();
     });
 
-    it("never reloads on a failed initial navigation", async () => {
-      const { assign, reloadableNavigation, router } = await setup();
-
-      await expect(router.push("/page/a")).rejects.toThrow(TypeError);
-      expect(assign).not.toHaveBeenCalled();
-      expect(reloadableNavigation.value).toBe("/page/a");
-    });
-
     it("leaves other navigation errors to the console", async () => {
       const error = vi.spyOn(console, "error").mockImplementation(() => {});
       const { assign, reloadableNavigation, router } = await setup(false);
@@ -136,8 +105,8 @@ describe("web information architecture routes", () => {
       error.mockRestore();
     });
 
-    it("mounts after a failed initial chunk so the offer can render", async () => {
-      const { router } = await setup();
+    it("mounts after a failed initial chunk and offers a manual reload", async () => {
+      const { assign, reloadableNavigation, router } = await setup();
       const { mountAfterInitialNavigation } =
         await import("../src/shared/routes");
       const mount = vi.fn();
@@ -146,6 +115,8 @@ describe("web information architecture routes", () => {
       await expect(router.push("/page/a")).rejects.toThrow(TypeError);
       await mounted;
       expect(mount).toHaveBeenCalledOnce();
+      expect(assign).not.toHaveBeenCalled();
+      expect(reloadableNavigation.value).toBe("/page/a");
     });
 
     it("mounts once after a successful initial navigation", async () => {

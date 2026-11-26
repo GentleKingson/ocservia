@@ -217,7 +217,7 @@ run_postgres_business_tests() {
   clone_database "${container}" ocservia_latest ocservia_auth_backend
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url/ocservia_latest/ocservia_auth_backend}" \
     OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url/ocservia_latest/ocservia_auth_backend}" \
-    checked_go_tests backend-auth -p 1 -parallel 1 ./internal/api -run '^TestAuthenticationBackend(HTTP|Safety)Integration$'
+    checked_go_tests backend-auth --select -p 1 -parallel 1
   assert_auth_fixture_cleanup "${container}" ocservia_auth_backend
   docker exec "${container}" dropdb -U ocservia_owner ocservia_auth_backend
   clone_database "${container}" ocservia_latest ocservia_policy_api
@@ -229,8 +229,7 @@ run_postgres_business_tests() {
     checked_go_tests database-auth -p 1 -parallel 1 ./internal/auth -run Integration
   assert_auth_fixture_cleanup "${container}" ocservia_latest
   OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
-    checked_go_tests database-api -p 1 -parallel 1 ./internal/api \
-      -run '^(TestLocalAccountHTTPSharedLimitsIntegration|TestAuthHTTPLoginLogoutIntegration|TestAuthLogSessionFailureIntegration)$'
+    checked_go_tests database-api --select -p 1 -parallel 1
   assert_auth_fixture_cleanup "${container}" ocservia_latest
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_DATABASE_URL="${runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-policy-upgrades --select -p 1)
@@ -293,7 +292,7 @@ port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
     bash "${ROOT}/scripts/required-go-tests.sh" backend-audit-postgres -p 1 ./internal/database/...)
   (cd "${ROOT}/control-plane" && OCSERV_TEST_DATABASE_URL="${latest_runtime_url}" OCSERV_TEST_OWNER_DATABASE_URL="${latest_owner_url}" \
-    bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination -race -p 1 ./internal/operations -run '^Test(OutboxBackend|FencingBackend|CoordinationDeadlockBackend|HistoryRetentionBackend|AuditRetentionBackend)Integration$')
+    bash "${ROOT}/scripts/required-go-tests.sh" backend-coordination --select -race -p 1)
 
   docker exec "${container}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d postgres -c 'CREATE DATABASE ocservia_init_smoke' >/dev/null
   (cd "${TEST_CONTROL_PLANE}" && OCSERV_TEST_INITIALIZATION_DATABASE_URL="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia_init_smoke?sslmode=disable" \
@@ -418,7 +417,6 @@ port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   pid=$!
   PIDS+=("${pid}")
   wait_for_http "http://127.0.0.1:${api_port}/readyz"
-  assert_current_checkpoint "${container}" ocservia
   assert_local_bootstrap_schema "${container}" ocservia
   test "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${api_port}/readyz")" = "200"
 

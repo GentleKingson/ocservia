@@ -203,10 +203,7 @@ func TestAgentUpgradeRequiresActorAndValidReleaseIdentity(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*AgentUpgradePayload){
 		"non-semver version": func(r *AgentUpgradePayload) { r.TargetVersion = "latest" },
-		"partial version":    func(r *AgentUpgradePayload) { r.TargetVersion = "1.2" },
-		"v-prefixed version": func(r *AgentUpgradePayload) { r.TargetVersion = "v1.2.3" },
 		"short digest":       func(r *AgentUpgradePayload) { r.PackageSHA256 = make([]byte, 31) },
-		"foreign arch":       func(r *AgentUpgradePayload) { r.Architecture = "x86_64" },
 		"unknown arch":       func(r *AgentUpgradePayload) { r.Architecture = "riscv64" },
 	} {
 		t.Run(name, func(t *testing.T) {

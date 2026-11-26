@@ -28,9 +28,17 @@
 - **数据库迁移与权限**：v2.0.0 从空库建立 Goose 基线，禁止为 pre-v2 旧数据形态新增兼容分支或双重哈希。owner 经 `--migrate-only` 在 PostgreSQL 会话咨询锁内按序执行 `control-plane/migrations/sql/` 的编号迁移。Controller 运行时以受限角色核对 `goose_db_version`。[数据库契约](docs/reference/stable-contracts.md#database)
 - **工程克制与启动边界**：非密码学/非完整性场景（如内部相等比较、开发模拟 ID、已比对的临时文件）禁用 SHA-256；启动与热路径避免随历史线性增长的无界 `O(N)` 全量扫描（如全表重算审计链或全账本重验签）。
 
+## 测试设计
+
+- 探索和原型阶段只做验证假设所需的最小检查。设计收敛后，补能检出真实回归的最小测试集。
+- 修改现有行为时优先扩展已有表驱动或参数化用例，将小分支纳入同一组。禁止为透传、简单 getter/setter、框架自身行为或提高覆盖率数字增测。mock 或 fake 编排占主要篇幅时，改用少量验证实际行为的集成或契约测试，已有等价覆盖时清理重复项。保留各独立边界的验证。
+- 重构或移除路径时，同步清理死测试、冗余 fake、孤儿脚本和失效的必跑条目。以 `scripts/required-go-tests.txt`、`scripts/ci-release-tests.txt` 及工作流为准，核对 `scripts/ci-relevance.sh` 的路由。
+
 ## 验证与交付
 
 从仓库根目录在获准隔离环境中运行最小覆盖检查；缺工具链执行 `scripts/bootstrap.sh <profile>`（如 `go-test`），直接运行 `go`、`cargo`、`npm` 前先在根目录 **Bash** 执行 `source scripts/env.sh`。[验证指引](docs/development/release-checks.md#choose-the-validation-scope)
+
+开发迭代优先用缓存运行单包、单 crate、单规格或单脚本。阶段收尾运行下表中受影响模块的完整门禁，覆盖 Go 无缓存全跑、Rust 工作区 Clippy 和 Web 生产构建。[精准快跑命令](docs/development/release-checks.md#focused-development-checks)
 
 | 变更 | 验证入口 |
 | --- | --- |
@@ -38,7 +46,7 @@
 | Go（Controller、Signer） | `scripts/go-check.sh standard`、`scripts/transport-boundary-check.sh --go-only`；增删或重命名集成测试时同步核对 `scripts/required-go-tests.txt` |
 | Rust | `make rust-check`、`scripts/transport-boundary-check.sh --rust-only`、`scripts/agent-boundary-check.sh` |
 | Web | `scripts/web-check.sh basic`；视觉或交互改动按实际展示尺寸核验目标交互（如 `make e2e`） |
-| Workflow、脚本或部署 | `CI_SUITES="guards release" scripts/ci-tools-check.sh` 及对应 `scripts/test-*.sh` |
+| Workflow、脚本或部署 | `CI_SUITES="guards release" bash scripts/ci-tools-check.sh`、受影响的脚本测试，Shell/Python 改动加 `CI_SUITES=source-style bash scripts/ci-tools-check.sh` |
 | 协议 | 确认生成目录无未提交改动后 `make generate` 并审阅差异；干净提交上跑 `make generated-clean`（`buf breaking` 仅约束外部 `agent/v1`，私有 `transport/v1` 已解绑）。[契约与生成](docs/reference/stable-contracts.md#schema-sources-and-generation) |
 
 - **共享资源与收尾**：共享宿主机时节制并发构建与测试数，重任务按需独占运行；收尾前停止本次启动的后台进程，仅删除本次创建的临时文件，测试临时目录不得写入仓库源码树。
@@ -47,3 +55,5 @@
 ## Code Review Rules
 
 - 重点拦截破坏上述硬边界、跨事务/崩溃恢复窗口、命令幂等对账，以及严重过度工程、同边界过度防御、非密码学 SHA-256 滥用、启动 `O(N)` 全量扫描和文档/门禁清单漏同步的变更；仅报告有明确触发路径与实际影响的缺陷或验证缺口，格式、lint 与生成一致性交由 CI 裁决。
+- 拦截绑定私有实现或调用次序的脆弱用例、mock/stub 编排超过篇幅一半或新建重型 fake 的用例、上层已完整覆盖的同边界断言，以及每例重复启动重型夹具造成的明显延时。
+- 拦截与现有门禁重叠的 `scripts/test-*`，以及失效或在同一验证范围内重复的清单项。

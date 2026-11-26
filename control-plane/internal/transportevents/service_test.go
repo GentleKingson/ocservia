@@ -16,16 +16,21 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
+func TestCertificateCSRResultRequiresSubjectAndReceipt(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	testutil.NoError(t, err)
+	t.Run("substituted-subject", func(t *testing.T) { checkCertificateCSRResultRejectsSubjectSubstitution(t, key) })
+	t.Run("missing-receipt", func(t *testing.T) { checkMatchingAttackerCSRWithoutPrivdReceipt(t, key) })
+}
+
+func checkCertificateCSRResultRejectsSubjectSubstitution(t *testing.T, key *rsa.PrivateKey) {
+	t.Helper()
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "attacker.example.test"}, DNSNames: []string{"attacker.example.test"}}, key)
 	testutil.NoError(t, err)
 	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
@@ -40,9 +45,8 @@ func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
 	}
 }
 
-func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	testutil.NoError(t, err)
+func checkMatchingAttackerCSRWithoutPrivdReceipt(t *testing.T, key *rsa.PrivateKey) {
+	t.Helper()
 	certificateID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	commandID, operationID, idempotencyID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "node.example.test"}, DNSNames: []string{"node.example.test"}}, key)
@@ -88,24 +92,6 @@ func TestOperationJSONOmitsAbsentIdentifiers(t *testing.T) {
 	for _, field := range []string{"node_id", "command_id"} {
 		if strings.Contains(string(payload), field) {
 			t.Fatalf("absent %s was serialized: %s", field, payload)
-		}
-	}
-}
-
-func TestValidTraceparent(t *testing.T) {
-	valid := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-	if tracecontext.TraceID(valid) == "" {
-		t.Fatal("validTraceparent rejected a valid value")
-	}
-	for _, value := range []string{
-		"", "00-0123-0123-01",
-		"00-00000000000000000000000000000000-0123456789abcdef-01",
-		"00-0123456789abcdef0123456789abcdef-0000000000000000-01",
-		"00-0123456789abcdef0123456789abcdef-0123456789abcdef-zz",
-		"00-0123456789ABCDEF0123456789abcdef-0123456789abcdef-01",
-	} {
-		if tracecontext.TraceID(value) != "" {
-			t.Fatalf("validTraceparent accepted %q", value)
 		}
 	}
 }

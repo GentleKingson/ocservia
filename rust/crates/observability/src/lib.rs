@@ -214,14 +214,28 @@ mod runtime_stats_tests {
     use ocservia_test_support::PrivateTempDir;
     use std::time::Duration;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn runtime_stats_writer_publishes_live_task_counts() {
         let dir = PrivateTempDir::new("obs");
         let path = dir.join("runtime-stats.json");
         spawn_runtime_stats_writer(path.clone()).expect("writer starts");
-        tokio::time::sleep(Duration::from_millis(2500)).await;
-        let body = std::fs::read_to_string(&path).expect("stats written");
-        let value: serde_json::Value = serde_json::from_str(body.trim()).expect("stats json");
+        let initial = std::fs::read_to_string(&path).expect("initial stats written");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // The writer publishes from a blocking worker. Use a wall-clock deadline
+        // while waiting for the atomic replacement.
+        tokio::time::resume();
+        let value = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let body = std::fs::read_to_string(&path).expect("stats written");
+                if body != initial {
+                    break serde_json::from_str::<serde_json::Value>(&body).expect("stats JSON");
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("updated stats written");
         assert!(value["at"].as_u64().is_some_and(|at| at > 0));
         assert!(
             value["tasks_alive"]

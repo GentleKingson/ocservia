@@ -161,24 +161,23 @@ it("never shows server text for an unknown or unreadable Problem", async () => {
 });
 
 it("drops a rejection whose Problem arrives after the view unmounts", async () => {
-  let body!: (value: unknown) => void;
+  const body = Promise.withResolvers<unknown>();
+  const reading = Promise.withResolvers<undefined>();
   const response = {
     status: 409,
-    json: () =>
-      new Promise((done) => {
-        body = done;
-      }),
+    json: () => {
+      reading.resolve(undefined);
+      return body.promise;
+    },
   } as unknown as Response;
   mocks.createAgentRollout.mockRejectedValue(
     new ResponseError(response, "Response returned an error code"),
   );
   const view = await mount();
   const submit = view.submitRollout();
-  await vi.waitFor(() => {
-    expect(body).toBeDefined();
-  });
+  await reading.promise;
   unmount?.();
-  body({ type: "https://ocservia.dev/problems/forbidden" });
+  body.resolve({ type: "https://ocservia.dev/problems/forbidden" });
   await submit;
   expect(view.rolloutError).toBe("");
 });

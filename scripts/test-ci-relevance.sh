@@ -40,12 +40,21 @@ assert_flag() {
   assert_eq "${label} ${flag}" "${expected}" "${!flag}"
 }
 
-# 1. Every tracked file must match a declared rule (never fall through to unknown_path).
-while IFS= read -r path; do
+# 1. Every tracked path is recognized and every linted source selects source-style.
+while IFS= read -r -d '' path; do
   reset_state
   classify_path "${path}"
   [[ "${reason}" != unknown_path:* ]] || die "tracked file fell through to ${reason}"
-done < <(git ls-files)
+  case "${path}" in scripts/*|deploy/*) ;; *) continue ;; esac
+  [[ -f "${path}" ]] || continue
+  IFS= read -r shebang <"${path}" || true
+  if [[ "${path}" == *.py ]] || [[ "${shebang}" =~ ^\#!.*(/|[[:space:]])(ba)?sh([[:space:]]|$) ]]; then
+    case " ${ci_suites[*]:-} " in
+      *" source-style "*) ;;
+      *) die "linted source file ${path} did not select source-style (got '${ci_suites[*]:-}')" ;;
+    esac
+  fi
+done < <(git ls-files -z)
 
 while read -r interpreter entry _; do
   case "${interpreter}" in bash|node|python3) ;; *) die "unknown interpreter: ${interpreter}" ;; esac
@@ -186,20 +195,6 @@ classify_path scripts/postgres-test-common.sh
 assert_flag "postgres test common" run_go true
 assert_flag "postgres test common" run_database true
 assert_eq "postgres test common ci_suites" "guards source-style" "${ci_suites[*]}"
-
-# Every shell/Python source scanned by scripts/lint.sh source-style must trigger source-style.
-while IFS= read -r -d '' path; do
-  [[ -f "${path}" ]] || continue
-  IFS= read -r shebang <"${path}" || true
-  if [[ "${path}" == *.py ]] || [[ "${shebang}" =~ ^\#!.*(/|[[:space:]])(ba)?sh([[:space:]]|$) ]]; then
-    reset_state
-    classify_path "${path}"
-    case " ${ci_suites[*]:-} " in
-      *" source-style "*) ;;
-      *) die "linted source file ${path} did not select source-style (got '${ci_suites[*]:-}')" ;;
-    esac
-  fi
-done < <(git ls-files -z -- scripts deploy)
 
 # 4. End-to-end CLI checks (workflow_dispatch and fail-closed git error handling).
 out_file="$(mktemp)"

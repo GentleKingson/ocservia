@@ -10,8 +10,8 @@ const valid = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 
 func TestTraceID(t *testing.T) {
 	for _, input := range []string{
-		"", "00-0123-0123-01", valid[:54], valid + "-00", valid + " ",
-		"01" + valid[2:], "ff" + valid[2:], strings.ToUpper(valid),
+		"", "00-0123-0123-01", valid[:54], valid + "-00", valid + " ", valid[:53] + "zz",
+		"01" + valid[2:], "ff" + valid[2:], strings.ToUpper(valid), strings.Replace(valid, "abcdef", "ABCDEF", 1),
 		strings.Replace(valid, "0123456789abcdef0123456789abcdef", strings.Repeat("0", 32), 1),
 		strings.Replace(valid, "-0123456789abcdef-", "-0000000000000000-", 1),
 		strings.Replace(valid, "a", "界", 1), strings.Replace(valid, "a", "g", 1),

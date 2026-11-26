@@ -372,12 +372,41 @@ async fn complete_tls_path_and_binding_fail_closed() {
 #[tokio::test]
 async fn complete_tls_rejects_mismatched_key_expiry_and_missing_version() {
     let mut fixture = Fixture::new();
-    let other = Fixture::new();
+    let mut missing_version = fixture.plan.clone();
+    for directive in &mut missing_version
+        .candidate
+        .as_mut()
+        .expect("candidate")
+        .directives
+    {
+        if let Some(Value::Tls(reference)) = &mut directive.value {
+            reference.version = "missing-v2".to_owned();
+        }
+    }
+    missing_version.candidate_hash = Sha256::digest(
+        config_profile::canonical(missing_version.candidate.as_ref().expect("candidate"))
+            .expect("canonical"),
+    )
+    .to_vec();
+    assert!(
+        fixture
+            .adapter
+            .complete_config_plan(&missing_version)
+            .await
+            .is_err()
+    );
+
     let key_path = fixture.bundle.join("server-key.pem");
     let original_key = std::fs::read(&key_path).expect("fixture key");
     write(
         &key_path,
-        std::fs::read(other.bundle.join("server-key.pem")).expect("other fixture key"),
+        openssl(&[
+            "genpkey",
+            "-algorithm",
+            "EC",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+        ]),
         0o400,
     );
     assert!(
@@ -428,31 +457,6 @@ async fn complete_tls_rejects_mismatched_key_expiry_and_missing_version() {
     {
         if let Some(Value::Tls(reference)) = &mut directive.value {
             reference.certificate_sha256.clone_from(&digest);
-        }
-    }
-    fixture.plan.candidate_hash = Sha256::digest(
-        config_profile::canonical(fixture.plan.candidate.as_ref().expect("candidate"))
-            .expect("canonical"),
-    )
-    .to_vec();
-    assert!(
-        fixture
-            .adapter
-            .complete_config_plan(&fixture.plan)
-            .await
-            .is_err()
-    );
-
-    let mut fixture = Fixture::new();
-    for directive in &mut fixture
-        .plan
-        .candidate
-        .as_mut()
-        .expect("candidate")
-        .directives
-    {
-        if let Some(Value::Tls(reference)) = &mut directive.value {
-            reference.version = "missing-v2".to_owned();
         }
     }
     fixture.plan.candidate_hash = Sha256::digest(

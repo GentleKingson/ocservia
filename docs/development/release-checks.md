@@ -43,7 +43,7 @@ Validation converges onto four explicit tiers:
 
 | Tier | Purpose | Primary entrypoints |
 | --- | --- | --- |
-| Unit | Fast in-memory domain, protocol, UI, and CI-guard contract checks | `scripts/go-check.sh standard`, `make rust-check`, `scripts/web-check.sh basic`, `scripts/ci-tools-check.sh` |
+| Unit | Fast in-memory domain, protocol, UI, and CI-guard contract checks | `scripts/go-check.sh standard`, `make rust-check`, `scripts/web-check.sh basic`, `CI_SUITES=guards bash scripts/ci-tools-check.sh` |
 | Key Integration | Live PostgreSQL 18 schema and API checks, native ocserv adapter integration, and Controller/Agent lifecycle suites | `scripts/database-postgres-smoke.sh`, `DATABASE_TEST_SCOPE=full PG_MAJOR=18 scripts/database-integration.sh`, `scripts/native-ocserv-integration.sh` |
 | Security Regressions | Single-admin workspace boundary, authentication/session, fencing/outbox regressions, secret scanning, and dependency/image vulnerability gates | `regression-*` groups in `scripts/required-go-tests.txt`, `scripts/security-check.sh`, `security.yml`, `release-controller.yml` |
 | Release E2E Acceptance | Playwright browser suite, Integrated Business Smoke with single-instance & sole-Relay offline-queue recovery, and Pebble ACME Quick Install | `scripts/web-check.sh full` / `make e2e`, `release-check.yml` |
@@ -86,20 +86,31 @@ environment across changes. Direct `go`, `cargo` or `npm` runs need
 The local development stack is started as described in the
 [README](../../README.md).
 
-For day-to-day work inside a single module, use `make test-go`,
-`make test-rust`, or `make test-web`. `make test-go` runs `go test ./...` in
-`control-plane` and `signer` without `gofmt`, `go vet`, `-count=1` or race
-runs. `make go-check` (`scripts/go-check.sh`, default mode `full`) covers both
-`control-plane` and `signer` with `gofmt`, `go vet`, and `go test -race -count=1`
-(or non-race `go test -count=1` in `standard` mode), using a private `0700` `TMPDIR`
-outside the repository checkout (such as `$XDG_RUNTIME_DIR` or `$HOME/.cache`)
-because the signer store and UDS checks refuse state directories beneath a
-group- or world-writable parent such as `/tmp` or a `0775` checkout. Basic CI invokes
-`go-check.sh standard` in Quick runs and `go-check.sh full` in Full runs. The top-level `make test` (`scripts/test.sh`) runs
-`control-plane` and `signer` Go tests, Rust workspace tests, and Web `npm test`
-without linters or race runs. For Rust, `make rust-check` runs
-`cargo fmt --check`, Clippy with `-D warnings`, and workspace tests. Web checks
-are in [Web validation](#web-validation).
+### Focused development checks
+
+Run the focused command for the affected package, crate, spec, or script during
+iteration. Run the module gate when finishing the change. Source
+`scripts/env.sh` in Bash from the repository root before the direct toolchain
+commands below.
+
+| Change | Focused command from the repository root | Module gate before delivery |
+| --- | --- | --- |
+| Go | `(cd control-plane && go test ./internal/platform/telemetry -run '^TestTraceID$')` | `scripts/go-check.sh standard` and `scripts/transport-boundary-check.sh --go-only`. Add live PostgreSQL checks for storage and lifecycle behavior. |
+| Rust | `(cd rust && cargo test --locked -p ocservia-contracts --lib strict_wire)` | `make rust-check`, `scripts/transport-boundary-check.sh --rust-only`, and `scripts/agent-boundary-check.sh`. |
+| Web | `(cd web && npx --no-install vitest run test/operation-state-tone.test.ts)` | `scripts/web-check.sh basic`. Run the relevant Playwright specs for interaction or layout changes. |
+| Scripts and CI | `bash scripts/test-toolchain-consistency.sh` | `CI_SUITES="guards release" bash scripts/ci-tools-check.sh` and the affected script tests. Add `CI_SUITES=source-style bash scripts/ci-tools-check.sh` for Shell or Python changes. |
+
+Keep the Go test-result cache enabled during iteration. Use a private `0700`
+`TMPDIR` outside the checkout with trusted ancestors for Signer and Unix socket
+tests. These checks reject group- or world-writable ancestors such as `/tmp`.
+Cargo reuses build artifacts for the selected crate and features.
+
+`make test-go`, `make test-rust`, and `make test-web` run module-wide tests.
+`make test` runs all of those suites. `scripts/go-check.sh standard` adds
+`gofmt`, `go vet`, and uncached tests for Controller and Signer. Its default
+`full` mode runs the suites with the race detector. Basic CI uses `standard` for
+Quick and `full` for Full. `make rust-check` runs formatting, workspace Clippy
+and workspace tests. The Web gate also compiles the production bundle.
 
 ## Choose a broader check when needed
 
@@ -947,7 +958,7 @@ Select suites according to [Choose the validation scope](#choose-the-validation-
 | Shared UI, styles or shell | `bash scripts/web-check.sh basic` from repository root; full `npm run test:e2e`, desktop/mobile layout and keyboard checks below |
 | ESLint configuration | `npm run lint`, `npx vitest run test/eslint-vue.test.ts` (Vue rules reach SFCs) and `npx --no-install prettier --check eslint.config.ts` |
 
-`scripts/web-check.sh basic` runs formatting checks, ESLint (over `web/` and the root JS scripts), `vue-tsc --noEmit`, Vitest unit tests, and the production Vite build. Running `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`), while the full Playwright E2E suite requires `npm run test:e2e` or `make e2e`. This runner and stubbed Playwright specs do not validate a live Controller, database recovery, or host installation. To run focused Playwright specs against an already-serving production bundle, export `PLAYWRIGHT_BASE_URL` beforehand.
+`scripts/web-check.sh basic` runs formatting checks, ESLint, type checking, Vitest unit tests, and the production Vite build. `scripts/web-check.sh full` adds the focused authentication browser runner (`test/run-auth-browser.mjs`). The focused runner and Overview browser specs use stubbed API responses. Run the full Playwright suite with `npm run test:e2e` against a running bundle or use `make e2e` for the Compose stack. Set `PLAYWRIGHT_BASE_URL` to target an already-serving bundle. Live recovery and host installation are covered by the [business and release checks](#business-validation).
 
 Playwright projects are named after their browser target: `desktop` runs Chromium, `mobile` emulates an iPhone 13 viewport inside Chromium (not Safari engine coverage), and `firefox` and `webkit` run the cross-engine subset covering login/workspace selection, rollouts, node forms, password dialogs, shell/Overview layout, Nodes/detail, Operations, and audit. `npm run test:e2e` runs all four projects unless filtered with `--project`. `node test/run-auth-browser.mjs` accepts the same `--project` flags (for example `node test/run-auth-browser.mjs agent-rollout.spec.ts --project=desktop --project=webkit`) and exits with an error if a requested browser binary is missing; report any project whose browser engine is not installed as not run.
 

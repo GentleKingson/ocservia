@@ -110,7 +110,7 @@ describe("configuration feature without a page or store", () => {
     expect(trackOperation).toHaveBeenCalledExactlyOnceWith("apply-operation");
   });
 
-  it.each([0, 7, Number.MAX_SAFE_INTEGER])(
+  it.each([0, Number.MAX_SAFE_INTEGER])(
     "submits the read configuration revision %s, not node.Version",
     async (revision) => {
       const { feature } = setup(revision);

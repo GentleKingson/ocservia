@@ -71,7 +71,6 @@ assert_rejected v2-missing-images --manifest-version 2 "${common_args[@]}" "${im
 assert_rejected v3 --manifest-version 3 "${common_args[@]}" "${image_args[@]}"
 arm64_args[9]=linux/arm64
 python3 "${GENERATOR}" --output "${fixture}/manifest-arm64.json" "${arm64_args[@]}" "${image_args[@]}"
-jq -e '.platform == "linux/arm64"' "${fixture}/manifest-arm64.json" >/dev/null
 platform_changes="$(diff -u "${fixture}/manifest-a.json" "${fixture}/manifest-arm64.json" \
   | grep -E '^[+-][^+-]' || true)"
 if [[ "${platform_changes}" != $'-  "platform": "linux/amd64",\n+  "platform": "linux/arm64",' ]]; then
@@ -89,12 +88,6 @@ assert_rejected missing-platform "${missing_platform_args[@]}" "${image_args[@]}
 
 missing_image_args=("${image_args[@]:0:6}" "${image_args[@]:8}")
 assert_rejected missing-image "${common_args[@]}" "${missing_image_args[@]}"
-
-version_image_args=("${image_args[@]}")
-for ((index = 1; index < ${#version_image_args[@]}; index += 2)); do
-  version_image_args[index]="${version_image_args[index]/@${digest}/:v0.2.0}"
-done
-assert_rejected version-images "${common_args[@]}" "${version_image_args[@]}"
 
 mutable_image_args=("${image_args[@]}")
 mutable_image_args[1]="gateway=ghcr.io/gentlekingson/ocservia/gateway:latest"

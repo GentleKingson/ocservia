@@ -29,70 +29,50 @@ command -v jq >/dev/null || {
 fixture="$(mktemp -d)"
 trap 'rm -rf "${fixture}"' EXIT
 
-# The default curl rule joins separate commands. The override must stop there,
-# while detecting the very same value when it really is a curl credential.
-mkdir -p "${fixture}/curl-boundary"
-scan_curl() {
-  local expected="$1" code=0
+# Scan each configuration once. The exact file/rule pairs cover positive,
+# exempt, and near-match cases independently, including duplicate findings.
+mkdir -- "${fixture}/default" "${fixture}/configured"
+scan_fixtures() {
+  local profile="$1" code=0
   shift
-  rm -f "${fixture}/curl-report.json"
-  gitleaks dir --no-banner --redact --no-color --exit-code 10 --report-format json \
-    --report-path "${fixture}/curl-report.json" "$@" "${fixture}/curl-boundary" \
-    >"${fixture}/curl-scan.log" 2>&1 || code=$?
-  if [[ "${code}" -eq "$((expected * 10))" ]] && jq -e --argjson expected "${expected}" \
-    'length == $expected and all(.[]; .RuleID == "curl-auth-user")' \
-    "${fixture}/curl-report.json" >/dev/null; then
-    return
+  rm -f -- "${fixture}/report.json"
+  (cd "${fixture}/${profile}" && gitleaks dir --no-banner --redact --no-color \
+    --exit-code 10 --report-format json --report-path "${fixture}/report.json" "$@" .) \
+    >"${fixture}/scan.log" 2>&1 || code=$?
+  if [[ "${code}" == 10 ]] && jq -e --rawfile expected "${fixture}/${profile}.tsv" '
+    (map([.File, .RuleID] | @tsv) | sort) ==
+    ($expected | split("\n") | map(select(length > 0)) | sort)
+  ' "${fixture}/report.json" >/dev/null; then
+    return 0
   fi
-  echo "curl boundary fixture expected ${expected} finding(s), exit=${code}" >&2
-  exit 1
+  echo "unexpected ${profile} fixture findings or scanner error (exit=${code})" >&2
+  return 1
 }
-record="${fixture}/curl-boundary/commands.sh"
+
+index=0
 for separator in $'\n' $'\r\n' '; ' ' && ' ' | '; do
+  name="curl-boundary-$((++index)).sh"
   printf 'curl --fail https://example.test/healthz%sdocker run --user %s image\n' \
-    "${separator}" '65534:65532' >"${record}"
-  scan_curl 1
-  scan_curl 0 --config "${CONFIG}"
+    "${separator}" '65534:65532' >"${fixture}/default/${name}"
+  cp -- "${fixture}/default/${name}" "${fixture}/configured/${name}"
+  printf '%s\tcurl-auth-user\n' "${name}" >>"${fixture}/default.tsv"
 done
 for prefix in 'curl -u ' 'curl --user=' $'curl \\\n--user ' \
   $'curl --fail \\\n  --user ' $'curl --fail \\\r\n  --user ' \
   'curl --url "https://example.test/?a=1&b=2" --user ' \
   $'curl --header "X-Note: first\nsecond" --user '; do
-  printf '%s%s\n' "${prefix}" '65534:65532' >"${record}"
-  scan_curl 1 --config "${CONFIG}"
+  name="curl-credential-$((++index)).sh"
+  printf '%s%s\n' "${prefix}" '65534:65532' >"${fixture}/configured/${name}"
+  printf '%s\tcurl-auth-user\n' "${name}" >>"${fixture}/configured.tsv"
 done
 curl_secret="$(openssl rand -hex 16)"
 for quote in '' '"' "'"; do
+  name="curl-credential-$((++index)).sh"
   printf 'curl --user %soperator:%s%s https://example.test/\n' \
-    "${quote}" "${curl_secret}" "${quote}" >"${record}"
-  scan_curl 1 --config "${CONFIG}"
+    "${quote}" "${curl_secret}" "${quote}" >"${fixture}/configured/${name}"
+  printf '%s\tcurl-auth-user\n' "${name}" >>"${fixture}/configured.tsv"
 done
-# Configuration errors must not masquerade as a credential finding.
-if (scan_curl 1 --config "${fixture}/missing.toml") >/dev/null 2>&1; then
-  echo "curl detector errors must not count as detected credentials" >&2
-  exit 1
-fi
-rm -rf "${fixture}/curl-boundary" "${fixture}/curl-report.json" "${fixture}/curl-scan.log"
 
-# Each new exemption must reproduce under defaults, pass under the config,
-# and leave other values in the same field/file/line visible. Inspect a single
-# finding per case so another hit or a detector error cannot fake rejection.
-mkdir -p "${fixture}/release-database"
-scan_public_literal() {
-  local expected="$1" code=0
-  shift
-  rm -f "${fixture}/report.json"
-  gitleaks dir --no-banner --redact --no-color --exit-code 10 --report-format json \
-    --report-path "${fixture}/report.json" "$@" "${fixture}/release-database" \
-    >"${fixture}/scan.log" 2>&1 || code=$?
-  if [[ "${code}" -eq "$((expected * 10))" ]] && jq -e --argjson expected "${expected}" '
-    length == $expected and all(.[]; .RuleID == "generic-api-key")
-  ' "${fixture}/report.json" >/dev/null; then
-    return
-  fi
-  echo "public-literal fixture expected ${expected} generic-api-key finding(s), exit=${code}" >&2
-  exit 1
-}
 fingerprint_a="b0156efe8c67273d773be595fa34546d0"
 fingerprint_b="86950961d8fa33b5f7bfe6297e80369"
 prose_a="validity"
@@ -110,24 +90,31 @@ for index in "${!public_literals[@]}"; do
   prefix="${literal_prefixes[index]}"
   suffix="${literal_suffixes[index]}"
   literal="${public_literals[index]}"
-  record="${fixture}/release-database/record.txt"
-  printf '%s%s%s\n' "${prefix}" "${literal}" "${suffix}" >"${record}"
-  scan_public_literal 1
-  scan_public_literal 0 --config "${CONFIG}"
+  name="public-literal-${index}.txt"
+  printf '%s%s%s\n' "${prefix}" "${literal}" "${suffix}" >"${fixture}/default/${name}"
+  cp -- "${fixture}/default/${name}" "${fixture}/configured/${name}"
+  printf '%s\tgeneric-api-key\n' "${name}" >>"${fixture}/default.tsv"
+
+  variant=0
   for value in "${other_a}${other_b}" "x${literal}" "${literal}x"; do
-    printf '%s%s%s\n' "${prefix}" "${value}" "${suffix}" >"${record}"
-    scan_public_literal 1 --config "${CONFIG}"
+    name="public-variant-${index}-$((++variant)).txt"
+    printf '%s%s%s\n' "${prefix}" "${value}" "${suffix}" >"${fixture}/configured/${name}"
+    printf '%s\tgeneric-api-key\n' "${name}" >>"${fixture}/configured.tsv"
   done
+  name="public-adjacent-${index}.txt"
   printf '%s%s%s api_token="%s%s"\n' "${prefix}" "${literal}" "${suffix}" \
-    "${other_a}" "${other_b}" >"${record}"
-  scan_public_literal 1 --config "${CONFIG}"
+    "${other_a}" "${other_b}" >"${fixture}/configured/${name}"
+  printf '%s\tgeneric-api-key\n' "${name}" >>"${fixture}/configured.tsv"
 done
-# A detector failure must not reuse the previous successful finding report.
-if (scan_public_literal 1 --config "${fixture}/missing.toml") >/dev/null 2>&1; then
+
+scan_fixtures default
+scan_fixtures configured --config "${CONFIG}"
+# A configuration error must not count as a finding or reuse a previous report.
+if scan_fixtures configured --config "${fixture}/missing.toml" >/dev/null 2>&1; then
   echo "a secret-scan configuration error must not count as a detected credential" >&2
   exit 1
 fi
-rm -rf "${fixture}/release-database" "${fixture}/report.json" "${fixture}/scan.log"
+rm -rf -- "${fixture}/default" "${fixture}/configured" "${fixture}/"{default.tsv,configured.tsv,report.json,scan.log}
 
 mkdir -p "${fixture}/strict-wire"
 cp "${ROOT}/testdata/command-strict-wire.json" "${fixture}/strict-wire/command.json"

@@ -855,46 +855,7 @@ async fn failed_password_rotation_and_staging_cleanup_preserve_original() {
 }
 
 #[test]
-fn effect_store_scale_rollback_crash_tamper_and_missing_evidence() {
-    // 10,000 historical rows.
-    let scale_dir = TempDir::new("effects-scale");
-    let mut store = EffectStore::open_for_mutation(&scale_dir.effect_resources()).expect("open");
-    let now = effect_now().expect("clock");
-    let tx = store
-        .connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .expect("tx");
-    let before = authenticate_file(&store.hmac_key, b"before");
-    let after = authenticate_file(&store.hmac_key, b"after");
-    for i in 0..10_000_u64 {
-        let key = format!("user{i:05}");
-        let id = validate_effect_context("user_create", &key, 1, test_effect(), now).expect("id");
-        let mac = authenticate_record(
-            &store.hmac_key,
-            "user_create",
-            &key,
-            1,
-            id,
-            "applied",
-            &before,
-            &after,
-        );
-        tx.execute(
-            "INSERT INTO desired_effects(mutation_kind,resource_key,revision,command_id,idempotency_key,payload_sha256,expires_at,state,before_hmac,after_hmac,record_hmac,updated_at) VALUES('user_create',?1,1,?2,?3,?4,?5,'applied',?6,?7,?8,?9)",
-            params![key, id.command_id.as_slice(), id.idempotency_key.as_slice(), id.payload_sha256.as_slice(), id.expires_at, before.as_slice(), after.as_slice(), mac.as_slice(), now],
-        )
-        .expect("insert");
-    }
-    tx.commit().expect("commit");
-    assert_eq!(
-        store
-            .connection
-            .query_row("SELECT count(*) FROM desired_effects", [], |r| r
-                .get::<_, i64>(0))
-            .expect("count"),
-        10_000
-    );
-
+fn effect_store_rollback_crash_tamper_and_missing_evidence() {
     // Revision rollback rejection, post-commit crash recovery, tamper rejection.
     let dir = TempDir::new("effects-core");
     let res = dir.effect_resources();

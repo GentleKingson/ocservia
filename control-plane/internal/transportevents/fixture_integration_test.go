@@ -35,8 +35,12 @@ type commandResultFixture struct {
 
 func newCommandResultFixture(t *testing.T) commandResultFixture {
 	t.Helper()
+	return commandResultFixtureWithPool(t, testfixture.OpenRuntimePool(t))
+}
+
+func commandResultFixtureWithPool(t *testing.T, pool *pgxpool.Pool) commandResultFixture {
+	t.Helper()
 	ctx := context.Background()
-	pool := testfixture.OpenRuntimePool(t)
 	operationID, commandID, key := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	messageID := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC().Truncate(time.Microsecond)

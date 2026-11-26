@@ -360,11 +360,11 @@ func TestTrustedSealing(t *testing.T) {
 }
 
 func TestCrashRecovery(t *testing.T) {
+	der := csrFixture(t, "crash")
 	for _, stage := range []string{"prepare", "signed", "commit", "reply"} {
 		t.Run(stage, func(t *testing.T) {
 			s, dir := fixture(t)
 			must(t, s.db.Close())
-			der := csrFixture(t, "crash")
 			must(t, os.WriteFile(dir+"/csr.der", der, 0600))
 			id := uuid.NewString()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestCrashChild$")

@@ -48,34 +48,37 @@ func eventually(t *testing.T, timeout time.Duration, predicate func() bool) {
 }
 
 func TestSubscribersShareOnePollingWatcher(t *testing.T) {
-	config := DefaultConfig()
-	config.PollInterval = 100 * time.Millisecond
-	config.SubscriberQueue = 256
-	var queries atomic.Uint64
-	hub, err := NewHub(config, func(_ context.Context, _ string, _ uuid.UUID, _ int) ([]Event, error) {
-		queries.Add(1)
-		return nil, nil
-	}, rejectNonNilCursor)
-	testutil.NoError(t, err)
-	defer hub.Close()
-
-	subs := make([]*Subscription, 0, 32)
-	for range 32 {
-		sub, err := hub.Subscribe(context.Background(), "workspace-a", uuid.Nil)
+	synctest.Test(t, func(t *testing.T) {
+		config := DefaultConfig()
+		config.PollInterval = 100 * time.Millisecond
+		config.SubscriberQueue = 256
+		var queries atomic.Uint64
+		hub, err := NewHub(config, func(_ context.Context, _ string, _ uuid.UUID, _ int) ([]Event, error) {
+			queries.Add(1)
+			return nil, nil
+		}, rejectNonNilCursor)
 		testutil.NoError(t, err)
-		subs = append(subs, sub)
-	}
-	if queries.Load() != 0 || hub.Snapshot().Watchers != 1 {
-		t.Fatalf("queries=%d watchers=%d", queries.Load(), hub.Snapshot().Watchers)
-	}
-	time.Sleep(350 * time.Millisecond)
-	if count := queries.Load(); count < 2 || count > 5 {
-		t.Fatalf("shared poll queries = %d, want 2..5", count)
-	}
-	for _, sub := range subs {
-		sub.Close()
-	}
-	eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
+		defer hub.Close()
+
+		subs := make([]*Subscription, 0, 32)
+		for range 32 {
+			sub, err := hub.Subscribe(context.Background(), "workspace-a", uuid.Nil)
+			testutil.NoError(t, err)
+			subs = append(subs, sub)
+		}
+		if queries.Load() != 0 || hub.Snapshot().Watchers != 1 {
+			t.Fatalf("queries=%d watchers=%d", queries.Load(), hub.Snapshot().Watchers)
+		}
+		time.Sleep(350 * time.Millisecond)
+		synctest.Wait()
+		if count := queries.Load(); count < 2 || count > 5 {
+			t.Fatalf("shared poll queries = %d, want 2..5", count)
+		}
+		for _, sub := range subs {
+			sub.Close()
+		}
+		eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
+	})
 }
 
 // New subscriptions must not postpone polling for existing subscribers.
@@ -102,96 +105,100 @@ func TestPollDuringSubscriptionChurn(t *testing.T) {
 }
 
 func TestSlowConsumerDisconnectedWithoutBlockingPeer(t *testing.T) {
-	config := DefaultConfig()
-	config.PollInterval = 100 * time.Millisecond
-	config.SubscriberQueue = 8
-	var sequence atomic.Uint64
-	hub, err := NewHub(config, func(_ context.Context, _ string, _ uuid.UUID, _ int) ([]Event, error) {
-		events := make([]Event, 0, 8)
-		for range 8 {
-			next := sequence.Add(1)
-			events = append(events, Event{ID: uuid.Must(uuid.NewV7()), Sequence: next, Name: "test", Data: []byte(fmt.Sprintf("%d", next))})
+	synctest.Test(t, func(t *testing.T) {
+		config := DefaultConfig()
+		config.PollInterval = 100 * time.Millisecond
+		config.SubscriberQueue = 8
+		var sequence atomic.Uint64
+		hub, err := NewHub(config, func(_ context.Context, _ string, _ uuid.UUID, _ int) ([]Event, error) {
+			events := make([]Event, 0, 8)
+			for range 8 {
+				next := sequence.Add(1)
+				events = append(events, Event{ID: uuid.Must(uuid.NewV7()), Sequence: next, Name: "test", Data: []byte(fmt.Sprintf("%d", next))})
+			}
+			return events, nil
+		}, rejectNonNilCursor)
+		testutil.NoError(t, err)
+		defer hub.Close()
+
+		slow, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
+		testutil.NoError(t, err)
+		fast, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
+		testutil.NoError(t, err)
+		defer fast.Close()
+
+		for range 16 {
+			select {
+			case <-fast.Events:
+			case <-time.After(time.Second):
+				t.Fatal("fast subscriber stopped receiving")
+			}
 		}
-		return events, nil
-	}, rejectNonNilCursor)
-	testutil.NoError(t, err)
-	defer hub.Close()
-
-	slow, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-	testutil.NoError(t, err)
-	fast, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-	testutil.NoError(t, err)
-	defer fast.Close()
-
-	for range 16 {
 		select {
-		case <-fast.Events:
+		case err := <-slow.Done:
+			if !errors.Is(err, ErrSlowConsumer) {
+				t.Fatalf("slow consumer error = %v", err)
+			}
 		case <-time.After(time.Second):
-			t.Fatal("fast subscriber stopped receiving")
+			t.Fatal("slow subscriber was not disconnected")
 		}
-	}
-	select {
-	case err := <-slow.Done:
-		if !errors.Is(err, ErrSlowConsumer) {
-			t.Fatalf("slow consumer error = %v", err)
+		if hub.Snapshot().SlowConsumerDisconnects == 0 {
+			t.Fatal("slow consumer metric was not incremented")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("slow subscriber was not disconnected")
-	}
-	if hub.Snapshot().SlowConsumerDisconnects == 0 {
-		t.Fatal("slow consumer metric was not incremented")
-	}
+	})
 }
 
 func TestDatabaseFailureBacksOffAndCursorRecovers(t *testing.T) {
-	config := DefaultConfig()
-	config.PollInterval = 100 * time.Millisecond
-	config.DatabaseMaxBackoff = 800 * time.Millisecond
-	var queries atomic.Uint64
-	var fail atomic.Bool
-	var eventID atomic.Value
-	fail.Store(true)
-	hub, err := NewHub(config, func(_ context.Context, _ string, after uuid.UUID, _ int) ([]Event, error) {
-		queries.Add(1)
-		if fail.Load() {
-			return nil, errors.New("database paused")
-		}
-		id, _ := eventID.Load().(uuid.UUID)
-		if id == uuid.Nil || id == after {
-			return nil, nil
-		}
-		return []Event{{ID: id, Sequence: 1, Name: "test", Data: []byte("recovered")}}, nil
-	}, rejectNonNilCursor)
-	testutil.NoError(t, err)
-	defer hub.Close()
+	synctest.Test(t, func(t *testing.T) {
+		config := DefaultConfig()
+		config.PollInterval = 100 * time.Millisecond
+		config.DatabaseMaxBackoff = 800 * time.Millisecond
+		var queries atomic.Uint64
+		var fail atomic.Bool
+		var eventID atomic.Value
+		fail.Store(true)
+		hub, err := NewHub(config, func(_ context.Context, _ string, after uuid.UUID, _ int) ([]Event, error) {
+			queries.Add(1)
+			if fail.Load() {
+				return nil, errors.New("database paused")
+			}
+			id, _ := eventID.Load().(uuid.UUID)
+			if id == uuid.Nil || id == after {
+				return nil, nil
+			}
+			return []Event{{ID: id, Sequence: 1, Name: "test", Data: []byte("recovered")}}, nil
+		}, rejectNonNilCursor)
+		testutil.NoError(t, err)
+		defer hub.Close()
 
-	sub, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
-	testutil.NoError(t, err)
-	defer sub.Close()
-	eventually(t, time.Second, func() bool {
-		s := hub.Snapshot()
-		return s.DatabaseErrors > 0 && s.UnhealthyWatchers == 1
-	})
-	before := queries.Load()
-	if _, err := hub.Subscribe(context.Background(), "scope", uuid.Nil); !errors.Is(err, ErrDatabaseBackoff) || queries.Load() != before {
-		t.Fatalf("backoff admission err=%v delta=%d", err, queries.Load()-before)
-	}
-	time.Sleep(300 * time.Millisecond)
-	fail.Store(false)
-	id := uuid.Must(uuid.NewV7())
-	eventID.Store(id)
-	eventually(t, 2*time.Second, func() bool {
-		s := hub.Snapshot()
-		return s.DatabaseBackoff == 0 && s.UnhealthyWatchers == 0
-	})
-	select {
-	case event := <-sub.Events:
-		if event.ID != id {
-			t.Fatalf("recovered event = %s, want %s", event.ID, id)
+		sub, err := hub.Subscribe(context.Background(), "scope", uuid.Nil)
+		testutil.NoError(t, err)
+		defer sub.Close()
+		eventually(t, time.Second, func() bool {
+			s := hub.Snapshot()
+			return s.DatabaseErrors > 0 && s.UnhealthyWatchers == 1
+		})
+		before := queries.Load()
+		if _, err := hub.Subscribe(context.Background(), "scope", uuid.Nil); !errors.Is(err, ErrDatabaseBackoff) || queries.Load() != before {
+			t.Fatalf("backoff admission err=%v delta=%d", err, queries.Load()-before)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("durable cursor did not recover")
-	}
+		time.Sleep(300 * time.Millisecond)
+		fail.Store(false)
+		id := uuid.Must(uuid.NewV7())
+		eventID.Store(id)
+		eventually(t, 2*time.Second, func() bool {
+			s := hub.Snapshot()
+			return s.DatabaseBackoff == 0 && s.UnhealthyWatchers == 0
+		})
+		select {
+		case event := <-sub.Events:
+			if event.ID != id {
+				t.Fatalf("recovered event = %s, want %s", event.ID, id)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("durable cursor did not recover")
+		}
+	})
 }
 
 func TestTerminalEventDrainsAndWatcherCapacityReclaims(t *testing.T) {
@@ -240,73 +247,75 @@ func TestTerminalEventDrainsAndWatcherCapacityReclaims(t *testing.T) {
 }
 
 func TestReconnectCursorValidationAndLiveHandoff(t *testing.T) {
-	config := DefaultConfig()
-	config.PollInterval = 100 * time.Millisecond
-	firstID, secondID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	var mu sync.Mutex
-	events := []Event{{ID: firstID, Sequence: 1, Name: "platform"}}
-	fetch := func(_ context.Context, _ string, after uuid.UUID, _ int) ([]Event, error) {
+	synctest.Test(t, func(t *testing.T) {
+		config := DefaultConfig()
+		config.PollInterval = 100 * time.Millisecond
+		firstID, secondID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+		var mu sync.Mutex
+		events := []Event{{ID: firstID, Sequence: 1, Name: "platform"}}
+		fetch := func(_ context.Context, _ string, after uuid.UUID, _ int) ([]Event, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			var result []Event
+			seen := after == uuid.Nil
+			for _, event := range events {
+				if seen {
+					result = append(result, cloneEvent(event))
+				}
+				if event.ID == after {
+					seen = true
+				}
+			}
+			return result, nil
+		}
+		resolve := func(_ context.Context, _ string, cursor uuid.UUID) (uint64, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			for _, event := range events {
+				if event.ID == cursor {
+					return event.Sequence, nil
+				}
+			}
+			return 0, ErrInvalidCursor
+		}
+		hub, err := NewHub(config, fetch, resolve)
+		testutil.NoError(t, err)
+		defer hub.Close()
+
+		if _, err := hub.Subscribe(context.Background(), "workspace", uuid.Must(uuid.NewV7())); !errors.Is(err, ErrInvalidCursor) {
+			t.Fatalf("invalid cursor error = %v", err)
+		}
+
+		initial, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
+		testutil.NoError(t, err)
+		select {
+		case <-initial.Events:
+		case <-time.After(time.Second):
+			t.Fatal("initial event missing")
+		}
+		initial.Close()
+		eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
+
+		reconnected, err := hub.Subscribe(context.Background(), "workspace", firstID)
+		testutil.NoError(t, err)
+		defer reconnected.Close()
+		select {
+		case dup := <-reconnected.Events:
+			t.Fatalf("replayed latest cursor event %s", dup.ID)
+		case <-time.After(200 * time.Millisecond):
+		}
 		mu.Lock()
-		defer mu.Unlock()
-		var result []Event
-		seen := after == uuid.Nil
-		for _, event := range events {
-			if seen {
-				result = append(result, cloneEvent(event))
+		events = append(events, Event{ID: secondID, Sequence: 2, Name: "platform"})
+		mu.Unlock()
+		select {
+		case ev := <-reconnected.Events:
+			if ev.ID != secondID {
+				t.Fatalf("live event = %s, want %s", ev.ID, secondID)
 			}
-			if event.ID == after {
-				seen = true
-			}
+		case <-time.After(time.Second):
+			t.Fatal("missed next live event after reconnect")
 		}
-		return result, nil
-	}
-	resolve := func(_ context.Context, _ string, cursor uuid.UUID) (uint64, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		for _, event := range events {
-			if event.ID == cursor {
-				return event.Sequence, nil
-			}
-		}
-		return 0, ErrInvalidCursor
-	}
-	hub, err := NewHub(config, fetch, resolve)
-	testutil.NoError(t, err)
-	defer hub.Close()
-
-	if _, err := hub.Subscribe(context.Background(), "workspace", uuid.Must(uuid.NewV7())); !errors.Is(err, ErrInvalidCursor) {
-		t.Fatalf("invalid cursor error = %v", err)
-	}
-
-	initial, err := hub.Subscribe(context.Background(), "workspace", uuid.Nil)
-	testutil.NoError(t, err)
-	select {
-	case <-initial.Events:
-	case <-time.After(time.Second):
-		t.Fatal("initial event missing")
-	}
-	initial.Close()
-	eventually(t, time.Second, func() bool { return hub.Snapshot().Watchers == 0 })
-
-	reconnected, err := hub.Subscribe(context.Background(), "workspace", firstID)
-	testutil.NoError(t, err)
-	defer reconnected.Close()
-	select {
-	case dup := <-reconnected.Events:
-		t.Fatalf("replayed latest cursor event %s", dup.ID)
-	case <-time.After(200 * time.Millisecond):
-	}
-	mu.Lock()
-	events = append(events, Event{ID: secondID, Sequence: 2, Name: "platform"})
-	mu.Unlock()
-	select {
-	case ev := <-reconnected.Events:
-		if ev.ID != secondID {
-			t.Fatalf("live event = %s, want %s", ev.ID, secondID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("missed next live event after reconnect")
-	}
+	})
 }
 
 func TestLaggingReconnectDoesNotRewindOrStallLiveSubscribers(t *testing.T) {

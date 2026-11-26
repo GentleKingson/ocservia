@@ -14,6 +14,7 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	transportv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	"github.com/google/uuid"
@@ -163,10 +164,29 @@ func assertWatchResumes(t *testing.T, ctx context.Context, service *Service, eve
 	}
 }
 
-func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) {
-	fixture := newCommandResultFixture(t)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer testCancel()
+func TestRunWatchQuarantineIntegration(t *testing.T) {
+	pool := testfixture.OpenRuntimePool(t)
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T, context.Context, commandResultFixture)
+	}{
+		{"permanent-event", watchQuarantinesPermanentEvent},
+		{"command-result-nul", watchQuarantinesCommandResultNUL},
+		{"telemetry-bigint-overflow", watchQuarantinesTelemetryBigintOverflow},
+		{"duplicate-and-conflicting-sessions", watchQuarantinesDuplicateAndConflictingSessions},
+		{"postgres-unsafe-telemetry", watchQuarantinesPostgresUnsafeTelemetry},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := commandResultFixtureWithPool(t, pool)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			tc.run(t, ctx, fixture)
+		})
+	}
+}
+
+func watchQuarantinesPermanentEvent(t *testing.T, testCtx context.Context, fixture commandResultFixture) {
+	t.Helper()
 
 	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
@@ -220,10 +240,8 @@ func TestRunWatchQuarantinesPermanentEventAndContinuesIntegration(t *testing.T) 
 	}
 }
 
-func TestRunWatchQuarantinesCommandResultNULAndContinuesIntegration(t *testing.T) {
-	fixture := newCommandResultFixture(t)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer testCancel()
+func watchQuarantinesCommandResultNUL(t *testing.T, testCtx context.Context, fixture commandResultFixture) {
+	t.Helper()
 
 	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
@@ -276,10 +294,8 @@ func TestRunWatchQuarantinesCommandResultNULAndContinuesIntegration(t *testing.T
 	}
 }
 
-func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *testing.T) {
-	fixture := newCommandResultFixture(t)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer testCancel()
+func watchQuarantinesTelemetryBigintOverflow(t *testing.T, testCtx context.Context, fixture commandResultFixture) {
+	t.Helper()
 
 	healthyNodeID, healthyEndpoint := prepareWatchNodes(t, testCtx, fixture)
 
@@ -335,10 +351,8 @@ func TestRunWatchQuarantinesTelemetryBigintOverflowAndContinuesIntegration(t *te
 	}
 }
 
-func TestRunWatchQuarantinesDuplicateAndConflictingSessionsIntegration(t *testing.T) {
-	fixture := newCommandResultFixture(t)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer testCancel()
+func watchQuarantinesDuplicateAndConflictingSessions(t *testing.T, testCtx context.Context, fixture commandResultFixture) {
+	t.Helper()
 
 	t.Cleanup(func() {
 		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, fixture.nodeID)
@@ -417,10 +431,8 @@ func TestRunWatchQuarantinesDuplicateAndConflictingSessionsIntegration(t *testin
 	}
 }
 
-func TestRunWatchQuarantinesPostgresUnsafeTelemetryIntegration(t *testing.T) {
-	fixture := newCommandResultFixture(t)
-	testCtx, testCancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer testCancel()
+func watchQuarantinesPostgresUnsafeTelemetry(t *testing.T, testCtx context.Context, fixture commandResultFixture) {
+	t.Helper()
 
 	t.Cleanup(func() {
 		_, _ = fixture.pool.Exec(context.Background(), `DELETE FROM telemetry_ingest_batches WHERE node_id=$1`, fixture.nodeID)
