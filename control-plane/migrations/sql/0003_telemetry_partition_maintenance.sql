@@ -1,7 +1,6 @@
 -- +goose Up
 -- Remove the DEFAULT partition from the routing table while retaining its historical rows.
 ALTER TABLE public.telemetry_samples DETACH PARTITION public.telemetry_samples_default;
-GRANT SELECT ON public.telemetry_samples_default TO ocservia_app;
 DROP FUNCTION public.telemetry_drop_expired_partitions(timestamptz);
 
 CREATE TABLE public.telemetry_partition_retirements (
@@ -37,7 +36,6 @@ END;
 $$;
 -- +goose StatementEnd
 REVOKE ALL ON FUNCTION public.telemetry_ensure_upcoming_partitions() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.telemetry_ensure_upcoming_partitions() TO ocservia_app;
 
 CREATE TABLE public.telemetry_rollup_queue (
     bucket_at timestamptz NOT NULL,
@@ -45,7 +43,6 @@ CREATE TABLE public.telemetry_rollup_queue (
     metric text NOT NULL,
     PRIMARY KEY (bucket_at, node_id, metric)
 );
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.telemetry_rollup_queue TO ocservia_app;
 
 -- +goose StatementBegin
 CREATE FUNCTION public.telemetry_queue_rollups() RETURNS trigger

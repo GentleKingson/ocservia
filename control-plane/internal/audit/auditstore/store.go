@@ -38,7 +38,6 @@ type Store interface {
 	LatestCheckpoint(context.Context, uuid.UUID) (uuid.UUID, []byte, []byte, time.Time, int16, error)
 	AddCheckpoint(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []byte, []byte) error
 	Workspaces(context.Context) (database.Rows, error)
-	CheckpointProof(context.Context, uuid.UUID, uuid.UUID) (hash, signature []byte, err error)
 	ExpiredDetails(context.Context, time.Time) (database.Rows, error)
 	CompactDetails(context.Context, uuid.UUID, []byte, string, []byte, time.Time) error
 	CompactSecurity(context.Context, time.Time) error

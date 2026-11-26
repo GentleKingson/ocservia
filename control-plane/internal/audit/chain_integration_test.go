@@ -112,40 +112,6 @@ func TestForgedDatabaseTailCannotVerifyOrCheckpointIntegration(t *testing.T) {
 	}
 }
 
-func TestLegacyAuditTransitionRequiresCheckpointedTailIntegration(t *testing.T) {
-	ctx := context.Background()
-	pool := testfixture.OpenRuntimePool(t)
-	owner := testfixture.OpenOwnerPool(t)
-
-	workspaceID := uuid.Must(uuid.NewV7())
-	eventID := uuid.Must(uuid.NewV7())
-	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'legacy audit transition',$2,now(),now())`, workspaceID, "audit-transition-"+workspaceID.String())
-	var occurredAt time.Time
-	testutil.NoError(t, owner.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&occurredAt))
-	legacy := ChainRecord{EventID: eventID, WorkspaceID: workspaceID, ActorType: "controller", ActorID: "legacy", Action: "legacy.event", ResourceType: "workspace", ResourceID: workspaceID, RequestID: "legacy-event", Result: "succeeded", At: occurredAt}
-	payload, err := encodeChainPayload(nil, legacy)
-	testutil.NoError(t, err)
-	eventHash := sha256.Sum256(payload)
-	testutil.Exec(t, ctx, owner, `INSERT INTO audit_events(id,workspace_id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,result,event_hash,auth_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0)`, eventID, workspaceID, occurredAt, legacy.ActorType, legacy.ActorID, legacy.Action, legacy.ResourceType, legacy.ResourceID, legacy.RequestID, legacy.Result, eventHash[:])
-	checkpointKey := integrationCheckpointKey(t)
-	manager := NewBackendManager(postgres.WrapPool(pool), checkpointKey)
-	if err := manager.EnsureAuthenticity(ctx); err == nil {
-		t.Fatal("uncheckpointed legacy audit tail was accepted")
-	}
-	testutil.Exec(t, ctx, owner, `INSERT INTO audit_checkpoints(id,workspace_id,through_event_id,through_event_hash,signature,created_at) VALUES($1,$2,$3,$4,$5,now())`, uuid.Must(uuid.NewV7()), workspaceID, eventID, eventHash[:], signCheckpoint(checkpointKey, workspaceID, eventID, eventHash[:]))
-	testutil.NoError(t, manager.EnsureAuthenticity(ctx))
-	verified, err := manager.Verify(ctx, workspaceID)
-	if err != nil || !verified.Valid || !verified.Checkpoint || verified.Events != 2 {
-		t.Fatalf("transition verification = %+v, %v", verified, err)
-	}
-	var version int16
-	var keyID string
-	testutil.NoError(t, owner.QueryRow(ctx, `SELECT auth_version,event_key_id FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, workspaceID).Scan(&version, &keyID))
-	if version != eventAuthVersionV1 || keyID != manager.current.keyID {
-		t.Fatalf("transition auth = version %d key %q", version, keyID)
-	}
-}
-
 func integrationCheckpointKey(t *testing.T) []byte {
 	t.Helper()
 	encoded := os.Getenv("OCSERV_AUDIT_CHECKPOINT_KEY")

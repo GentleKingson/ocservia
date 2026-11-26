@@ -307,25 +307,6 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 	return operation, false, nil
 }
 
-func (s *Service) ListEvents(ctx context.Context, operationID, after uuid.UUID, limit int) ([]Event, error) {
-	if limit < 1 || limit > 200 {
-		return nil, ErrInvalidRequest
-	}
-	var events []Event
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		events, err = store.Events(ctx, operationID, after, limit)
-		return err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list operation events: %w", err)
-	}
-	return events, nil
-}
-
 // ListEventsWithState returns operation events after cursor and, when no new
 // events are present, reads the operation's current state within the same
 // transaction so SSE watchers detect already-terminal operations without a

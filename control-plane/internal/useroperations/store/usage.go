@@ -43,17 +43,10 @@ type UsageDelta struct {
 	ObservedAt  time.Time
 }
 
+// UsageStore executes usage cursor locking, cursor upserts, and usage
+// aggregation in bulk queries.
 type UsageStore interface {
 	LockNode(context.Context, uuid.UUID) error
-	LockCursor(context.Context, uuid.UUID, UsageCursor) (UsageCursor, error)
-	PutCursor(context.Context, uuid.UUID, UsageCursor) error
-	AddUsage(context.Context, uuid.UUID, UsageCursor, string, time.Time, int64, int64) error
-}
-
-// BatchUsageStore executes usage cursor locking, cursor upserts, and usage
-// aggregation in bulk queries rather than per-sample round-trips.
-type BatchUsageStore interface {
-	UsageStore
 	LockCursors(context.Context, uuid.UUID, []UsageKey) (map[UsageKey]UsageCursor, error)
 	PutCursors(context.Context, uuid.UUID, []UsageCursor) error
 	AddUsageBatch(context.Context, uuid.UUID, []UsageDelta) error
@@ -80,49 +73,6 @@ func RecordUsageTx(ctx context.Context, store UsageStore, nodeID uuid.UUID, samp
 	if len(samples) == 0 {
 		return nil
 	}
-	if batch, ok := store.(BatchUsageStore); ok {
-		return recordUsageBatch(ctx, batch, nodeID, samples)
-	}
-	for _, sample := range samples {
-		if sample.RXBytes < 0 || sample.TXBytes < 0 || sample.ObservedAt.IsZero() || sample.Connected.IsZero() {
-			return ErrInvalidUsageSample
-		}
-		connected := sample.Connected.UTC().Truncate(time.Microsecond)
-		observed := sample.ObservedAt.UTC().Truncate(time.Microsecond)
-		current := UsageCursor{SessionID: sample.SessionID, Username: sample.Username, Connected: connected, ObservedAt: observed, RXBytes: sample.RXBytes, TXBytes: sample.TXBytes}
-		prior, err := store.LockCursor(ctx, nodeID, current)
-		if err != nil && !errors.Is(err, database.ErrNotFound) {
-			return err
-		}
-		if err == nil && !observed.After(prior.ObservedAt) {
-			continue
-		}
-		if err == nil && sample.Username != prior.Username {
-			return ErrInvalidUsageSample
-		}
-		deltaRX, deltaTX := sample.RXBytes-prior.RXBytes, sample.TXBytes-prior.TXBytes
-		if deltaRX < 0 {
-			deltaRX = sample.RXBytes
-		}
-		if deltaTX < 0 {
-			deltaTX = sample.TXBytes
-		}
-		if err := store.PutCursor(ctx, nodeID, current); err != nil {
-			return err
-		}
-		for _, period := range []struct {
-			kind  string
-			start time.Time
-		}{{"monthly", monthStart(sample.ObservedAt)}, {"lifetime", time.Unix(0, 0).UTC()}} {
-			if err := store.AddUsage(ctx, nodeID, current, period.kind, period.start, deltaRX, deltaTX); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func recordUsageBatch(ctx context.Context, store BatchUsageStore, nodeID uuid.UUID, samples []UsageSample) error {
 	keys := make([]UsageKey, 0, len(samples))
 	seenKeys := make(map[UsageKey]struct{}, len(samples))
 	for _, sample := range samples {

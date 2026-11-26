@@ -65,7 +65,7 @@ func (s *Service) Issue(ctx context.Context, request IssueRequest) (Certificate,
 		if err != nil || current.NodeID != nodeID || !current.Current || current.ReceiptKey != approved.ReceiptKey || !bytes.Equal(current.CSR, csrDER) || !bytes.Equal(current.ReceiptDigest, approved.ReceiptDigest) || !bytes.Equal(current.CSRDigest, approved.CSRDigest) || current.IssueVersion != issueVersion {
 			return ErrNotReady
 		}
-		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey, now.UTC())
+		active, err := store.KeyActive(ctx, nodeID, current.ReceiptKey)
 		if err != nil || !active {
 			return ErrNotReady
 		}
@@ -105,11 +105,7 @@ func (s *Service) prepareIssue(ctx context.Context, request *IssueRequest) (work
 		if !stored.ReceiptCurrent || len(stored.ReceiptDigest) != sha256.Size || len(stored.ReceiptKey) == 0 || !bytes.Equal(stored.CSRDigest, csrDigest[:]) {
 			return ErrNotReady
 		}
-		at, err := database.TransactionTime(ctx, tx)
-		if err != nil {
-			return err
-		}
-		active, err := store.KeyActive(ctx, nodeID, stored.ReceiptKey, at)
+		active, err := store.KeyActive(ctx, nodeID, stored.ReceiptKey)
 		if err != nil || !active {
 			return ErrNotReady
 		}

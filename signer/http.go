@@ -21,6 +21,12 @@ type statusError int
 
 func (e statusError) Error() string { return http.StatusText(int(e)) }
 
+func decodeStrictJSON(body []byte, dst any) bool {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(dst) == nil && decoder.Decode(new(any)) == io.EOF
+}
+
 func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/healthz" {
@@ -87,37 +93,34 @@ func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var response any
 	code := 200
-	if r.URL.Path == "/sign/seal" {
+	switch r.URL.Path {
+	case "/sign/seal":
 		node, use := r.Header.Get("X-Ocservia-Node-ID"), r.Header.Get("X-Ocservia-Seal-Purpose")
 		if !validUUID(node) || !validSealPurpose(use) {
 			err = statusError(400)
 		} else {
 			response, err = s.seal(node, use, body)
 		}
-	} else if r.URL.Path == "/sign/public-key" {
+	case "/sign/public-key":
 		var req struct {
 			NodeID  string `json:"node_id"`
 			Purpose string `json:"purpose"`
 		}
-		decoder := json.NewDecoder(bytes.NewReader(body))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF || !validUUID(req.NodeID) || req.Purpose != "user_password" {
+		if !decodeStrictJSON(body, &req) || !validUUID(req.NodeID) || req.Purpose != "user_password" {
 			err = statusError(400)
 		} else {
 			response, err = s.userPasswordPublicKey(req.NodeID)
 		}
-	} else {
+	case "/sign":
 		var req struct {
 			ID     string `json:"certificate_id"`
 			CSR    string `json:"csr_der"`
 			Serial string `json:"serial_number"`
 			Reason string `json:"reason"`
 		}
-		decoder := json.NewDecoder(bytes.NewReader(body))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&req) != nil || decoder.Decode(new(any)) != io.EOF || !validUUID(req.ID) {
+		if !decodeStrictJSON(body, &req) || !validUUID(req.ID) {
 			err = statusError(400)
-		} else if r.URL.Path == "/sign" {
+		} else {
 			der, decodeErr := base64.StdEncoding.Strict().DecodeString(req.CSR)
 			if decodeErr != nil || len(der) == 0 || req.Serial != "" || req.Reason != "" || r.Header.Get("Idempotency-Key") != req.ID {
 				err = statusError(400)
@@ -126,6 +129,16 @@ func (s *service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				record, err = s.sign(uuid.MustParse(req.ID), der)
 				response = map[string]string{"certificate_chain_pem": record.Chain}
 			}
+		}
+	case "/sign/revoke":
+		var req struct {
+			ID     string `json:"certificate_id"`
+			CSR    string `json:"csr_der"`
+			Serial string `json:"serial_number"`
+			Reason string `json:"reason"`
+		}
+		if !decodeStrictJSON(body, &req) || !validUUID(req.ID) {
+			err = statusError(400)
 		} else {
 			serial, ok := new(big.Int).SetString(req.Serial, 10)
 			if r.Header.Get("Idempotency-Key") != req.ID+":revoke" || req.CSR != "" || !ok || serial.Sign() <= 0 || serial.String() != req.Serial || len(req.Serial) > 40 || strings.TrimSpace(req.Reason) == "" || len(req.Reason) > 512 {

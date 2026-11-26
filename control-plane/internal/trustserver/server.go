@@ -77,8 +77,6 @@ func (h *Handler) Enroll(ctx context.Context, request *agentv1.EnrollRequest) (*
 	switch {
 	case errors.Is(err, enrollment.ErrInvalidToken), errors.Is(err, enrollment.ErrEndpointMismatch), errors.Is(err, enrollment.ErrEndpointProof):
 		return nil, status.Error(codes.PermissionDenied, "enrollment rejected")
-	case errors.Is(err, enrollment.ErrPendingLimit):
-		return nil, status.Error(codes.ResourceExhausted, "pending enrollment capacity reached")
 	case errors.Is(err, enrollment.ErrInvalidRequest):
 		return nil, status.Error(codes.InvalidArgument, "enrollment request rejected")
 	case err != nil:

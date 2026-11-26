@@ -91,8 +91,8 @@ func (s certificateStore) LockReceipt(ctx context.Context, id uuid.UUID) (v cert
 	return
 }
 
-func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key string, at time.Time) (active bool, err error) {
-	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>$3))`, node, key, at).Scan(&active)
+func (s certificateStore) KeyActive(ctx context.Context, node uuid.UUID, key string) (active bool, err error) {
+	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_privd_attestation_keys WHERE node_id=$1 AND key_id=$2 AND state='active' AND (valid_until IS NULL OR valid_until>now()))`, node, key).Scan(&active)
 	return
 }
 

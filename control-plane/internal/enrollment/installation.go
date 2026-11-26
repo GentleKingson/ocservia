@@ -93,10 +93,6 @@ func installationChild(root, origin string) (string, bool) {
 	return installEnrollmentPrefix + base64.RawURLEncoding.EncodeToString(digest[:]), true
 }
 
-func bootstrapResult(_ string) agentv1.HandshakeResult {
-	return agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED
-}
-
 type InstallationConfig struct {
 	ControllerEndpointID      string    `json:"controller_endpoint_id"`
 	Environment               string    `json:"environment"`
@@ -130,7 +126,7 @@ func (s *Service) InstallationConfig(ctx context.Context, root string) (Installa
 	}
 	if token.ConsumedNode != nil {
 		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
-		if err != nil || !bootstrapNodeState(child, node) || !slices.Equal(node.Endpoint, token.Endpoint) {
+		if err != nil || !bootstrapNodeState(node) || !slices.Equal(node.Endpoint, token.Endpoint) {
 			return InstallationConfig{}, ErrInvalidToken
 		}
 	}
@@ -181,7 +177,7 @@ func (s *Service) lockInstallation(ctx context.Context, store enrollmentstore.En
 		return enrollmentstore.Token{}, ErrInvalidToken
 	}
 	node, err := store.NodeByID(ctx, request.NodeID, enrollmentstore.ForUpdate)
-	if err != nil || node.WorkspaceID != token.WorkspaceID || !bootstrapNodeState(child, node) || !slices.Equal(node.Endpoint, endpoint) {
+	if err != nil || node.WorkspaceID != token.WorkspaceID || !bootstrapNodeState(node) || !slices.Equal(node.Endpoint, endpoint) {
 		return enrollmentstore.Token{}, ErrInvalidToken
 	}
 	return token, nil

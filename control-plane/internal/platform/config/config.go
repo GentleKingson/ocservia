@@ -338,10 +338,10 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.ResetLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.TelemetryRetentionOnly) {
+	if c.ResetLocalAdmin && (!c.LocalAuth || c.MigrateOnly || c.ProvisionWorkspace || c.BootstrapLocalAdmin || c.TelemetryRetentionOnly) {
 		return errors.New("administrator password reset requires Local auth and cannot be combined with other one-shot commands")
 	}
-	if c.BootstrapLocalAdmin && (!c.LocalAuthEnabled() || c.MigrateOnly || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
+	if c.BootstrapLocalAdmin && (!c.LocalAuth || c.MigrateOnly || c.LocalBootstrapUsername == "" || c.LocalBootstrapWorkspace == "") {
 		return errors.New("bootstrap requires Local auth, username and workspace ID, and cannot be combined with other one-shot commands")
 	}
 	if c.ProvisionWorkspace && (c.MigrateOnly || c.BootstrapLocalAdmin) {
@@ -401,12 +401,12 @@ func (c Config) Validate() error {
 	if c.Environment == "production" && (!c.TelemetryRetentionOnly || c.PublicOrigin != "") && !strings.HasPrefix(publicOrigin, "https://") {
 		return errors.New("OCSERV_PUBLIC_ORIGIN must be an HTTPS origin in production")
 	}
-	if c.LocalAuthEnabled() || len(c.SessionKey) != 0 {
+	if c.LocalAuth || len(c.SessionKey) != 0 {
 		if len(c.SessionKey) != 32 || c.SessionTTL < time.Minute || c.SessionTTL > 24*time.Hour {
 			return errors.New("browser sessions require a 32-byte session key and a session TTL from 1m to 24h")
 		}
 	}
-	if c.Environment == "production" && !c.TelemetryRetentionOnly && !c.LocalAuthEnabled() {
+	if c.Environment == "production" && !c.TelemetryRetentionOnly && !c.LocalAuth {
 		return errors.New("Local authentication is required in production")
 	}
 	if len(c.AuditCheckpointKey) != 0 && len(c.AuditCheckpointKey) != 32 {
@@ -720,8 +720,6 @@ func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
 	*target = decoded
 	return nil
 }
-
-func (c Config) LocalAuthEnabled() bool { return c.LocalAuth }
 
 // BrowserOrigin is the explicit exact-origin boundary for cookie mutations.
 func (c Config) BrowserOrigin() string {

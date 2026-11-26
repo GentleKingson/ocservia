@@ -152,9 +152,3 @@ func (b *Backend) PoolStats() database.PoolStats {
 }
 
 var _ database.Diagnostics = (*Backend)(nil)
-
-func (t *transaction) TransactionTime(ctx context.Context) (time.Time, error) {
-	var now time.Time
-	err := t.QueryRow(ctx, "SELECT transaction_timestamp()").Scan(&now)
-	return now.UTC(), err
-}

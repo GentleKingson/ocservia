@@ -33,7 +33,7 @@ func compactionMAC(key [sha256.Size]byte, record ChainRecord, previous, hash, or
 	return mac.Sum(nil), nil
 }
 func (m *Manager) validCompaction(record ChainRecord, previous, hash, originalMAC []byte, at time.Time, keyID *string, mac []byte) bool {
-	if keyID == nil || record.Reason != "" || len(record.BeforeSummary) != 0 || len(record.AfterSummary) != 0 || record.Action == transitionActionV1 {
+	if keyID == nil || record.Reason != "" || len(record.BeforeSummary) != 0 || len(record.AfterSummary) != 0 {
 		return false
 	}
 	key, ok := m.eventKeys[*keyID]
@@ -48,9 +48,8 @@ func (m *Manager) validCompaction(record ChainRecord, previous, hash, originalMA
 	return err == nil && hmac.Equal(expected, mac)
 }
 
-// CompactDetails is a single bounded transaction. Legacy rows and the
-// legacy/authenticated transition remain full evidence. Unverifiable rows stop
-// the batch; compaction must never convert corrupt history into trusted history.
+// CompactDetails is a single bounded transaction. Unverifiable rows stop the
+// batch; compaction must never convert corrupt history into trusted history.
 func (m *Manager) CompactDetails(ctx context.Context, days int) error {
 	if days < 90 || days > 2555 {
 		return errors.New("audit retention must be 90–2555 days")

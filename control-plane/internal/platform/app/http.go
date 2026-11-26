@@ -23,8 +23,8 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 		return nil, fmt.Errorf("configure SSE admission: %w", err)
 	}
 	var authService *auth.Service
-	if cfg.LocalAuthEnabled() || cfg.BreakGlassEnabled || len(cfg.SessionKey) == 32 {
-		authConfig := auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash}
+	if cfg.LocalAuth || cfg.BreakGlassEnabled || len(cfg.SessionKey) == 32 {
+		authConfig := auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash}
 		authService, err = auth.NewBackend(backend, authConfig)
 		if err != nil {
 			return nil, fmt.Errorf("configure authentication: %w", err)
@@ -37,7 +37,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	}
 	server, err := api.NewServer(api.HTTPConfig{
 		Context: life.ctx, Address: cfg.HTTPAddress, BodyLimit: cfg.BodyLimit, RequestTimeout: cfg.RequestTimeout,
-		DevAuth: operationAuthEnabled(cfg), DevAuthToken: cfg.DevAuthToken,
+		DevAuth: cfg.DevAuth, DevAuthToken: cfg.DevAuthToken,
 		LocalSimulator: cfg.LocalSimulator, BrowserOrigin: cfg.BrowserOrigin(), AuthTrustedProxies: cfg.AuthTrustedProxyCIDRs, EventStreams: cfg.EventStreams,
 	}, backend, api.BuildInfo{Version: build.Version, Commit: build.Commit, RecommendedAgentVersion: cfg.RecommendedAgentVersion}, logger, modules,
 		api.Authorization{Authentication: authService, Audit: auditManager})
@@ -79,5 +79,3 @@ func startPprof(address string, logger *slog.Logger) func() {
 		}
 	}
 }
-
-func operationAuthEnabled(cfg config.Config) bool { return cfg.DevAuth }

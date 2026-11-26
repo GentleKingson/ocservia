@@ -103,13 +103,8 @@ func (s auditStore) Workspaces(ctx context.Context) (database.Rows, error) {
 	return s.Query(ctx, `SELECT w.id FROM workspaces w WHERE EXISTS (SELECT 1 FROM audit_events e WHERE e.workspace_id=w.id) ORDER BY w.id`)
 }
 
-func (s auditStore) CheckpointProof(ctx context.Context, workspace, event uuid.UUID) (hash, signature []byte, err error) {
-	err = s.QueryRow(ctx, `SELECT through_event_hash,signature FROM audit_checkpoints WHERE workspace_id=$1 AND through_event_id=$2`, workspace, event).Scan(&hash, &signature)
-	return
-}
-
 func (s auditStore) ExpiredDetails(ctx context.Context, cutoff time.Time) (database.Rows, error) {
-	return s.Query(ctx, `SELECT workspace_id,id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac FROM audit_events WHERE details_compacted_at IS NULL AND auth_version=1 AND action<>'audit.auth.transition' AND occurred_at<$1 ORDER BY occurred_at,id LIMIT 32 FOR UPDATE SKIP LOCKED`, cutoff)
+	return s.Query(ctx, `SELECT workspace_id,id,occurred_at,actor_type,actor_id,action,resource_type,resource_id,request_id,COALESCE(trace_id,''),result,COALESCE(reason,''),source_session_id,node_id,command_id,approval_id,before_summary,after_summary,COALESCE(error_type,''),previous_event_hash,event_hash,auth_version,event_key_id,event_mac,details_compacted_at,compaction_key_id,compaction_mac FROM audit_events WHERE details_compacted_at IS NULL AND auth_version=1 AND occurred_at<$1 ORDER BY occurred_at,id LIMIT 32 FOR UPDATE SKIP LOCKED`, cutoff)
 }
 func (s auditStore) CompactDetails(ctx context.Context, id uuid.UUID, hash []byte, key string, mac []byte, at time.Time) error {
 	var changed bool

@@ -30,6 +30,7 @@ type IngressStore interface {
 	RollbackBusiness(context.Context) error
 	ReleaseBusiness(context.Context) error
 	LockTrust(context.Context, uuid.UUID, []byte) (IngressTrust, error)
+	LockTrustShared(context.Context, uuid.UUID, []byte) (IngressTrust, error)
 	InsertEvent(context.Context, TransportEvent) (bool, error)
 	NodeStatus(context.Context, uuid.UUID, string, time.Time) error
 	SimulationOutcome(context.Context, uuid.UUID, string, string, bool, time.Time) error

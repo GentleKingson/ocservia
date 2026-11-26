@@ -105,7 +105,7 @@ type Store interface {
 	LockIssue(context.Context, uuid.UUID) (IssueState, error)
 	SigningReceipt(context.Context, uuid.UUID) (IssueReceipt, error)
 	LockReceipt(context.Context, uuid.UUID) (IssueReceipt, error)
-	KeyActive(context.Context, uuid.UUID, string, time.Time) (bool, error)
+	KeyActive(context.Context, uuid.UUID, string) (bool, error)
 	StartIssue(context.Context, Signing) error
 	ResumeIssue(context.Context, uuid.UUID, time.Time) error
 	SignerUnavailable(context.Context, uuid.UUID, int64, time.Time) error

@@ -123,9 +123,6 @@ func (t *commitFaultTx) Commit(ctx context.Context) error {
 func (t *commitFaultTx) WallTime(ctx context.Context) (time.Time, error) {
 	return database.WallTime(ctx, t.Tx)
 }
-func (t *commitFaultTx) TransactionTime(ctx context.Context) (time.Time, error) {
-	return database.TransactionTime(ctx, t.Tx)
-}
 func (t *commitFaultTx) AuthenticationStore() authstore.Store {
 	return t.Tx.(authstore.Provider).AuthenticationStore()
 }

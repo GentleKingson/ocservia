@@ -22,13 +22,9 @@ import (
 )
 
 const (
-	chainResultIntent        = "intent"
-	eventAuthVersionV1       = int16(1)
-	eventAuthDomainV1        = "ocservia/audit-event/v1\x00"
-	transitionActionV1       = "audit.auth.transition"
-	transitionActorTypeV1    = "controller"
-	transitionActorIDV1      = "audit-auth-v1"
-	transitionResourceTypeV1 = "audit_chain"
+	chainResultIntent  = "intent"
+	eventAuthVersionV1 = int16(1)
+	eventAuthDomainV1  = "ocservia/audit-event/v1\x00"
 )
 
 var eventKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -278,9 +274,8 @@ type checkpointRecord struct {
 
 type chainVerification struct {
 	Verification
-	legacyOnly bool
-	lastID     uuid.UUID
-	lastHash   []byte
+	lastID   uuid.UUID
+	lastHash []byte
 }
 
 func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verification, error) {
@@ -291,7 +286,7 @@ func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verificati
 	var verified chainVerification
 	err := database.Within(ctx, m.backend, database.RepeatableRead, func(tx database.Tx) error {
 		var err error
-		verified, err = m.verifyTx(ctx, tx, workspaceID, false)
+		verified, err = m.verifyTx(ctx, tx, workspaceID)
 		return err
 	})
 	return verified.Verification, err
@@ -357,7 +352,7 @@ func (m *Manager) validEventMAC(event eventRow) bool {
 	return ok && hmac.Equal(event.mac, signEvent(key, event.hash))
 }
 
-func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID, allowLegacyOnly bool) (chainVerification, error) {
+func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) (chainVerification, error) {
 	s, err := auditstore.From(tx)
 	if err != nil {
 		return chainVerification{}, err
@@ -373,9 +368,7 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 	defer rows.Close()
 	verified := chainVerification{Verification: Verification{WorkspaceID: workspaceID, Valid: true}}
 	var previous []byte
-	var previousID, transitionAnchorID uuid.UUID
-	var checkpointHash, transitionAnchorHash []byte
-	seenAuthenticated := false
+	var checkpointHash []byte
 	for rows.Next() {
 		event, err := scanEventRow(rows, workspaceID, false)
 		if err != nil {
@@ -389,30 +382,10 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		if event.compactedAt != nil {
 			verified.CompactedEvents++
 		}
-		if !hashValid {
-			verified.Valid = false
-		}
-		switch event.authVersion {
-		case 0:
-			if seenAuthenticated || event.keyID != nil || len(event.mac) != 0 {
-				verified.Valid = false
-			}
-		case eventAuthVersionV1:
-			if !seenAuthenticated && verified.Events > 0 {
-				transitionAnchorID, transitionAnchorHash = previousID, bytes.Clone(previous)
-				if !isTransitionRecord(record) {
-					verified.Valid = false
-				}
-			}
-			seenAuthenticated = true
-			if !m.validEventMAC(event) {
-				verified.Valid = false
-			}
-		default:
+		if !hashValid || event.authVersion != eventAuthVersionV1 || !m.validEventMAC(event) {
 			verified.Valid = false
 		}
 		previous = append(previous[:0], event.hash...)
-		previousID = record.EventID
 		verified.lastID = record.EventID
 		verified.lastHash = append(verified.lastHash[:0], event.hash...)
 		if record.EventID == latestID {
@@ -424,20 +397,6 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 		return chainVerification{}, err
 	}
 	rows.Close()
-	if transitionAnchorID != uuid.Nil {
-		hash, signature, err := s.CheckpointProof(ctx, workspaceID, transitionAnchorID)
-		if err != nil && !errors.Is(err, database.ErrNotFound) {
-			return chainVerification{}, err
-		}
-		if err != nil || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: transitionAnchorID, eventHash: hash, signature: signature}) ||
-			!bytes.Equal(hash, transitionAnchorHash) {
-			verified.Valid = false
-		}
-	}
-	verified.legacyOnly = verified.Events > 0 && !seenAuthenticated
-	if verified.legacyOnly && !allowLegacyOnly {
-		verified.Valid = false
-	}
 	if latestID == uuid.Nil {
 		verified.Checkpoint = verified.Events == 0
 	} else {
@@ -449,10 +408,6 @@ func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid
 
 func (m *Manager) validCheckpoint(workspaceID uuid.UUID, checkpoint checkpointRecord) bool {
 	return len(m.checkpointKey) >= sha256.Size && hmac.Equal(checkpoint.signature, signCheckpoint(m.checkpointKey, workspaceID, checkpoint.eventID, checkpoint.eventHash))
-}
-
-func isTransitionRecord(record ChainRecord) bool {
-	return record.ActorType == transitionActorTypeV1 && record.ActorID == transitionActorIDV1 && record.Action == transitionActionV1 && record.ResourceType == transitionResourceTypeV1 && record.ResourceID == record.WorkspaceID && record.Result == "succeeded"
 }
 
 func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
@@ -497,8 +452,11 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return uuid.Nil, nil, false, err
 	}
-	if err == nil && cpAuthVersion == eventAuthVersionV1 {
-		if cpOccurredAt.IsZero() || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
+	if err == nil {
+		if cpOccurredAt.IsZero() {
+			return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
+		}
+		if cpAuthVersion != eventAuthVersionV1 || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
 			return uuid.Nil, nil, false, errors.New("audit checkpoint is not authenticated")
 		}
 		rows, err := s.EventsFrom(ctx, workspaceID, cpOccurredAt, cpEventID)
@@ -540,13 +498,10 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 		}
 		return lastID, previous, deltaCount == 1, nil
 	}
-	if err == nil && cpOccurredAt.IsZero() {
-		return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
-	}
 	if !verifyGenesis {
 		return uuid.Nil, nil, false, nil
 	}
-	verified, err := m.verifyTx(ctx, tx, workspaceID, false)
+	verified, err := m.verifyTx(ctx, tx, workspaceID)
 	if err != nil {
 		return uuid.Nil, nil, false, err
 	}
@@ -631,39 +586,17 @@ func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID u
 		if lastID, _, _, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID, false); err != nil || lastID != uuid.Nil {
 			return err
 		}
-		verified, err := m.verifyTx(ctx, tx, workspaceID, true)
+		verified, err := m.verifyTx(ctx, tx, workspaceID)
 		if err != nil {
 			return err
 		}
 		if !verified.Valid {
 			return errors.New("audit chain integrity or origin authentication is invalid")
 		}
-		if !verified.legacyOnly {
-			if verified.Events == 0 || len(m.checkpointKey) < sha256.Size {
-				return nil
-			}
-			return s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, verified.lastID, verified.lastHash, signCheckpoint(m.checkpointKey, workspaceID, verified.lastID, verified.lastHash))
+		if verified.Events == 0 || len(m.checkpointKey) < sha256.Size {
+			return nil
 		}
-		hash, signature, err := s.CheckpointProof(ctx, workspaceID, verified.lastID)
-		if err != nil {
-			return errors.New("legacy audit checkpoint does not cover the tail")
-		}
-		if !bytes.Equal(hash, verified.lastHash) ||
-			!m.validCheckpoint(workspaceID, checkpointRecord{eventID: verified.lastID, eventHash: hash, signature: signature}) {
-			return errors.New("legacy audit checkpoint does not authenticate the tail")
-		}
-		if err := AppendChainTx(ctx, tx, ChainRecord{
-			WorkspaceID: workspaceID, ActorType: transitionActorTypeV1, ActorID: transitionActorIDV1,
-			Action: transitionActionV1, ResourceType: transitionResourceTypeV1, ResourceID: workspaceID,
-			RequestID: "audit-auth-transition-v1", Result: "succeeded", Reason: "checkpoint-anchored audit event authentication transition",
-		}); err != nil {
-			return err
-		}
-		lastID, lastHash, err := s.LatestEvent(ctx, workspaceID)
-		if err != nil {
-			return err
-		}
-		return s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, lastID, lastHash, signCheckpoint(m.checkpointKey, workspaceID, lastID, lastHash))
+		return s.AddCheckpoint(ctx, uuid.Must(uuid.NewV7()), workspaceID, verified.lastID, verified.lastHash, signCheckpoint(m.checkpointKey, workspaceID, verified.lastID, verified.lastHash))
 	})
 }
 

@@ -41,16 +41,15 @@ type Config struct {
 }
 
 type Service struct {
-	backend                     database.Backend
-	localEnabled                bool
-	aead                        cipher.AEAD
-	accountLogKey               []byte
-	sessionTTL                  time.Duration
-	breakGlassEnabled           bool
-	breakGlassTokenHash         []byte
-	legacyBreakGlassFingerprint [sha256.Size]byte
-	now                         func() time.Time
-	random                      io.Reader
+	backend             database.Backend
+	localEnabled        bool
+	aead                cipher.AEAD
+	accountLogKey       []byte
+	sessionTTL          time.Duration
+	breakGlassEnabled   bool
+	breakGlassTokenHash []byte
+	now                 func() time.Time
+	random              io.Reader
 }
 
 type Principal struct {
@@ -88,10 +87,8 @@ func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
 		sessionTTL:          cfg.SessionTTL,
 		breakGlassEnabled:   cfg.BreakGlassEnabled,
 		breakGlassTokenHash: bytes.Clone(cfg.BreakGlassTokenHash),
-		// Preserve rotation records written before the single-hash format.
-		legacyBreakGlassFingerprint: sha256.Sum256(cfg.BreakGlassTokenHash),
-		now:                         func() time.Time { return time.Now().UTC() },
-		random:                      rand.Reader,
+		now:                 func() time.Time { return time.Now().UTC() },
+		random:              rand.Reader,
 	}, nil
 }
 
@@ -162,7 +159,7 @@ func (s *Service) BreakGlass(ctx context.Context, token string, requestID string
 	sessionID := uuid.Must(uuid.NewV7())
 	var expires time.Time
 	err := s.withAuthentication(ctx, func(tx database.Tx, store authstore.Store) error {
-		used, err := store.BreakGlassUsed(ctx, s.breakGlassTokenHash, s.legacyBreakGlassFingerprint[:])
+		used, err := store.BreakGlassUsed(ctx, s.breakGlassTokenHash)
 		if err != nil {
 			return err
 		}

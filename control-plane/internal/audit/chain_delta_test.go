@@ -189,17 +189,6 @@ func (s *memAuditStore) LatestCheckpoint(_ context.Context, workspaceID uuid.UUI
 	return uuid.Nil, nil, nil, time.Time{}, 0, database.ErrNotFound
 }
 
-func (s *memAuditStore) CheckpointProof(_ context.Context, _, eventID uuid.UUID) ([]byte, []byte, error) {
-	s.backend.mu.Lock()
-	defer s.backend.mu.Unlock()
-	for _, cp := range s.backend.checkpoints {
-		if cp.eventID == eventID {
-			return bytes.Clone(cp.eventHash), bytes.Clone(cp.signature), nil
-		}
-	}
-	return nil, nil, database.ErrNotFound
-}
-
 func (s *memAuditStore) AddCheckpoint(_ context.Context, _, _, eventID uuid.UUID, eventHash, signature []byte) error {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()

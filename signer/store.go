@@ -77,10 +77,6 @@ func protectedParent(path string) error {
 	}
 }
 
-func openStore(path string, ca *authority, initialize bool) (*service, error) {
-	return openLedger(path, ca, initialize, false)
-}
-
 func openLedger(path string, ca *authority, initialize, readOnly bool) (*service, error) {
 	if err := protectedParent(path); err != nil {
 		return nil, err
