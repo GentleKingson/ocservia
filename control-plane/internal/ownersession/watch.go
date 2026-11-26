@@ -48,7 +48,7 @@ type transportEventHandler struct {
 	cursor  *memoryCursor
 }
 
-var _ transportclient.OwnerGapReconciler = transportEventHandler{}
+var _ transportclient.GapReconciler = transportEventHandler{}
 
 func (h transportEventHandler) Ingest(ctx context.Context, event *transportv1.TransportEvent) error {
 	if err := h.manager.handleTransportEvent(ctx, event); err != nil {
@@ -58,12 +58,12 @@ func (h transportEventHandler) Ingest(ctx context.Context, event *transportv1.Tr
 	return nil
 }
 
-// ReconcileOwnerEventGap compares every exact local owner term with
+// ReconcileEventGap compares every exact local owner term with
 // transportd's current connection inventory. The snapshot is immutable and
 // CloseSession exact-matches it, so a concurrent replacement cannot be closed
 // by a stale reconciliation decision. The old cursor is cleared only after the
 // complete inventory pass succeeds.
-func (h transportEventHandler) ReconcileOwnerEventGap(ctx context.Context, readConnection transportclient.NodeConnectionReader) error {
+func (h transportEventHandler) ReconcileEventGap(ctx context.Context, readConnection transportclient.NodeConnectionReader) error {
 	if readConnection == nil {
 		return errors.New("ownersession: node connection reader is required")
 	}

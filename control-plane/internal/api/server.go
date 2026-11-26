@@ -16,6 +16,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/devsim"
 	"github.com/GentleKingson/ocservia/control-plane/internal/enrollment"
 	"github.com/GentleKingson/ocservia/control-plane/internal/eventstream"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
@@ -48,6 +49,7 @@ type Server struct {
 	devAuthToken        string
 	browserOrigin       string
 	transportEvents     *transportevents.Service
+	devSim              *devsim.Service
 	localSimulator      bool
 	operations          *operations.Service
 	enrollment          *enrollment.Service
@@ -103,6 +105,7 @@ type Modules struct {
 	Enrollment      *enrollment.Service
 	Transport       *transportclient.Client
 	TransportEvents *transportevents.Service
+	DevSim          *devsim.Service
 }
 
 type Authorization struct {
@@ -134,7 +137,7 @@ func NewServer(config HTTPConfig, backend database.Backend, build BuildInfo, log
 		userOperations: modules.UserOperations, certificates: modules.Certificates,
 		operations: modules.Operations, releaseCatalog: modules.ReleaseCatalog, userstate: modules.UserState,
 		enrollment: modules.Enrollment, transport: modules.Transport,
-		transportEvents: modules.TransportEvents, localSimulator: config.LocalSimulator,
+		transportEvents: modules.TransportEvents, devSim: modules.DevSim, localSimulator: config.LocalSimulator,
 		authProxies: append([]netip.Prefix(nil), config.AuthTrustedProxies...),
 	}
 	if config.BrowserOrigin != "" {

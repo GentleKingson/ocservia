@@ -22,7 +22,6 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
-	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,15 +35,7 @@ type lifecycleFixture struct {
 func newLifecycleFixture(t *testing.T) lifecycleFixture {
 	t.Helper()
 	f := lifecycleFixture{enrollmentBackend(t), uuid.Must(uuid.NewV7())}
-	f.within(t, func(tx database.Tx) error {
-		s := eventstore.FromTransaction(tx)
-		at, err := tx.WallTime(context.Background())
-		if err != nil {
-			return err
-		}
-		_, err = s.EnsureWorkspace(context.Background(), f.workspace, f.workspace.String(), at)
-		return err
-	})
+	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Lifecycle',$2,now(),now())`, f.workspace, f.workspace.String())
 	return f
 }
 
@@ -633,16 +624,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 	})
 	t.Run("cross-workspace-endpoint-conflict", func(t *testing.T) {
 		other := uuid.Must(uuid.NewV7())
-		// Use the same database, creating another workspace through its store.
-		f.within(t, func(tx database.Tx) error {
-			store := eventstore.FromTransaction(tx)
-			at, err := tx.WallTime(ctx)
-			if err != nil {
-				return err
-			}
-			_, err = store.EnsureWorkspace(ctx, other, other.String(), at)
-			return err
-		})
+		f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Lifecycle',$2,now(),now())`, other, other.String())
 		endpoint := endpointFixture(215)
 		first := createToken(t, s, f.workspace, endpoint)
 		if _, err := s.Enroll(ctx, enrollmentRequest(first.Value, endpoint)); err != nil {
