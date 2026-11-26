@@ -24,21 +24,33 @@ release_verify_native_runner() {
 }
 
 release_load_controller_images() {
-  local images_dir="${1:?}" version="${2:?}" arch="${3:?}" name source
+  local images_dir="${1:?}" version="${2:?}" arch="${3:?}" image_prefix="${4:-ghcr.io/gentlekingson/ocservia}"
+  local name source archive start_load_wait idx
   local -a pids=()
-  local load_errors=0 pid
-  for name in "${RELEASE_CONTROLLER_ROLES[@]}"; do
-    docker load -i "${images_dir}/${name}-linux-${arch}.tar" &
+  local load_errors=0 max_load_jobs=4
+  for idx in "${!RELEASE_CONTROLLER_ROLES[@]}"; do
+    name="${RELEASE_CONTROLLER_ROLES[idx]}"
+    archive="${images_dir}/${name}-linux-${arch}.tar"
+    if [[ ! -s "${archive}" ]]; then
+      echo "Controller image archive is missing or empty: ${archive}" >&2
+      load_errors=1
+      break
+    fi
+    docker load -i "${archive}" >/dev/null &
     pids+=("$!")
+    if ((idx + 1 >= max_load_jobs)); then
+      wait "${pids[idx + 1 - max_load_jobs]}" || load_errors=1
+    fi
   done
-  for pid in "${pids[@]}"; do
-    wait "${pid}" || load_errors=1
+  start_load_wait=$((${#pids[@]} >= max_load_jobs ? ${#pids[@]} - max_load_jobs + 1 : 0))
+  for ((idx = start_load_wait; idx < ${#pids[@]}; idx++)); do
+    wait "${pids[idx]}" || load_errors=1
   done
   ((load_errors == 0)) || return 1
   for name in "${RELEASE_CONTROLLER_ROLES[@]}"; do
-    source="ghcr.io/gentlekingson/ocservia/${name}:${version}-linux-${arch}"
+    source="${image_prefix}/${name}:${version}-linux-${arch}"
     # Unrelated binfmt handlers could otherwise run a foreign image emulated.
-    [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")" == "linux/${arch}" ]]
+    [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${source}")" == "linux/${arch}" ]] || return 1
   done
 }
 

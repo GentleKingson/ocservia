@@ -14,7 +14,6 @@ source "$ROOT/scripts/env.sh"
 # shellcheck source=scripts/release-common.sh disable=SC1091
 source "$ROOT/scripts/release-common.sh"
 
-export PRODUCTION_SIGNER_ACCEPTANCE=true
 resilience_result=FAIL
 relay_ipv4_rule=false
 relay_ipv6_rule=false

@@ -2,9 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/postgres-test-common.sh
+source "${ROOT}/scripts/postgres-test-common.sh"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-POSTGRES_IMAGE='postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35'
+POSTGRES_IMAGE="${POSTGRES_18_IMAGE}"
 [[ "${RUN_ID}" != *[^a-zA-Z0-9._-]* ]] || { echo "RUN_ID contains unsafe characters" >&2; exit 2; }
 
 work="${RUNNER_TEMP:-/tmp}/ocservia-external-postgres-${RUN_ID}"
@@ -60,16 +62,10 @@ docker run -d --name "${source_container}" --network "${source_network}" -p 0:54
   -e POSTGRES_PASSWORD="${password}" -e POSTGRES_DB=ocservia \
   -v "${work}/tls:/tls:ro" "${POSTGRES_IMAGE}" \
   -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key >/dev/null
-source_ready=false
-for _ in $(seq 1 90); do
-  if docker logs "${source_container}" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.' \
-    && docker exec -e PGPASSWORD="${password}" "${source_container}" pg_isready -U postgres -d ocservia >/dev/null 2>&1; then
-    source_ready=true
-    break
-  fi
-  sleep 1
-done
-[[ "${source_ready}" == true ]] || { echo "external PostgreSQL source did not become ready" >&2; exit 1; }
+postgres_wait_initdb_ready "${source_container}" postgres ocservia "${password}" 90 || {
+  echo "external PostgreSQL source did not become ready" >&2
+  exit 1
+}
 host_port="$(docker port "${source_container}" 5432/tcp | sed -n 's/.*://p' | head -1)"
 [[ "${host_port}" =~ ^[0-9]+$ ]] || { echo "cannot determine published PostgreSQL port" >&2; exit 1; }
 
@@ -129,7 +125,7 @@ docker exec -e PGPASSWORD="${password}" "${source_container}" psql -At -U postgr
 # Preserve the goose version table byte for byte, including timestamps.
 # A restored database must never be reinitialized.
 provenance_sql="SELECT jsonb_build_object('goose_db_version',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM goose_db_version r))"
-expected_revision="$(find "${ROOT}/control-plane/migrations/sql" -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' | sed -n 's/^\([0-9][0-9]*\)_.*/\1/p' | awk '{print $1 + 0}' | sort -n | tail -n 1)"
+expected_revision="$(postgres_expected_migration_version "${ROOT}")"
 [[ "${expected_revision}" =~ ^[0-9]+$ ]] || { echo "cannot determine expected PostgreSQL schema version" >&2; exit 1; }
 source_coverage="$(docker exec "${source_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \
   -c "SELECT to_regclass('public.schema_snapshot_origin') IS NULL AND to_regclass('public.schema_migrations') IS NULL AND to_regclass('public.schema_revisions') IS NULL AND (SELECT COALESCE(MAX(version_id), 0) = ${expected_revision} FROM goose_db_version WHERE is_applied = true)")"
@@ -176,12 +172,10 @@ docker run --rm -v "${work}/restore:/restore" "${POSTGRES_IMAGE}" \
 docker run -d --name "${restore_container}" --network "${source_network}" -p 0:5432 \
   -v "${work}/restore:/var/lib/postgresql/18/docker" -v "${work}/tls:/tls:ro" "${POSTGRES_IMAGE}" \
   -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key >/dev/null
-restore_ready=false
-for _ in $(seq 1 90); do
-  if docker exec -e PGPASSWORD="${password}" "${restore_container}" psql -X -h127.0.0.1 -U postgres -d ocservia -Atc 'SELECT 1' >/dev/null 2>&1; then restore_ready=true; break; fi
-  sleep 1
-done
-[[ "${restore_ready}" == true ]] || { echo "restored PostgreSQL did not become ready" >&2; exit 1; }
+postgres_wait_tcp "${restore_container}" postgres ocservia "${password}" 90 1 || {
+  echo "restored PostgreSQL did not become ready" >&2
+  exit 1
+}
 restore_port="$(docker port "${restore_container}" 5432/tcp | sed -n 's/.*://p' | head -1)"
 [[ "${restore_port}" =~ ^[0-9]+$ ]] || { echo "cannot determine restored PostgreSQL port" >&2; exit 1; }
 docker exec "${restore_container}" psql -X -At -v ON_ERROR_STOP=1 -U postgres -d ocservia \

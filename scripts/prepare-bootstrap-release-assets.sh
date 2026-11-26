@@ -42,7 +42,7 @@ from pathlib import Path
 import sys
 p, root = Path(sys.argv[1]), Path(sys.argv[2])
 s = p.read_text()
-for helper in ('install-env', 'install-ui', 'controller-runtime', 'node-bootstrap'):
+for helper in ('install-env', 'controller-runtime', 'node-bootstrap'):
     marker = f'source "${{SCRIPT_LIB}}/{helper}.sh" # release-embed'
     s = s.replace(marker, (root / f'deploy/lib/{helper}.sh').read_text())
 if '# release-embed' in s:

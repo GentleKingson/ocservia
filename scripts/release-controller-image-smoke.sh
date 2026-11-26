@@ -13,6 +13,10 @@ fail() {
   exit 1
 }
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/release-common.sh
+source "${ROOT}/scripts/release-common.sh"
+
 IMAGES_DIR="${IMAGES_DIR:?IMAGES_DIR is required}"
 CONTROLLER_ARCH="${CONTROLLER_ARCH:?CONTROLLER_ARCH is required}"
 VERSION="${VERSION:?VERSION is required}"
@@ -41,34 +45,8 @@ image_ref() {
   printf '%s/%s:%s-linux-%s' "${CONTROLLER_IMAGE_PREFIX}" "$1" "${VERSION}" "${CONTROLLER_ARCH}"
 }
 
-roles=(gateway control transport backup edge relay signer)
-load_pids=()
-max_load_jobs=4
-load_errors=0
-for idx in "${!roles[@]}"; do
-  name="${roles[idx]}"
-  archive="${IMAGES_DIR}/${name}-linux-${CONTROLLER_ARCH}.tar"
-  [[ -s "${archive}" ]] || fail "Controller image archive is missing or empty: ${archive}"
-  docker load --input "${archive}" >/dev/null &
-  load_pids+=("$!")
-  if ((idx + 1 >= max_load_jobs)); then
-    wait "${load_pids[idx + 1 - max_load_jobs]}" || load_errors=1
-  fi
-done
-start_load_wait=$((${#load_pids[@]} >= max_load_jobs ? ${#load_pids[@]} - max_load_jobs + 1 : 0))
-for ((idx = start_load_wait; idx < ${#load_pids[@]}; idx++)); do
-  wait "${load_pids[idx]}" || load_errors=1
-done
-((load_errors == 0)) || fail "failed loading one or more Controller image archives"
-
-for name in "${roles[@]}"; do
-  image="$(image_ref "${name}")"
-  docker image inspect "${image}" >/dev/null ||
-    fail "Controller image ${name} was not loaded into the daemon"
-  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${image}")"
-  [[ "${platform}" == "linux/${CONTROLLER_ARCH}" ]] ||
-    fail "loaded ${name} image is ${platform}, expected linux/${CONTROLLER_ARCH}"
-done
+release_load_controller_images "${IMAGES_DIR}" "${VERSION}" "${CONTROLLER_ARCH}" "${CONTROLLER_IMAGE_PREFIX}" ||
+  fail "failed loading or verifying Controller image archives"
 
 # Gateway must actually start: its USER directive once referenced an
 # account the upstream image never created (#139), so boot it for real,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Strict, non-executing install.env loader and canonical installer allowlists
-# shared by the Controller and Managed Node installers. Sourced directly in
+# Strict, non-executing install.env loader and canonical installer allowlist
+# for the Controller installer. Sourced directly in
 # repository/runtime layouts and embedded into standalone Release bootstrap
 # scripts by scripts/prepare-bootstrap-release-assets.sh.
 # Sourced, never executed directly.
@@ -33,8 +33,8 @@
 # - A missing file is a silent no-op: without install.env the installers
 #   behave exactly as before this loader existed.
 
-# Canonical operator-supplied configuration allowlists for the Controller and
-# Managed Node installers. Internal bootstrap and test fixture seams stay
+# Canonical operator-supplied configuration allowlist for the Controller
+# installer. Internal bootstrap and test fixture seams stay
 # outside these allowlists and must not gain an install.env entry.
 # shellcheck disable=SC2034 # Consumed by the Controller installer scripts.
 CONTROLLER_INSTALL_ENV_NAMES=(

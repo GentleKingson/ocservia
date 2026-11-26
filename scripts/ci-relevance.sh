@@ -112,6 +112,12 @@ classify_path() {
       run_go=true; run_database=true; tools_suite release ;;
     deploy/lib/postgres-entrypoint.sh)
       run_database=true; run_installers=true ;;
+    scripts/postgres-backup.sh)
+      run_database=true; run_installers=true ;;
+    scripts/test-postgres-backup.sh)
+      run_installers=true ;;
+    scripts/postgres-test-common.sh)
+      run_go=true; run_database=true; tools_suite guards ;;
     deploy/compose/*|deploy/database-e2e/*|scripts/*database*|scripts/*postgres*|\
     scripts/*-backup-restore-smoke.sh|scripts/test-enrollment-restart.sh)
       run_go=true; run_database=true ;;
@@ -140,7 +146,7 @@ classify_path() {
     deploy/production/transportd-relays.sh|deploy/production/systemd/agent-relays.sh|\
     deploy/production/systemd/ocservia-agent-relays.conf|\
     scripts/prepare-bootstrap-release-assets.sh|\
-    scripts/test-installer-common.sh|scripts/test-node-bootstrap.py|\
+    scripts/test-node-bootstrap.py|\
     scripts/test-controller-install.sh|scripts/test-controller-bootstrap.sh|\
     scripts/test-controller-host-bootstrap.sh|scripts/test-controller-lifecycle.sh|\
     scripts/test-production-auth-config.sh|scripts/test-relay-launchers.py|scripts/test-vpn-audit.py)

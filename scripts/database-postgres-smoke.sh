@@ -3,6 +3,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/env.sh"
 source "${ROOT}/scripts/go-test-environment.sh"
+# shellcheck source=scripts/postgres-test-common.sh
+source "${ROOT}/scripts/postgres-test-common.sh"
 require_test_commands go jq setsid python3
 require_test_docker
 require_go_race
@@ -11,7 +13,7 @@ case "${DATABASE_TEST_SCOPE:-smoke}" in
   *) echo 'PostgreSQL smoke requires smoke scope' >&2; exit 2 ;;
 esac
 case "${PG_MAJOR:-18}" in
-  18) image='postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35' ;;
+  18) image="${POSTGRES_18_IMAGE}" ;;
   *) echo 'PG_MAJOR must be 18' >&2; exit 2 ;;
 esac
 name="ocservia-pg-smoke-$$"
@@ -25,23 +27,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # A stable host port keeps the original pool/DSN valid across container restart.
-port="$(python3 - <<'PY'
-import socket
-with socket.socket() as sock:
-    sock.bind(('127.0.0.1', 0))
-    print(sock.getsockname()[1])
-PY
-)"
+port="$(postgres_allocate_loopback_port)"
 docker run -d --name "${name}" -p "127.0.0.1:${port}:5432" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner \
   -e POSTGRES_PASSWORD=test-owner-only "${image}" >/dev/null
 bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
-ready=false
-for ((i=0; i<240; i++)); do
-  if docker exec -e PGPASSWORD=test-owner-only "${name}" psql -h127.0.0.1 -U ocservia_owner -d ocservia -Atc 'SELECT 1' >/dev/null 2>&1; then ready=true; break; fi
-  sleep 0.25
-done
-[[ "${ready}" == true ]] || { echo 'PostgreSQL did not become ready' >&2; exit 1; }
+postgres_wait_tcp "${name}" || { echo 'PostgreSQL did not become ready' >&2; exit 1; }
 docker exec "${name}" psql -v ON_ERROR_STOP=1 -U ocservia_owner -d ocservia \
   -c "CREATE ROLE ocservia_app LOGIN PASSWORD 'test-runtime-only'" >/dev/null
 port="$(docker port "${name}" 5432/tcp | sed 's/127.0.0.1://')"

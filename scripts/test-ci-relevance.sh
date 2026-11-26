@@ -168,6 +168,25 @@ assert_flag "go test env" run_go true
 assert_flag "go test env" run_database true
 assert_eq "go test env ci_suites" "guards source-style" "${ci_suites[*]}"
 
+reset_state
+classify_path scripts/postgres-backup.sh
+assert_flag "postgres backup" run_installers true
+assert_flag "postgres backup" run_database true
+assert_eq "postgres backup cache" backup "${controller_cache_images[*]}"
+assert_eq "postgres backup ci_suites" source-style "${ci_suites[*]}"
+
+reset_state
+classify_path scripts/test-postgres-backup.sh
+assert_flag "test postgres backup" run_installers true
+assert_flag "test postgres backup" run_database false
+assert_eq "test postgres backup ci_suites" source-style "${ci_suites[*]}"
+
+reset_state
+classify_path scripts/postgres-test-common.sh
+assert_flag "postgres test common" run_go true
+assert_flag "postgres test common" run_database true
+assert_eq "postgres test common ci_suites" "guards source-style" "${ci_suites[*]}"
+
 # Every shell/Python source scanned by scripts/lint.sh source-style must trigger source-style.
 while IFS= read -r -d '' path; do
   [[ -f "${path}" ]] || continue

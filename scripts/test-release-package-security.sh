@@ -205,7 +205,6 @@ state = {"relay_up": True, "epoch": 2, "conn": "aa" * 16, "reloads": 1, "journal
 recorded = []
 
 sc.single_relay_argv = lambda: None
-sc.identity_digest = lambda: "id-digest"
 sc.native_service_pids = lambda: {"ocserv": 10, "ocservia-agent": 20, "ocservia-privd": 30}
 sc.node_side_effects = lambda: {"journal": state["journal"], "privd": state["privd"], "reloads": state["reloads"], "files": "same"}
 

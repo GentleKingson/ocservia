@@ -95,9 +95,7 @@ jobs:
       - uses: ./.github/actions/setup-tools
         with:
           profiles: ${{ matrix.profile }}
-          cache-label: ${{ matrix.cache_label || matrix.profile }}
           key-suffix: ${{ matrix.profile == 'rust-security' && format('-{0}', hashFiles('rust/Cargo.lock')) || '' }}
-          cache-npm: ${{ matrix.cache_npm && 'true' || 'false' }}
       - name: Compute Go module cache key
         id: go-cache-key
         if: matrix.restore_go_mod == true

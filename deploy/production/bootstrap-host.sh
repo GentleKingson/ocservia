@@ -35,6 +35,7 @@
 #   OCSERV_BOOTSTRAP_APT_SOURCES_DIR  default /etc/apt/sources.list.d
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OS_RELEASE_FILE="${OCSERV_BOOTSTRAP_OS_RELEASE:-/etc/os-release}"
 KEYRING_DIR="${OCSERV_BOOTSTRAP_APT_KEYRING_DIR:-/etc/apt/keyrings}"
 APT_SOURCES_DIR="${OCSERV_BOOTSTRAP_APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
@@ -502,7 +503,7 @@ print_operator_prerequisites() {
     fi
   fi
 
-  if ! command -v git >/dev/null 2>&1; then
+  if [[ ! -f "${ROOT}/RELEASE" ]] && ! command -v git >/dev/null 2>&1; then
     record_pending "git is required by controller.sh (a clean checkout matching the release manifest); install it before 'controller.sh install'"
   fi
   record_pending "download controller-release-${ARCH_WORD}.json over HTTPS for this host architecture"

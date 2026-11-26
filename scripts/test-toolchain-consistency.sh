@@ -87,6 +87,10 @@ expect_equal "PostgreSQL digest" "${pg_ref}" \
   "$(sed -n "s/^[[:space:]]*'postgres': '\([^']*\)',$/\1/p" "${ROOT}/scripts/publish-release.py" | head -n 1)" \
   "scripts/publish-release.py" "scripts/release-common.sh"
 
+pg_test_pin="$(sed -n "s/^readonly POSTGRES_18_IMAGE='\\([^']*\\)'$/\\1/p" "${ROOT}/scripts/postgres-test-common.sh" | head -n 1)"
+expect_equal "PostgreSQL 18 test pin" "postgres:${pg18_pin}-bookworm@${pg_digest}" \
+  "${pg_test_pin}" "scripts/postgres-test-common.sh" "toolchains.lock + scripts/release-common.sh"
+
 for script in \
   scripts/database-controller-e2e.sh \
   scripts/database-integration.sh \
@@ -95,8 +99,12 @@ for script in \
   scripts/external-postgres-backup-restore-smoke.sh \
   scripts/postgres-backup-restore-smoke.sh \
   scripts/test-postgres-volume-layout.sh; do
-  if ! grep -Fq "postgres:${pg18_pin}-bookworm@${pg_digest}" "${ROOT}/${script}"; then
-    echo "${script} does not match postgres:${pg18_pin}-bookworm@${pg_digest}" >&2
+  if ! grep -Fq 'scripts/postgres-test-common.sh' "${ROOT}/${script}"; then
+    echo "${script} does not source scripts/postgres-test-common.sh" >&2
+    exit 1
+  fi
+  if grep -Eq 'postgres:18[^[:space:]]*@sha256:' "${ROOT}/${script}"; then
+    echo "${script} must reuse POSTGRES_18_IMAGE from scripts/postgres-test-common.sh instead of pinning inline" >&2
     exit 1
   fi
 done
