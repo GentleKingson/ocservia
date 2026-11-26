@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,9 +24,24 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+var (
+	sharedCSRKeyOnce sync.Once
+	sharedCSRKey     *rsa.PrivateKey
+)
+
+func testCSRKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	sharedCSRKeyOnce.Do(func() {
+		var err error
+		sharedCSRKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		testutil.NoError(t, err)
+	})
+	return sharedCSRKey
+}
+
 func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	testutil.NoError(t, err)
+	t.Parallel()
+	key := testCSRKey(t)
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "attacker.example.test"}, DNSNames: []string{"attacker.example.test"}}, key)
 	testutil.NoError(t, err)
 	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
@@ -41,8 +57,8 @@ func TestCertificateCSRResultRejectsSubjectSubstitution(t *testing.T) {
 }
 
 func TestMatchingAttackerCSRWithoutPrivdReceiptCannotBecomeReady(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	testutil.NoError(t, err)
+	t.Parallel()
+	key := testCSRKey(t)
 	certificateID, nodeID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	commandID, operationID, idempotencyID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "node.example.test"}, DNSNames: []string{"node.example.test"}}, key)

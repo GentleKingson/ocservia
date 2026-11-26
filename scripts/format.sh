@@ -10,5 +10,4 @@ source "${ROOT}/scripts/env.sh"
 (cd "${ROOT}/web" && npm run format)
 (cd "${ROOT}" && web/node_modules/.bin/prettier --write \
   scripts/redact-release-upgrade-log.mjs \
-  scripts/release-business-browser.mjs scripts/test-release-upgrade.mjs \
   .github/actions/build-cache-credentials/index.js)

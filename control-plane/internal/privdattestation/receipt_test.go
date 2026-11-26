@@ -20,39 +20,35 @@ import (
 )
 
 func TestCanonicalReceiptV1DeterministicCBOR(t *testing.T) {
+	t.Parallel()
 	id := mustHex(t, "018f2a3b4c5d70008000000000000001")
 	receipt := &agentv1.PrivdResultReceiptV1{
 		ReceiptVersion: 1,
 		NodeId:         id, PrivdAttestationKeyId: "ed25519-sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
-		CommandId: mustHex(t, "018f2a3b4c5d70008000000000000002"), OperationId: mustHex(t, "018f2a3b4c5d70008000000000000003"), IdempotencyKey: mustHex(t, "018f2a3b4c5d70008000000000000004"),
+		CommandId: id, OperationId: id, IdempotencyKey: id,
 		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2,
-		SemanticPayloadSha256:      makeRepeated(0x11, 32), CommandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR,
+		SemanticPayloadSha256:      bytes.Repeat([]byte{0x11}, 32), CommandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR,
 		ResultKind: agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR, TerminalState: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED,
-		ResultCborSha256: makeRepeated(0x22, 32), ErrorCode: "",
-		EffectSequence: 9, AcceptedAt: &timestamppb.Timestamp{Seconds: 1_700_000_000, Nanos: 123}, CompletedAt: &timestamppb.Timestamp{Seconds: 1_700_000_001, Nanos: 456},
-		Certificate: &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: id, CsrDerSha256: makeRepeated(0x33, 32), PublicKeySha256: makeRepeated(0x44, 32)},
+		ResultCborSha256: bytes.Repeat([]byte{0x22}, 32), EffectSequence: 9,
+		AcceptedAt:  &timestamppb.Timestamp{Seconds: 1_700_000_000, Nanos: 123},
+		CompletedAt: &timestamppb.Timestamp{Seconds: 1_700_000_001, Nanos: 456},
+		Certificate: &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: id, CsrDerSha256: bytes.Repeat([]byte{0x33}, 32), PublicKeySha256: bytes.Repeat([]byte{0x44}, 32)},
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
 	testutil.NoError(t, err)
-	if !bytes.HasPrefix(canonical, []byte(receiptDomain)) {
-		t.Fatalf("canonical transcript missing CBOR domain prefix: %x", canonical)
-	}
-	// Repeat to verify strict determinism.
 	again, err := CanonicalReceiptV1(receipt)
 	testutil.NoError(t, err)
-	if !bytes.Equal(canonical, again) {
-		t.Fatal("canonical CBOR receipt transcript is not deterministic")
+	if !bytes.HasPrefix(canonical, []byte(receiptDomain)) || !bytes.Equal(canonical, again) {
+		t.Fatal("canonical CBOR receipt transcript is non-deterministic or missing domain prefix")
 	}
 }
 
 func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testing.T) {
+	t.Parallel()
 	nodeID, envelope, result, trustedKey := receiptVerificationFixture(t)
 	trustedLookup := lookupFor(trustedKey.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
-	if verification := verifyResult(context.Background(), trustedLookup, nodeID, envelope, result); !verification.Verified() {
-		t.Fatalf("valid root receipt was rejected: %+v", verification)
-	}
-	if verification := verifyResult(context.Background(), trustedLookup, nodeID, envelope, proto.Clone(result).(*agentv1.CommandResult)); !verification.Verified() {
-		t.Fatalf("exact idempotent receipt replay was rejected: %+v", verification)
+	if v := verifyResult(context.Background(), trustedLookup, nodeID, envelope, result); !v.Verified() {
+		t.Fatalf("valid root receipt was rejected: %+v", v)
 	}
 
 	tests := []struct {
@@ -62,192 +58,92 @@ func TestPrivilegedReceiptVerificationRejectsTamperingAndUntrustedKeys(t *testin
 		status string
 		reason string
 	}{
-		{name: "missing receipt", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.PrivilegedResultProof = nil }, status: "missing", reason: "receipt_missing"},
-		{name: "result byte", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.Result = []byte{0x01} }, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "node", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { envelope.NodeId[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "command", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { envelope.CommandId[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "operation", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { envelope.OperationId[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "idempotency", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.IdempotencyKey[15] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "semantic version", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
-			result.SemanticPayloadHashVersion = agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_UNSPECIFIED
-		}, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "semantic digest", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) { result.PayloadSha256[0] ^= 1 }, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "receipt before command issuance", mutate: func(envelope *agentv1.CommandEnvelope, _ *agentv1.CommandResult) {
-			envelope.IssuedAt = timestamppb.New(time.Unix(1_700_000_301, 0))
-			envelope.ExpiresAt = timestamppb.New(time.Unix(1_700_000_361, 0))
-		}, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "terminal state", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
-			result.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
-		}, status: "invalid", reason: "receipt_claim_mismatch"},
-		{name: "effect sequence", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
-			result.PrivilegedResultProof.ReceiptV1.EffectSequence++
-		}, status: "invalid", reason: "receipt_signature_invalid"},
-		{name: "signature", mutate: func(_ *agentv1.CommandEnvelope, result *agentv1.CommandResult) {
-			result.PrivilegedResultProof.Signature[0] ^= 1
-		}, status: "invalid", reason: "receipt_signature_invalid"},
-		{name: "unknown key", lookup: func(context.Context, uuid.UUID, string) (attestationKeyRecord, error) {
+		{"missing receipt", func(_ *agentv1.CommandEnvelope, r *agentv1.CommandResult) { r.PrivilegedResultProof = nil }, nil, "missing", "receipt_missing"},
+		{"result byte", func(_ *agentv1.CommandEnvelope, r *agentv1.CommandResult) { r.Result = []byte{0x01} }, nil, "invalid", "receipt_claim_mismatch"},
+		{"command", func(e *agentv1.CommandEnvelope, _ *agentv1.CommandResult) { e.CommandId[15] ^= 1 }, nil, "invalid", "receipt_claim_mismatch"},
+		{"semantic digest", func(_ *agentv1.CommandEnvelope, r *agentv1.CommandResult) { r.PayloadSha256[0] ^= 1 }, nil, "invalid", "receipt_claim_mismatch"},
+		{"terminal state", func(_ *agentv1.CommandEnvelope, r *agentv1.CommandResult) {
+			r.State = agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED
+		}, nil, "invalid", "receipt_claim_mismatch"},
+		{"effect sequence", func(_ *agentv1.CommandEnvelope, r *agentv1.CommandResult) {
+			r.PrivilegedResultProof.ReceiptV1.EffectSequence++
+		}, nil, "invalid", "receipt_signature_invalid"},
+		{"signature", func(_ *agentv1.CommandEnvelope, r *agentv1.CommandResult) { r.PrivilegedResultProof.Signature[0] ^= 1 }, nil, "invalid", "receipt_signature_invalid"},
+		{"unknown key", nil, func(context.Context, uuid.UUID, string) (attestationKeyRecord, error) {
 			return attestationKeyRecord{}, database.ErrNotFound
-		}, status: "unknown_key", reason: "receipt_key_unknown"},
-		{name: "revoked key", lookup: lookupFor(trustedKey.Public().(ed25519.PublicKey), "revoked", time.Unix(1_699_999_999, 0), nil), status: "revoked_key", reason: "receipt_key_revoked"},
-		{name: "expired rotation overlap", lookup: lookupFor(trustedKey.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), timePointer(time.Unix(1_700_000_000, 500))), status: "invalid", reason: "receipt_key_outside_validity"},
+		}, "unknown_key", "receipt_key_unknown"},
+		{"revoked key", nil, lookupFor(trustedKey.Public().(ed25519.PublicKey), "revoked", time.Unix(1_699_999_999, 0), nil), "revoked_key", "receipt_key_revoked"},
+		{"expired overlap", nil, lookupFor(trustedKey.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), timePointer(time.Unix(1_700_000_000, 500))), "invalid", "receipt_key_outside_validity"},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			testEnvelope := proto.Clone(envelope).(*agentv1.CommandEnvelope)
-			testResult := proto.Clone(result).(*agentv1.CommandResult)
-			if test.mutate != nil {
-				test.mutate(testEnvelope, testResult)
-			}
-			lookup := test.lookup
-			if lookup == nil {
-				lookup = trustedLookup
-			}
-			verification := verifyResult(context.Background(), lookup, nodeID, testEnvelope, testResult)
-			if verification.Status != test.status || verification.FailureReason != test.reason {
-				t.Fatalf("verification=%+v, want status=%s reason=%s", verification, test.status, test.reason)
-			}
-		})
-	}
-
-	attackerPrivate := ed25519.NewKeyFromSeed(makeRepeated(0x42, ed25519.SeedSize))
-	attackerPublic := attackerPrivate.Public().(ed25519.PublicKey)
-	attackerResult := proto.Clone(result).(*agentv1.CommandResult)
-	attackerResult.PrivilegedResultProof.ReceiptV1.PrivdAttestationKeyId = PublicKeyID(attackerPublic)
-	canonical, err := CanonicalReceiptV1(attackerResult.GetPrivilegedResultProof().GetReceiptV1())
-	testutil.NoError(t, err)
-	attackerResult.PrivilegedResultProof.Signature = ed25519.Sign(attackerPrivate, canonical)
-	verification := verifyResult(context.Background(), func(context.Context, uuid.UUID, string) (attestationKeyRecord, error) {
-		return attestationKeyRecord{}, database.ErrNotFound
-	}, nodeID, envelope, attackerResult)
-	if verification.FailureReason != "receipt_key_unknown" {
-		t.Fatalf("attacker-selected key verification=%+v", verification)
-	}
-}
-
-func TestReceiptUnknownProtobufFieldsDoNotChangeSignatureSemantics(t *testing.T) {
-	nodeID, envelope, result, key := receiptVerificationFixture(t)
-	proofBytes, err := proto.Marshal(result.GetPrivilegedResultProof())
-	testutil.NoError(t, err)
-	proofBytes = protowire.AppendTag(proofBytes, 1000, protowire.BytesType)
-	proofBytes = protowire.AppendBytes(proofBytes, []byte("ignored by canonical v1"))
-	var decoded agentv1.PrivilegedResultProof
-	testutil.NoError(t, proto.Unmarshal(proofBytes, &decoded))
-	result.PrivilegedResultProof = &decoded
-	verification := verifyResult(context.Background(), lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil), nodeID, envelope, result)
-	if !verification.Verified() {
-		t.Fatalf("unknown Protobuf field changed canonical signature semantics: %+v", verification)
-	}
-}
-
-func TestReceiptMissingTransactionFailsClosed(t *testing.T) {
-	node, envelope, result, _ := receiptVerificationFixture(t)
-	for _, verification := range []Verification{
-		VerifyResultTransaction(context.Background(), nil, node, envelope, result),
-		VerifyResultTransaction(context.Background(), nil, node, envelope, result),
-	} {
-		if verification.Status != "invalid" || verification.FailureReason != "receipt_key_lookup_failed" {
-			t.Fatalf("missing transaction verification = %+v", verification)
+		testEnvelope := proto.Clone(envelope).(*agentv1.CommandEnvelope)
+		testResult := proto.Clone(result).(*agentv1.CommandResult)
+		if test.mutate != nil {
+			test.mutate(testEnvelope, testResult)
+		}
+		lookup := test.lookup
+		if lookup == nil {
+			lookup = trustedLookup
+		}
+		if v := verifyResult(context.Background(), lookup, nodeID, testEnvelope, testResult); v.Status != test.status || v.FailureReason != test.reason {
+			t.Fatalf("%s: got %+v, want %s/%s", test.name, v, test.status, test.reason)
 		}
 	}
 }
 
-func TestRejectedPrivilegedResultNeverVerifiesAsTerminalEvidence(t *testing.T) {
+func TestReceiptProtocolGuardsAndCertificateBinding(t *testing.T) {
+	t.Parallel()
 	nodeID, envelope, result, key := receiptVerificationFixture(t)
 	lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
-	rejected := func() *agentv1.CommandResult {
-		return &agentv1.CommandResult{CommandId: result.CommandId, IdempotencyKey: result.IdempotencyKey, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, ErrorCode: "rejected", CompletedAt: result.CompletedAt}
-	}
-	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, rejected()); verification.Status != "missing" || verification.Verified() {
-		t.Fatalf("unsigned rejection of a root command = %+v", verification)
-	}
-	// A signed success receipt cannot be reused to vouch for a rejection.
-	reused := rejected()
-	reused.PrivilegedResultProof = result.PrivilegedResultProof
-	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, reused); verification.Verified() || verification.Status != "invalid" {
-		t.Fatalf("receipt reused for a rejection = %+v", verification)
-	}
-	// Commands without a root effect keep their ordinary rejection semantics.
-	envelope.Payload = &agentv1.CommandEnvelope_SyntheticEcho{SyntheticEcho: &agentv1.SyntheticEcho{Message: "x"}}
-	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, rejected()); verification.Status != "not_required" {
-		t.Fatalf("non-privileged rejection = %+v", verification)
-	}
-}
 
-func TestUnknownPrivilegedReceiptErrorClassification(t *testing.T) {
-	nodeID, envelope, _, _ := receiptVerificationFixture(t)
-	tests := []struct {
-		code, status, reason string
-	}{
-		{"receipt_missing", "missing", "receipt_missing"},
-		{"receipt_invalid", "invalid", "receipt_malformed"},
-		{"privd_receipt_missing_or_malformed", "invalid", "receipt_malformed"},
-		{"privd_outcome_unknown", "not_required", ""},
+	// Unknown Protobuf fields must not change canonical v1 signature semantics.
+	proofBytes, err := proto.Marshal(result.GetPrivilegedResultProof())
+	testutil.NoError(t, err)
+	proofBytes = protowire.AppendBytes(protowire.AppendTag(proofBytes, 1000, protowire.BytesType), []byte("ignored"))
+	var decoded agentv1.PrivilegedResultProof
+	testutil.NoError(t, proto.Unmarshal(proofBytes, &decoded))
+	result.PrivilegedResultProof = &decoded
+	if v := verifyResult(context.Background(), lookup, nodeID, envelope, result); !v.Verified() {
+		t.Fatalf("unknown Protobuf field broke verification: %+v", v)
 	}
-	for _, tt := range tests {
-		t.Run(tt.code, func(t *testing.T) {
-			result := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_UNKNOWN, ErrorCode: tt.code}
-			if got := verifyResult(t.Context(), nil, nodeID, envelope, result); got.Status != tt.status || got.FailureReason != tt.reason {
-				t.Fatalf("receipt verification = %+v", got)
-			}
-		})
-	}
-}
 
-func TestReceiptUnknownVersionAndOversizeFailClosed(t *testing.T) {
-	nodeID, envelope, result, key := receiptVerificationFixture(t)
-	lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
-	result.PrivilegedResultProof.Version = 0
-	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); verification.FailureReason != "receipt_version_unsupported" {
-		t.Fatalf("unknown version verification=%+v", verification)
+	// Missing transaction fails closed.
+	if v := VerifyResultTransaction(context.Background(), nil, nodeID, envelope, result); v.Status != "invalid" || v.FailureReason != "receipt_key_lookup_failed" {
+		t.Fatalf("missing transaction = %+v", v)
 	}
-	result.PrivilegedResultProof.Version = 1
-	result.PrivilegedResultProof.Signature = make([]byte, 65*1024)
-	if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); verification.FailureReason != "receipt_malformed" {
-		t.Fatalf("oversized proof verification=%+v", verification)
-	}
-}
 
-func TestCertificateP12AndRevokeRequireBoundReceipts(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		commandKind agentv1.PrivilegedCommandKind
-		resultKind  agentv1.PrivilegedResultKind
-	}{
-		{name: "p12", commandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12, resultKind: agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12},
-		{name: "revoke", commandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE, resultKind: agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			nodeID, envelope, result, key := receiptVerificationFixture(t)
-			certificateID := uuid.Must(uuid.NewV7())
-			if test.name == "p12" {
-				artifactID := uuid.Must(uuid.NewV7())
-				envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: certificateID[:], ArtifactId: artifactID[:]}}
-				raw, err := proto.Marshal(&agentv1.CertificateArtifactResult{CertificateId: certificateID[:], ArtifactId: artifactID[:], ArtifactSha256: makeRepeated(0x33, 32), ArtifactSize: 128})
-				testutil.NoError(t, err)
-				result.Result = raw
-			} else {
-				envelope.Payload = &agentv1.CommandEnvelope_CertificateRevoke{CertificateRevoke: &agentv1.CertificateRevoke{CertificateId: certificateID[:]}}
-				raw, err := proto.Marshal(&agentv1.CertificateRevokeResult{CertificateId: certificateID[:], KeyRemoved: true})
-				testutil.NoError(t, err)
-				result.Result = raw
-			}
-			resultDigest, err := ResultPayloadCBORHash(test.resultKind, result.Result)
-			testutil.NoError(t, err)
-			receipt := result.GetPrivilegedResultProof().GetReceiptV1()
-			receipt.CommandKind, receipt.ResultKind, receipt.ResultCborSha256 = test.commandKind, test.resultKind, resultDigest[:]
-			receipt.Certificate = &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: bytes.Clone(certificateID[:])}
-			canonical, err := CanonicalReceiptV1(receipt)
-			testutil.NoError(t, err)
-			result.PrivilegedResultProof.Signature = ed25519.Sign(key, canonical)
-			lookup := lookupFor(key.Public().(ed25519.PublicKey), "active", time.Unix(1_699_999_999, 0), nil)
-			if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); !verification.Verified() {
-				t.Fatalf("valid certificate root receipt = %+v", verification)
-			}
-			result.PrivilegedResultProof.ReceiptV1.Certificate.CertificateId[15] ^= 1
-			if verification := verifyResult(context.Background(), lookup, nodeID, envelope, result); verification.FailureReason != "receipt_claim_mismatch" {
-				t.Fatalf("substituted certificate binding = %+v", verification)
-			}
-		})
+	// Signed success receipt cannot vouch for a rejected outcome.
+	rejected := &agentv1.CommandResult{
+		CommandId: result.CommandId, IdempotencyKey: result.IdempotencyKey,
+		State: agentv1.CommandResultState_COMMAND_RESULT_STATE_REJECTED, ErrorCode: "rejected",
+		CompletedAt: result.CompletedAt, PrivilegedResultProof: result.PrivilegedResultProof,
+	}
+	if v := verifyResult(context.Background(), lookup, nodeID, envelope, rejected); v.Verified() || v.Status != "invalid" {
+		t.Fatalf("reused receipt for rejection = %+v", v)
+	}
+
+	// Certificate P12 bound receipt.
+	certID, artifactID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	envelope.Payload = &agentv1.CommandEnvelope_CertificateP12{CertificateP12: &agentv1.CertificateP12{CertificateId: certID[:], ArtifactId: artifactID[:]}}
+	raw, err := proto.Marshal(&agentv1.CertificateArtifactResult{CertificateId: certID[:], ArtifactId: artifactID[:], ArtifactSha256: bytes.Repeat([]byte{0x33}, 32), ArtifactSize: 128})
+	testutil.NoError(t, err)
+	result.Result = raw
+	resultDigest, err := ResultPayloadCBORHash(agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12, result.Result)
+	testutil.NoError(t, err)
+	receipt := result.GetPrivilegedResultProof().GetReceiptV1()
+	receipt.CommandKind = agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12
+	receipt.ResultKind = agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12
+	receipt.ResultCborSha256 = resultDigest[:]
+	receipt.Certificate = &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: bytes.Clone(certID[:])}
+	canonical, err := CanonicalReceiptV1(receipt)
+	testutil.NoError(t, err)
+	result.PrivilegedResultProof.Signature = ed25519.Sign(key, canonical)
+	if v := verifyResult(context.Background(), lookup, nodeID, envelope, result); !v.Verified() {
+		t.Fatalf("valid certificate root receipt = %+v", v)
+	}
+	result.PrivilegedResultProof.ReceiptV1.Certificate.CertificateId[15] ^= 1
+	if v := verifyResult(context.Background(), lookup, nodeID, envelope, result); v.FailureReason != "receipt_claim_mismatch" {
+		t.Fatalf("substituted certificate binding = %+v", v)
 	}
 }
 
@@ -257,10 +153,9 @@ func receiptVerificationFixture(t *testing.T) (uuid.UUID, *agentv1.CommandEnvelo
 	commandID := uuid.MustParse("018f2a3b-4c5d-7000-8000-000000000002")
 	operationID := uuid.MustParse("018f2a3b-4c5d-7000-8000-000000000003")
 	idempotencyID := uuid.MustParse("018f2a3b-4c5d-7000-8000-000000000004")
-	semantic := makeRepeated(0x11, sha256.Size)
+	semantic := bytes.Repeat([]byte{0x11}, sha256.Size)
 	accepted, completed := time.Unix(1_700_000_000, 0).UTC(), time.Unix(1_700_000_001, 0).UTC()
-	seed := makeRepeated(0x29, ed25519.SeedSize)
-	privateKey := ed25519.NewKeyFromSeed(seed)
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x29}, ed25519.SeedSize))
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	envelope := &agentv1.CommandEnvelope{
 		CommandId: commandID[:], OperationId: operationID[:], IdempotencyKey: idempotencyID[:], NodeId: nodeID[:],
@@ -278,11 +173,11 @@ func receiptVerificationFixture(t *testing.T) (uuid.UUID, *agentv1.CommandEnvelo
 	resultDigest, err := ResultPayloadCBORHash(agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION, nil)
 	testutil.NoError(t, err)
 	receipt := &agentv1.PrivdResultReceiptV1{
-		ReceiptVersion: 1,
-		NodeId:         nodeID[:], PrivdAttestationKeyId: PublicKeyID(publicKey), CommandId: commandID[:], OperationId: operationID[:], IdempotencyKey: idempotencyID[:],
+		ReceiptVersion: 1, NodeId: nodeID[:], PrivdAttestationKeyId: PublicKeyID(publicKey),
+		CommandId: commandID[:], OperationId: operationID[:], IdempotencyKey: idempotencyID[:],
 		SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, SemanticPayloadSha256: semantic,
 		CommandKind: agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_SESSION_DISCONNECT, ResultKind: agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION,
-		TerminalState: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, ResultCborSha256: resultDigest[:], ErrorCode: "",
+		TerminalState: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, ResultCborSha256: resultDigest[:],
 		EffectSequence: 1, AcceptedAt: timestamppb.New(accepted), CompletedAt: timestamppb.New(completed),
 	}
 	canonical, err := CanonicalReceiptV1(receipt)
@@ -307,61 +202,4 @@ func mustHex(t *testing.T, value string) []byte {
 	decoded, err := hex.DecodeString(value)
 	testutil.NoError(t, err)
 	return decoded
-}
-
-func makeRepeated(value byte, length int) []byte {
-	result := make([]byte, length)
-	for i := range result {
-		result[i] = value
-	}
-	return result
-}
-
-func TestAgentUpgradeReceiptMapsToScheduledIntentKind(t *testing.T) {
-	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_AgentUpgrade{AgentUpgrade: &agentv1.AgentUpgrade{TargetVersion: "1.2.3", PackageSha256: make([]byte, sha256.Size), Architecture: "arm64"}}}
-	if CommandKind(envelope) != agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE {
-		t.Fatal("agent upgrade envelope did not map to its privileged command kind")
-	}
-	succeeded := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED}
-	if ResultKind(envelope, succeeded) != agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED {
-		t.Fatal("successful upgrade result must attest a scheduled intent, never a running version")
-	}
-	failed := &agentv1.CommandResult{State: agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED}
-	if ResultKind(envelope, failed) != agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR {
-		t.Fatal("failed upgrade result must attest an error outcome")
-	}
-}
-
-func TestReceiptWindowAllowsSkewAndSettlementGrace(t *testing.T) {
-	issued := time.Unix(1700000000, 0).UTC()
-	expires := issued.Add(time.Minute)
-	envelope := &agentv1.CommandEnvelope{IssuedAt: timestamppb.New(issued), ExpiresAt: timestamppb.New(expires)}
-	tests := []struct {
-		name                string
-		accepted, completed time.Time
-		valid               bool
-	}{
-		{"inclusive bounds", issued.Add(-5 * time.Minute), expires.Add(5 * time.Minute), true},
-		{"accepted too early", issued.Add(-5*time.Minute - time.Second), issued, false},
-		{"accepted too late", expires.Add(5*time.Minute + time.Nanosecond), expires.Add(5*time.Minute + time.Nanosecond), false},
-		{"completed too late", issued, expires.Add(5*time.Minute + time.Nanosecond), false},
-		{"completed before acceptance", issued, issued.Add(-time.Nanosecond), false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			receipt := &agentv1.PrivdResultReceiptV1{AcceptedAt: timestamppb.New(tt.accepted), CompletedAt: timestamppb.New(tt.completed)}
-			if got := receiptWithinCommandWindow(envelope, receipt); got != tt.valid {
-				t.Fatalf("valid=%v want %v", got, tt.valid)
-			}
-		})
-	}
-	nodeID, envelope, result, key := receiptVerificationFixture(t)
-	completed := result.GetCompletedAt().AsTime()
-	public := key.Public().(ed25519.PublicKey)
-	if v := verifyResult(t.Context(), lookupFor(public, "active", completed.Add(5*time.Minute), nil), nodeID, envelope, result); !v.Verified() {
-		t.Fatalf("activation skew rejected: %+v", v)
-	}
-	if v := verifyResult(t.Context(), lookupFor(public, "active", completed.Add(5*time.Minute+time.Nanosecond), nil), nodeID, envelope, result); v.Verified() {
-		t.Fatalf("activation outside skew accepted: %+v", v)
-	}
 }

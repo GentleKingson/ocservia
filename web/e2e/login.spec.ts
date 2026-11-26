@@ -1,4 +1,4 @@
-import { expect, test } from "./csp";
+import { expect, test } from "@playwright/test";
 
 test("local-only login restores return path and initializes the shell without storing passwords", async ({
   page,

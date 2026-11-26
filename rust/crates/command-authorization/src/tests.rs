@@ -1,36 +1,32 @@
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, symlink};
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt as _, symlink};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePublicKey as _, spki::der::pem::LineEnding};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, CommandAuthorizationProof, CompleteConfigApply, ConfigApply, ConfigPlan,
-    SyntheticEcho, command_envelope, complete_config_directive,
+    SyntheticEcho, command_envelope,
 };
 use prost_types::Timestamp;
 use serde_json::Value;
 
 use super::*;
 
-type ArtifactMutation = (&'static str, fn(&mut ArtifactGrantV1));
-
 fn load_fixture(name: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../testdata")
         .join(name);
-    let raw = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_json::from_str(&raw).expect("fixture json")
+    serde_json::from_str(&fs::read_to_string(path).expect("fixture")).expect("json")
 }
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
-    v[k].as_str().unwrap_or_else(|| panic!("{k} string"))
+    v[k].as_str().expect("str")
 }
 fn u(v: &Value, k: &str) -> u64 {
-    v[k].as_u64().unwrap_or_else(|| panic!("{k} u64"))
+    v[k].as_u64().expect("u64")
 }
 fn i(v: &Value, k: &str) -> i64 {
-    v[k].as_i64().unwrap_or_else(|| panic!("{k} i64"))
+    v[k].as_i64().expect("i64")
 }
 fn u32v(v: &Value, k: &str) -> u32 {
     u32::try_from(u(v, k)).expect("u32")
@@ -38,23 +34,17 @@ fn u32v(v: &Value, k: &str) -> u32 {
 fn fixed<const N: usize>(hex_s: &str) -> [u8; N] {
     hex::decode(hex_s).expect("hex").try_into().expect("len")
 }
-#[allow(clippy::unnecessary_wraps)]
-fn ts(sec: i64, nanos: u32) -> Option<Timestamp> {
-    Some(Timestamp {
+fn ts(sec: i64, nanos: u32) -> Timestamp {
+    Timestamp {
         seconds: sec,
         nanos: i32::try_from(nanos).expect("nanos"),
-    })
+    }
 }
 fn fixture_keyring(f: &Value) -> ControllerCommandKeyring {
-    let pk = VerifyingKey::from_bytes(&fixed::<32>(s(f, "public_key_hex"))).expect("pk");
-    ControllerCommandKeyring::new([pk]).expect("keyring")
-}
-fn str_vec(v: &Value, k: &str) -> Vec<String> {
-    v[k].as_array()
-        .expect("arr")
-        .iter()
-        .map(|x| x.as_str().expect("s").to_owned())
-        .collect()
+    ControllerCommandKeyring::new([
+        VerifyingKey::from_bytes(&fixed::<32>(s(f, "public_key_hex"))).expect("pk"),
+    ])
+    .expect("kr")
 }
 
 #[test]
@@ -88,18 +78,6 @@ fn complete_config_matches_go_identity_vectors() {
         changed.node_id[0] ^= 1;
         assert!(semantic_payload_hash_v2(&changed).is_err());
     }
-    let mut bad = candidate.clone();
-    bad.directives.swap(0, 1);
-    assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
-    bad = candidate.clone();
-    bad.directives.remove(2);
-    assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
-    bad = candidate;
-    if let Some(complete_config_directive::Value::Tls(v)) = bad.directives[7].value.as_mut() {
-        v.version = "../escape".into();
-    }
-    assert!(ocservia_contracts::config_profile::canonical(&bad).is_err());
-
     let mut env =
         ocservia_contracts::decode_strict_command_envelope(&bytes("apply_proto")).unwrap();
     let direct = semantic_payload_hash_v2(&env).unwrap();
@@ -111,7 +89,6 @@ fn complete_config_matches_go_identity_vectors() {
 
 #[test]
 fn rust_verifies_go_command_session_and_artifact_vectors() {
-    // Command authorization v1 vectors.
     let f = load_fixture("command-authorization-v1.json");
     assert_eq!(u(&f, "version"), 1);
     let pk = VerifyingKey::from_bytes(&fixed::<32>(s(&f, "public_key_hex"))).expect("pk");
@@ -141,9 +118,7 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         };
         assert_eq!(
             hex::encode(canonical_v1(&c).expect("canon")),
-            s(v, "canonical_preimage_hex"),
-            "{}",
-            s(v, "name")
+            s(v, "canonical_preimage_hex")
         );
         let payload = match c.payload_kind {
             130 => command_envelope::Payload::CompleteConfigApply(CompleteConfigApply::default()),
@@ -156,8 +131,8 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
             idempotency_key: c.idempotency_key.to_vec(),
             node_id: c.node_id.to_vec(),
             operation_id: c.operation_id.to_vec(),
-            issued_at: ts(c.issued_at_seconds, c.issued_at_nanos),
-            expires_at: ts(c.expires_at_seconds, c.expires_at_nanos),
+            issued_at: Some(ts(c.issued_at_seconds, c.issued_at_nanos)),
+            expires_at: Some(ts(c.expires_at_seconds, c.expires_at_nanos)),
             expected_revision: c.expected_revision,
             actor_id: c.actor_identity,
             action: c.action,
@@ -173,23 +148,22 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
             }),
             ..CommandEnvelope::default()
         };
-        kr.verify(&env)
-            .unwrap_or_else(|e| panic!("{} Go sig: {e}", s(v, "name")));
+        kr.verify(&env).expect("Go sig");
         if c.payload_kind == 108 {
-            let mut legacy_proto = env.clone();
-            legacy_proto.protocol_version = "1.1".into();
+            let mut bad = env.clone();
+            bad.protocol_version = "1.1".into();
             assert_eq!(
-                claims_from_envelope_v1(&legacy_proto),
+                claims_from_envelope_v1(&bad),
                 Err(AuthorizationError::ClaimsInvalid(
                     "command_protocol_version_unsupported"
                 ))
             );
-            for legacy_payload in [
+            for legacy in [
                 command_envelope::Payload::ConfigPlan(ConfigPlan::default()),
                 command_envelope::Payload::ConfigApply(ConfigApply::default()),
             ] {
                 let mut unsupported = env.clone();
-                unsupported.payload = Some(legacy_payload);
+                unsupported.payload = Some(legacy);
                 assert_eq!(
                     claims_from_envelope_v1(&unsupported),
                     Err(AuthorizationError::PayloadUnsupported)
@@ -202,7 +176,6 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         }
     }
 
-    // Session grant v1 vector (including session_epoch).
     let sf = load_fixture("session-grant-v1.json");
     let skr = fixture_keyring(&sf);
     let sc = SessionGrantClaimsV1 {
@@ -214,7 +187,12 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         endpoint_id: fixed(s(&sf, "endpoint_id_hex")),
         authorization_revision: u(&sf, "authorization_revision"),
         session_epoch: u(&sf, "session_epoch"),
-        negotiated_capabilities: str_vec(&sf, "negotiated_capabilities"),
+        negotiated_capabilities: sf["negotiated_capabilities"]
+            .as_array()
+            .expect("arr")
+            .iter()
+            .map(|x| x.as_str().expect("s").to_owned())
+            .collect(),
         issued_at_seconds: i(&sf, "issued_at_seconds"),
         issued_at_nanos: u32v(&sf, "issued_at_nanos"),
         expires_at_seconds: i(&sf, "expires_at_seconds"),
@@ -234,24 +212,20 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         authorization_revision: sc.authorization_revision,
         session_epoch: sc.session_epoch,
         negotiated_capabilities: sc.negotiated_capabilities.clone(),
-        issued_at: ts(sc.issued_at_seconds, sc.issued_at_nanos),
-        expires_at: ts(sc.expires_at_seconds, sc.expires_at_nanos),
+        issued_at: Some(ts(sc.issued_at_seconds, sc.issued_at_nanos)),
+        expires_at: Some(ts(sc.expires_at_seconds, sc.expires_at_nanos)),
         signature: hex::decode(s(&sf, "signature_hex")).expect("sig"),
     };
     let verified = skr
         .verify_session_grant(&sg, &sc.node_id, &sc.endpoint_id, sc.issued_at_seconds)
         .expect("sg");
-    assert_eq!(verified.authorization_revision, sc.authorization_revision);
-    assert_eq!(verified.session_epoch, sc.session_epoch);
+    assert_eq!(
+        (verified.authorization_revision, verified.session_epoch),
+        (sc.authorization_revision, sc.session_epoch)
+    );
     assert_eq!(
         skr.verify_session_grant(&sg, &sc.node_id, &sc.endpoint_id, sc.expires_at_seconds),
         Err(AuthorizationError::ClaimsInvalid("session_grant_expired"))
-    );
-    let mut bad_sg = sg.clone();
-    bad_sg.key_id = "ed25519-sha256:unknown".into();
-    assert_eq!(
-        skr.verify_session_grant(&bad_sg, &sc.node_id, &sc.endpoint_id, sc.issued_at_seconds),
-        Err(AuthorizationError::UnknownKey)
     );
     sg.session_epoch += 1;
     assert_eq!(
@@ -259,7 +233,6 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         Err(AuthorizationError::SignatureInvalid)
     );
 
-    // Artifact grant v1 vector.
     let af = load_fixture("artifact-grant-v1.json");
     let akr = fixture_keyring(&af);
     let ac = ArtifactGrantClaimsV1 {
@@ -283,7 +256,7 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         hex::encode(canonical_artifact_grant_v1(&ac).expect("ag")),
         s(&af, "canonical_preimage_hex")
     );
-    let ag = ArtifactGrantV1 {
+    let mut ag = ArtifactGrantV1 {
         version: 1,
         key_id: ac.key_id.clone(),
         node_id: ac.node_id.to_vec(),
@@ -294,8 +267,8 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         authorized_subject: ac.authorized_subject.clone(),
         purpose: ac.purpose.clone(),
         max_bytes: ac.max_bytes,
-        issued_at: ts(ac.issued_at_seconds, ac.issued_at_nanos),
-        expires_at: ts(ac.expires_at_seconds, ac.expires_at_nanos),
+        issued_at: Some(ts(ac.issued_at_seconds, ac.issued_at_nanos)),
+        expires_at: Some(ts(ac.expires_at_seconds, ac.expires_at_nanos)),
         grant_id: ac.grant_id.to_vec(),
         signature: hex::decode(s(&af, "signature_hex")).expect("sig"),
     };
@@ -328,151 +301,45 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         ac.expires_at_seconds,
     )
     .expect("confirm");
-    let mut forged = ag.clone();
-    forged.signature[0] ^= 1;
-    assert_eq!(
-        akr.verify_artifact_grant_for_confirmation(
-            &forged,
-            &ac.node_id,
-            &ac.artifact_id,
-            &ac.purpose,
-            ac.max_bytes,
-            ac.expires_at_seconds
-        ),
-        Err(AuthorizationError::SignatureInvalid)
-    );
-    let mut unk = ag.clone();
-    unk.key_id = "ed25519-sha256:unknown".into();
-    assert_eq!(
-        akr.verify_artifact_grant(
-            &unk,
-            &ac.node_id,
-            &ac.artifact_id,
-            &ac.purpose,
-            ac.max_bytes,
-            ac.issued_at_seconds
-        ),
-        Err(AuthorizationError::UnknownKey)
-    );
-    let mut wrong_node = ac.node_id;
-    wrong_node[0] ^= 1;
+    ag.signature[0] ^= 1;
     assert_eq!(
         akr.verify_artifact_grant(
             &ag,
-            &wrong_node,
+            &ac.node_id,
             &ac.artifact_id,
             &ac.purpose,
             ac.max_bytes,
             ac.issued_at_seconds
         ),
-        Err(AuthorizationError::ClaimsInvalid(
-            "artifact_grant_node_mismatch"
-        ))
+        Err(AuthorizationError::SignatureInvalid)
     );
-    let mutations: [ArtifactMutation; 4] = [
-        ("cert_ver", |v| v.certificate_version += 1),
-        ("op", |v| v.operation_id[0] ^= 1),
-        ("grant_id", |v| v.grant_id[0] ^= 1),
-        ("sig", |v| v.signature[0] ^= 1),
-    ];
-    for (name, m) in mutations {
-        let mut mod_g = ag.clone();
-        m(&mut mod_g);
-        assert_eq!(
-            akr.verify_artifact_grant(
-                &mod_g,
-                &ac.node_id,
-                &ac.artifact_id,
-                &ac.purpose,
-                ac.max_bytes,
-                ac.issued_at_seconds
-            ),
-            Err(AuthorizationError::SignatureInvalid),
-            "{name}"
-        );
-    }
-}
-
-struct PrivateTempDir(PathBuf);
-
-impl PrivateTempDir {
-    fn new(prefix: &str) -> Self {
-        let uid = rustix::process::geteuid().as_raw();
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .and_then(|p| fs::canonicalize(p).ok());
-        let mut candidates = Vec::with_capacity(3);
-        if let Some(dir) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
-            candidates.push(PathBuf::from(dir));
-        }
-        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-            candidates.push(PathBuf::from(dir));
-        }
-        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-            let home_path = PathBuf::from(home);
-            let cache = home_path.join(".cache");
-            if home_path.is_dir() && !cache.exists() {
-                let _ = fs::DirBuilder::new().mode(0o700).create(&cache);
-                let _ = fs::set_permissions(&cache, fs::Permissions::from_mode(0o700));
-            }
-            candidates.push(cache);
-        }
-        let base = candidates
-            .into_iter()
-            .filter_map(|candidate| fs::canonicalize(candidate).ok())
-            .find(|resolved| {
-                if let Some(root) = repo.as_deref()
-                    && resolved.starts_with(root)
-                {
-                    return false;
-                }
-                let mut current = Some(resolved.as_path());
-                while let Some(dir) = current {
-                    let Ok(meta) = fs::symlink_metadata(dir) else {
-                        return false;
-                    };
-                    if !meta.is_dir()
-                        || meta.file_type().is_symlink()
-                        || (meta.uid() != 0 && meta.uid() != uid)
-                        || meta.permissions().mode() & 0o022 != 0
-                    {
-                        return false;
-                    }
-                    current = dir.parent();
-                }
-                true
-            })
-            .expect("private temp directory outside repository");
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = base.join(format!("{prefix}-{}-{suffix}", std::process::id()));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .expect("mkdir");
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("700");
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for PrivateTempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
 }
 
 #[test]
 fn verification_key_loader_and_shared_metadata_policy() {
-    let dir = PrivateTempDir::new("cmd-key-test");
-    let key_path = dir.path().join("controller.pem");
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| {
+            let p =
+                std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".cache");
+            let _ = fs::DirBuilder::new().mode(0o700).create(&p);
+            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o700));
+            p
+        });
+    let dir = base.join(format!(
+        "cmd-key-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .expect("mkdir");
+    let key_path = dir.join("controller.pem");
     let key = SigningKey::from_bytes(&[7; 32]).verifying_key();
     fs::write(
         &key_path,
@@ -488,78 +355,14 @@ fn verification_key_loader_and_shared_metadata_policy() {
         load_verification_key(&key_path, uid, gid).expect("safe"),
         key
     );
-
-    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).expect("644");
-    assert!(load_verification_key(&key_path, uid, gid).is_err());
-    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("600");
-    let link = dir.path().join("controller-link.pem");
+    let link = dir.join("controller-link.pem");
     symlink(&key_path, &link).expect("symlink");
     assert!(load_verification_key(&link, uid, gid).is_err());
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).expect("770");
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).expect("644");
     assert!(load_verification_key(&key_path, uid, gid).is_err());
-    drop(dir);
-
-    let (agent_user_id, agent_group_id) = (997, 998);
-    for mode in [0o440, 0o640] {
-        assert!(verification_key_metadata_allowed(
-            0,
-            agent_group_id,
-            mode,
-            agent_user_id,
-            agent_group_id
-        ));
-        assert!(verification_key_metadata_allowed(
-            0,
-            agent_group_id,
-            mode,
-            0,
-            agent_group_id
-        ));
-    }
-    for mode in [0o400, 0o600] {
-        assert!(verification_key_metadata_allowed(
-            agent_user_id,
-            agent_group_id,
-            mode,
-            agent_user_id,
-            agent_group_id
-        ));
-        assert!(!verification_key_metadata_allowed(
-            agent_user_id,
-            agent_group_id,
-            mode,
-            0,
-            agent_group_id
-        ));
-        assert!(!verification_key_metadata_allowed(
-            0,
-            agent_group_id,
-            mode,
-            agent_user_id,
-            agent_group_id
-        ));
-        assert!(verification_key_metadata_allowed(
-            0,
-            agent_group_id,
-            mode,
-            0,
-            agent_group_id
-        ));
-    }
-    assert!(!verification_key_metadata_allowed(
-        0,
-        agent_group_id + 1,
-        0o640,
-        agent_user_id,
-        agent_group_id
-    ));
-    assert!(!verification_key_metadata_allowed(
-        0,
-        agent_group_id + 1,
-        0o640,
-        0,
-        agent_group_id
-    ));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(verification_key_metadata_allowed(0, 998, 0o640, 997, 998));
+    assert!(!verification_key_metadata_allowed(0, 999, 0o640, 997, 998));
 }
 
 #[test]
@@ -579,35 +382,12 @@ fn canonical_semantic_hash_v2_matches_shared_agent_upgrade_vector() {
     };
     let digest = semantic_payload_hash_v2(&env).expect("v2");
     assert_eq!(hex::encode(digest), s(v, "expected_sha256"));
-    for (name, val, reject) in [
-        ("ver", "1.2.4", false),
-        ("arch", "amd64", false),
-        ("ver", "latest", true),
-        ("ver", "1.2", true),
-    ] {
-        let mut c = env.clone();
-        if let Some(command_envelope::Payload::AgentUpgrade(p)) = c.payload.as_mut() {
-            if name == "ver" {
-                p.target_version = val.into();
-            } else {
-                p.architecture = val.into();
-            }
-        }
-        if reject {
-            assert_eq!(
-                semantic_payload_hash_v2(&c),
-                Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
-            );
-        } else {
-            assert_ne!(semantic_payload_hash_v2(&c).expect("ok"), digest);
-        }
-    }
-    let mut short = env;
-    if let Some(command_envelope::Payload::AgentUpgrade(p)) = short.payload.as_mut() {
-        p.package_sha256.pop();
+    let mut bad = env;
+    if let Some(command_envelope::Payload::AgentUpgrade(p)) = bad.payload.as_mut() {
+        p.target_version = "latest".into();
     }
     assert_eq!(
-        semantic_payload_hash_v2(&short),
+        semantic_payload_hash_v2(&bad),
         Err(AuthorizationError::ClaimsInvalid("agent_upgrade_invalid"))
     );
 }

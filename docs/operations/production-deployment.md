@@ -32,7 +32,7 @@ install, upgrade, rollback, and uninstall lifecycles.
 | Managed ocserv | Adapter-admitted `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` (`1.6.0` parser fixtures unit-tested) | See the note below |
 | Relays | Dedicated relay hosts running the matched checksum-verified crates.io `iroh`/`iroh-relay` release | [Dedicated Relay](#dedicated-relay) |
 | Authentication | Local single administrator (`OCSERV_LOCAL_AUTH_ENABLED=true`) | [Production authentication](authentication.md) |
-| Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives; CI runs Chromium plus Playwright Firefox and WebKit on the cross-engine specs | [Web validation](../development/release-checks.md#web-validation) |
+| Web console browsers | Chrome 111+, Safari 16.4+, Firefox 128+, Chromium 111+ derivatives | [Validation scope](../development/release-checks.md#choose-the-validation-scope) |
 
 On managed nodes, the ocserv adapter and Controller configuration planner admit
 `1.2.x`, `1.3.x`, `1.4.x`, and `1.5.0` (while `1.6.0` parser fixtures remain covered by unit tests). Full release
@@ -57,8 +57,7 @@ PostgreSQL 18.x relational database, one Signer service, and one dedicated Relay
 hosts in Standalone mode or co-located in Integrated mode, with bundled or
 external PostgreSQL), managing one or more node Agents. Controller high availability, multi-relay failover, database replication clusters,
 automatic PostgreSQL failover, and point-in-time recovery (PITR) are outside the
-supported scope. See
-[resilience and capacity](../development/release-checks.md#resilience-and-capacity).
+supported scope.
 
 Operational readiness separates three pairs of states:
 
@@ -1440,9 +1439,7 @@ browser specs on exercised paths does not prove the absence of XSS across the
 application. Responses generated directly by Caddy for handler errors (such as
 a 502 when the control plane is unreachable) skip the site's deferred `header`
 block, so each file repeats the headers inside `handle_errors`. Keep all
-four header blocks identical;
-[`test-controller-gateway-headers.py`](../../scripts/test-controller-gateway-headers.py)
-verifies both static and 502 responses across both configurations.
+four header blocks identical across both configurations.
 
 If CSP enforcement breaks a page, roll back at the release level instead of
 editing an installed copy, since the Standalone Caddyfile is built into the

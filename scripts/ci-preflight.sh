@@ -14,7 +14,6 @@ routing=$(mktemp)
 trap 'rm -f -- "${routing}"' EXIT
 bash scripts/ci-relevance.sh pull_request "${base}" "${head}" "${routing}"
 cat "${routing}"
-echo 'GitHub runs CodeQL and the other selected Basic CI jobs.'
 suites=$(sed -n 's/^ci_suites=//p' "${routing}")
 if [[ -n "${suites}" ]]; then
   CI_SUITES="${suites}" CONTRACT_EVENT=pull_request CONTRACT_BASE_REF="${base}" CONTRACT_HEAD_SHA="${head}" bash scripts/ci-tools-check.sh

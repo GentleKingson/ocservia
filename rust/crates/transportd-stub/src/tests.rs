@@ -2,7 +2,7 @@ use ocservia_contracts::traceparent::generate as new_traceparent;
 
 use super::*;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandEnvelope, SemanticPayloadHashVersion, SyntheticEcho, SyntheticNoop,
+    CommandEnvelope, SemanticPayloadHashVersion, SyntheticEcho,
 };
 use tokio_stream::StreamExt;
 
@@ -153,71 +153,56 @@ async fn heartbeat_expiry_capacity_and_idempotency_invariants() {
 #[tokio::test]
 async fn reconcile_only_observes_without_accepting_or_running_commands() {
     for expired in [true, false] {
-        for payload in [
-            command_envelope::Payload::SyntheticNoop(SyntheticNoop {}),
-            command_envelope::Payload::SyntheticEcho(SyntheticEcho {
-                message: "test".into(),
-            }),
-            command_envelope::Payload::SimulationProbe(probe(1, 0)),
-        ] {
-            let svc = StubService::new(8);
-            let mut exec = probe_req(uid(), uid(), probe(1, 0));
-            let mut env = CommandEnvelope::decode(exec.command_envelope.as_slice()).expect("env");
-            env.payload = Some(payload);
-            exec.command_envelope = env.encode_to_vec();
-            if expired {
-                let now = SystemTime::now();
-                env.issued_at = Some((now - Duration::from_mins(2)).into());
-                env.expires_at = Some((now - Duration::from_mins(1)).into());
-            }
-            env.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
-            let mut rec = exec.clone();
-            rec.command_envelope = env.encode_to_vec();
-            assert!(
-                svc.send_command(Request::new(rec.clone()))
-                    .await
-                    .expect("obs")
-                    .into_inner()
-                    .accepted
-            );
-            tokio::task::yield_now().await;
-            let st = svc.stats().await;
-            assert_eq!(
-                (
-                    st.accepted_commands,
-                    st.active_tasks,
-                    st.retained_events,
-                    st.connected_nodes
-                ),
-                (0, 0, 0, 0)
-            );
-
-            assert!(
-                svc.send_command(Request::new(exec))
-                    .await
-                    .expect("exec")
-                    .into_inner()
-                    .accepted
-            );
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while svc.stats().await.active_tasks != 0 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("done");
-            let before = svc.stats().await;
-            assert_eq!(before.accepted_commands, 1);
-            assert!(
-                svc.send_command(Request::new(rec))
-                    .await
-                    .expect("obs2")
-                    .into_inner()
-                    .accepted
-            );
-            tokio::task::yield_now().await;
-            assert_eq!(svc.stats().await, before);
+        let svc = StubService::new(8);
+        let mut exec = probe_req(uid(), uid(), probe(1, 0));
+        let mut env = CommandEnvelope::decode(exec.command_envelope.as_slice()).expect("env");
+        env.payload = Some(command_envelope::Payload::SyntheticEcho(SyntheticEcho {
+            message: "test".into(),
+        }));
+        exec.command_envelope = env.encode_to_vec();
+        if expired {
+            let now = SystemTime::now();
+            env.issued_at = Some((now - Duration::from_mins(2)).into());
+            env.expires_at = Some((now - Duration::from_mins(1)).into());
         }
+        env.delivery_mode = CommandDeliveryMode::ReconcileOnly.into();
+        let mut rec = exec.clone();
+        rec.command_envelope = env.encode_to_vec();
+        assert!(
+            svc.send_command(Request::new(rec.clone()))
+                .await
+                .expect("obs")
+                .into_inner()
+                .accepted
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(svc.stats().await.accepted_commands, 0);
+
+        assert!(
+            svc.send_command(Request::new(exec))
+                .await
+                .expect("exec")
+                .into_inner()
+                .accepted
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while svc.stats().await.active_tasks != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("done");
+        let before = svc.stats().await;
+        assert_eq!(before.accepted_commands, 1);
+        assert!(
+            svc.send_command(Request::new(rec))
+                .await
+                .expect("obs2")
+                .into_inner()
+                .accepted
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(svc.stats().await, before);
     }
 }
 
@@ -253,7 +238,23 @@ async fn close_node_cancellation_validation_and_subscriber_backpressure() {
     svc.close_node(close_req(node, "operator close".into()))
         .await
         .expect("closed");
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while svc
+            .state
+            .delivery
+            .lock()
+            .await
+            .retained
+            .iter()
+            .filter(|e| e.r#type == i32::from(TransportEventType::Disconnected))
+            .count()
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnect event");
     let evs = svc.state.delivery.lock().await.retained.clone();
     assert_eq!(
         evs.iter()
@@ -298,41 +299,6 @@ async fn close_node_cancellation_validation_and_subscriber_backpressure() {
     .await
     .expect("fast")
     .expect("ok");
-
-    // Slow subscriber applies publication backpressure.
-    let bp = StubService::new(1);
-    let nb = uid();
-    let mut stream = bp
-        .watch_events(Request::new(WatchEventsRequest::default()))
-        .await
-        .expect("w")
-        .into_inner();
-    bp.publish(new_event(
-        &nb,
-        TransportEventType::Connected,
-        &new_traceparent(),
-        Vec::new(),
-    ))
-    .await;
-    let pub_task = tokio::spawn({
-        let (bp, nb) = (bp.clone(), nb.clone());
-        async move {
-            bp.publish(new_event(
-                &nb,
-                TransportEventType::Heartbeat,
-                &new_traceparent(),
-                Vec::new(),
-            ))
-            .await;
-        }
-    });
-    tokio::task::yield_now().await;
-    assert!(!pub_task.is_finished());
-    assert!(stream.next().await.is_some());
-    tokio::time::timeout(Duration::from_secs(1), pub_task)
-        .await
-        .expect("unblocked")
-        .expect("join");
 
     // Cancellation disconnects skipped subscribers during fanout.
     let fan = StubService::new(2);

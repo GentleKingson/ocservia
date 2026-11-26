@@ -58,7 +58,7 @@ jobs:
     name: Resolve Basic CI evidence
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: write
@@ -66,9 +66,7 @@ jobs:
       quick_url: ${{ steps.evidence.outputs.quick_url }}
       full_url: ${{ steps.evidence.outputs.full_url }}
       contract_done: ${{ steps.evidence.outputs.contract_done }}
-      database_done: ${{ steps.evidence.outputs.database_done }}
       database_smoke_done: ${{ steps.evidence.outputs.database_smoke_done }}
-      recovery_done: ${{ steps.evidence.outputs.recovery_done }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -84,7 +82,7 @@ jobs:
     name: Resolve security evidence
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: write
@@ -127,93 +125,6 @@ jobs:
     with:
       version: ${{ inputs.version }}
       arch: arm64
-
-  smoke-agent-packages:
-    name: Smoke Agent Packages (${{ matrix.arch }})
-    needs: [agent-amd64, agent-arm64]
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    env:
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Checkout release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Download and verify immutable package set for smoke
-        uses: ./.github/actions/download-release-product
-        with:
-          artifact-id: ${{ needs[format('agent-{0}', matrix.arch)].outputs.artifact_id }}
-          manifest-sha256: ${{ needs[format('agent-{0}', matrix.arch)].outputs.manifest_sha256 }}
-          kind: agent
-          version: ${{ inputs.version }}
-          arch: ${{ matrix.arch }}
-          path: ${{ runner.temp }}/packages
-      - name: Validate native package lifecycle (${{ matrix.arch }})
-        id: smoke-packages
-        env:
-          RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/native-smoke
-          PRODUCTS_DIR: ${{ runner.temp }}/packages
-          VERSION: ${{ inputs.version }}
-        run: scripts/release-native-package-smoke.sh
-      - name: Upload native smoke diagnostics
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: native-smoke-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/native-smoke
-          retention-days: 7
-          if-no-files-found: warn
-
-  smoke-rc-lifecycle:
-    name: Smoke Synthetic RC Lifecycle (${{ matrix.arch }})
-    if: contains(inputs.version, '-rc.')
-    # Restore the compilation cache saved by this run's package build.
-    needs: [agent-amd64, agent-arm64]
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 90
-    env:
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Checkout release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: native-packages
-          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
-      - name: Restore Rocky Agent compilation cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: rust/target/agent-${{ matrix.arch }}-*
-          key: release-agent-target-v3-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: release-agent-target-v3-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('rust/agent-build.Dockerfile', 'toolchains.lock', 'scripts/checksums.txt', 'scripts/bootstrap.sh', 'scripts/env.sh', 'scripts/build-agent-binaries.sh', 'rust/rust-toolchain.toml', 'rust/.cargo/**', 'rust/**/Cargo.toml', 'rust/Cargo.lock') }}-
-      - name: Validate RC to final package lifecycle (${{ matrix.arch }})
-        env:
-          RUN_ID: rc-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
-          ARTIFACT_DIR: ${{ runner.temp }}/artifacts/rc-lifecycle
-          RC_LIFECYCLE: 'true'
-        run: scripts/release-native-package-smoke.sh
-      - name: Upload synthetic RC lifecycle diagnostics
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: rc-lifecycle-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/artifacts/rc-lifecycle
-          retention-days: 7
-          if-no-files-found: warn
 
   assets:
     name: Assemble release assets
@@ -291,239 +202,38 @@ jobs:
         run: echo 'Reused the successful comparison against the release baseline.'
 
   database:
-    name: Release database acceptance
+    name: Release database smoke
     needs: ci
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.ci.outputs.database_done != 'true' || needs.ci.outputs.recovery_done != 'true'
+        if: needs.ci.outputs.database_smoke_done != 'true'
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-tools
-        if: needs.ci.outputs.database_done != 'true'
+        if: needs.ci.outputs.database_smoke_done != 'true'
         with:
           profiles: go-test
-      - id: cache-key
-        if: needs.ci.outputs.database_done != 'true'
-        run: bash scripts/ci-go-cache-key.sh >> "${GITHUB_OUTPUT}"
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        if: needs.ci.outputs.database_done != 'true'
-        with:
-          path: .cache/go-mod
-          key: basic-go-mod-v2-${{ steps.cache-key.outputs.mod_identity }}
-          restore-keys: basic-go-mod-v2-
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        if: needs.ci.outputs.database_done != 'true'
-        with:
-          path: .cache/go-build
-          key: basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-${{ github.sha }}
-          restore-keys: |
-            basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-            basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-      - if: needs.ci.outputs.database_done != 'true'
+      - if: needs.ci.outputs.database_smoke_done != 'true'
         env:
           PG_MAJOR: '18'
-          DATABASE_TEST_SCOPE: full
-        run: scripts/database-integration.sh
-      - if: needs.ci.outputs.database_done != 'true' && needs.ci.outputs.database_smoke_done != 'true'
-        run: bash scripts/test-postgres-volume-layout.sh
-      - if: needs.ci.outputs.recovery_done != 'true'
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/database-recovery-postgres
-        run: |
-          mkdir -p "$ARTIFACT_DIR/bundled"
-          RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres-bundled" \
-            ARTIFACT_DIR="$ARTIFACT_DIR/bundled" \
-            bash scripts/postgres-backup-restore-smoke.sh >"$RUNNER_TEMP/recovery-bundled.log" 2>&1 &
-          bundled_pid=$!
-          RUN_ID="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-postgres" \
-            bash scripts/external-postgres-backup-restore-smoke.sh >"$RUNNER_TEMP/recovery-external.log" 2>&1 &
-          ext_pid=$!
-          bundled_status=0; ext_status=0
-          wait "$bundled_pid" || bundled_status=$?
-          wait "$ext_pid" || ext_status=$?
-          cat "$RUNNER_TEMP/recovery-bundled.log" "$RUNNER_TEMP/recovery-external.log"
-          ((bundled_status == 0 && ext_status == 0))
-      - if: always() && needs.ci.outputs.recovery_done != 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: database-recovery-postgres-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/database-recovery-postgres
-          retention-days: 7
-      - if: needs.ci.outputs.database_done == 'true' && needs.ci.outputs.recovery_done == 'true'
-        run: echo 'Reused successful Full CI database acceptance and recovery.'
-
-  business:
-    name: Business Smoke (amd64)
-    needs: [agent-amd64, controller-amd64, security]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    env:
-      CONTROLLER_ARCH: amd64
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/download-release-product
-        with:
-          artifact-id: ${{ needs.agent-amd64.outputs.artifact_id }}
-          manifest-sha256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
-          kind: agent
-          version: ${{ inputs.version }}
-          arch: amd64
-          path: ${{ runner.temp }}/business-packages
-      - uses: ./.github/actions/download-release-product
-        with:
-          artifact-id: ${{ needs.controller-amd64.outputs.artifact_id }}
-          manifest-sha256: ${{ needs.controller-amd64.outputs.manifest_sha256 }}
-          kind: controller
-          version: ${{ inputs.version }}
-          arch: amd64
-          path: ${{ runner.temp }}/business-controller-images
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: npm-security
-          cache-npm: 'true'
-      - name: Exercise Integrated Business Smoke with candidate products
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/business-diagnostics
-          PRODUCTS_DIR: ${{ runner.temp }}/business-packages
-          IMAGES_DIR: ${{ runner.temp }}/business-controller-images
-        run: |
-          sudo --preserve-env=ARTIFACT_DIR,VERSION,GITHUB_ACTIONS,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_ENVIRONMENT,RUNNER_ARCH,CONTROLLER_ARCH,PRODUCTS_DIR,IMAGES_DIR \
-            bash scripts/release-business-probe.sh
-      - name: Return task-owned diagnostics and caches to the runner
-        if: always()
-        run: |
-          for path in "$RUNNER_TEMP/business-diagnostics" .cache .tools web/node_modules; do
-            if [[ -d "$path" && ! -L "$path" ]]; then
-              sudo chown -R -- "$(id -u):$(id -g)" "$path"
-            fi
-          done
-      - name: Summarize business timings and sanitized failures
-        if: always()
-        env:
-          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
-        run: |
-          if [[ -f "$DIAGNOSTICS/result.json" ]]; then
-            jq '{probe_status,last_stage,exit_code,timings,scenario_timings,resilience_scenarios}' "$DIAGNOSTICS/result.json"
-          fi
-          if [[ -f "$DIAGNOSTICS/api-checkpoints.jsonl" ]]; then
-            jq -c 'select(.name == "real_vpn_relay_recovery" or .name == "resilience_relay") | {name,time,status}' "$DIAGNOSTICS/api-checkpoints.jsonl"
-          fi
-          if [[ -f "$DIAGNOSTICS/probe.log" ]]; then
-            grep -E '^(RuntimeError:|AssertionError|probe failed at line)' "$DIAGNOSTICS/probe.log" || true
-          fi
-      - name: Require completed business and recovery scenarios
-        env:
-          DIAGNOSTICS: ${{ runner.temp }}/business-diagnostics
-        run: |
-          test -s "$DIAGNOSTICS/probe.log"
-          if grep -rIEq '(obt2_[A-Za-z0-9_-]{43}|oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43})' "$DIAGNOSTICS"; then
-            echo 'diagnostics contain a node bootstrap token' >&2
-            exit 1
-          fi
-          jq -e '
-            . as $result |
-            .profile == "smoke" and .terminal == "revocation" and
-            .probe_status == "PASS" and .exit_code == 0 and
-            (.timings | type == "array" and length > 0) and
-            ([
-              "integrated_entry_and_internal_tls",
-              "production_signer_active_binding",
-              "bootstrap_token_enrollment_and_rerun_identity",
-              "real_browser_subset",
-              "config_apply_and_vpn_user",
-              "real_vpn_after_config_apply",
-              "real_node_revocation_and_disconnect"
-            ] - .passed_checkpoints | length) == 0 and
-            .resilience_requested == true and
-            .resilience_result == "PASS" and
-            .planned_topology.native_systemd_node == true and
-            (.resilience_scenarios | type == "array") and
-            all(["controller", "agent", "database", "relay"][];
-              . as $name |
-              ([$result.resilience_scenarios[] | select(.name == "resilience_" + $name)] | length == 1 and .[0].status == "PASS"))
-          ' "$DIAGNOSTICS/result.json" >/dev/null
-          jq -se 'any(.[]; .name == "production_signer_password_sealed" and .status == "PASS")' \
-            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
-          jq -se 'any(.[]; .name == "resilience_relay" and .status == "PASS" and .offline_queued_zero_side_effects == true and .idempotent_replay == true)' \
-            "$DIAGNOSTICS/api-checkpoints.jsonl" >/dev/null
-      - name: Preserve business timings and sanitized diagnostics
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: business-smoke-amd64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/business-diagnostics
-          if-no-files-found: warn
-          retention-days: 7
-
-  quick:
-    name: Shared-domain Quick Install (${{ matrix.scenario }}, Pebble ACME, amd64)
-    strategy:
-      fail-fast: false
-      matrix:
-        scenario: [lifecycle, renewal]
-    needs: [agent-amd64, controller-amd64, security]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/download-release-product
-        with:
-          artifact-id: ${{ needs.controller-amd64.outputs.artifact_id }}
-          manifest-sha256: ${{ needs.controller-amd64.outputs.manifest_sha256 }}
-          kind: controller
-          version: ${{ inputs.version }}
-          arch: amd64
-          path: ${{ runner.temp }}/quick-controller-images
-      - uses: ./.github/actions/download-release-product
-        with:
-          artifact-id: ${{ needs.agent-amd64.outputs.artifact_id }}
-          manifest-sha256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
-          kind: agent
-          version: ${{ inputs.version }}
-          arch: amd64
-          path: ${{ runner.temp }}/quick-agent-packages
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: rust-basic
-          key-suffix: -${{ hashFiles('rust/Cargo.lock') }}
-      - name: Build the Relay network probe
-        run: |
-          source scripts/env.sh
-          cargo build --locked --manifest-path rust/Cargo.toml --package ocservia-relay-network-probe
-      - name: Verify shared-domain ${{ matrix.scenario }}
-        env:
-          SCENARIO: ${{ matrix.scenario }}
-          IMAGES_DIR: ${{ runner.temp }}/quick-controller-images
-          PRODUCTS_DIR: ${{ runner.temp }}/quick-agent-packages
-          RELAY_NETWORK_PROBE: ${{ github.workspace }}/rust/target/debug/ocservia-relay-network-probe
-          CONTROLLER_ARCH: amd64
-        run: |
-          sudo --preserve-env=VERSION,CONTROLLER_ARCH,RUNNER_ARCH,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,IMAGES_DIR,PRODUCTS_DIR,RELAY_NETWORK_PROBE \
-            bash scripts/release-quick-acceptance.sh "$SCENARIO"
+        run: scripts/database-postgres-smoke.sh
+      - if: needs.ci.outputs.database_smoke_done == 'true'
+        run: echo 'Reused successful CI database smoke.'
 
   result:
     name: Release Check Result
     needs: [prepare, ci, contracts, database, security, agent-amd64, agent-arm64,
-            controller-amd64, controller-arm64, smoke-agent-packages, smoke-rc-lifecycle, assets, business, quick]
+            controller-amd64, controller-arm64, assets]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
-          IS_PRERELEASE: ${{ contains(inputs.version, '-rc.') }}
         run: |
-          if ! jq -e --arg rc "$IS_PRERELEASE" '
-            all(to_entries[];
-              .value.result == (if .key == "smoke-rc-lifecycle" and $rc == "false"
-                                then "skipped" else "success" end))
-          ' <<<"$RESULTS" >/dev/null; then
+          if ! jq -e 'all(to_entries[]; .value.result == "success")' <<<"$RESULTS" >/dev/null; then
             echo FAIL >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi

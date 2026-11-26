@@ -97,7 +97,7 @@ make verify
 
 Starting with [`v1.1.0`](https://github.com/GentleKingson/ocservia/releases/tag/v1.1.0), compatibility between different versions is no longer tested. A package install, upgrade, or rollback that succeeds does not guarantee compatibility with an existing database state. Read the [version policy](docs/operations/production-deployment.md#version-policy) before you change versions.
 
-Pin production deployments to official [published releases](https://github.com/GentleKingson/ocservia/releases), and do not run development branches or release candidates in production. The [resilience and capacity harness](docs/development/release-checks.md#resilience-and-capacity) exercises load and fault injection against synthetic agents; you should still validate each target release on your own infrastructure.
+Pin production deployments to official [published releases](https://github.com/GentleKingson/ocservia/releases), and do not run development branches or release candidates in production. Validate each target release on your own infrastructure following [Validation and release](docs/development/release-checks.md#choose-the-validation-scope).
 
 ## VPN audit history
 

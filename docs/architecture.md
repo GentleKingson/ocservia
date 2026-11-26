@@ -114,7 +114,7 @@ key. See [enrollment](operations/agent-lifecycle.md#enroll-the-node).
 
 An outage of the Controller or its database halts request validation and durable writes. Queued operations stay in the outbox until they run after recovery or expire. If `Agent` or `privd` crashes during execution, the operation stays indeterminate even if network delivery succeeded. If the Relay becomes unreachable, control-plane sessions through that Relay drop until the Relay returns and the Controller reconciles pending node state.
 
-Recovery procedures preserve command logs, local SQLite journals, endpoint identities, and monotonic sequence numbers. Restoring from a cold backup requires running the documented verification workflow. A restore provides no automatic failover and does not relax schema identity checks. See [incident recovery](operations/incident-recovery.md), [Signer backup and restore](operations/incident-recovery.md#signer-backup-and-restore), and [resilience coverage](development/release-checks.md#resilience-and-capacity).
+Recovery procedures preserve command logs, local SQLite journals, endpoint identities, and monotonic sequence numbers. Restoring from a cold backup requires running the documented verification workflow. A restore provides no automatic failover and does not relax schema identity checks. See [incident recovery](operations/incident-recovery.md) and [Signer backup and restore](operations/incident-recovery.md#signer-backup-and-restore).
 
 ## Design tradeoffs and capacity
 
@@ -306,7 +306,7 @@ unknown/missing SNI or plaintext -> closed connection
 - Certificates come from files (`OCSERV_TLS_MODE=manual`, the default) or from TLS-ALPN-01 through Edge's SNI routing (`OCSERV_TLS_MODE=acme`, Integrated only). With a shared domain under ACME, Gateway obtains and renews the certificate via TLS-ALPN-01. The pinned Relay reloads it for UDP 7842 on its 24-hour polling interval or at startup. The mode cannot change after installation.
 - The mode, backend, topology, and ACME setting are bound in `deployment-profile.json`, and a conflicting change aborts preflight before services stop. Lifecycle scripts never reverse schema or state after a partial activation, reset node or Signer identity, or lower a recorded checkpoint.
 
-Configuration and procedures are in [Integrated configuration](operations/production-deployment.md#integrated-configuration), and recovery is in [incident recovery](operations/incident-recovery.md). The contract does not establish runtime acceptance on its own ([Business validation](development/release-checks.md#business-validation)).
+Configuration and procedures are in [Integrated configuration](operations/production-deployment.md#integrated-configuration), and recovery is in [incident recovery](operations/incident-recovery.md) and [validation and release](development/release-checks.md).
 
 ### Relay build
 

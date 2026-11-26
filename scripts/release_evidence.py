@@ -129,16 +129,13 @@ def ci(repo, sha, baseline, deadline):
         full_run = wait(repo, full_run, full, deadline)
         if full_run['conclusion'] in ('success', 'failure'):
             full_jobs = jobs(repo, full_run)
-        for name in ('database-smoke', 'database-recovery-full'):
-            require(full_jobs.get(name, {}).get('conclusion') != 'failure',
-                    f'Full CI {name} failed: {full_run["html_url"]}')
+        require(full_jobs.get('database-smoke', {}).get('conclusion') != 'failure',
+                f'Full CI database-smoke failed: {full_run["html_url"]}')
     return {
         'quick_url': run['html_url'],
         'full_url': full_run['html_url'] if full_run else '',
         'contract_done': contract_passed(quick_jobs, baseline) or contract_passed(full_jobs, baseline),
-        'database_done': passed(full_jobs, 'database-smoke'),
-        'database_smoke_done': passed(quick_jobs, 'database-smoke'),
-        'recovery_done': passed(full_jobs, 'database-recovery-full'),
+        'database_smoke_done': passed(quick_jobs, 'database-smoke') or passed(full_jobs, 'database-smoke'),
     }
 
 

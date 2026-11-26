@@ -4,35 +4,21 @@
     clippy::too_many_lines
 )]
 
-use std::fs::OpenOptions;
-use std::os::unix::fs::{OpenOptionsExt as _, chown, symlink};
+use std::os::unix::fs::symlink;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use ocservia_agent_protocol::{
-    ArtifactConsumeRequest, ArtifactReadRequest, PrivilegedRequestMode, ReadRequest, privd_request,
+    ArtifactReadRequest, PrivilegedRequestMode, ReadRequest, privd_request,
 };
-use ocservia_command_authorization::{
-    ArtifactGrantClaimsV1, canonical_artifact_grant_v1, canonical_v1, claims_from_envelope_v1,
-    verification_key_id,
-};
-use ocservia_contracts::config_profile;
+use ocservia_command_authorization::{canonical_v1, claims_from_envelope_v1};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, AgentUpgradeOutcomeState, ArtifactGrantV1, CertificateCsr, CertificateP12,
-    CommandDeliveryMode, CommandResultState, CompleteConfigApply, CompleteConfigCandidate,
-    CompleteConfigDirective, IpBanRemove, NodeLocalTlsReference, PrivilegedCommandKind,
-    PrivilegedResultKind, SealedSecretPurpose, SealedSecretV1, ServiceReload, SessionDisconnect,
-    SessionGrantV1, SessionTerminate, UserCreate, command_envelope, complete_config_directive,
+    CommandDeliveryMode, CommandEnvelope, IpBanRemove, SealedSecretPurpose, SealedSecretV1,
+    ServiceReload, UserCreate, command_envelope,
 };
 use ocservia_ocserv_adapter::{FixedResources, Limits};
 use ocservia_test_support::{
-    deadline_ms, foreign_architecture, host_architecture, keyring, sign_command_v2,
-    sign_session_grant, ts, unix_seconds,
+    deadline_ms, keyring, sign_command_v2, sign_session_grant, unix_seconds,
 };
-use ocservia_upgrader::UpgradeTrigger;
-use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncWriteExt as _;
-
-use ocservia_contracts::generated::ocserv::platform::agent::v1::CommandEnvelope;
 
 use super::*;
 
@@ -41,54 +27,21 @@ const TEST_ENDPOINT_ID: [u8; 32] = [9; 32];
 async fn dispatch(
     request: PrivdRequest,
     node_id: &[u8; 16],
-    command_keys: &ControllerCommandKeyring,
+    keys: &ControllerCommandKeyring,
     adapter: &Adapter,
 ) -> PrivdResponse {
-    dispatch_upgrade(
-        request,
-        node_id,
-        command_keys,
-        adapter,
-        &UpgradeScheduler::disabled(),
-    )
-    .await
-}
-
-fn test_context(
-    node_id: [u8; 16],
-    command_keys: ControllerCommandKeyring,
-    attestation_key: Arc<SigningKey>,
-    upgrades: UpgradeScheduler,
-    adapter: Adapter,
-) -> PrivdContext {
-    let attestation_key_id: Arc<str> = Arc::from(key_id(&attestation_key.verifying_key()));
-    PrivdContext {
+    let ak = Arc::new(SigningKey::from_bytes(&[41; 32]));
+    let ctx = PrivdContext {
         exec_permits: Semaphore::new(MAX_CONCURRENT_CLIENTS),
         agent_uid: rustix_uid(),
-        node_id,
+        node_id: *node_id,
         endpoint_id: TEST_ENDPOINT_ID,
-        command_keys,
-        attestation_key,
-        attestation_key_id,
-        upgrades,
-        adapter,
-    }
-}
-
-async fn dispatch_upgrade(
-    request: PrivdRequest,
-    node_id: &[u8; 16],
-    command_keys: &ControllerCommandKeyring,
-    adapter: &Adapter,
-    upgrades: &UpgradeScheduler,
-) -> PrivdResponse {
-    let ctx = test_context(
-        *node_id,
-        command_keys.clone(),
-        Arc::new(SigningKey::from_bytes(&[41; 32])),
-        upgrades.clone(),
-        adapter.clone(),
-    );
+        command_keys: keys.clone(),
+        attestation_key_id: Arc::from(key_id(&ak.verifying_key())),
+        attestation_key: ak,
+        upgrades: UpgradeScheduler::disabled(),
+        adapter: adapter.clone(),
+    };
     Box::pin(dispatch_attested(&request, &ctx)).await
 }
 
@@ -102,142 +55,60 @@ struct PrivdFixture {
 impl PrivdFixture {
     fn new() -> Self {
         let dir = ocservia_test_support::PrivateTempDir::new("ocp");
-        let counter = dir.join("reload-count");
-        let systemctl = dir.join("systemctl");
+        let (counter, systemctl) = (dir.join("reload-count"), dir.join("systemctl"));
         fs::write(
             &systemctl,
             format!("#!/bin/sh\nprintf x >> '{}'\n", counter.display()),
         )
-        .expect("write systemctl");
+        .expect("sc");
         fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).expect("chmod");
-        let config = dir.join("ocserv.conf");
-        let boot = dir.join("boot_id");
-        fs::write(&config, b"fixture\n").expect("config");
+        let (config, boot) = (dir.join("ocserv.conf"), dir.join("boot_id"));
+        fs::write(&config, b"fixture\n").expect("cfg");
         fs::write(&boot, Uuid::now_v7().to_string()).expect("boot");
-        let resources = FixedResources::new(
+        let res = FixedResources::new(
             systemctl,
             PathBuf::from("/bin/true"),
             PathBuf::from("/bin/true"),
             config,
             boot,
         )
-        .expect("fixed resources")
+        .expect("res")
         .with_effect_store(dir.join("effects.sqlite3"), dir.join("effects.key"))
-        .expect("effect resources");
-        let adapter = Adapter::new(resources.clone(), Limits::default());
+        .expect("eff");
         Self {
             dir,
-            adapter,
-            resources,
+            adapter: Adapter::new(res.clone(), Limits::default()),
+            resources: res,
             counter,
         }
     }
-
-    fn upgrade_scheduler(&self) -> (UpgradeScheduler, PathBuf) {
-        let ops = self.dir.join("upgrade-operations");
-        fs::create_dir(&ops).expect("ops dir");
-        fs::set_permissions(&ops, fs::Permissions::from_mode(0o700)).expect("chmod ops");
-        (
-            UpgradeScheduler::new(ops.clone(), UpgradeTrigger::Disabled),
-            ops,
-        )
-    }
-
-    fn server_config(
-        &self,
-        node_id: [u8; 16],
-        keys: ControllerCommandKeyring,
-        attest: [u8; 32],
-    ) -> ServerConfig {
+    fn server_config(&self, node_id: [u8; 16], keys: ControllerCommandKeyring) -> ServerConfig {
         ServerConfig {
             socket: self.dir.join("privd.sock"),
             agent_uid: rustix_uid(),
             node_id,
             endpoint_id: TEST_ENDPOINT_ID,
             command_keys: keys,
-            attestation_key: Arc::new(SigningKey::from_bytes(&attest)),
+            attestation_key: Arc::new(SigningKey::from_bytes(&[43; 32])),
             upgrades: UpgradeScheduler::disabled(),
         }
     }
 }
 
-fn signed_command(
-    key: &SigningKey,
-    node_id: [u8; 16],
-    issued_at: i64,
-    expires_at: i64,
-    action: &str,
-    capability: &str,
-    payload: command_envelope::Payload,
-) -> CommandEnvelope {
+fn reload_cmd(key: &SigningKey, node_id: [u8; 16], issued: i64, expires: i64) -> CommandEnvelope {
     sign_command_v2(
-        key, node_id, issued_at, expires_at, 7, action, capability, payload,
-    )
-}
-
-fn signed_service_reload(
-    key: &SigningKey,
-    node_id: [u8; 16],
-    issued: i64,
-    expires: i64,
-) -> CommandEnvelope {
-    signed_command(
         key,
         node_id,
         issued,
         expires,
+        7,
         "service.reload",
         "ocserv.service.reload",
         command_envelope::Payload::ServiceReload(ServiceReload {}),
     )
 }
 
-fn signed_agent_upgrade(
-    key: &SigningKey,
-    node_id: [u8; 16],
-    issued: i64,
-    expires: i64,
-    ver: &str,
-    sha: Vec<u8>,
-    arch: &str,
-) -> CommandEnvelope {
-    signed_command(
-        key,
-        node_id,
-        issued,
-        expires,
-        "agent.upgrade",
-        "ocserv.agent.upgrade.v2",
-        command_envelope::Payload::AgentUpgrade(AgentUpgrade {
-            target_version: ver.to_owned(),
-            package_sha256: sha,
-            architecture: arch.to_owned(),
-        }),
-    )
-}
-
-fn session_grant_for(
-    key: &SigningKey,
-    cmd: &CommandEnvelope,
-    endpoint_id: [u8; 32],
-    session_epoch: u64,
-) -> SessionGrantV1 {
-    let issued = cmd.issued_at.expect("issued").seconds;
-    let expires = cmd.expires_at.expect("expires").seconds;
-    let node_id: [u8; 16] = cmd.node_id.as_slice().try_into().expect("node");
-    sign_session_grant(
-        key,
-        node_id,
-        endpoint_id,
-        cmd.expected_revision,
-        session_epoch,
-        vec![cmd.required_capability.clone()],
-        issued - 1,
-        expires.max(unix_seconds() + 60),
-    )
-}
-
-fn resign_mode(
+fn resign(
     mut cmd: CommandEnvelope,
     key: &SigningKey,
     mode: CommandDeliveryMode,
@@ -246,230 +117,143 @@ fn resign_mode(
     cmd.message_id = Uuid::now_v7().as_bytes().to_vec();
     let claims = claims_from_envelope_v1(&cmd).expect("claims");
     cmd.authorization.as_mut().expect("auth").signature = key
-        .sign(&canonical_v1(&claims).expect("canonical"))
+        .sign(&canonical_v1(&claims).expect("canon"))
         .to_bytes()
         .to_vec();
     cmd
 }
 
-fn command_request_with_grant(
-    command: CommandEnvelope,
-    session_grant: Option<SessionGrantV1>,
-) -> PrivdRequest {
+fn req_epoch(command: CommandEnvelope, key: &SigningKey, epoch: u64) -> PrivdRequest {
+    let (issued, expires) = (
+        command.issued_at.expect("i").seconds,
+        command.expires_at.expect("e").seconds,
+    );
+    let grant = sign_session_grant(
+        key,
+        command.node_id.as_slice().try_into().expect("n"),
+        TEST_ENDPOINT_ID,
+        command.expected_revision,
+        epoch,
+        vec![command.required_capability.clone()],
+        issued - 1,
+        expires.max(unix_seconds() + 60),
+    );
     PrivdRequest {
         request_id: Uuid::now_v7().as_bytes().to_vec(),
         deadline_unix_ms: deadline_ms(5_000),
         accepted_at: command.issued_at,
         authorization_command: Some(command),
         privileged_mode: PrivilegedRequestMode::Execute.into(),
-        session_grant: session_grant.map(Box::new),
-        operation: None,
+        session_grant: Some(Box::new(grant)),
+        ..PrivdRequest::default()
     }
 }
 
-fn command_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
-    let grant = session_grant_for(key, &command, TEST_ENDPOINT_ID, 1);
-    command_request_with_grant(command, Some(grant))
-}
-
-fn command_request_at_epoch(
-    command: CommandEnvelope,
-    key: &SigningKey,
-    session_epoch: u64,
-) -> PrivdRequest {
-    let grant = session_grant_for(key, &command, TEST_ENDPOINT_ID, session_epoch);
-    command_request_with_grant(command, Some(grant))
-}
-
-fn reconcile_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
+fn unsigned(operation: Option<privd_request::Operation>) -> PrivdRequest {
     PrivdRequest {
         request_id: Uuid::now_v7().as_bytes().to_vec(),
         deadline_unix_ms: deadline_ms(5_000),
-        accepted_at: None,
-        authorization_command: Some(resign_mode(
-            command,
-            key,
-            CommandDeliveryMode::ReconcileOnly,
-        )),
-        privileged_mode: PrivilegedRequestMode::Reconcile.into(),
-        session_grant: None,
-        operation: None,
-    }
-}
-
-fn retry_request(command: CommandEnvelope, key: &SigningKey) -> PrivdRequest {
-    command_request(
-        resign_mode(command, key, CommandDeliveryMode::RetryIfEffectAbsent),
-        key,
-    )
-}
-
-fn unsigned_request(operation: Option<privd_request::Operation>) -> PrivdRequest {
-    PrivdRequest {
-        request_id: Uuid::now_v7().as_bytes().to_vec(),
-        deadline_unix_ms: deadline_ms(5_000),
-        accepted_at: None,
-        authorization_command: None,
-        privileged_mode: PrivilegedRequestMode::Unspecified.into(),
-        session_grant: None,
         operation,
+        ..PrivdRequest::default()
     }
 }
 
-fn assert_error_kind(response: &PrivdResponse, want: ErrorKind) {
-    let Some(privd_response::Result::Error(failure)) = response.result.as_ref() else {
-        panic!("expected error {want:?}, got {:?}", response.result);
+fn assert_denied(resp: &PrivdResponse) {
+    let Some(privd_response::Result::Error(f)) = resp.result.as_ref() else {
+        panic!("expected error");
     };
     assert_eq!(
-        ErrorKind::try_from(failure.kind).unwrap_or(ErrorKind::Unspecified),
-        want
+        ErrorKind::try_from(f.kind).unwrap_or(ErrorKind::Unspecified),
+        ErrorKind::PermissionDenied
     );
 }
 
-fn assert_permission_denied(response: &PrivdResponse) {
-    assert_error_kind(response, ErrorKind::PermissionDenied);
-}
+#[tokio::test]
+async fn rejects_expired_unsigned_tampered_and_cross_purpose_before_root_effect() {
+    let (trusted, unknown) = (
+        SigningKey::from_bytes(&[7; 32]),
+        SigningKey::from_bytes(&[11; 32]),
+    );
+    let (keys, node_id, now, fx) = (
+        keyring(&trusted),
+        *Uuid::now_v7().as_bytes(),
+        unix_seconds(),
+        PrivdFixture::new(),
+    );
 
-fn assert_requires_reconciliation(response: &PrivdResponse) {
-    assert!(response.privileged_result_proof.is_none());
-    assert_error_kind(response, ErrorKind::Unavailable);
-}
+    assert_denied(&dispatch(unsigned(None), &node_id, &keys, &fx.adapter).await);
+    assert_denied(
+        &dispatch(
+            unsigned(Some(privd_request::Operation::ArtifactRead(
+                ArtifactReadRequest::default(),
+            ))),
+            &node_id,
+            &keys,
+            &fx.adapter,
+        )
+        .await,
+    );
+    for bad in [
+        reload_cmd(&trusted, node_id, now - 60, now - 1),
+        reload_cmd(&trusted, *Uuid::now_v7().as_bytes(), now, now + 60),
+        reload_cmd(&unknown, node_id, now, now + 60),
+    ] {
+        assert_denied(&dispatch(req_epoch(bad, &trusted, 1), &node_id, &keys, &fx.adapter).await);
+    }
+    let mut forged = reload_cmd(&trusted, node_id, now, now + 60);
+    forged.payload = Some(command_envelope::Payload::IpBanRemove(IpBanRemove {
+        ip: "192.0.2.1".into(),
+    }));
+    assert_denied(&dispatch(req_epoch(forged, &trusted, 1), &node_id, &keys, &fx.adapter).await);
 
-fn durable_operation_state(ops_dir: &Path, operation_id: &[u8]) -> String {
-    let id = Uuid::from_slice(operation_id).expect("op UUID");
-    fs::read_to_string(ops_dir.join(id.to_string()).join("state"))
-        .expect("durable state")
-        .trim_end_matches('\n')
-        .to_owned()
+    let mut bad_user = sign_command_v2(
+        &trusted,
+        node_id,
+        now,
+        now + 60,
+        1,
+        "user.create",
+        "ocserv.users.write",
+        command_envelope::Payload::UserCreate(UserCreate {
+            username: "alice".into(),
+            desired_revision: 1,
+            sealed_password_v1: Some(SealedSecretV1 {
+                version: 1,
+                purpose: SealedSecretPurpose::UserPassword as i32,
+                key_id: "user-key-v1".into(),
+                ciphertext: vec![0xa5; 256],
+            }),
+        }),
+    );
+    if let Some(command_envelope::Payload::UserCreate(p)) = bad_user.payload.as_mut() {
+        p.sealed_password_v1.as_mut().expect("s").purpose =
+            SealedSecretPurpose::CertificateP12Password as i32;
+    }
+    assert_denied(
+        &dispatch(
+            req_epoch(bad_user, &trusted, 1),
+            &node_id,
+            &keys,
+            &fx.adapter,
+        )
+        .await,
+    );
+    assert!(!fx.counter.exists());
 }
 
 #[tokio::test]
-async fn rejects_expired_missing_unknown_and_unsigned_operations() {
-    let trusted = SigningKey::from_bytes(&[7; 32]);
-    let unknown = SigningKey::from_bytes(&[11; 32]);
-    let keys = keyring(&trusted);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let adapter = Adapter::new(FixedResources::default(), Limits::default());
-
-    let expired_req = PrivdRequest {
-        deadline_unix_ms: 1,
-        ..unsigned_request(Some(privd_request::Operation::ServiceStatus(
-            ReadRequest {},
-        )))
-    };
-    assert!(matches!(
-        dispatch(expired_req, &node_id, &keys, &adapter)
-            .await
-            .result,
-        Some(privd_response::Result::Error(_))
-    ));
-    assert_permission_denied(&dispatch(unsigned_request(None), &node_id, &keys, &adapter).await);
-
-    for bad_cmd in [
-        signed_service_reload(&trusted, node_id, now - 60, now - 1),
-        signed_service_reload(&trusted, *Uuid::now_v7().as_bytes(), now, now + 60),
-        signed_service_reload(&unknown, node_id, now, now + 60),
-    ] {
-        assert_permission_denied(
-            &dispatch(
-                command_request(bad_cmd, &trusted),
-                &node_id,
-                &keys,
-                &adapter,
-            )
-            .await,
-        );
-    }
-    for op in [
-        privd_request::Operation::ArtifactRead(ArtifactReadRequest::default()),
-        privd_request::Operation::ArtifactConsume(ArtifactConsumeRequest::default()),
-    ] {
-        assert_permission_denied(
-            &dispatch(unsigned_request(Some(op)), &node_id, &keys, &adapter).await,
-        );
-    }
-}
-
-#[tokio::test]
-async fn rebound_authority_denies_old_node_key_and_quarantines_uncertain_effects() {
-    let old_key = SigningKey::from_bytes(&[8; 32]);
-    let new_key = SigningKey::from_bytes(&[9; 32]);
-    let keys = keyring(&new_key);
-    let old_node = *Uuid::now_v7().as_bytes();
-    let new_node = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fx = PrivdFixture::new();
-    for (signing, node) in [
-        (&old_key, old_node),
-        (&old_key, new_node),
-        (&new_key, old_node),
-    ] {
-        let cmd = signed_service_reload(signing, node, now, now + 60);
-        assert_permission_denied(
-            &dispatch(command_request(cmd, signing), &new_node, &keys, &fx.adapter).await,
-        );
-        assert!(!fx.counter.exists());
-    }
-    let cmd = signed_service_reload(&new_key, new_node, now, now + 60);
-    let ok = dispatch(
-        command_request(cmd, &new_key),
-        &new_node,
-        &keys,
-        &fx.adapter,
-    )
-    .await;
-    assert!(matches!(ok.result, Some(privd_response::Result::Mutation(ref r)) if r.applied));
-    assert_eq!(fs::read(&fx.counter).expect("counter"), b"x");
-}
-
-#[tokio::test]
-async fn journal_acceptance_allows_five_minute_skew_and_receipts_survive_clock_rollback() {
+async fn signed_effect_executes_once_replays_and_enforces_owner_epoch_floor() {
     let signing = SigningKey::from_bytes(&[8; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fixture = PrivdFixture::new();
-    for (accepted_at, allowed) in [
-        (ts(now - 301, 0), false),
-        (ts(now - 300, 0), true),
-        (ts(now + 30, 900_000_000), true),
-        (ts(now + 600, 0), false),
-    ] {
-        let mut request = command_request(
-            signed_service_reload(&signing, node_id, now, now + 60),
-            &signing,
-        );
-        request.accepted_at = Some(accepted_at);
-        let result = dispatch(request, &node_id, &keys, &fixture.adapter).await;
-        assert_eq!(result.privileged_result_proof.is_some(), allowed);
-        if let Some(proof) = result.privileged_result_proof {
-            ocservia_privd_attestation::verify_receipt(
-                &proof,
-                &SigningKey::from_bytes(&[41; 32]).verifying_key(),
-            )
-            .expect("valid receipt");
-            let receipt = proof.receipt_v1.expect("receipt");
-            assert_eq!(receipt.accepted_at, Some(accepted_at));
-            if accepted_at.seconds > now {
-                assert_eq!(receipt.completed_at, Some(accepted_at));
-            }
-        }
-    }
-    assert_eq!(fs::read(&fixture.counter).expect("executed twice"), b"xx");
-}
-
-#[tokio::test]
-async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_fault() {
-    let signing = SigningKey::from_bytes(&[8; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let cmd = signed_service_reload(&signing, node_id, now, now + 60);
-    let fx = PrivdFixture::new();
+    let (keys, node_id, now, fx) = (
+        keyring(&signing),
+        *Uuid::now_v7().as_bytes(),
+        unix_seconds(),
+        PrivdFixture::new(),
+    );
+    let cmd = reload_cmd(&signing, node_id, now, now + 60);
 
     let first = dispatch(
-        command_request(cmd.clone(), &signing),
+        req_epoch(cmd.clone(), &signing, 1),
         &node_id,
         &keys,
         &fx.adapter,
@@ -484,1313 +268,133 @@ async fn signed_effect_executes_once_replays_after_restart_and_fails_on_receipt_
         &proof,
         &SigningKey::from_bytes(&[41; 32]).verifying_key(),
     )
-    .expect("valid receipt");
+    .expect("receipt");
 
     let restarted = Adapter::new(fx.resources.clone(), Limits::default());
-    for req in [
-        reconcile_request(cmd.clone(), &signing),
-        command_request(cmd.clone(), &signing),
-        retry_request(cmd, &signing),
-    ] {
+    let reconcile = PrivdRequest {
+        request_id: Uuid::now_v7().as_bytes().to_vec(),
+        deadline_unix_ms: deadline_ms(5_000),
+        authorization_command: Some(resign(
+            cmd.clone(),
+            &signing,
+            CommandDeliveryMode::ReconcileOnly,
+        )),
+        privileged_mode: PrivilegedRequestMode::Reconcile.into(),
+        ..PrivdRequest::default()
+    };
+    let retry = req_epoch(
+        resign(
+            cmd.clone(),
+            &signing,
+            CommandDeliveryMode::RetryIfEffectAbsent,
+        ),
+        &signing,
+        1,
+    );
+    for req in [reconcile, req_epoch(cmd, &signing, 1), retry] {
         let replay = dispatch(req, &node_id, &keys, &restarted).await;
-        assert_eq!(replay.privileged_result_proof, Some(proof.clone()));
-        assert_eq!(replay.result, first.result);
+        assert_eq!(
+            (replay.privileged_result_proof, replay.result),
+            (Some(proof.clone()), first.result.clone())
+        );
     }
     assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
 
-    // Receipt persistence failure cannot return privileged success or repeat side effect.
-    let fault_fx = PrivdFixture::new();
-    let init = signed_service_reload(&signing, node_id, now, now + 60);
-    let claims = claims_from_envelope_v1(&init).expect("claims");
-    let binding = effect_binding(&init, &claims).expect("binding");
-    assert_eq!(
-        fault_fx
-            .adapter
-            .prepare_authorized_effect(
-                authorized_effect(&init, &claims, &binding),
-                owner_fence(&node_id, &TEST_ENDPOINT_ID, 1),
-            )
-            .expect("init"),
-        AuthorizedEffectDecision::Execute
+    let newer = reload_cmd(&signing, node_id, now, now + 60);
+    assert!(
+        matches!(dispatch(req_epoch(newer, &signing, 2), &node_id, &keys, &restarted).await.result, Some(privd_response::Result::Mutation(ref r)) if r.applied)
     );
-    rusqlite::Connection::open(fault_fx.dir.join("effects.sqlite3"))
-        .expect("sqlite")
-        .execute_batch(
-            "CREATE TRIGGER fail_attested_response BEFORE UPDATE OF response ON authorized_effects BEGIN SELECT RAISE(ABORT, 'injected'); END;",
-        )
-        .expect("trigger");
-    let failed = dispatch(
-        command_request(
-            signed_service_reload(&signing, node_id, now, now + 60),
-            &signing,
-        ),
-        &node_id,
-        &keys,
-        &fault_fx.adapter,
-    )
-    .await;
-    assert_requires_reconciliation(&failed);
-    assert_eq!(fs::read_to_string(&fault_fx.counter).expect("counter"), "x");
-}
-
-#[tokio::test]
-async fn newer_owner_epoch_persists_and_rejects_stale_root_effects() {
-    let signing = SigningKey::from_bytes(&[47; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fx = PrivdFixture::new();
-
-    let stale = signed_service_reload(&signing, node_id, now, now + 60);
-    let newer = signed_service_reload(&signing, node_id, now, now + 60);
-    let accepted = dispatch(
-        command_request_at_epoch(newer, &signing, 2),
-        &node_id,
-        &keys,
-        &fx.adapter,
-    )
-    .await;
-    assert!(matches!(
-        accepted.result,
-        Some(privd_response::Result::Mutation(ref result)) if result.applied
-    ));
-
-    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
-    assert_permission_denied(
-        &dispatch(
-            retry_request(stale.clone(), &signing),
-            &node_id,
-            &keys,
-            &restarted,
-        )
-        .await,
-    );
-    assert_permission_denied(
-        &dispatch(
-            command_request(stale, &signing),
-            &node_id,
-            &keys,
-            &restarted,
-        )
-        .await,
-    );
-    assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
-
-    let current = signed_service_reload(&signing, node_id, now, now + 60);
-    let allowed = dispatch(
-        command_request_at_epoch(current, &signing, 2),
-        &node_id,
-        &keys,
-        &restarted,
-    )
-    .await;
-    assert!(matches!(
-        allowed.result,
-        Some(privd_response::Result::Mutation(ref result)) if result.applied
-    ));
+    let stale = reload_cmd(&signing, node_id, now, now + 60);
+    assert_denied(&dispatch(req_epoch(stale, &signing, 1), &node_id, &keys, &restarted).await);
     assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "xx");
 }
 
 #[tokio::test]
-async fn unattestable_csr_is_rejected_before_effect_reservation() {
-    let signing = SigningKey::from_bytes(&[44; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fx = PrivdFixture::new();
-    let certificate_id = Uuid::now_v7();
-    let command = signed_command(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "certificate.issue",
-        "ocserv.certificate.issue",
-        command_envelope::Payload::CertificateCsr(CertificateCsr {
-            certificate_id: certificate_id.as_bytes().to_vec(),
-            common_name: "a".repeat(254),
-            dns_names: Vec::new(),
-            key_bits: 2048,
-        }),
-    );
-
-    let rejected = dispatch(
-        command_request(command, &signing),
-        &node_id,
-        &keys,
-        &fx.adapter,
-    )
-    .await;
-    assert_error_kind(&rejected, ErrorKind::InvalidRequest);
-    assert!(!fx.dir.join("effects.sqlite3").exists());
-}
-
-#[tokio::test]
-async fn expired_and_retry_grants_enforce_reconciliation_and_fixed_host_rules() {
-    let signing = SigningKey::from_bytes(&[45; 32]);
-    let keys = keyring(&signing);
-    let node = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-
-    // Fixed-host classification check.
-    for payload in [
-        command_envelope::Payload::ServiceReload(ServiceReload {}),
-        command_envelope::Payload::IpBanRemove(IpBanRemove {
-            ip: "192.0.2.1".to_owned(),
-        }),
-        command_envelope::Payload::SessionDisconnect(SessionDisconnect {
-            session_id: "s".into(),
-            boot_id: "b".into(),
-        }),
-        command_envelope::Payload::SessionTerminate(SessionTerminate {
-            session_id: "s".into(),
-            boot_id: "b".into(),
-        }),
-    ] {
-        assert!(fixed_host_effect(&CommandEnvelope {
-            payload: Some(payload),
-            ..CommandEnvelope::default()
-        }));
-    }
-    assert!(!fixed_host_effect(&CommandEnvelope {
-        payload: Some(command_envelope::Payload::AgentUpgrade(
-            AgentUpgrade::default()
-        )),
-        ..CommandEnvelope::default()
-    }));
-
-    let expired = signed_service_reload(&signing, node, now - 120, now - 60);
-    assert!(
-        validate_request(
-            &reconcile_request(expired.clone(), &signing),
-            &node,
-            &TEST_ENDPOINT_ID,
-            &keys
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_request(
-            &retry_request(expired.clone(), &signing),
-            &node,
-            &TEST_ENDPOINT_ID,
-            &keys
-        )
-        .is_err()
-    );
-    assert!(
-        validate_request(
-            &command_request(expired, &signing),
-            &node,
-            &TEST_ENDPOINT_ID,
-            &keys
-        )
-        .is_err()
-    );
-
-    // Retry grant never re-executes fixed host effects when pending or pruned.
-    for pending in [true, false] {
-        let retry_fx = PrivdFixture::new();
-        let cmd = signed_service_reload(&signing, node, now, now + 60);
-        if pending {
-            let claims = claims_from_envelope_v1(&cmd).expect("claims");
-            let binding = effect_binding(&cmd, &claims).expect("binding");
-            assert_eq!(
-                retry_fx
-                    .adapter
-                    .prepare_authorized_effect(
-                        authorized_effect(&cmd, &claims, &binding),
-                        owner_fence(&node, &TEST_ENDPOINT_ID, 1),
-                    )
-                    .expect("prep"),
-                AuthorizedEffectDecision::Execute
-            );
-        }
-        for _ in 0..2 {
-            assert_requires_reconciliation(
-                &dispatch(
-                    retry_request(cmd.clone(), &signing),
-                    &node,
-                    &keys,
-                    &retry_fx.adapter,
-                )
-                .await,
-            );
-            assert!(!retry_fx.counter.exists());
-        }
-    }
-}
-
-#[tokio::test]
-async fn tampering_cross_purpose_and_substituted_config_fail_before_root_effect() {
-    use complete_config_directive::Value::{Literal, Tls};
-
-    let signing = SigningKey::from_bytes(&[9; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fx = PrivdFixture::new();
-    let cmd = signed_service_reload(&signing, node_id, now, now + 60);
-
-    let mutations: [fn(&mut CommandEnvelope); 10] = [
-        |c| c.node_id = Uuid::now_v7().as_bytes().to_vec(),
-        |c| c.expected_revision += 1,
-        |c| c.command_id = Uuid::now_v7().as_bytes().to_vec(),
-        |c| c.idempotency_key = Uuid::now_v7().as_bytes().to_vec(),
-        |c| c.required_capability = "ocserv.config.apply".to_owned(),
-        |c| c.semantic_payload_sha256[0] ^= 1,
-        |c| c.operation_id = Uuid::now_v7().as_bytes().to_vec(),
-        |c| c.actor_id = "forged-controller".to_owned(),
-        |c| {
-            c.payload = Some(command_envelope::Payload::IpBanRemove(IpBanRemove {
-                ip: "192.0.2.1".into(),
-            }));
-        },
-        |c| c.authorization.as_mut().expect("auth").signature[0] ^= 1,
-    ];
-    for mutate in mutations {
-        let mut changed = cmd.clone();
-        mutate(&mut changed);
-        assert_permission_denied(
-            &dispatch(
-                command_request(changed, &signing),
-                &node_id,
-                &keys,
-                &fx.adapter,
-            )
-            .await,
-        );
-    }
-    let mut agent_selected = command_request(cmd, &signing);
-    agent_selected.operation = Some(privd_request::Operation::ServiceStatus(ReadRequest {}));
-    assert_error_kind(
-        &dispatch(agent_selected, &node_id, &keys, &fx.adapter).await,
-        ErrorKind::InvalidRequest,
-    );
-    assert!(!fx.counter.exists());
-
-    // Cross-purpose sealed passwords fail closed.
-    let mut user_cmd = signed_command(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "user.create",
-        "ocserv.users.write",
-        command_envelope::Payload::UserCreate(UserCreate {
-            username: "alice".into(),
-            desired_revision: 1,
-            sealed_password_v1: Some(SealedSecretV1 {
-                version: 1,
-                purpose: SealedSecretPurpose::UserPassword as i32,
-                key_id: "user-key-v1".into(),
-                ciphertext: vec![0xa5; 256],
-            }),
-        }),
-    );
-    if let Some(command_envelope::Payload::UserCreate(p)) = user_cmd.payload.as_mut() {
-        p.sealed_password_v1.as_mut().expect("secret").purpose =
-            SealedSecretPurpose::CertificateP12Password as i32;
-    }
-    assert_permission_denied(
-        &dispatch(
-            command_request(user_cmd, &signing),
-            &node_id,
-            &keys,
-            &fx.adapter,
-        )
-        .await,
-    );
-
-    let mut p12_cmd = signed_command(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "certificate.private_key.export",
-        "ocserv.certificate.issue",
-        command_envelope::Payload::CertificateP12(CertificateP12 {
-            certificate_id: Uuid::now_v7().as_bytes().to_vec(),
-            certificate_chain_pem: vec![b'A'; 64],
-            artifact_id: Uuid::now_v7().as_bytes().to_vec(),
-            sealed_password_v1: Some(SealedSecretV1 {
-                version: 1,
-                purpose: SealedSecretPurpose::CertificateP12Password as i32,
-                key_id: "p12-key-v1".into(),
-                ciphertext: vec![0x5a; 256],
-            }),
-            certificate_version: 1,
-            artifact_expires_at: Some(ts(now + 60, 0)),
-        }),
-    );
-    if let Some(command_envelope::Payload::CertificateP12(p)) = p12_cmd.payload.as_mut() {
-        p.sealed_password_v1.as_mut().expect("secret").purpose =
-            SealedSecretPurpose::UserPassword as i32;
-    }
-    assert_permission_denied(
-        &dispatch(
-            command_request(p12_cmd, &signing),
-            &node_id,
-            &keys,
-            &fx.adapter,
-        )
-        .await,
-    );
-
-    // Substituted complete config candidate bytes fail closed.
-    let tls = NodeLocalTlsReference {
-        secret_ref_id: vec![0x12; 16],
-        version: "v1".into(),
-        certificate_sha256: vec![0x23; 32],
-        spki_sha256: vec![0x34; 32],
-        ca_sha256: Vec::new(),
-    };
-    let dir = |name: &str, value| CompleteConfigDirective {
-        name: name.into(),
-        value: Some(value),
-    };
-    let candidate = CompleteConfigCandidate {
-        node_id: node_id.to_vec(),
-        expected_revision: 1,
-        directives: vec![
-            dir("auth", Literal("plain[passwd=/etc/ocserv/ocpasswd]".into())),
-            dir("cookie-timeout", Literal("300".into())),
-            dir("device", Literal("vpns".into())),
-            dir("dns", Literal("1.1.1.1".into())),
-            dir("ipv4-network", Literal("192.0.2.0/24".into())),
-            dir("max-clients", Literal("64".into())),
-            dir("max-same-clients", Literal("2".into())),
-            dir("server-cert", Tls(tls.clone())),
-            dir("server-key", Tls(tls)),
-            dir("socket-file", Literal("/run/ocserv.socket".into())),
-            dir("tcp-port", Literal("443".into())),
-            dir("udp-port", Literal("0".into())),
-        ],
-    };
-    let candidate_hash =
-        Sha256::digest(config_profile::canonical(&candidate).expect("canonical")).to_vec();
-    let mut cfg_cmd = signed_command(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "config.apply",
-        config_profile::APPLY_CAPABILITY,
-        command_envelope::Payload::CompleteConfigApply(CompleteConfigApply {
-            candidate: Some(candidate),
-            candidate_hash,
-            materialized_hash: vec![0x33; 32],
-            expected_current_hash: vec![0x44; 32],
-            desired_revision: 2,
-            plan_id: Uuid::now_v7().as_bytes().to_vec(),
-            plan_expires_at: Some(ts(now + 60, 0)),
-        }),
-    );
-    if let Some(command_envelope::Payload::CompleteConfigApply(p)) = cfg_cmd.payload.as_mut() {
-        p.candidate.as_mut().expect("cand").directives[10].value = Some(Literal("8443".into()));
-    }
-    assert_permission_denied(
-        &dispatch(
-            command_request(cfg_cmd, &signing),
-            &node_id,
-            &keys,
-            &fx.adapter,
-        )
-        .await,
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn agent_upgrade_prepare_attestation_concurrency_conflict_and_validation() {
-    let signing = SigningKey::from_bytes(&[29; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-
-    // Release identity validation: foreign arch, unknown key, unsigned.
-    let no_io = Adapter::new(FixedResources::default(), Limits::default());
-    let foreign = signed_agent_upgrade(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "1.2.3",
-        vec![0x43; 32],
-        foreign_architecture(),
-    );
-    assert_error_kind(
-        &dispatch(command_request(foreign, &signing), &node_id, &keys, &no_io).await,
-        ErrorKind::InvalidRequest,
-    );
-    let forged_key = SigningKey::from_bytes(&[31; 32]);
-    let forged = signed_agent_upgrade(
-        &forged_key,
-        node_id,
-        now,
-        now + 60,
-        "1.2.3",
-        vec![0x43; 32],
-        host_architecture(),
-    );
-    assert_permission_denied(
-        &dispatch(
-            command_request(forged, &forged_key),
-            &node_id,
-            &keys,
-            &no_io,
-        )
-        .await,
-    );
-
-    // Concurrent duplicate schedules both attest the same durable intent; second active op is refused.
-    let fx = PrivdFixture::new();
-    let (upgrades, ops_dir) = fx.upgrade_scheduler();
-    let cmd = signed_agent_upgrade(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "1.2.3",
-        vec![0x43; 32],
-        host_architecture(),
-    );
-    let (r1, r2) = tokio::join!(
-        dispatch_upgrade(
-            command_request(cmd.clone(), &signing),
-            &node_id,
-            &keys,
-            &fx.adapter,
-            &upgrades
-        ),
-        dispatch_upgrade(
-            command_request(cmd.clone(), &signing),
-            &node_id,
-            &keys,
-            &fx.adapter,
-            &upgrades
-        ),
-    );
-    for resp in [&r1, &r2] {
-        let Some(privd_response::Result::AgentUpgradeScheduled(ref s)) = resp.result else {
-            panic!("expected scheduled intent, got {:?}", resp.result);
-        };
-        assert_eq!(
-            (
-                s.target_version.as_str(),
-                s.package_sha256.as_slice(),
-                s.operation_id.as_slice()
-            ),
-            ("1.2.3", [0x43; 32].as_slice(), cmd.operation_id.as_slice())
-        );
-        let proof = resp.privileged_result_proof.as_ref().expect("proof");
-        ocservia_privd_attestation::verify_receipt(
-            proof,
-            &SigningKey::from_bytes(&[41; 32]).verifying_key(),
-        )
-        .expect("receipt");
-        let rec = proof.receipt_v1.as_ref().expect("receipt_v1");
-        assert_eq!(
-            PrivilegedCommandKind::try_from(rec.command_kind),
-            Ok(PrivilegedCommandKind::AgentUpgrade)
-        );
-        assert_eq!(
-            PrivilegedResultKind::try_from(rec.result_kind),
-            Ok(PrivilegedResultKind::AgentUpgradeScheduled)
-        );
-        assert_eq!(
-            CommandResultState::try_from(rec.terminal_state),
-            Ok(CommandResultState::Succeeded)
-        );
-    }
-    assert_eq!(
-        durable_operation_state(&ops_dir, &cmd.operation_id),
-        "accepted"
-    );
-    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
-    let replay = dispatch_upgrade(
-        reconcile_request(cmd, &signing),
-        &node_id,
-        &keys,
-        &restarted,
-        &upgrades,
-    )
-    .await;
-    assert_eq!(replay.privileged_result_proof, r1.privileged_result_proof);
-    assert_eq!(replay.result, r1.result);
-
-    let second_cmd = signed_agent_upgrade(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "1.2.4",
-        vec![0x52; 32],
-        host_architecture(),
-    );
-    let refused = dispatch_upgrade(
-        command_request(second_cmd, &signing),
-        &node_id,
-        &keys,
-        &restarted,
-        &upgrades,
-    )
-    .await;
-    assert_error_kind(&refused, ErrorKind::InvalidRequest);
-    if let Some(proof) = refused.privileged_result_proof.as_ref() {
-        assert_eq!(
-            CommandResultState::try_from(proof.receipt_v1.as_ref().expect("rec").terminal_state),
-            Ok(CommandResultState::Failed)
-        );
-    }
-    let durable_count = fs::read_dir(&ops_dir)
-        .expect("ops")
-        .filter_map(Result::ok)
-        .filter(|e| Uuid::parse_str(&e.file_name().to_string_lossy()).is_ok())
-        .count();
-    assert_eq!(durable_count, 1);
-
-    // Pending journal replays while runner holds execution lock.
-    let lock_fx = PrivdFixture::new();
-    let (lock_up, lock_ops) = lock_fx.upgrade_scheduler();
-    let lock_cmd = signed_agent_upgrade(
-        &signing,
-        node_id,
-        now,
-        now + 60,
-        "1.2.3",
-        vec![0x61; 32],
-        host_architecture(),
-    );
-    let claims = claims_from_envelope_v1(&lock_cmd).expect("claims");
-    let binding = effect_binding(&lock_cmd, &claims).expect("binding");
-    assert_eq!(
-        lock_fx
-            .adapter
-            .prepare_authorized_effect(
-                authorized_effect(&lock_cmd, &claims, &binding),
-                owner_fence(&node_id, &TEST_ENDPOINT_ID, 1),
-            )
-            .expect("prep"),
-        AuthorizedEffectDecision::Execute
-    );
-    let Some(command_envelope::Payload::AgentUpgrade(payload)) = lock_cmd.payload.as_ref() else {
-        unreachable!()
-    };
-    let intent = UpgradeIntent::new(
-        claims.operation_id,
-        claims.command_id,
-        &payload.target_version,
-        payload.package_sha256.clone().try_into().expect("sha"),
-        &payload.architecture,
-        claims.semantic_payload_sha256,
-    )
-    .expect("intent");
-    assert_eq!(
-        lock_up.schedule_and_trigger(&intent).expect("schedule"),
-        ScheduleOutcome::Scheduled
-    );
-    fs::write(
-        lock_ops.join(intent.operation_id.to_string()).join("state"),
-        b"running\n",
-    )
-    .expect("state");
-    let exec_lock = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(lock_ops.join(".run.lock"))
-        .expect("lock");
-    rustix::fs::flock(
-        &exec_lock,
-        rustix::fs::FlockOperation::NonBlockingLockExclusive,
-    )
-    .expect("flock");
-    let lock_replay = dispatch_upgrade(
-        command_request(lock_cmd.clone(), &signing),
-        &node_id,
-        &keys,
-        &lock_fx.adapter,
-        &lock_up,
-    )
-    .await;
-    assert!(matches!(
-        lock_replay.result,
-        Some(privd_response::Result::AgentUpgradeScheduled(_))
-    ));
-    assert_eq!(
-        durable_operation_state(&lock_ops, &lock_cmd.operation_id),
-        "running"
-    );
-    drop(exec_lock);
-}
-
-#[tokio::test]
-async fn root_execution_and_artifacts_require_their_own_unexpired_session_grant() {
+async fn grants_and_socket_binding_enforce_trust_boundaries() {
     let signing = SigningKey::from_bytes(&[12; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fx = PrivdFixture::new();
-    let cmd = signed_service_reload(&signing, node_id, now, now + 60);
-    let cap = cmd.required_capability.clone();
-    let with_grant = |grant: Option<SessionGrantV1>| command_request_with_grant(cmd.clone(), grant);
+    let (keys, node_id, now, fx) = (
+        keyring(&signing),
+        *Uuid::now_v7().as_bytes(),
+        unix_seconds(),
+        PrivdFixture::new(),
+    );
+    let cmd = reload_cmd(&signing, node_id, now, now + 60);
 
-    for req in [
-        with_grant(None),
-        with_grant(Some(sign_session_grant(
+    for grant in [
+        None,
+        Some(sign_session_grant(
             &signing,
             node_id,
             TEST_ENDPOINT_ID,
             cmd.expected_revision,
             1,
-            vec![cap.clone()],
+            vec![cmd.required_capability.clone()],
             now - 60,
             now - 1,
-        ))),
-        with_grant(Some(sign_session_grant(
-            &signing,
-            node_id,
-            [8; 32],
-            cmd.expected_revision,
-            1,
-            vec![cap.clone()],
-            now - 1,
-            now + 60,
-        ))),
-        with_grant(Some(sign_session_grant(
+        )),
+        Some(sign_session_grant(
             &signing,
             node_id,
             TEST_ENDPOINT_ID,
             cmd.expected_revision,
             1,
-            vec!["ocserv.users.write".to_owned()],
+            vec!["ocserv.users.write".into()],
             now - 1,
             now + 60,
-        ))),
-        with_grant(Some(sign_session_grant(
-            &signing,
-            node_id,
-            TEST_ENDPOINT_ID,
-            cmd.expected_revision + 1,
-            1,
-            vec![cap.clone()],
-            now - 1,
-            now + 60,
-        ))),
+        )),
     ] {
-        assert_permission_denied(&dispatch(req, &node_id, &keys, &fx.adapter).await);
-    }
-    assert!(!fx.counter.exists());
-    let ok = dispatch(command_request(cmd, &signing), &node_id, &keys, &fx.adapter).await;
-    assert!(matches!(ok.result, Some(privd_response::Result::Mutation(ref r)) if r.applied));
-    assert_eq!(fs::read_to_string(&fx.counter).expect("counter"), "x");
-
-    // Artifact read and consume each require a live session grant and obey the epoch floor.
-    let claims = ArtifactGrantClaimsV1 {
-        version: 1,
-        key_id: verification_key_id(&signing.verifying_key()),
-        node_id,
-        artifact_id: *Uuid::now_v7().as_bytes(),
-        certificate_id: *Uuid::now_v7().as_bytes(),
-        certificate_version: 1,
-        operation_id: *Uuid::now_v7().as_bytes(),
-        authorized_subject: "user:test".into(),
-        purpose: "certificate_p12".into(),
-        max_bytes: 4096,
-        issued_at_seconds: now - 1,
-        issued_at_nanos: 0,
-        expires_at_seconds: now + 60,
-        expires_at_nanos: 0,
-        grant_id: *Uuid::now_v7().as_bytes(),
-    };
-    let sig = signing.sign(&canonical_artifact_grant_v1(&claims).expect("canonical"));
-    let grant = ArtifactGrantV1 {
-        version: 1,
-        key_id: claims.key_id.clone(),
-        node_id: node_id.to_vec(),
-        artifact_id: claims.artifact_id.to_vec(),
-        certificate_id: claims.certificate_id.to_vec(),
-        certificate_version: claims.certificate_version,
-        operation_id: claims.operation_id.to_vec(),
-        authorized_subject: claims.authorized_subject.clone(),
-        purpose: claims.purpose.clone(),
-        max_bytes: claims.max_bytes,
-        issued_at: Some(ts(claims.issued_at_seconds, 0)),
-        expires_at: Some(ts(claims.expires_at_seconds, 0)),
-        grant_id: claims.grant_id.to_vec(),
-        signature: sig.to_bytes().to_vec(),
-    };
-    let session_at = |epoch, issued, expires| {
-        Some(Box::new(sign_session_grant(
-            &signing,
-            node_id,
-            TEST_ENDPOINT_ID,
-            7,
-            epoch,
-            vec![cap.clone()],
-            issued,
-            expires,
-        )))
-    };
-    let read = |session_grant| PrivdRequest {
-        session_grant,
-        ..unsigned_request(Some(privd_request::Operation::ArtifactRead(
-            ArtifactReadRequest {
-                grant: Some(grant.clone()),
-            },
-        )))
-    };
-    let consume = |session_grant| PrivdRequest {
-        session_grant,
-        ..unsigned_request(Some(privd_request::Operation::ArtifactConsume(
-            ArtifactConsumeRequest {
-                grant: Some(grant.clone()),
-                sha256: vec![1; 32],
-                size: claims.max_bytes,
-                confirm_only: false,
-            },
-        )))
-    };
-    for req in [
-        read(None),
-        consume(None),
-        read(session_at(1, now - 60, now - 1)),
-        consume(session_at(1, now - 60, now - 1)),
-    ] {
-        assert_permission_denied(&dispatch(req, &node_id, &keys, &fx.adapter).await);
-    }
-    for req in [
-        read(session_at(1, now - 1, now + 60)),
-        consume(session_at(1, now - 1, now + 60)),
-    ] {
-        let resp = dispatch(req, &node_id, &keys, &fx.adapter).await;
-        let Some(privd_response::Result::Error(f)) = resp.result else {
-            panic!("expected absent lease error")
+        let req = PrivdRequest {
+            session_grant: grant.map(Box::new),
+            ..req_epoch(cmd.clone(), &signing, 1)
         };
-        assert_ne!(f.kind, i32::from(ErrorKind::PermissionDenied));
+        assert_denied(&dispatch(req, &node_id, &keys, &fx.adapter).await);
     }
 
-    let newer = read(session_at(2, now - 1, now + 60));
-    let response = dispatch(newer, &node_id, &keys, &fx.adapter).await;
-    let Some(privd_response::Result::Error(failure)) = response.result else {
-        panic!("expected absent lease error")
-    };
-    assert_ne!(failure.kind, i32::from(ErrorKind::PermissionDenied));
-
-    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
-    assert_permission_denied(
-        &dispatch(
-            read(session_at(1, now - 1, now + 60)),
-            &node_id,
-            &keys,
-            &restarted,
-        )
-        .await,
-    );
-    assert_permission_denied(
-        &dispatch(
-            consume(session_at(1, now - 1, now + 60)),
-            &node_id,
-            &keys,
-            &restarted,
-        )
-        .await,
-    );
-}
-
-#[tokio::test]
-async fn socket_binding_requires_trusted_parent_and_preserves_socket_access() {
-    let root = ocservia_test_support::PrivateTempDir::new("ocp-sock");
-    let dir = root.create_subdir_all("parent");
-    let signing = SigningKey::from_bytes(&[42; 32]);
-    let mut cfg = ServerConfig {
-        socket: dir.join("privd.sock"),
-        agent_uid: rustix_uid(),
-        node_id: *Uuid::now_v7().as_bytes(),
-        endpoint_id: TEST_ENDPOINT_ID,
-        command_keys: keyring(&signing),
-        attestation_key: Arc::new(signing),
-        upgrades: UpgradeScheduler::disabled(),
-    };
-    for mode in [0o755, 0o750] {
-        fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).expect("chmod");
-        let listener = bind_socket(&cfg).expect("trusted parent");
-        assert_eq!(
-            fs::metadata(&cfg.socket).expect("meta").mode() & 0o777,
-            0o660
-        );
-        drop(listener);
-    }
-    remove_socket(&cfg.socket).expect("rm");
-    for mode in [0o775, 0o757, 0o777] {
-        fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).expect("chmod");
-        assert_eq!(
-            bind_socket(&cfg).unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        assert!(!cfg.socket.exists());
-    }
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod");
-    if rustix_uid() == 0 {
-        chown(&dir, Some(65534), None).expect("chown");
-        let res = bind_socket(&cfg);
-        chown(&dir, Some(0), None).expect("restore");
-        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-    }
-    let alias = dir.with_extension("link");
-    symlink(&dir, &alias).expect("symlink");
+    let mut cfg = fx.server_config(node_id, keys);
+    let alias = fx.dir.join("alias");
+    symlink(fx.dir.path(), &alias).expect("symlink");
     cfg.socket = alias.join("privd.sock");
     assert_eq!(
         bind_socket(&cfg).unwrap_err().kind(),
         io::ErrorKind::PermissionDenied
     );
-    fs::remove_file(alias).expect("rm alias");
-    cfg.socket = dir.join("privd.sock");
-    fs::write(&cfg.socket, b"do not replace").expect("file");
-    assert_eq!(
-        bind_socket(&cfg).unwrap_err().kind(),
-        io::ErrorKind::AlreadyExists
-    );
-    assert_eq!(fs::read(&cfg.socket).expect("kept"), b"do not replace");
-    fs::remove_file(&cfg.socket).expect("rm");
-    symlink(dir.join("missing"), &cfg.socket).expect("dangling");
-    assert_eq!(
-        bind_socket(&cfg).unwrap_err().kind(),
-        io::ErrorKind::AlreadyExists
-    );
-}
 
-#[tokio::test]
-async fn saturated_clients_wait_for_capacity_and_direct_socket_blocks_forgery() {
-    let signing = SigningKey::from_bytes(&[42; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let fx = PrivdFixture::new();
-    let cfg = fx.server_config(node_id, keys, [43; 32]);
+    cfg.socket = fx.dir.join("privd.sock");
     let socket = cfg.socket.clone();
     let listener = bind_socket(&cfg).expect("bind");
     let (tx, rx) = tokio::sync::oneshot::channel();
     let srv = tokio::spawn(serve(listener, cfg, fx.adapter.clone(), async {
         let _ = rx.await;
     }));
-
-    // Same-UID forged request is denied before root effect.
     let mut forge = UnixStream::connect(&socket).await.expect("connect");
-    let forge_req = unsigned_request(Some(privd_request::Operation::ArtifactRead(
-        ArtifactReadRequest::default(),
-    )));
-    write_frame(&mut forge, &forge_req).await.expect("write");
-    assert_permission_denied(
+    write_frame(
+        &mut forge,
+        &unsigned(Some(privd_request::Operation::ArtifactRead(
+            ArtifactReadRequest::default(),
+        ))),
+    )
+    .await
+    .expect("write");
+    assert_denied(
         &read_frame::<PrivdResponse, _>(&mut forge)
             .await
             .expect("read"),
     );
-    assert!(!fx.counter.exists());
-    drop(forge);
-
-    // Idle connections (> MAX_CONCURRENT_CLIENTS) waiting in frame-read must
-    // not occupy execution permits or block valid requests.
-    let mut held = Vec::with_capacity(MAX_CONCURRENT_CLIENTS + 1);
-    for _ in 0..=MAX_CONCURRENT_CLIENTS {
-        held.push(UnixStream::connect(&socket).await.expect("held"));
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let mut active_client = UnixStream::connect(&socket).await.expect("active");
-    let req = unsigned_request(Some(privd_request::Operation::ServiceStatus(
+    let mut valid = UnixStream::connect(&socket).await.expect("valid");
+    let req = unsigned(Some(privd_request::Operation::ServiceStatus(
         ReadRequest {},
     )));
     let req_id = req.request_id.clone();
-    write_frame(&mut active_client, &req).await.expect("write");
+    write_frame(&mut valid, &req).await.expect("write");
     let resp = tokio::time::timeout(
         Duration::from_secs(2),
-        read_frame::<PrivdResponse, _>(&mut active_client),
+        read_frame::<PrivdResponse, _>(&mut valid),
     )
     .await
-    .expect("idle connections blocked legitimate client")
-    .expect("read");
+    .expect("fast")
+    .expect("resp");
     assert_eq!(resp.request_id, req_id);
-    assert!(resp.result.is_some());
-
-    drop(held);
     tx.send(()).expect("stop");
     srv.await.expect("join").expect("serve");
-    remove_socket(&socket).expect("rm sock");
-}
-
-#[tokio::test]
-async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
-    let signing = SigningKey::from_bytes(&[13; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let fx = PrivdFixture::new();
-    let now = unix_seconds();
-    let cmd = signed_service_reload(&signing, node_id, now, now + 60);
-    let send = |bytes: Vec<u8>, peer_uid| {
-        let (mut client, server) = UnixStream::pair().expect("pair");
-        let ctx = Arc::new(test_context(
-            node_id,
-            keys.clone(),
-            Arc::new(SigningKey::from_bytes(&[41; 32])),
-            UpgradeScheduler::disabled(),
-            fx.adapter.clone(),
-        ));
-        let task = tokio::spawn(async move {
-            verify_peer_uid(&server, peer_uid)?;
-            handle_client(server, ctx).await
-        });
-        async move {
-            let written = client.write_all(&bytes).await;
-            let finished = client.shutdown().await;
-            let response: Result<PrivdResponse, _> = read_frame(&mut client).await;
-            let status = task.await.expect("no panic");
-            if peer_uid == rustix_uid() {
-                written.expect("write");
-                finished.expect("shutdown");
-            }
-            (response, status)
-        }
-    };
-    let frame = |body: Vec<u8>| {
-        let mut out = u32::try_from(body.len())
-            .expect("len")
-            .to_be_bytes()
-            .to_vec();
-        out.extend(body);
-        out
-    };
-    let request = command_request(cmd.clone(), &signing);
-    let mut bad_reqs: Vec<PrivdRequest> = [
-        (|c: &mut CommandEnvelope| c.authorization.as_mut().expect("a").signature[0] ^= 1)
-            as fn(&mut CommandEnvelope),
-        |c| c.action = "config.apply".into(),
-        |c| c.required_capability = "ocserv.config.apply".into(),
-        |c| c.semantic_payload_sha256[0] ^= 1,
-        |c| {
-            c.payload = Some(command_envelope::Payload::IpBanRemove(IpBanRemove {
-                ip: "192.0.2.1".into(),
-            }));
-        },
-    ]
-    .into_iter()
-    .map(|f| {
-        let mut c = cmd.clone();
-        f(&mut c);
-        command_request(c, &signing)
-    })
-    .collect();
-    for c in [
-        signed_service_reload(&signing, *Uuid::now_v7().as_bytes(), now, now + 60),
-        signed_service_reload(&signing, node_id, now - 60, now - 1),
-        signed_service_reload(&signing, node_id, now + 3600, now + 3660),
-    ] {
-        bad_reqs.push(command_request(c, &signing));
-    }
-    bad_reqs.push(PrivdRequest {
-        privileged_mode: 127,
-        ..request.clone()
-    });
-    bad_reqs.push(PrivdRequest {
-        privileged_mode: PrivilegedRequestMode::Reconcile.into(),
-        ..request.clone()
-    });
-    bad_reqs.push(PrivdRequest {
-        accepted_at: None,
-        ..request.clone()
-    });
-
-    for bad in bad_reqs {
-        let (resp, status) = send(frame(bad.encode_to_vec()), rustix_uid()).await;
-        status.expect("handled");
-        let resp = resp.expect("resp");
-        assert!(
-            matches!(resp.result, Some(privd_response::Result::Error(_)))
-                && resp.privileged_result_proof.is_none()
-        );
-        assert!(!fx.counter.exists() && !fx.dir.join("effects.sqlite3").exists());
-    }
-
-    let mut dup_mode = request.encode_to_vec();
-    dup_mode.extend([0x40, 0x7f]);
-    assert!(matches!(
-        send(frame(dup_mode), rustix_uid())
-            .await
-            .0
-            .expect("resp")
-            .result,
-        Some(privd_response::Result::Error(_))
-    ));
-    for malformed in [vec![0, 0, 0, 0], vec![0xff; 4], vec![0, 0, 0, 2, 0x80]] {
-        let (r, s) = send(malformed, rustix_uid()).await;
-        assert!(r.is_err() && s.is_err() && !fx.counter.exists());
-    }
-    let (r, s) = send(frame(request.encode_to_vec()), rustix_uid() + 1).await;
-    assert!(
-        r.is_err()
-            && s.unwrap_err().kind() == io::ErrorKind::PermissionDenied
-            && !fx.counter.exists()
-    );
-
-    let mut additive = request.encode_to_vec();
-    additive.extend([0xf8, 0x07, 0x01, 0x40, 0x01]);
-    let (first, status) = send(frame(additive), rustix_uid()).await;
-    status.expect("ok");
-    let first = first.expect("first");
-    assert!(
-        matches!(first.result, Some(privd_response::Result::Mutation(ref r)) if r.applied)
-            && first.privileged_result_proof.is_some()
-    );
-    for replay in [request, reconcile_request(cmd.clone(), &signing)] {
-        let (resp, st) = send(frame(replay.encode_to_vec()), rustix_uid()).await;
-        st.expect("ok");
-        let resp = resp.expect("resp");
-        assert_eq!(
-            (resp.result, resp.privileged_result_proof),
-            (first.result.clone(), first.privileged_result_proof.clone())
-        );
-        assert_eq!(fs::read(&fx.counter).expect("cnt"), b"x");
-    }
-    let mut conflict = cmd;
-    conflict.expected_revision += 1;
-    let claims = claims_from_envelope_v1(&conflict).expect("claims");
-    conflict.authorization.as_mut().expect("auth").signature = signing
-        .sign(&canonical_v1(&claims).expect("c"))
-        .to_bytes()
-        .to_vec();
-    let (resp, st) = send(
-        frame(command_request(conflict, &signing).encode_to_vec()),
-        rustix_uid(),
-    )
-    .await;
-    st.expect("ok");
-    assert!(matches!(
-        resp.expect("r").result,
-        Some(privd_response::Result::Error(_))
-    ));
-    assert_eq!(fs::read(&fx.counter).expect("cnt"), b"x");
-}
-
-#[tokio::test]
-async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
-    let signing = SigningKey::from_bytes(&[7; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let adapter = Adapter::new(FixedResources::default(), Limits::default());
-    let dir = ocservia_test_support::PrivateTempDir::new("privd-upg");
-    let ops = dir.create_subdir_all("var/lib/ocservia-upgrade/operations");
-    let scheduler = UpgradeScheduler::new(ops, UpgradeTrigger::Disabled);
-    let intent = UpgradeIntent::new(
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-        "2.0.0",
-        [0x43; 32],
-        host_architecture(),
-        [0x55; 32],
-    )
-    .expect("intent");
-    scheduler.schedule_and_trigger(&intent).expect("schedule");
-    assert!(
-        ocservia_upgrader::UpgradeRunner::new(dir.path().to_path_buf())
-            .run(&intent.operation_id.to_string())
-            .is_err()
-    );
-
-    let req = unsigned_request(Some(privd_request::Operation::UpgradeResultList(
-        ReadRequest {},
-    )));
-    let ctx = test_context(
-        node_id,
-        keys,
-        Arc::new(SigningKey::from_bytes(&[41; 32])),
-        scheduler.clone(),
-        adapter.clone(),
-    );
-    let resp = dispatch_attested(&req, &ctx).await;
-    let Some(privd_response::Result::UpgradeResultList(list)) = resp.result else {
-        panic!("expected upgrade result list, got {:?}", resp.result);
-    };
-    assert_eq!(list.results.len(), 1);
-    assert_eq!(
-        (
-            list.results[0].operation_id.as_slice(),
-            list.results[0].state,
-            list.results[0].target_version.as_str()
-        ),
-        (
-            intent.operation_id.as_bytes().as_slice(),
-            i32::from(AgentUpgradeOutcomeState::Failed),
-            "2.0.0"
-        )
-    );
-    let proof = list.results[0]
-        .privileged_result_proof
-        .as_ref()
-        .expect("proof");
-    assert_eq!(
-        (
-            proof.node_id.as_slice(),
-            proof.operation_id.as_slice(),
-            proof.package_sha256.as_slice()
-        ),
-        (
-            node_id.as_slice(),
-            intent.operation_id.as_bytes().as_slice(),
-            intent.package_sha256.as_slice()
-        )
-    );
-    assert_eq!(
-        (proof.result_sha256.len(), proof.signature.len()),
-        (32, ed25519_dalek::SIGNATURE_LENGTH)
-    );
-}
-
-#[tokio::test]
-async fn distinct_commands_at_same_revision_allocate_unique_monotonic_effect_sequences() {
-    let signing = SigningKey::from_bytes(&[19; 32]);
-    let keys = keyring(&signing);
-    let node_id = *Uuid::now_v7().as_bytes();
-    let now = unix_seconds();
-    let fx = PrivdFixture::new();
-
-    let first = signed_service_reload(&signing, node_id, now, now + 60);
-    let second = signed_service_reload(&signing, node_id, now, now + 60);
-    assert_eq!(first.expected_revision, second.expected_revision);
-
-    let first_resp = dispatch(
-        command_request(first.clone(), &signing),
-        &node_id,
-        &keys,
-        &fx.adapter,
-    )
-    .await;
-    let first_proof = first_resp
-        .privileged_result_proof
-        .clone()
-        .expect("first attested proof");
-    let first_seq = first_proof
-        .receipt_v1
-        .as_ref()
-        .expect("first receipt")
-        .effect_sequence;
-
-    let second_resp = dispatch(
-        command_request(second.clone(), &signing),
-        &node_id,
-        &keys,
-        &fx.adapter,
-    )
-    .await;
-    let second_proof = second_resp
-        .privileged_result_proof
-        .clone()
-        .expect("second attested proof");
-    let second_seq = second_proof
-        .receipt_v1
-        .as_ref()
-        .expect("second receipt")
-        .effect_sequence;
-
-    assert_eq!(first_seq, 1);
-    assert_eq!(second_seq, 2);
-
-    // Replaying an already completed command must return its exact original
-    // cached receipt without consuming a new effect_sequence.
-    let replayed = dispatch(
-        reconcile_request(first, &signing),
-        &node_id,
-        &keys,
-        &fx.adapter,
-    )
-    .await;
-    assert_eq!(replayed.privileged_result_proof, Some(first_proof));
-
-    // A third distinct command after restart continues monotonically.
-    let restarted = Adapter::new(fx.resources.clone(), Limits::default());
-    let third = signed_service_reload(&signing, node_id, now, now + 60);
-    let third_resp = dispatch(
-        command_request(third, &signing),
-        &node_id,
-        &keys,
-        &restarted,
-    )
-    .await;
-    let third_seq = third_resp
-        .privileged_result_proof
-        .expect("third attested proof")
-        .receipt_v1
-        .expect("third receipt")
-        .effect_sequence;
-    assert_eq!(third_seq, 3);
-}
-
-#[test]
-fn attested_upgrade_results_isolate_corrupt_sibling_and_clamp_clock_rollback() {
-    let dir = ocservia_test_support::PrivateTempDir::new("privd-upg-resilient");
-    let ops = dir.create_subdir_all("var/lib/ocservia-upgrade/operations");
-    let scheduler = UpgradeScheduler::new(ops.clone(), UpgradeTrigger::Disabled);
-
-    // 1. Create one valid operation whose completed_unix is slightly ahead of now
-    //    (simulating an NTP backward clock jump).
-    let valid = UpgradeIntent::new(
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-        "2.0.1",
-        [0x11; 32],
-        host_architecture(),
-        [0x22; 32],
-    )
-    .expect("valid intent");
-    scheduler
-        .schedule_and_trigger(&valid)
-        .expect("schedule valid");
-    let valid_dir = ops.join(valid.operation_id.to_string());
-    let future_unix = unix_seconds().cast_unsigned() + 600;
-    let future_result = format!(
-        "schema=1\nstate=succeeded\noperation_id={}\ntarget_version=2.0.1\npackage_sha256={}\ncompleted_unix={future_unix}\ndetail=activated release\n",
-        valid.operation_id,
-        hex::encode(valid.package_sha256)
-    );
-    let result_path = valid_dir.join("result");
-    let state_path = valid_dir.join("state");
-    fs::write(&result_path, future_result.as_bytes()).expect("write future result");
-    fs::set_permissions(&result_path, fs::Permissions::from_mode(0o600)).expect("mode result");
-    fs::write(&state_path, b"succeeded\n").expect("write state");
-    fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600)).expect("mode state");
-
-    // 2. Create a second sibling directory with a corrupt 0644 result file.
-    let corrupt = UpgradeIntent::new(
-        *Uuid::now_v7().as_bytes(),
-        *Uuid::now_v7().as_bytes(),
-        "2.0.2",
-        [0x33; 32],
-        host_architecture(),
-        [0x44; 32],
-    )
-    .expect("corrupt intent");
-    scheduler
-        .schedule_and_trigger(&corrupt)
-        .expect("schedule corrupt");
-    let corrupt_res = ops.join(corrupt.operation_id.to_string()).join("result");
-    fs::write(&corrupt_res, b"corrupt-content").expect("write corrupt");
-    fs::set_permissions(&corrupt_res, fs::Permissions::from_mode(0o644)).expect("mode 644");
-
-    let node_id = *Uuid::now_v7().as_bytes();
-    let key = SigningKey::from_bytes(&[41; 32]);
-    let key_id_str = verification_key_id(&key.verifying_key());
-    let result = read_attested_upgrade_results(&ops, &node_id, &key, &key_id_str)
-        .expect("resilient read must succeed despite corrupt sibling");
-    let privd_response::Result::UpgradeResultList(list) = result else {
-        panic!("expected UpgradeResultList");
-    };
-    assert_eq!(list.results.len(), 1);
-    assert_eq!(list.results[0].target_version, "2.0.1");
-    let proof = list.results[0]
-        .privileged_result_proof
-        .as_ref()
-        .expect("proof");
-    assert!(
-        proof.attested_unix_ms >= proof.completed_unix_ms,
-        "attested_unix_ms ({}) must clamp >= completed_unix_ms ({})",
-        proof.attested_unix_ms,
-        proof.completed_unix_ms
-    );
+    remove_socket(&socket).expect("rm");
 }

@@ -1,5 +1,3 @@
-#[cfg(test)]
-use ocservia_contracts::generated::ocserv::platform::agent::v1::ConfigApplyResult;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretV1,
     SemanticPayloadHashVersion, command_envelope,
@@ -33,24 +31,6 @@ pub fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, &st
             Some(("config", "ocserv.conf", value.desired_revision))
         }
         _ => None,
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn observed_result(envelope: &CommandEnvelope) -> Vec<u8> {
-    match envelope.payload.as_ref() {
-        Some(command_envelope::Payload::CompleteConfigApply(payload)) => ConfigApplyResult {
-            candidate_hash: payload.candidate_hash.clone(),
-            previous_hash: Vec::new(),
-            observed_hash: payload.candidate_hash.clone(),
-            applied_revision: payload.desired_revision,
-            healthy: true,
-            rolled_back: false,
-            failed_critical: false,
-            failure_code: String::new(),
-        }
-        .encode_to_vec(),
-        _ => b"observed".to_vec(),
     }
 }
 
