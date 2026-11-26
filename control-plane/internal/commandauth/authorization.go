@@ -533,12 +533,10 @@ func payloadAuthorization(envelope *agentv1.CommandEnvelope) (uint32, string, st
 	case *agentv1.CommandEnvelope_CertificateRevoke:
 		return 119, "certificate.revoke", "ocserv.certificate.revoke", nil
 	case *agentv1.CommandEnvelope_AgentUpgrade:
-		switch envelope.GetRequiredCapability() {
-		case "ocserv.agent.upgrade.v1", "ocserv.agent.upgrade.v2":
-			return 128, "agent.upgrade", envelope.GetRequiredCapability(), nil
-		default:
+		if envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v2" {
 			return 0, "", "", errors.New("unsupported agent upgrade capability")
 		}
+		return 128, "agent.upgrade", envelope.GetRequiredCapability(), nil
 	default:
 		return 0, "", "", errors.New("command payload does not support authorization v1")
 	}
