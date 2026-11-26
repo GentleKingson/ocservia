@@ -1,5 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
-import { beforeEach } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { requestOrigin, stubRequestOrigin } from "./request-origin";
 
 let createNodeBootstrapToken: typeof import("../src/api/enrollment").createNodeBootstrapToken;

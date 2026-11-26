@@ -7,20 +7,25 @@ export const devAuthToken = import.meta.env.DEV
   ? import.meta.env.VITE_DEV_AUTH_TOKEN
   : undefined;
 
+export function formatUuid(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 export function newIdempotencyKey(): string {
   if (typeof globalThis.crypto.randomUUID === "function")
     return globalThis.crypto.randomUUID();
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
-  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+  return formatUuid(bytes);
 }
 
 export class ResponseError extends Error {
   constructor(
     readonly response: Response,
     message = "",
+    readonly type = "",
   ) {
     super(message);
   }
@@ -72,15 +77,39 @@ client.use({
         type !== "https://ocservia.dev/problems/password-change"
       )
         redirectToLogin();
-      throw new ResponseError(response, detail);
+      throw new ResponseError(response, detail, type);
     }
   },
 });
 
+export async function unwrap<T>(
+  request: Promise<{ data?: T; response: Response }>,
+): Promise<T> {
+  const { data, response } = await request;
+  if (data === undefined) throw new ResponseError(response);
+  return data;
+}
+
 export async function read<T>(
   request: Promise<{ data?: T; response: Response }>,
 ) {
-  const { data, response } = await request;
-  if (data === undefined) throw new ResponseError(response);
-  return fromWire(data);
+  return fromWire(await unwrap(request));
+}
+
+export function fencedHeaders(version: number) {
+  return {
+    "Idempotency-Key": newIdempotencyKey(),
+    "If-Match": `"revision-${String(version)}"`,
+  };
+}
+
+export function fencedRequest(
+  version: number,
+  reason: string,
+  ttlSeconds: number,
+) {
+  return {
+    header: fencedHeaders(version),
+    body: { reason, expected_version: version, ttl_seconds: ttlSeconds },
+  };
 }

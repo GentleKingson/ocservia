@@ -1,17 +1,14 @@
 <script setup lang="ts">
 import { Ellipsis } from "@lucide/vue";
-import { ResponseError } from "@/api/transport";
 import { useIntervalFn, useNow } from "@vueuse/core";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
-import { createAgentRollout } from "../api/agents";
 import DataState from "../components/common/DataState.vue";
-import FormField from "../components/common/FormField.vue";
-import OperationDialog from "../components/common/OperationDialog.vue";
 import PageHeader from "../components/common/PageHeader.vue";
 import NodeInstallDialog from "../components/nodes/NodeInstallDialog.vue";
+import NodeRolloutDialog from "../components/nodes/NodeRolloutDialog.vue";
 import NodeTableToolbar from "../components/nodes/NodeTableToolbar.vue";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -21,7 +18,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../components/ui/dropdown-menu";
-import { Input } from "../components/ui/input";
 import {
   Table,
   TableBody,
@@ -30,7 +26,6 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table";
-import { Textarea } from "../components/ui/textarea";
 import {
   countFilterValues,
   filterNodes,
@@ -47,7 +42,7 @@ import { formatTimestamp, relativeTimestamp } from "../shared/timestamp";
 const fleet = useFleetStore();
 const route = useRoute();
 const router = useRouter();
-const { t, locale } = useI18n();
+const { locale } = useI18n();
 const now = useNow({ scheduler: (update) => useIntervalFn(update, 30_000) });
 
 onMounted(() => {
@@ -55,7 +50,6 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   fleet.stop();
-  rolloutSubmission += 1;
 });
 
 // The URL query owns the list view state so refresh, history and returning
@@ -142,27 +136,13 @@ const agentBadge: Record<string, "default" | "secondary" | "destructive"> = {
 const installDialog = ref(false);
 const selected = ref<string[]>([]);
 const selectedSet = computed(() => new Set(selected.value));
-const rolloutDialog = ref(false);
-const rolloutBatchSize = ref(5);
-const rolloutReason = ref("");
-const rolloutStarting = ref(false);
-const rolloutError = ref("");
-// Bumped when the page is left; an accepted create keeps running
-// server-side, but its late response no longer owns this page.
-let rolloutSubmission = 0;
-// Bumped on every open; closing the dialog gives up the automatic navigation.
-let rolloutOpening = 0;
-// Set when a create may have succeeded without a response; unlike a definite
-// failure, that warning survives reopening the dialog.
-let rolloutUnconfirmed = false;
+const rolloutDialog =
+  useTemplateRef<InstanceType<typeof NodeRolloutDialog>>("rolloutDialog");
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
     (node) => selectedSet.value.has(node.id) && node.agentUpgradeEligible,
   ),
-);
-const rolloutTarget = computed(
-  () => selectedNodes.value[0]?.recommendedAgentVersion ?? "",
 );
 
 function toggleSelection(nodeId: string): void {
@@ -195,82 +175,12 @@ const hiddenSelectedCount = computed(() => {
   return selectedNodes.value.filter((node) => !visible.has(node.id)).length;
 });
 
-// Only the stable Problem type selects a local message; server text is never
-// shown. Unknown or unreadable bodies fall back to a generic rejection.
-const rolloutRejections = new Map([
-  ["https://ocservia.dev/problems/forbidden", "rolloutForbidden"],
-  ["https://ocservia.dev/problems/no-eligible-nodes", "rolloutNoEligibleNodes"],
-  ["https://ocservia.dev/problems/invalid-request", "rolloutRequestInvalid"],
-]);
-async function problemType(error: ResponseError): Promise<string> {
-  try {
-    const problem: unknown = await error.response.json();
-    return typeof problem === "object" &&
-      problem !== null &&
-      "type" in problem &&
-      typeof problem.type === "string"
-      ? problem.type
-      : "";
-  } catch {
-    return "";
-  }
-}
-
-function openRolloutDialog(): void {
-  rolloutOpening += 1;
-  if (!rolloutUnconfirmed) rolloutError.value = "";
-  rolloutDialog.value = true;
-}
-
-async function submitRollout(): Promise<void> {
-  if (rolloutStarting.value || !rolloutTarget.value) return;
-  const ticket = ++rolloutSubmission;
-  const opening = rolloutOpening;
-  const owned = () => ticket === rolloutSubmission;
-  rolloutStarting.value = true;
-  if (!rolloutUnconfirmed) rolloutError.value = "";
-  let createdId: string | undefined;
-  let rejected: ResponseError | undefined;
-  try {
-    const rollout = await createAgentRollout(
-      rolloutTarget.value,
-      [...selectedNodes.value].map((node) => node.id),
-      rolloutBatchSize.value,
-      rolloutReason.value.trim(),
-    );
-    // Closing the dialog abandons only the navigation, never the request.
-    if (!owned()) return;
-    rolloutUnconfirmed = false;
-    if (!rolloutDialog.value || opening !== rolloutOpening) return;
-    rolloutDialog.value = false;
-    selected.value = [];
-    rolloutReason.value = "";
-    createdId = rollout.id;
-  } catch (cause) {
-    if (!owned()) return;
-    // A lost POST response may still have created the rollout; never resend.
-    // Until a create is confirmed, a definite rejection of an explicit retry
-    // (e.g. a stale node revision) does not settle that earlier start.
-    rolloutUnconfirmed ||= !(cause instanceof ResponseError);
-    if (!rolloutUnconfirmed && cause instanceof ResponseError) rejected = cause;
-    else rolloutError.value = t("rolloutStartUnconfirmed");
-  } finally {
-    if (ticket === rolloutSubmission) rolloutStarting.value = false;
-  }
-  if (rejected) {
-    const key = rolloutRejections.get(await problemType(rejected));
-    // The body is read after the request settled; a newer submit
-    // or dialog owns the message by then.
-    if (owned() && opening === rolloutOpening)
-      rolloutError.value = t(key ?? "rolloutStartRejected");
-  }
-  // Outside the create's error handling: the rollout is confirmed even if
-  // navigation fails.
-  if (createdId)
-    await router.push({
-      name: "rollout-detail",
-      params: { rolloutId: createdId },
-    });
+async function handleRolloutStarted(rolloutId: string): Promise<void> {
+  selected.value = [];
+  await router.push({
+    name: "rollout-detail",
+    params: { rolloutId },
+  });
 }
 </script>
 
@@ -385,7 +295,7 @@ async function submitRollout(): Promise<void> {
             <Button
               type="button"
               :disabled="selectedNodes.length === 0"
-              @click="openRolloutDialog"
+              @click="rolloutDialog?.open()"
             >
               {{ $t("rollingUpgrade") }} ({{ selectedNodes.length }})
             </Button>
@@ -595,61 +505,10 @@ async function submitRollout(): Promise<void> {
       </section>
     </template>
 
-    <OperationDialog
-      v-if="rolloutDialog"
-      :title="$t('rollingUpgradeTitle')"
-      :subject="rolloutTarget"
-      :error="rolloutError"
-      @close="rolloutDialog = false"
-      @submit="submitRollout"
-    >
-      <FormField id="rollout-target" :label="$t('targetVersion')">
-        <output id="rollout-target" class="font-mono text-sm break-all">{{
-          rolloutTarget
-        }}</output>
-      </FormField>
-      <FormField id="rollout-nodes" :label="$t('selectedNodes')">
-        <output id="rollout-nodes" class="text-sm break-words"
-          >{{ selectedNodes.length }}:
-          {{ selectedNodes.map((node) => node.name).join(", ") }}</output
-        >
-      </FormField>
-      <FormField id="rollout-canary" :label="$t('canary')">
-        <output id="rollout-canary" class="text-sm">{{
-          $t("canaryOneNode")
-        }}</output>
-      </FormField>
-      <FormField id="rollout-batch-size" :label="$t('batchSize')">
-        <Input
-          id="rollout-batch-size"
-          v-model.number="rolloutBatchSize"
-          type="number"
-          min="1"
-          max="20"
-          required
-        />
-      </FormField>
-      <FormField id="rollout-reason" :label="$t('reason')">
-        <Textarea
-          id="rollout-reason"
-          v-model="rolloutReason"
-          maxlength="512"
-          required
-        />
-      </FormField>
-      <template #footer>
-        <Button
-          type="submit"
-          :disabled="
-            rolloutStarting ||
-            !rolloutReason.trim() ||
-            rolloutBatchSize < 1 ||
-            rolloutBatchSize > 20
-          "
-        >
-          {{ $t(rolloutStarting ? "rolloutStarting" : "startRollout") }}
-        </Button>
-      </template>
-    </OperationDialog>
+    <NodeRolloutDialog
+      ref="rolloutDialog"
+      :selected-nodes="selectedNodes"
+      :on-started="handleRolloutStarted"
+    />
   </main>
 </template>

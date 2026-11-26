@@ -128,6 +128,23 @@ function createDetailSection<T>(empty: T, onSettled: () => void) {
   return { data, state, load, reset, cancel: reads.cancel };
 }
 
+async function collectAllPages<T>(
+  readPage: (
+    cursor: string | undefined,
+  ) => Promise<{ items: T[]; page: { hasMore: boolean; nextCursor?: string } }>,
+  canContinue: () => boolean,
+): Promise<T[] | undefined> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await readPage(cursor);
+    if (!canContinue()) return undefined;
+    items.push(...page.items);
+    cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+  } while (cursor);
+  return items;
+}
+
 export const useFleetStore = defineStore("fleet", () => {
   const nodes = shallowRef<NodeObservedState[]>([]);
   const selected = shallowRef<NodeObservedState>();
@@ -216,18 +233,6 @@ export const useFleetStore = defineStore("fleet", () => {
     };
   });
 
-  const online = computed(() => fleetStats.value.online);
-  const offline = computed(() => fleetStats.value.offline);
-  const relay = computed(() => fleetStats.value.relay);
-  const direct = computed(() => fleetStats.value.direct);
-  const sessionCount = computed(() => fleetStats.value.sessionCount);
-  const agentCurrent = computed(() => fleetStats.value.agentCurrent);
-  const agentUpdateAvailable = computed(
-    () => fleetStats.value.agentUpdateAvailable,
-  );
-  const agentAhead = computed(() => fleetStats.value.agentAhead);
-  const agentUnknown = computed(() => fleetStats.value.agentUnknown);
-
   async function rebuild(): Promise<void> {
     if (!isPageActive()) return;
     const request = rebuildReads.begin();
@@ -242,15 +247,11 @@ export const useFleetStore = defineStore("fleet", () => {
             () => undefined,
           );
       if (!request.current()) return;
-      const rebuilt: NodeObservedState[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await listNodes(cursor, request.signal);
-        if (!request.current()) return;
-        rebuilt.push(...page.items);
-        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-      } while (cursor);
-      if (!request.current()) return;
+      const rebuilt = await collectAllPages(
+        (cursor) => listNodes(cursor, request.signal),
+        () => request.current(),
+      );
+      if (!rebuilt) return;
       nodes.value = rebuilt;
       if (!source && snapshotEvents) eventCursor = snapshotEvents.items[0]?.id;
       snapshotAt.value = new Date();
@@ -297,17 +298,16 @@ export const useFleetStore = defineStore("fleet", () => {
       }
     }
 
-    void sessionSection.load(async (signal) => {
-      const items: NodeSession[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await listNodeSessions(nodeId, cursor, signal);
-        signal.throwIfAborted();
-        items.push(...page.items);
-        cursor = page.page.hasMore ? page.page.nextCursor : undefined;
-      } while (cursor);
-      return items;
-    });
+    void sessionSection.load(
+      async (signal) =>
+        (await collectAllPages(
+          (cursor) => listNodeSessions(nodeId, cursor, signal),
+          () => {
+            signal.throwIfAborted();
+            return true;
+          },
+        )) ?? [],
+    );
     void ipBanSection.load(
       async (signal) => (await listNodeIpBans(nodeId, signal)).items,
     );
@@ -562,15 +562,7 @@ export const useFleetStore = defineStore("fleet", () => {
     selectionError,
     unavailable,
     snapshotAt,
-    online,
-    offline,
-    relay,
-    direct,
-    sessionCount,
-    agentCurrent,
-    agentUpdateAvailable,
-    agentAhead,
-    agentUnknown,
+    stats: fleetStats,
     rebuild,
     start: (mode: "fleet" | "detail" = "fleet") => {
       detailMode = mode === "detail";

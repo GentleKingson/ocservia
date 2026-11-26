@@ -29,6 +29,7 @@ import NodeDetailUsersGroupsSection from "../components/nodes/NodeDetailUsersGro
 import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
 import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
 import NodeObservedDetails from "../components/nodes/NodeObservedDetails.vue";
+import NodeSectionState from "../components/nodes/NodeSectionState.vue";
 import NodeTelemetryHistory from "../components/nodes/NodeTelemetryHistory.vue";
 import NodeStatusSummary from "../components/nodes/NodeStatusSummary.vue";
 import UserPolicyDialog from "../components/nodes/UserPolicyDialog.vue";
@@ -72,7 +73,11 @@ const policyDialog = ref<{ username: string }>();
 const readReady = computed(
   () => Boolean(currentNode.value) && !fleet.selecting && !fleet.selectionError,
 );
-const dialogContext = { currentNode, readReady };
+const dialogContext = {
+  currentNode,
+  readReady,
+  trackOperation: (id: string) => fleet.trackOperation(id),
+};
 const usersState = computed(() =>
   fleet.userGroupState.filter((item) => item.kind === "user"),
 );
@@ -291,19 +296,7 @@ function openPolicy(username: string): void {
           <h3 class="m-0 text-sm font-semibold">
             {{ $t("currentSessions") }}
           </h3>
-          <DataState
-            v-if="fleet.sessionsState !== 'ready'"
-            :kind="fleet.sessionsState === 'loading' ? 'loading' : 'error'"
-            :message="
-              $t(
-                fleet.sessionsState === 'loading'
-                  ? 'loading'
-                  : fleet.sessionsState === 'stale'
-                    ? 'nodeSectionStale'
-                    : 'nodeSectionUnavailable',
-              )
-            "
-          />
+          <NodeSectionState :state="fleet.sessionsState" />
           <ul v-if="fleet.sessions.length" class="m-0 grid list-none p-0">
             <li
               v-for="session in fleet.sessions"
@@ -366,19 +359,7 @@ function openPolicy(username: string): void {
         </div>
         <div class="grid gap-2">
           <h3 class="m-0 text-sm font-semibold">{{ $t("ipBans") }}</h3>
-          <DataState
-            v-if="fleet.ipBansState !== 'ready'"
-            :kind="fleet.ipBansState === 'loading' ? 'loading' : 'error'"
-            :message="
-              $t(
-                fleet.ipBansState === 'loading'
-                  ? 'loading'
-                  : fleet.ipBansState === 'stale'
-                    ? 'nodeSectionStale'
-                    : 'nodeSectionUnavailable',
-              )
-            "
-          />
+          <NodeSectionState :state="fleet.ipBansState" />
           <ul v-if="fleet.ipBans.length" class="m-0 grid list-none p-0">
             <li
               v-for="ban in fleet.ipBans"

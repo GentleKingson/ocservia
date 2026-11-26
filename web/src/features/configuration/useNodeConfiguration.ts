@@ -7,13 +7,12 @@ import {
 } from "../../api/configuration";
 import { getOperation } from "../../api/operations";
 import {
-  beginNodeMutation,
   createNodeWorkflow,
-  finishNodeMutation,
+  pollNodeResource,
   readNodeWorkflowReference,
   rememberNodeWorkflowReference,
+  runNodeMutation,
   waitForNodeMutation,
-  waitForNodePoll,
   type NodeWorkflowContext,
 } from "../node-workflow";
 
@@ -163,132 +162,107 @@ export function useNodeConfiguration({
     context: NodeWorkflowContext,
     plan: ConfigPlan,
   ): Promise<void> {
-    if (!configWorkflow.isCurrent(context)) return;
-    configPlan.value = plan;
-    for (
-      let attempt = 0;
-      attempt < 30 &&
-      !["succeeded", "failed", "rejected", "unknown", "expired"].includes(
-        plan.state,
-      );
-      attempt += 1
-    ) {
-      await waitForNodePoll(context.signal);
-      if (!configWorkflow.isCurrent(context)) return;
-      plan = await getConfigPlan(plan.id, context.signal);
-      if (!configWorkflow.isCurrent(context)) return;
-      configPlan.value = plan;
-    }
+    await pollNodeResource(
+      configWorkflow,
+      context,
+      plan,
+      (current) =>
+        !["succeeded", "failed", "rejected", "unknown", "expired"].includes(
+          current.state,
+        ),
+      (current, signal) => getConfigPlan(current.id, signal),
+      (current) => {
+        configPlan.value = current;
+      },
+    );
   }
 
   async function submitConfigPlan(): Promise<void> {
     const source = configPlanSource.value;
-    const context = configContext;
-    if (
-      !source ||
-      !context ||
-      !configWorkflow.isCurrent(context) ||
-      configLoading.value ||
-      !canSubmitConfigPlan.value ||
-      !configReason.value.trim()
-    )
+    if (!source || !canSubmitConfigPlan.value || !configReason.value.trim())
       return;
-    const ticket = beginNodeMutation(context, "config");
-    if (!ticket) return;
-    configLoading.value = true;
-    configError.value = "";
-    try {
-      // Do not abort mutations on UI teardown: retain the server's accepted IDs,
-      // then fence all UI updates and subsequent reads by the captured context.
-      const plan = await createConfigPlan(source.nodeId, {
-        expectedRevision: source.revision,
-        template: {
-          name: "node-baseline",
-          directives: [
-            { name: "auth", value: "plain[passwd=/etc/ocserv/ocpasswd]" },
-            {
-              name: "cookie-timeout",
-              value: String(configCookieTimeout.value),
-            },
-            { name: "device", value: configDevice.value.trim() },
-            { name: "dns", value: configDns.value.trim() },
-            { name: "ipv4-network", value: configNetwork.value.trim() },
-            { name: "max-clients", value: String(configMaxClients.value) },
-            {
-              name: "max-same-clients",
-              value: String(configMaxSameClients.value),
-            },
-            { name: "route", value: configRoute.value.trim() },
-            {
-              name: "server-cert",
-              secretRef: {
-                secretRefId: configCertificateSecretRefId.value.trim(),
+    await runNodeMutation({
+      workflow: configWorkflow,
+      context: configContext,
+      kind: "config",
+      loading: configLoading,
+      error: configError,
+      fallbackError: () => t("configPlanFailed"),
+      async run(ticket, context) {
+        // Do not abort mutations on UI teardown: retain the server's accepted IDs,
+        // then fence all UI updates and subsequent reads by the captured context.
+        const plan = await createConfigPlan(source.nodeId, {
+          expectedRevision: source.revision,
+          template: {
+            name: "node-baseline",
+            directives: [
+              { name: "auth", value: "plain[passwd=/etc/ocserv/ocpasswd]" },
+              {
+                name: "cookie-timeout",
+                value: String(configCookieTimeout.value),
               },
-            },
-            {
-              name: "server-key",
-              secretRef: {
-                secretRefId: configPrivateKeySecretRefId.value.trim(),
+              { name: "device", value: configDevice.value.trim() },
+              { name: "dns", value: configDns.value.trim() },
+              { name: "ipv4-network", value: configNetwork.value.trim() },
+              { name: "max-clients", value: String(configMaxClients.value) },
+              {
+                name: "max-same-clients",
+                value: String(configMaxSameClients.value),
               },
-            },
-            { name: "socket-file", value: "/run/ocserv.socket" },
-            { name: "tcp-port", value: String(configPort.value) },
-            { name: "udp-port", value: String(configUdpPort.value) },
-          ],
-        },
-        ttlSeconds: 900,
-        reason: configReason.value.trim(),
-      });
-      rememberNodeWorkflowReference(ticket, {
-        resourceId: plan.id,
-        operationId: plan.operationId,
-      });
-      await pollConfigPlan(context, plan);
-    } catch (error) {
-      if (!configWorkflow.isCurrent(context)) return;
-      configError.value =
-        (error instanceof Error && error.message) || t("configPlanFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (configWorkflow.isCurrent(context)) configLoading.value = false;
-    }
+              { name: "route", value: configRoute.value.trim() },
+              {
+                name: "server-cert",
+                secretRef: {
+                  secretRefId: configCertificateSecretRefId.value.trim(),
+                },
+              },
+              {
+                name: "server-key",
+                secretRef: {
+                  secretRefId: configPrivateKeySecretRefId.value.trim(),
+                },
+              },
+              { name: "socket-file", value: "/run/ocserv.socket" },
+              { name: "tcp-port", value: String(configPort.value) },
+              { name: "udp-port", value: String(configUdpPort.value) },
+            ],
+          },
+          ttlSeconds: 900,
+          reason: configReason.value.trim(),
+        });
+        rememberNodeWorkflowReference(ticket, {
+          resourceId: plan.id,
+          operationId: plan.operationId,
+        });
+        await pollConfigPlan(context, plan);
+      },
+    });
   }
 
   async function submitConfigApply(): Promise<void> {
-    const context = configContext;
     const plan = configPlan.value;
-    if (
-      !context ||
-      !configWorkflow.isCurrent(context) ||
-      configLoading.value ||
-      !canSubmitConfigPlan.value ||
-      !plan ||
-      !configApplyReason.value.trim()
-    )
+    if (!canSubmitConfigPlan.value || !plan || !configApplyReason.value.trim())
       return;
-    const ticket = beginNodeMutation(context, "config");
-    if (!ticket) return;
-    configLoading.value = true;
-    configError.value = "";
-    try {
-      const operation = await applyConfigPlan(plan.id, {
-        reason: configApplyReason.value.trim(),
-      });
-      rememberNodeWorkflowReference(ticket, {
-        resourceId: plan.id,
-        operationId: operation.id,
-      });
-      if (!configWorkflow.isCurrent(context)) return;
-      configDialog.value = false;
-      await trackOperation(operation.id);
-    } catch (error) {
-      if (!configWorkflow.isCurrent(context)) return;
-      configError.value =
-        (error instanceof Error && error.message) || t("configApplyFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (configWorkflow.isCurrent(context)) configLoading.value = false;
-    }
+    await runNodeMutation({
+      workflow: configWorkflow,
+      context: configContext,
+      kind: "config",
+      loading: configLoading,
+      error: configError,
+      fallbackError: () => t("configApplyFailed"),
+      async run(ticket, context) {
+        const operation = await applyConfigPlan(plan.id, {
+          reason: configApplyReason.value.trim(),
+        });
+        rememberNodeWorkflowReference(ticket, {
+          resourceId: plan.id,
+          operationId: operation.id,
+        });
+        if (!configWorkflow.isCurrent(context)) return;
+        configDialog.value = false;
+        await trackOperation(operation.id);
+      },
+    });
   }
 
   return {

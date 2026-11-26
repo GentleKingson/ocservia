@@ -4,7 +4,13 @@ import {
   type NodeObservedState,
   type Schemas,
 } from "./models";
-import { client, newIdempotencyKey, read, ResponseError } from "./transport";
+import {
+  client,
+  fencedHeaders,
+  newIdempotencyKey,
+  read,
+  unwrap,
+} from "./transport";
 import { getWorkspaceId } from "./workspace";
 
 export type RolloutDetail = Omit<AgentRollout, "excluded"> & {
@@ -36,9 +42,7 @@ function rolloutDetail({
 async function readRollout(
   request: Promise<{ data?: Schemas["AgentRollout"]; response: Response }>,
 ) {
-  const { data, response } = await request;
-  if (data === undefined) throw new ResponseError(response);
-  return rolloutDetail(data);
+  return rolloutDetail(await unwrap(request));
 }
 
 export function upgradeNodeAgent(
@@ -51,10 +55,7 @@ export function upgradeNodeAgent(
     client.POST("/nodes/{node_id}/agent-upgrade", {
       params: {
         path: { node_id: node.id },
-        header: {
-          "Idempotency-Key": newIdempotencyKey(),
-          "If-Match": `"revision-${String(node.version)}"`,
-        },
+        header: fencedHeaders(node.version),
       },
       body: { target_version: targetVersion, reason },
       signal: signal ?? null,
@@ -89,14 +90,15 @@ export async function createAgentRollout(
 }
 
 export async function listAgentRollouts(limit?: number, signal?: AbortSignal) {
-  const { data, response } = await client.GET("/agent-rollouts", {
-    params: {
-      header: { "X-Workspace-ID": await getWorkspaceId() },
-      ...(limit === undefined ? {} : { query: { limit } }),
-    },
-    signal: signal ?? null,
-  });
-  if (data === undefined) throw new ResponseError(response);
+  const data = await unwrap(
+    client.GET("/agent-rollouts", {
+      params: {
+        header: { "X-Workspace-ID": await getWorkspaceId() },
+        ...(limit === undefined ? {} : { query: { limit } }),
+      },
+      signal: signal ?? null,
+    }),
+  );
   return { rollouts: data.rollouts.map(rolloutDetail) };
 }
 

@@ -28,6 +28,7 @@ export function mountNodeDetail() {
             dialogContext: {
               currentNode: Readonly<Ref<NodeObservedState | undefined>>;
               readReady: Readonly<Ref<boolean>>;
+              trackOperation: (id: string) => Promise<void>;
             };
             actionAvailable: (action: string) => boolean;
             actionExplanation: (action: string) => string;

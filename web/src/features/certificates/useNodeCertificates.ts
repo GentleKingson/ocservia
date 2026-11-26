@@ -17,18 +17,18 @@ import {
 } from "../../api/certificates";
 import { getOperation } from "../../api/operations";
 import { ResponseError } from "../../api/transport";
+import { downloadBlob } from "../../shared/download";
 import {
-  beginNodeMutation,
-  createNodeWorkflow,
-  finishNodeMutation,
-  readNodeWorkflowReference,
-  rememberNodeWorkflowReference,
-  waitForNodeMutation,
-  waitForNodePoll,
-  type NodeWorkflowContext,
   consumeCertificateGrant,
+  createNodeWorkflow,
+  pollNodeResource,
   readCertificateGrant,
+  readNodeWorkflowReference,
   rememberCertificateGrant,
+  rememberNodeWorkflowReference,
+  runNodeMutation,
+  waitForNodeMutation,
+  type NodeWorkflowContext,
 } from "../node-workflow";
 
 interface CertificatesInputs {
@@ -155,103 +155,78 @@ export function useNodeCertificates({
     context: NodeWorkflowContext,
     value: Certificate,
   ): Promise<void> {
-    if (!certificateWorkflow.isCurrent(context)) return;
-    certificate.value = value;
-    for (
-      let attempt = 0;
-      attempt < 30 && value.state === "csr_pending";
-      attempt += 1
-    ) {
-      await waitForNodePoll(context.signal);
-      if (!certificateWorkflow.isCurrent(context)) return;
-      value = await getCertificate(value.id, context.signal);
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificate.value = value;
-    }
+    await pollNodeResource(
+      certificateWorkflow,
+      context,
+      value,
+      (current) => current.state === "csr_pending",
+      (current, signal) => getCertificate(current.id, signal),
+      (current) => {
+        certificate.value = current;
+      },
+    );
   }
 
   async function submitCertificateRequest(): Promise<void> {
     const node = currentNode.value;
-    const context = certificateContext;
     if (
       !node ||
-      !context ||
-      !certificateWorkflow.isCurrent(context) ||
-      certificateLoading.value ||
       !certificateCommonName.value.trim() ||
       !certificateReason.value.trim()
     )
       return;
-    const ticket = beginNodeMutation(context, "certificate");
-    if (!ticket) return;
-    certificateLoading.value = true;
-    certificateError.value = "";
-    try {
-      const value = await createCertificate(node.id, {
-        expectedVersion: node.version,
-        commonName: certificateCommonName.value.trim(),
-        dnsNames: [
-          ...new Set(
-            certificateDnsNames.value
-              .split(",")
-              .map((name) => name.trim())
-              .filter(Boolean),
-          ),
-        ],
-        keyBits: 3072,
-        reason: certificateReason.value.trim(),
-      });
-      rememberNodeWorkflowReference(ticket, {
-        resourceId: value.id,
-        operationId: value.operationId,
-      });
-      await pollCertificate(context, value);
-    } catch (error) {
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateError.value =
-        (error instanceof Error && error.message) ||
-        t("certificateRequestFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (certificateWorkflow.isCurrent(context))
-        certificateLoading.value = false;
-    }
+    await runNodeMutation({
+      workflow: certificateWorkflow,
+      context: certificateContext,
+      kind: "certificate",
+      loading: certificateLoading,
+      error: certificateError,
+      fallbackError: () => t("certificateRequestFailed"),
+      async run(ticket, context) {
+        const value = await createCertificate(node.id, {
+          expectedVersion: node.version,
+          commonName: certificateCommonName.value.trim(),
+          dnsNames: [
+            ...new Set(
+              certificateDnsNames.value
+                .split(",")
+                .map((name) => name.trim())
+                .filter(Boolean),
+            ),
+          ],
+          keyBits: 3072,
+          reason: certificateReason.value.trim(),
+        });
+        rememberNodeWorkflowReference(ticket, {
+          resourceId: value.id,
+          operationId: value.operationId,
+        });
+        await pollCertificate(context, value);
+      },
+    });
   }
 
   async function submitCertificateIssue(): Promise<void> {
-    const context = certificateContext;
     const current = certificate.value;
-    if (
-      !context ||
-      !certificateWorkflow.isCurrent(context) ||
-      certificateLoading.value ||
-      !current ||
-      !certificateReason.value.trim()
-    )
-      return;
-    const ticket = beginNodeMutation(context, "certificate");
-    if (!ticket) return;
-    certificateLoading.value = true;
-    certificateError.value = "";
-    try {
-      const issued = await issueCertificate(current.id, {
-        reason: certificateReason.value.trim(),
-      });
-      rememberNodeWorkflowReference(ticket, {
-        resourceId: issued.id,
-        operationId: issued.operationId,
-      });
-      if (certificateWorkflow.isCurrent(context)) certificate.value = issued;
-    } catch (error) {
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateError.value =
-        (error instanceof Error && error.message) ||
-        t("certificateIssueFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (certificateWorkflow.isCurrent(context))
-        certificateLoading.value = false;
-    }
+    if (!current || !certificateReason.value.trim()) return;
+    await runNodeMutation({
+      workflow: certificateWorkflow,
+      context: certificateContext,
+      kind: "certificate",
+      loading: certificateLoading,
+      error: certificateError,
+      fallbackError: () => t("certificateIssueFailed"),
+      async run(ticket, context) {
+        const issued = await issueCertificate(current.id, {
+          reason: certificateReason.value.trim(),
+        });
+        rememberNodeWorkflowReference(ticket, {
+          resourceId: issued.id,
+          operationId: issued.operationId,
+        });
+        if (certificateWorkflow.isCurrent(context)) certificate.value = issued;
+      },
+    });
   }
 
   async function createP12(): Promise<void> {
@@ -261,151 +236,113 @@ export function useNodeCertificates({
     if (
       !context ||
       !certificateWorkflow.isCurrent(context) ||
-      certificateLoading.value ||
       !current ||
       !node ||
-      !certificateReason.value.trim()
+      !certificateReason.value.trim() ||
+      readCertificateGrant(context, current.id)?.downloadToken
     )
       return;
-    if (readCertificateGrant(context, current.id)?.downloadToken) return;
-    const ticket = beginNodeMutation(context, "certificate");
-    if (!ticket) return;
-    certificateLoading.value = true;
-    certificateError.value = "";
     const exportKey = JSON.stringify([
       context.workspaceId,
       context.nodeId,
       current.id,
     ]);
-    try {
-      let request = pendingExports.get(exportKey);
-      if (!request) {
-        request = {
-          artifactRequestId: newArtifactRequestId(),
-          expectedVersion: node.version,
-          certificateVersion: current.version,
-          reason: certificateReason.value.trim(),
-        };
-        pendingExports.set(exportKey, request);
-      }
-      const grant = await createCertificateP12(current.id, request);
-      pendingExports.delete(exportKey);
-      rememberCertificateGrant(context, current.id, grant);
-      rememberNodeWorkflowReference(ticket, {
-        resourceId: current.id,
-        operationId: grant.operation.id,
-      });
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateGrant.value = readCertificateGrant(context, current.id);
-      certificateOperation.value = grant.operation;
-      if (!grant.downloadToken)
-        certificateError.value = t("p12GrantUnavailable");
-      await trackOperation(grant.operation.id);
-    } catch (error) {
-      if (
-        error instanceof ResponseError &&
-        [400, 409].includes(error.response.status)
-      )
+    await runNodeMutation({
+      workflow: certificateWorkflow,
+      context,
+      kind: "certificate",
+      loading: certificateLoading,
+      error: certificateError,
+      fallbackError: () => t("p12CreationFailed"),
+      async run(ticket, activeContext) {
+        let request = pendingExports.get(exportKey);
+        if (!request) {
+          request = {
+            artifactRequestId: newArtifactRequestId(),
+            expectedVersion: node.version,
+            certificateVersion: current.version,
+            reason: certificateReason.value.trim(),
+          };
+          pendingExports.set(exportKey, request);
+        }
+        const grant = await createCertificateP12(current.id, request);
         pendingExports.delete(exportKey);
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateError.value =
-        (error instanceof Error && error.message) || t("p12CreationFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (certificateWorkflow.isCurrent(context))
-        certificateLoading.value = false;
-    }
+        rememberCertificateGrant(activeContext, current.id, grant);
+        rememberNodeWorkflowReference(ticket, {
+          resourceId: current.id,
+          operationId: grant.operation.id,
+        });
+        if (!certificateWorkflow.isCurrent(activeContext)) return;
+        certificateGrant.value = readCertificateGrant(
+          activeContext,
+          current.id,
+        );
+        certificateOperation.value = grant.operation;
+        if (!grant.downloadToken)
+          certificateError.value = t("p12GrantUnavailable");
+        await trackOperation(grant.operation.id);
+      },
+      onError(error) {
+        if (
+          error instanceof ResponseError &&
+          [400, 409].includes(error.response.status)
+        )
+          pendingExports.delete(exportKey);
+      },
+    });
   }
 
   async function downloadP12(): Promise<void> {
     const grant = certificateGrant.value;
-    const context = certificateContext;
     const certificateId = certificate.value?.id;
-    if (
-      !context ||
-      !certificateId ||
-      !certificateWorkflow.isCurrent(context) ||
-      certificateLoading.value ||
-      !grant?.downloadToken
-    )
-      return;
-    const ticket = beginNodeMutation(context, "certificate");
-    if (!ticket) return;
-    certificateLoading.value = true;
-    certificateError.value = "";
-    try {
-      const blob = await downloadCertificateArtifact(
-        grant.artifactId,
-        grant.downloadToken,
-      );
-      // The Controller consumes the artifact before sending its bytes. Finish
-      // this user-initiated download even if its originating dialog has closed.
-      consumeCertificateGrant(context, certificateId, grant.artifactId);
-      const link = document.createElement("a");
-      const url = URL.createObjectURL(blob);
-      link.href = url;
-      link.download = "certificate.p12";
-      try {
-        link.click();
-      } finally {
-        setTimeout(() => {
-          URL.revokeObjectURL(url);
-        }, 1_000);
-      }
-    } catch (error) {
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateError.value =
-        (error instanceof Error && error.message) || t("p12DownloadFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (certificateWorkflow.isCurrent(context))
-        certificateLoading.value = false;
-    }
+    const token = grant?.downloadToken;
+    if (!certificateId || !token) return;
+    await runNodeMutation({
+      workflow: certificateWorkflow,
+      context: certificateContext,
+      kind: "certificate",
+      loading: certificateLoading,
+      error: certificateError,
+      fallbackError: () => t("p12DownloadFailed"),
+      async run(_ticket, context) {
+        const blob = await downloadCertificateArtifact(grant.artifactId, token);
+        // The Controller consumes the artifact before sending its bytes. Finish
+        // this user-initiated download even if its originating dialog has closed.
+        consumeCertificateGrant(context, certificateId, grant.artifactId);
+        downloadBlob(blob, "certificate.p12");
+      },
+    });
   }
 
   async function revokeCurrentCertificate(): Promise<void> {
     const node = currentNode.value;
-    const context = certificateContext;
     const current = certificate.value;
-    if (
-      !context ||
-      !certificateWorkflow.isCurrent(context) ||
-      certificateLoading.value ||
-      !current ||
-      !node ||
-      !certificateReason.value.trim()
-    )
-      return;
-    const ticket = beginNodeMutation(context, "certificate");
-    if (!ticket) return;
-    certificateLoading.value = true;
-    certificateError.value = "";
-    try {
-      const operation = await revokeCertificate(current.id, {
-        expectedVersion: node.version,
-        certificateVersion: current.version,
-        reason: certificateReason.value.trim(),
-      });
-      rememberNodeWorkflowReference(ticket, {
-        resourceId: current.id,
-        operationId: operation.id,
-      });
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateOperation.value = operation;
-      await trackOperation(operation.id);
-      if (!certificateWorkflow.isCurrent(context)) return;
-      const value = await getCertificate(current.id, context.signal);
-      if (certificateWorkflow.isCurrent(context)) certificate.value = value;
-    } catch (error) {
-      if (!certificateWorkflow.isCurrent(context)) return;
-      certificateError.value =
-        (error instanceof Error && error.message) ||
-        t("certificateRevokeFailed");
-    } finally {
-      finishNodeMutation(ticket);
-      if (certificateWorkflow.isCurrent(context))
-        certificateLoading.value = false;
-    }
+    if (!current || !node || !certificateReason.value.trim()) return;
+    await runNodeMutation({
+      workflow: certificateWorkflow,
+      context: certificateContext,
+      kind: "certificate",
+      loading: certificateLoading,
+      error: certificateError,
+      fallbackError: () => t("certificateRevokeFailed"),
+      async run(ticket, context) {
+        const operation = await revokeCertificate(current.id, {
+          expectedVersion: node.version,
+          certificateVersion: current.version,
+          reason: certificateReason.value.trim(),
+        });
+        rememberNodeWorkflowReference(ticket, {
+          resourceId: current.id,
+          operationId: operation.id,
+        });
+        if (!certificateWorkflow.isCurrent(context)) return;
+        certificateOperation.value = operation;
+        await trackOperation(operation.id);
+        if (!certificateWorkflow.isCurrent(context)) return;
+        const value = await getCertificate(current.id, context.signal);
+        if (certificateWorkflow.isCurrent(context)) certificate.value = value;
+      },
+    });
   }
   return {
     certificateDialog,

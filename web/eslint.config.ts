@@ -5,10 +5,9 @@ import tseslint from "typescript-eslint";
 
 // Match relative imports at any depth and the `@/` source alias.
 const pageOwnedImports = {
-  regex:
-    "(^|/)(views(/|$)|shared/(router|fleet|development-simulation)(\\.[^/]+)?$)|^vue-router(/|$)",
+  regex: "(^|/)(views(/|$)|shared/(router|fleet)(\\.[^/]+)?$)|^vue-router(/|$)",
   message:
-    "Keep routing and Fleet/development-simulation state in page composition; use API modules and injected context/tracking callbacks.",
+    "Keep routing and Fleet state in page composition; use API modules and injected context/tracking callbacks.",
 };
 
 // Keep extraFileExtensions identical across all projectService blocks so
@@ -123,8 +122,8 @@ export default defineConfig(
   },
   {
     files: [
-      "src/features/configuration/**/*.ts",
-      "src/features/certificates/**/*.ts",
+      "src/features/configuration/**/*.{ts,vue}",
+      "src/features/certificates/**/*.{ts,vue}",
     ],
     rules: {
       "no-restricted-imports": ["error", { patterns: [pageOwnedImports] }],

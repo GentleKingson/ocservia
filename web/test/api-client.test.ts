@@ -553,7 +553,6 @@ describe("audit and rollout wire decoding", () => {
             request_id: "request-a",
             trace_id: null,
             command_id: null,
-            approval_id: null,
             result: "historical-result",
             reason: null,
             error_type: null,
