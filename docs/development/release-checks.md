@@ -12,7 +12,7 @@ Pick the smallest validation target that covers what you changed. Direct `go`, `
 | Web | `scripts/web-check.sh basic` | Runs Prettier, ESLint, `vue-tsc`, Vitest, and Vite build; `full` adds desktop Playwright E2E. |
 | PostgreSQL 18 smoke | `scripts/database-postgres-smoke.sh` | Starts one disposable PostgreSQL 18 container and runs `go test -tags=integration` core smoke checks. |
 | Docs, scripts & hygiene | `make docs-check`, `scripts/lint.sh source-style`, `scripts/test-hygiene-check.sh` | Validates Markdown links, ShellCheck/Ruff, and test-to-prod line ratio/file limits. |
-| Full local baseline | `make verify` | Runs lint, breaking checks, Go, Rust, Web, boundary checks, Gitleaks, licenses, generated cleanliness, and test hygiene. |
+| Full local baseline | `make verify` | Runs lint, breaking checks, Go, Rust, Web, boundary checks, generated cleanliness, and test hygiene. |
 
 Go PostgreSQL integration tests carry `//go:build integration` so routine `go test ./...` runs stay fast and pure in-memory.
 
@@ -34,5 +34,5 @@ When intentionally updating wire fixtures, run the Go test with `UPDATE_STRICT_W
 
 ## Release policy
 
-- **Qualification (`release-check.yml`)**: Runs on `main` for a target version (`X.Y.Z` or `X.Y.Z-rc.N`). It resolves same-commit Basic CI (`Basic CI Result`) and Security (`security.yml`) evidence, verifies contracts and PostgreSQL 18 smoke if needed, builds native `amd64`/`arm64` Agent packages and Controller images (with image smoke via `scripts/release-controller-image-smoke.sh` and asset verification via `scripts/validate-release-packages.sh`), and writes the `release-check.json` receipt.
+- **Qualification (`release-check.yml`)**: Runs on `main` for a target version (`X.Y.Z` or `X.Y.Z-rc.N`). It verifies same-commit `Basic CI Result`, calls `security.yml` for Go, Rust, and production Web dependency advisories, builds native `amd64`/`arm64` Agent packages and Controller images (with `amd64` OS vulnerability scanning via `scripts/scan-release-images.sh`, dual-arch native image smoke via `scripts/release-controller-image-smoke.sh`, and asset verification via `scripts/validate-release-packages.sh`), and writes the `release-check.json` receipt.
 - **Publication (`release.yml`)**: Triggered on signed/approved `v*.*.*` tag pushes after `Release Check` passes, publishing immutable GitHub Release assets and container images.

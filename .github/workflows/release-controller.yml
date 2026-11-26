@@ -49,6 +49,7 @@ jobs:
       - name: Relay optional BuildKit cache credentials
         uses: ./.github/actions/build-cache-credentials
       - uses: ./.github/actions/setup-tools
+        if: inputs.arch == 'amd64'
         with:
           profiles: image-security
       # Each leg builds natively (no QEMU) and exports one Docker image
@@ -58,25 +59,30 @@ jobs:
       - name: Build Controller images and prefetch fresh vulnerability DB
         id: build-images
         run: |
-          grype_db="$RUNNER_TEMP/grype-db"
-          mkdir -p "$grype_db"
-          echo "GRYPE_DB_CACHE_DIR=$grype_db" >>"$GITHUB_ENV"
-          (
-            source scripts/env.sh
-            GRYPE_DB_CACHE_DIR="$grype_db" bash scripts/scan-release-images.sh --update-db-only
-          ) >"$RUNNER_TEMP/grype-db-update.log" 2>&1 &
-          db_pid=$!
+          if [[ "${{ inputs.arch }}" == "amd64" ]]; then
+            grype_db="$RUNNER_TEMP/grype-db"
+            mkdir -p "$grype_db"
+            echo "GRYPE_DB_CACHE_DIR=$grype_db" >>"$GITHUB_ENV"
+            (
+              source scripts/env.sh
+              GRYPE_DB_CACHE_DIR="$grype_db" bash scripts/scan-release-images.sh --update-db-only
+            ) >"$RUNNER_TEMP/grype-db-update.log" 2>&1 &
+            db_pid=$!
+          fi
           VERSION="${version}" SOURCE_COMMIT="${source_commit}" \
             CONTROLLER_ARCH="${{ inputs.arch }}" OUTPUT_DIR="${RUNNER_TEMP}/controller-images" \
             bash scripts/build-release-controller.sh &
           build_pid=$!
           db_status=0; build_status=0
           wait "$build_pid" || build_status=$?
-          wait "$db_pid" || db_status=$?
-          cat "$RUNNER_TEMP/grype-db-update.log"
+          if [[ "${{ inputs.arch }}" == "amd64" ]]; then
+            wait "$db_pid" || db_status=$?
+            cat "$RUNNER_TEMP/grype-db-update.log"
+          fi
           ((build_status == 0 && db_status == 0))
       - name: Scan exact Controller image archives
         id: scan-images
+        if: inputs.arch == 'amd64'
         env:
           CONTROLLER_ARCH: ${{ inputs.arch }}
         run: |

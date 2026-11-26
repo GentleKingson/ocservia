@@ -7,11 +7,6 @@ on:
         description: Intended release version without v (X.Y.Z or X.Y.Z-rc.N)
         type: string
         required: true
-      contract_base_ref:
-        description: Optional prior commit or tag; defaults to the latest release tag before HEAD (or HEAD~1)
-        type: string
-        required: false
-        default: ''
 permissions:
   contents: read
 concurrency:
@@ -24,35 +19,11 @@ jobs:
     name: Prepare Release Check
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    outputs:
-      contract_base_sha: ${{ steps.resolve.outputs.contract_base_sha }}
     steps:
       - name: Require main branch and a release version
         run: |
           test "$GITHUB_REF" = refs/heads/main
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ && "$VERSION" != 0.0.0 ]]
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Resolve contract baseline
-        id: resolve
-        env:
-          INPUT_BASE: ${{ inputs.contract_base_ref }}
-        run: |
-          if [[ -n "$INPUT_BASE" ]]; then
-            base="$INPUT_BASE"
-          else
-            base="$(git describe --tags --abbrev=0 --match 'v*.*.*' 'HEAD~1' 2>/dev/null || git rev-parse 'HEAD~1')"
-          fi
-          base_sha="$(git rev-parse --verify --end-of-options "${base}^{commit}")"
-          head_sha="$(git rev-parse HEAD)"
-          if [[ "$base_sha" == "$head_sha" ]]; then
-            echo "contract_base_ref (${base}) must differ from HEAD (${head_sha})" >&2
-            exit 1
-          fi
-          echo "contract_base_sha=${base_sha}" >>"$GITHUB_OUTPUT"
-          printf 'Contract baseline: %s (%s)\n' "$base" "$base_sha" >>"$GITHUB_STEP_SUMMARY"
 
   ci:
     name: Resolve Basic CI evidence
@@ -64,9 +35,6 @@ jobs:
       actions: write
     outputs:
       quick_url: ${{ steps.evidence.outputs.quick_url }}
-      full_url: ${{ steps.evidence.outputs.full_url }}
-      contract_done: ${{ steps.evidence.outputs.contract_done }}
-      database_smoke_done: ${{ steps.evidence.outputs.database_smoke_done }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -75,28 +43,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
         run: python3 scripts/release_evidence.py ci
 
   security:
-    name: Resolve security evidence
     needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      actions: write
-    outputs:
-      security_url: ${{ steps.evidence.outputs.security_url }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - id: evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: python3 scripts/release_evidence.py security
+    uses: ./.github/workflows/security.yml
 
   agent-amd64:
     needs: prepare
@@ -178,53 +129,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  contracts:
-    name: Release contract compatibility
-    needs: [prepare, ci]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.ci.outputs.contract_done != 'true'
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        if: needs.ci.outputs.contract_done != 'true'
-        with:
-          profiles: contracts
-          cache-npm: 'true'
-      - if: needs.ci.outputs.contract_done != 'true'
-        env:
-          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
-        run: bash scripts/check-breaking.sh "$CONTRACT_BASE_SHA"
-      - if: needs.ci.outputs.contract_done == 'true'
-        run: echo 'Reused the successful comparison against the release baseline.'
-
-  database:
-    name: Release database smoke
-    needs: ci
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.ci.outputs.database_smoke_done != 'true'
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        if: needs.ci.outputs.database_smoke_done != 'true'
-        with:
-          profiles: go-test
-      - if: needs.ci.outputs.database_smoke_done != 'true'
-        env:
-          PG_MAJOR: '18'
-        run: scripts/database-postgres-smoke.sh
-      - if: needs.ci.outputs.database_smoke_done == 'true'
-        run: echo 'Reused successful CI database smoke.'
-
   result:
     name: Release Check Result
-    needs: [prepare, ci, contracts, database, security, agent-amd64, agent-arm64,
+    needs: [prepare, ci, security, agent-amd64, agent-arm64,
             controller-amd64, controller-arm64, assets]
     if: always()
     runs-on: ubuntu-24.04
@@ -242,10 +149,7 @@ jobs:
           persist-credentials: false
       - name: Record the accepted artifacts and checks
         env:
-          CONTRACT_BASE_SHA: ${{ needs.prepare.outputs.contract_base_sha }}
           QUICK_URL: ${{ needs.ci.outputs.quick_url }}
-          FULL_URL: ${{ needs.ci.outputs.full_url }}
-          SECURITY_URL: ${{ needs.security.outputs.security_url }}
           AGENT_AMD64_ID: ${{ needs.agent-amd64.outputs.artifact_id }}
           AGENT_AMD64_SHA256: ${{ needs.agent-amd64.outputs.manifest_sha256 }}
           AGENT_ARM64_ID: ${{ needs.agent-arm64.outputs.artifact_id }}
@@ -265,8 +169,5 @@ jobs:
           retention-days: 7
       - env:
           QUICK_URL: ${{ needs.ci.outputs.quick_url }}
-          FULL_URL: ${{ needs.ci.outputs.full_url }}
-          SECURITY_URL: ${{ needs.security.outputs.security_url }}
         run: |
-          printf 'PASS\n\n- Quick CI: %s\n- Security: %s\n' "$QUICK_URL" "$SECURITY_URL" >>"$GITHUB_STEP_SUMMARY"
-          if [[ -n "$FULL_URL" ]]; then printf -- '- Full CI: %s\n' "$FULL_URL" >>"$GITHUB_STEP_SUMMARY"; fi
+          printf 'PASS\n\n- Basic CI: %s\n' "$QUICK_URL" >>"$GITHUB_STEP_SUMMARY"

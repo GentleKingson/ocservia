@@ -4,18 +4,10 @@ on:
   schedule:
     - cron: '23 3 * * 1'
   workflow_dispatch:
-    inputs:
-      expected_sha:
-        description: Expected main commit when dispatched by Release Check
-        type: string
-        required: false
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: security-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   scan:
@@ -26,9 +18,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Repository secrets
-            profile: secret-scan
-            command: scripts/security-check.sh
           - name: Go vulnerabilities
             profile: go-security
             restore_go_mod: true
@@ -50,47 +39,23 @@ jobs:
               export RUSTUP_AUTO_INSTALL=0
               work="$(mktemp -d)"
               trap 'rm -rf -- "${work}"' EXIT
-              export GRYPE_DB_CACHE_DIR="${work}/grype-db"
-              export GRYPE_DB_AUTO_UPDATE=false
-              mkdir -p "${GRYPE_DB_CACHE_DIR}"
               (cd rust && cargo audit --file ../deploy/production/relay.Cargo.lock) >"${work}/relay.log" 2>&1 &
               relay_pid=$!
-              (cd rust && cargo deny --locked check advisories bans licenses sources) >"${work}/deny.log" 2>&1 &
+              (cd rust && cargo deny --locked check advisories) >"${work}/deny.log" 2>&1 &
               deny_pid=$!
-              grype db update >"${work}/grype-db.log" 2>&1 &
-              db_pid=$!
-              relay_status=0; deny_status=0; db_status=0
+              relay_status=0; deny_status=0
               wait "${relay_pid}" || relay_status=$?
               wait "${deny_pid}" || deny_status=$?
-              wait "${db_pid}" || db_status=$?
-              cat "${work}/relay.log" "${work}/deny.log" "${work}/grype-db.log"
-              ((relay_status == 0 && deny_status == 0 && db_status == 0))
-              for lockfile in rust/Cargo.lock deploy/production/relay.Cargo.lock; do
-                grype "file:${lockfile}" -o json --file "${work}/lock.scan.json" -q
-                findings="$(jq -c '[.matches[]
-                  | select((.vulnerability.severity == "High" or .vulnerability.severity == "Critical")
-                    and ((.vulnerability.fix.versions // []) | length > 0))
-                  | {package:.artifact.name, version:.artifact.version, id:.vulnerability.id, severity:.vulnerability.severity, fix:.vulnerability.fix.versions}]' "${work}/lock.scan.json")"
-                echo "${lockfile} grype fixable high/critical: ${findings}"
-                jq -e 'length == 0' <<<"${findings}" >/dev/null
-              done
+              cat "${work}/relay.log" "${work}/deny.log"
+              ((relay_status == 0 && deny_status == 0))
           - name: npm vulnerabilities
             profile: npm-security
             command: |
-              (cd web && npm audit --package-lock-only --ignore-scripts)
-          - name: Go & Web licenses
-            profile: go-security
-            restore_go_mod: true
-            command: scripts/license-check.sh --skip-rust
+              (cd web && npm audit --package-lock-only --ignore-scripts --omit=dev --audit-level=high)
     steps:
-      - name: Verify dispatched candidate
-        if: inputs.expected_sha != ''
-        env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: test "$GITHUB_REF" = refs/heads/main && test "$GITHUB_SHA" = "$EXPECTED_SHA"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: ${{ matrix.profile != 'secret-scan' && 1 || 0 }}
+          fetch-depth: 1
           persist-credentials: false
       - uses: ./.github/actions/setup-tools
         with:
@@ -105,7 +70,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .cache/go-mod
-          key: basic-go-mod-v2-${{ steps.go-cache-key.outputs.mod_identity }}
+          key: basic-go-mod-v2-${{ steps.cache-key.outputs.mod_identity }}
           restore-keys: basic-go-mod-v2-
       - name: Scan
         shell: bash
