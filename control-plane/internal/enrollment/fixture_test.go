@@ -7,12 +7,12 @@ import (
 	"slices"
 	"sync"
 	"testing"
-	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -49,25 +49,8 @@ func createToken(t *testing.T, service *Service, workspaceID uuid.UUID, endpoint
 
 func bootstrapActor(t *testing.T, service *Service, workspaceID uuid.UUID) (uuid.UUID, uuid.UUID) {
 	t.Helper()
-	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	now := time.Now().UTC()
-	statements := []struct {
-		query string
-		args  []any
-	}{
-		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,'integration',$2,$3,$3)`, []any{identity, identity.String(), now}},
-		{`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, []any{workspaceID, identity, now}},
-		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,$3,$4)`, []any{session, identity, now.Add(time.Hour), now}},
-	}
-	exec := service.backend.(interface {
-		Exec(context.Context, string, ...any) (int64, error)
-	})
-	for _, statement := range statements {
-		if _, err := exec.Exec(context.Background(), statement.query, statement.args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return identity, session
+	pool := service.backend.(interface{ Pool() *pgxpool.Pool }).Pool()
+	return testfixture.InsertWorkspaceAdminSession(t, context.Background(), pool, workspaceID, "integration")
 }
 
 func enrollmentRequest(token string, endpoint []byte) *agentv1.EnrollRequest {

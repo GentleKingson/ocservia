@@ -72,16 +72,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 			requestTemplate.Directives[index].SecretRef = &SecretRef{ID: secretRefID}
 		}
 	}
-	requesterID, requesterSessionID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(ctx, `INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1::uuid,'test','config-apply-'||$1::text,now(),now())`, requesterID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, requesterSessionID, requesterID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now()-interval '1 minute')`, workspaceID, requesterID); err != nil {
-		t.Fatal(err)
-	}
+	requesterID, requesterSessionID := testfixture.InsertWorkspaceAdminSession(t, ctx, pool, workspaceID, "config-apply")
 	request := CreateRequest{NodeID: nodeID, ExpectedRevision: 0, Template: requestTemplate, TTL: 15 * time.Minute, IdempotencyKey: "config-plan-create", ActorID: requesterID.String(), ActorIdentityID: requesterID, ActorSessionID: requesterSessionID, RequestID: "config-plan-create-request", Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Reason: "integration plan"}
 	failing := request
 	failing.IdempotencyKey = "config-plan-atomic-failure"
