@@ -7,6 +7,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
+use tokio_stream::StreamExt as _;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use iroh::{RelayMap, Watcher as _, tls::CaTlsConfig};
@@ -1119,14 +1120,12 @@ async fn trust_budgets_shared_limits_and_lifecycle_invariants() {
         held.push(
             budgets
                 .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
-                .await
                 .expect("p"),
         );
     }
     assert_eq!(
         budgets
             .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
-            .await
             .err(),
         Some(AttemptRejection::Capacity)
     );
@@ -1136,14 +1135,13 @@ async fn trust_budgets_shared_limits_and_lifecycle_invariants() {
         TrustClass::AgentRegistrationRecheck,
         TrustClass::EnrollmentCompletion,
     ] {
-        drop(budgets.acquire_at(c, now).await.expect("approved"));
+        drop(budgets.acquire_at(c, now).expect("approved"));
         assert_eq!(budgets.snapshot(c).accepted, 1);
     }
     drop(held);
     assert_eq!(
         budgets
             .acquire_at(TrustClass::UnknownEnrollmentPreAuth, now)
-            .await
             .err(),
         Some(AttemptRejection::Rate)
     );
@@ -1153,7 +1151,6 @@ async fn trust_budgets_shared_limits_and_lifecycle_invariants() {
                 TrustClass::UnknownEnrollmentPreAuth,
                 now + Duration::from_mins(1),
             )
-            .await
             .expect("recovered"),
     );
 

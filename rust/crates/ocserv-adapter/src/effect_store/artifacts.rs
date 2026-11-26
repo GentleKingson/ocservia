@@ -368,14 +368,14 @@ impl EffectStore {
         Ok(artifact_ids)
     }
 
-    pub(crate) fn reconcile_artifacts(&mut self) -> Result<Vec<[u8; 16]>, AdapterError> {
+    pub(crate) fn reconcile_artifacts(&mut self) -> Result<ReconciledArtifacts, AdapterError> {
         let now = effect_now()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_io)?;
-        let records = query_all_artifact_records(&transaction)?;
-        let mut terminal = Vec::new();
+        let records = query_active_artifact_records(&transaction)?;
+        let mut reconciled = ReconciledArtifacts::default();
         let mut update_stmt = transaction
             .prepare_cached(
                 "UPDATE certificate_artifacts SET state=?2,active_grant_id=?3,active_subject=?4,grant_expires_at=?5,record_hmac=?6,updated_at=?7 WHERE artifact_id=?1",
@@ -384,9 +384,7 @@ impl EffectStore {
         for mut record in records {
             validate_artifact_record(&self.hmac_key, &record)?;
             let mut changed = false;
-            if record.artifact_expires_at <= now
-                && matches!(record.state, "prepared" | "available" | "leased")
-            {
+            if record.artifact_expires_at <= now {
                 record.state = "expired";
                 changed = true;
             } else if record.state == "leased"
@@ -398,8 +396,10 @@ impl EffectStore {
                 record.grant_expires_at = None;
                 changed = true;
             }
-            if matches!(record.state, "consumed" | "expired" | "revoked") {
-                terminal.push(record.artifact_id);
+            if record.state == "expired" {
+                reconciled.expired.push(record.artifact_id);
+            } else {
+                reconciled.active.push(record.artifact_id);
             }
             if changed {
                 record.record_hmac = authenticate_artifact_record(&self.hmac_key, &record);
@@ -418,19 +418,15 @@ impl EffectStore {
         }
         drop(update_stmt);
         transaction.commit().map_err(sqlite_io)?;
-        Ok(terminal)
+        Ok(reconciled)
     }
+}
 
-    pub(crate) fn tracked_artifact_ids(&self) -> Result<Vec<[u8; 16]>, AdapterError> {
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT artifact_id FROM certificate_artifacts ORDER BY artifact_id")
-            .map_err(sqlite_io)?;
-        let rows = statement
-            .query_map([], |row| fixed_blob(row.get(0)?))
-            .map_err(sqlite_io)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
-    }
+#[derive(Default)]
+pub(crate) struct ReconciledArtifacts {
+    pub(crate) active: Vec<[u8; 16]>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) expired: Vec<[u8; 16]>,
 }
 
 fn validate_artifact_identity(
@@ -548,12 +544,12 @@ fn query_certificate_artifact_records(
     rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
 }
 
-fn query_all_artifact_records(
+fn query_active_artifact_records(
     connection: &Connection,
 ) -> Result<Vec<ArtifactRecord>, AdapterError> {
     let mut statement = connection
         .prepare_cached(
-            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,record_hmac FROM certificate_artifacts ORDER BY artifact_id",
+            "SELECT artifact_id,certificate_id,certificate_version,operation_id,content_sha256,content_size,artifact_expires_at,state,active_grant_id,active_subject,grant_expires_at,record_hmac FROM certificate_artifacts WHERE state IN ('prepared','available','leased') ORDER BY artifact_id",
         )
         .map_err(sqlite_io)?;
     let rows = statement

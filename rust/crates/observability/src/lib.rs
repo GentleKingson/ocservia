@@ -2,7 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-/// Initializes JSON structured logging on stderr using `RUST_LOG` when present.
+/// Initializes JSON structured logging on stderr using `RUST_LOG` when present,
+/// falling back to `"info"`.
 ///
 /// # Errors
 ///
@@ -11,8 +12,22 @@ pub fn init(
     service_name: &'static str,
     release_version: &'static str,
 ) -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
+    init_with_default_filter(service_name, release_version, "info")
+}
+
+/// Initializes JSON structured logging on stderr using `RUST_LOG` when present,
+/// falling back to `default_filter`.
+///
+/// # Errors
+///
+/// Returns an error when a global subscriber was already installed.
+pub fn init_with_default_filter(
+    service_name: &'static str,
+    release_version: &'static str,
+    default_filter: &str,
+) -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_writer(std::io::stderr)

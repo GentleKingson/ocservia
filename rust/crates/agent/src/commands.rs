@@ -1,7 +1,5 @@
 use crate::artifacts::{handle_artifact_consume, handle_artifact_stream};
-use crate::session::{
-    SessionContext, SessionGrantAuthority, refresh_fence_epoch_floor, validate_artifact_frame_kind,
-};
+use crate::session::{SessionContext, SessionGrantAuthority, refresh_fence_epoch_floor};
 use crate::startup::invalid;
 use crate::{ARTIFACT_FRAME_MASK, HANDSHAKE_TIMEOUT};
 use ocservia_agent::{
@@ -21,6 +19,7 @@ use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
 use std::io;
 use std::time::SystemTime;
+#[cfg(test)]
 use uuid::Uuid;
 
 pub(super) async fn handle_command_stream(
@@ -35,7 +34,6 @@ pub(super) async fn handle_command_stream(
         .map_err(|_| invalid("command length timed out"))??;
     let framed_length = u32::from_be_bytes(length);
     if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_FETCH_FRAME {
-        validate_artifact_frame_kind(framed_length)?;
         return handle_artifact_stream(
             send,
             recv,
@@ -50,7 +48,6 @@ pub(super) async fn handle_command_stream(
         .await;
     }
     if framed_length & ARTIFACT_FRAME_MASK == ARTIFACT_CONSUME_FRAME {
-        validate_artifact_frame_kind(framed_length)?;
         return handle_artifact_consume(
             send,
             recv,
@@ -380,33 +377,6 @@ fn desired_resource(envelope: &CommandEnvelope) -> Option<(&'static str, String,
         command_envelope::Payload::CompleteConfigApply(value) => {
             Some(("config", "ocserv.conf".to_owned(), value.desired_revision))
         }
-        command_envelope::Payload::CertificateCsr(value) => {
-            Uuid::from_slice(&value.certificate_id).ok().map(|id| {
-                (
-                    "certificate_key",
-                    id.to_string(),
-                    envelope.expected_revision,
-                )
-            })
-        }
-        command_envelope::Payload::CertificateRevoke(value) => {
-            Uuid::from_slice(&value.certificate_id).ok().map(|id| {
-                (
-                    "certificate_revoke",
-                    id.to_string(),
-                    envelope.expected_revision,
-                )
-            })
-        }
-        command_envelope::Payload::CertificateP12(value) => {
-            Uuid::from_slice(&value.artifact_id).ok().map(|id| {
-                (
-                    "certificate_artifact",
-                    id.to_string(),
-                    envelope.expected_revision,
-                )
-            })
-        }
         _ => None,
     }
 }
@@ -465,7 +435,7 @@ pub(super) async fn observe_external_effect_with_reconcile(
                 ))
                 .await
         }
-        payload if desired_effect_identity(payload).is_some() => match prefetched_reconcile {
+        payload if has_desired_effect(payload) => match prefetched_reconcile {
             Some(response) => response,
             None => privd.call_reconcile(envelope).await,
         },
@@ -524,7 +494,7 @@ pub(super) fn map_external_effect(
             }
         }
         (payload, privd_response::Result::DesiredEffectObservation(observation))
-            if desired_effect_identity(payload).is_some() =>
+            if has_desired_effect(payload) =>
         {
             match DesiredEffectState::try_from(observation.state)
                 .unwrap_or(DesiredEffectState::Unspecified)
@@ -543,32 +513,16 @@ pub(super) fn map_external_effect(
     }
 }
 
-fn desired_effect_identity(
-    payload: &command_envelope::Payload,
-) -> Option<(&'static str, &str, u64)> {
-    match payload {
-        command_envelope::Payload::UserCreate(value) => {
-            Some(("user_create", &value.username, value.desired_revision))
-        }
-        command_envelope::Payload::UserDisable(value) => {
-            Some(("user_disable", &value.username, value.desired_revision))
-        }
-        command_envelope::Payload::UserEnable(value) => {
-            Some(("user_enable", &value.username, value.desired_revision))
-        }
-        command_envelope::Payload::UserPasswordRotate(value) => Some((
-            "user_password_rotate",
-            &value.username,
-            value.desired_revision,
-        )),
-        command_envelope::Payload::GroupApply(value) => {
-            Some(("group_apply", &value.group_name, value.desired_revision))
-        }
-        command_envelope::Payload::CompleteConfigApply(value) => {
-            Some(("config_apply", "ocserv.conf", value.desired_revision))
-        }
-        _ => None,
-    }
+fn has_desired_effect(payload: &command_envelope::Payload) -> bool {
+    matches!(
+        payload,
+        command_envelope::Payload::UserCreate(_)
+            | command_envelope::Payload::UserDisable(_)
+            | command_envelope::Payload::UserEnable(_)
+            | command_envelope::Payload::UserPasswordRotate(_)
+            | command_envelope::Payload::GroupApply(_)
+            | command_envelope::Payload::CompleteConfigApply(_)
+    )
 }
 
 fn unknown_result(record: &CommandRecord, code: &str) -> CommandResult {

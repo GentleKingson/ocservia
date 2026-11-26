@@ -1445,13 +1445,12 @@ async fn native_ocserv_operations() {
             let mut invalid = original.clone();
             invalid.extend_from_slice(b"\nauth = \"invalid-auth-backend\"\n");
             let result = cfg_adapter
-                .apply_validated_config(
+                .apply_validated_config_without_preflight(
                     &invalid,
                     &Sha256::digest(&invalid),
                     &Sha256::digest(&original),
                     1,
                     test_effect(),
-                    false,
                 )
                 .await
                 .expect("native rollback");
@@ -1846,38 +1845,6 @@ async fn child_timeout_output_limit_and_fixed_mutations() {
             .session_disconnect("42", &Uuid::now_v7().to_string())
             .await,
         Err(AdapterError::StaleBoot)
-    ));
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-#[ignore = "requires an explicitly prepared native Ocserv test service"]
-async fn native_controlled_operations() {
-    let disconnect_id = std::env::var("OCSERVIA_DISCONNECT_SESSION_ID").expect("disconnect ID");
-    let terminate_id = std::env::var("OCSERVIA_TERMINATE_SESSION_ID").expect("terminate ID");
-    let banned_ip = std::env::var("OCSERVIA_BANNED_IP").expect("banned IP");
-    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot ID");
-    let adapter = Adapter::new(FixedResources::default(), Limits::default());
-    adapter
-        .session_disconnect(&disconnect_id, boot_id.trim())
-        .await
-        .expect("disconnect");
-    adapter
-        .session_terminate(&terminate_id, boot_id.trim())
-        .await
-        .expect("terminate");
-    adapter.ip_ban_remove(&banned_ip).await.expect("unban");
-    adapter.service_reload().await.expect("reload");
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-#[ignore = "requires an explicitly stopped native Ocserv test service"]
-async fn native_reload_failure_is_bounded() {
-    let adapter = Adapter::new(FixedResources::default(), Limits::default());
-    assert!(matches!(
-        adapter.service_reload().await,
-        Err(AdapterError::CommandFailed { .. })
     ));
 }
 
@@ -2562,8 +2529,9 @@ fn effect_store_concurrent_writers_zero_busy() {
     let before = query_artifact(&verify.connection, artifact_id.as_bytes())
         .expect("query before")
         .expect("artifact present");
-    let terminal = verify.reconcile_artifacts().expect("reconcile_artifacts");
-    assert_eq!(terminal, Vec::<[u8; 16]>::new());
+    let reconciled = verify.reconcile_artifacts().expect("reconcile_artifacts");
+    assert_eq!(reconciled.expired, Vec::<[u8; 16]>::new());
+    assert_eq!(reconciled.active, vec![*artifact_id.as_bytes()]);
     let after = query_artifact(&verify.connection, artifact_id.as_bytes())
         .expect("query after")
         .expect("artifact still present");

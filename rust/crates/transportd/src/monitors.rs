@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures_util::StreamExt as _;
 use iroh::EndpointId;
 use iroh::endpoint::{Connection, PathEvent, VarInt};
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -13,6 +12,7 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     ConnectionPath, NodeConnection, TransportEventType,
 };
 use prost::Message;
+use tokio_stream::StreamExt as _;
 use tonic::Status;
 use uuid::Uuid;
 

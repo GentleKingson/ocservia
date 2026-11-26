@@ -23,7 +23,6 @@ use command_stream::{command_response_deadline, read_agent_events, validate_trac
 #[cfg(test)]
 use command_stream::{event, new_traceparent, now_timestamp, privileged_result_proof_error};
 use events::EventState;
-use futures_util::StreamExt as _;
 use iroh::endpoint::{
     AfterHandshakeOutcome, Connection, EndpointHooks, QuicTransportConfig, RelayMode, VarInt,
     presets,
@@ -58,16 +57,15 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
 };
 use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
-use tokio::sync::{Mutex, Semaphore, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use trust::PolicyUpdateDisposition;
 #[cfg(test)]
 use trust::TrustBudgetSet;
-pub use trust::{
-    IdentityPolicy, TrustAuthority, TrustBudgetConfig, TrustClass, TrustClassLimit,
-    TrustMetricsSnapshot,
-};
+#[cfg(test)]
+pub use trust::TrustMetricsSnapshot;
+pub use trust::{IdentityPolicy, TrustAuthority, TrustBudgetConfig, TrustClass, TrustClassLimit};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -603,14 +601,32 @@ impl TransportService for IrohTransportService {
         if *shutdown.borrow() {
             return Err(Status::unavailable("transport is shutting down"));
         }
-        let receiver = self.shared.subscribe_events(&after).await?;
-        let shutdown_signal =
-            async move { while !*shutdown.borrow() && shutdown.changed().await.is_ok() {} };
-        Ok(Response::new(Box::pin(
-            ReceiverStream::new(receiver)
-                .take_until(shutdown_signal)
-                .map(|item| item.map(Arc::unwrap_or_clone)),
-        )))
+        let mut receiver = self.shared.subscribe_events(&after).await?;
+        let (out_tx, out_rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+                let next = tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    item = receiver.recv() => item,
+                };
+                let Some(item) = next else {
+                    break;
+                };
+                if out_tx.send(item.map(Arc::unwrap_or_clone)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(out_rx))))
     }
 
     async fn update_node_trust(

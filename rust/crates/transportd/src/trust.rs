@@ -48,6 +48,7 @@ impl TrustClass {
     }
 
     /// Stable bounded metric label.
+    #[cfg(test)]
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -160,22 +161,22 @@ impl TrustBudgetSet {
         }
     }
 
-    pub(crate) async fn acquire(
+    pub(crate) fn acquire(
         self: &Arc<Self>,
         class: TrustClass,
     ) -> Result<TrustBudgetPermit, AttemptRejection> {
-        self.acquire_at(class, Instant::now()).await
+        self.acquire_at(class, Instant::now())
     }
 
     pub(crate) fn acquire_at(
         self: &Arc<Self>,
         class: TrustClass,
         now: Instant,
-    ) -> std::future::Ready<Result<TrustBudgetPermit, AttemptRejection>> {
+    ) -> Result<TrustBudgetPermit, AttemptRejection> {
         let budget = &self.classes[class.index()];
         let Ok(permit) = budget.checks.clone().try_acquire_owned() else {
             budget.capacity_rejected.fetch_add(1, Ordering::Relaxed);
-            return std::future::ready(Err(AttemptRejection::Capacity));
+            return Err(AttemptRejection::Capacity);
         };
         let mut attempts = budget
             .attempts
@@ -185,16 +186,16 @@ impl TrustBudgetSet {
             record_global_attempt(&mut attempts, now, budget.limit.attempts_per_minute)
         {
             budget.rate_rejected.fetch_add(1, Ordering::Relaxed);
-            return std::future::ready(Err(rejection));
+            return Err(rejection);
         }
         drop(attempts);
         budget.accepted.fetch_add(1, Ordering::Relaxed);
         budget.in_flight.fetch_add(1, Ordering::Relaxed);
-        std::future::ready(Ok(TrustBudgetPermit {
+        Ok(TrustBudgetPermit {
             budgets: Arc::clone(self),
             class,
             _permit: permit,
-        }))
+        })
     }
 
     fn acquire_capacity(
@@ -214,6 +215,7 @@ impl TrustBudgetSet {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self, class: TrustClass) -> TrustMetricsSnapshot {
         let budget = &self.classes[class.index()];
         TrustMetricsSnapshot {
@@ -240,6 +242,7 @@ impl Drop for TrustBudgetPermit {
 }
 
 /// Bounded counters backing trust metrics. No `EndpointID` is recorded.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TrustMetricsSnapshot {
     /// Accepted attempts.
@@ -547,6 +550,7 @@ impl TrustAuthority {
     }
 
     /// Returns a bounded metric snapshot for one fixed class label.
+    #[cfg(test)]
     #[must_use]
     pub fn metrics(&self, class: TrustClass) -> TrustMetricsSnapshot {
         self.budgets.snapshot(class)
@@ -586,7 +590,7 @@ impl TrustAuthority {
         endpoint: EndpointId,
         class: TrustClass,
     ) -> Result<bool, AttemptRejection> {
-        let _permit = self.budgets.acquire(class).await?;
+        let _permit = self.budgets.acquire(class)?;
         let mut client = self.client.clone();
         Ok(tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -631,7 +635,6 @@ impl TrustAuthority {
         let _permit = self
             .budgets
             .acquire(TrustClass::EnrollmentCompletion)
-            .await
             .map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(HANDSHAKE_TIMEOUT, client.enroll(request))
@@ -662,7 +665,6 @@ impl TrustAuthority {
         let _permit = self
             .budgets
             .acquire(TrustClass::AgentAuthorization)
-            .await
             .map_err(trust_rejection_error)?;
         let mut client = self.client.clone();
         tokio::time::timeout(

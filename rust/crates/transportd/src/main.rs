@@ -37,13 +37,11 @@ struct Config {
 #[tokio::main]
 #[allow(clippy::similar_names, clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,iroh=warn".into()),
-        )
-        .init();
+    ocservia_observability::init_with_default_filter(
+        "ocservia-transportd",
+        env!("CARGO_PKG_VERSION"),
+        "info,iroh=warn",
+    )?;
     let config = parse_args()?;
     if let Some(stats_file) = config.stats_file.clone() {
         ocservia_observability::spawn_runtime_stats_writer(stats_file)?;
