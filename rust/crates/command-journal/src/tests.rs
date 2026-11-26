@@ -1,24 +1,16 @@
+use ocservia_test_support::PrivateTempDir;
+
 use super::*;
 
-struct TempDb(std::path::PathBuf);
+struct TempDb(std::path::PathBuf, #[allow(dead_code)] PrivateTempDir);
 impl TempDb {
     fn new(label: &str) -> Self {
-        Self(
-            std::env::temp_dir()
-                .canonicalize()
-                .expect("tmp")
-                .join(format!("ocservia-{label}-{}.db", uuid::Uuid::now_v7())),
-        )
+        let dir = PrivateTempDir::new("cj");
+        let path = dir.join(format!("{label}.db"));
+        Self(path, dir)
     }
     fn open(&self) -> Journal {
         Journal::open(&self.0).expect("open")
-    }
-}
-impl Drop for TempDb {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
-        }
     }
 }
 

@@ -6,9 +6,11 @@
     clippy::type_complexity
 )]
 
+use std::io;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use ocservia_command_authorization::{
@@ -19,54 +21,44 @@ use ocservia_contracts::config_profile;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     AgentUpgrade, CommandAuthorizationProof, CompleteConfigApply, CompleteConfigCandidate,
     CompleteConfigDirective, ConfigApplyResult, ConfigPlan, GroupApply, NodeLocalTlsReference,
-    SessionDisconnect, SyntheticEcho, SyntheticNoop, UserCreate, UserDisable, UserEnable,
-    UserPasswordRotate, command_envelope, complete_config_directive,
+    SemanticPayloadHashVersion, SessionDisconnect, SyntheticEcho, SyntheticNoop, UserCreate,
+    UserDisable, UserEnable, UserPasswordRotate, command_envelope, complete_config_directive,
 };
-use ocservia_test_support::{foreign_architecture, host_architecture, keyring, ts};
+use ocservia_test_support::{
+    PrivateTempDir, foreign_architecture, host_architecture, keyring, ts,
+    user_password_secret as user_password,
+};
+use prost::Message as _;
 use rand::{SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use super::*;
+use crate::validation::validate_payload;
 
-struct TempJournal(std::path::PathBuf);
+struct TempJournal {
+    _dir: PrivateTempDir,
+    path: std::path::PathBuf,
+}
 
 impl TempJournal {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!("ocservia-agent-{label}-{}.db", Uuid::now_v7()));
-        Self(path)
+        let dir = PrivateTempDir::new("agt-j");
+        let path = dir.join(format!("{label}.db"));
+        Self { _dir: dir, path }
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 
     fn open(&self) -> CommandExecutor {
-        CommandExecutor::new(Journal::open(&self.0).expect("open journal"))
-    }
-}
-
-impl Drop for TempJournal {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
-        }
+        CommandExecutor::new(Journal::open(&self.path).expect("open journal"))
     }
 }
 
 fn capabilities(values: &[&str]) -> HashSet<String> {
     values.iter().map(|v| (*v).to_owned()).collect()
-}
-
-fn user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
-    SealedSecretV1 {
-        version: 1,
-        purpose: SealedSecretPurpose::UserPassword as i32,
-        key_id: "node-key-1".into(),
-        ciphertext,
-    }
 }
 
 fn test_signing_key() -> SigningKey {

@@ -5,10 +5,10 @@
 )]
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, Verifier as _, VerifyingKey};
 use iroh::EndpointId;
 use iroh::endpoint::RelayMode;
 use ocservia_agent::{ExternalEffectObservation, PrivdClient};
@@ -17,18 +17,17 @@ use ocservia_agent_protocol::{
     PrivdRequest, PrivdResponse, PrivilegedRequestMode, privd_request, privd_response, read_frame,
     write_frame,
 };
-use ocservia_command_authorization::{
-    ControllerCommandKeyring, canonical_session_grant_v1, session_grant_claims_v1,
-    verification_key_id,
-};
+use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_command_journal::Journal;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     CommandEnvelope, CompleteConfigApply, CompleteConfigPlan, EnrollRequest, HandshakeResult,
-    SealedSecretPurpose, SealedSecretV1, SealingKeyDescriptorV1, SessionGrantV1,
-    SessionHandshakeResponse, UserPasswordRotate, command_envelope,
+    SealedSecretPurpose, SealingKeyDescriptorV1, SessionHandshakeResponse, UserPasswordRotate,
+    command_envelope,
 };
 use ocservia_contracts::session::READ_ONLY_SESSION_CAPABILITIES;
-use ocservia_test_support::{keyring, ts};
+use ocservia_test_support::{
+    PrivateTempDir, keyring, sign_session_grant, ts, user_password_secret as test_user_password,
+};
 use uuid::Uuid;
 
 use crate::commands::{
@@ -81,7 +80,7 @@ fn only_successful_config_apply_advances_the_applied_revision() {
         (false, false, 0),
         (false, false, 8),
     ] {
-        let directory = TempDir::new("config-result");
+        let directory = PrivateTempDir::new("config-result");
         let mut executor = CommandExecutor::new(
             Journal::open(&directory.join("journal.sqlite3")).expect("open journal"),
         );
@@ -134,36 +133,6 @@ fn only_successful_config_apply_advances_the_applied_revision() {
     }
 }
 
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(prefix: &str) -> Self {
-        let dir = std::env::temp_dir()
-            .canonicalize()
-            .expect("tmp")
-            .join(format!(
-                "ocservia-agent-{prefix}-{}",
-                Uuid::now_v7().simple()
-            ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-
-    fn join(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
     vec![
         SealingKeyDescriptorV1 {
@@ -179,15 +148,6 @@ fn test_sealing_keys() -> Vec<SealingKeyDescriptorV1> {
             public_key_sha256: vec![0x22; 32],
         },
     ]
-}
-
-fn test_user_password(ciphertext: Vec<u8>) -> SealedSecretV1 {
-    SealedSecretV1 {
-        version: 1,
-        purpose: SealedSecretPurpose::UserPassword as i32,
-        key_id: "node-key-1".into(),
-        ciphertext,
-    }
 }
 
 fn command_key_config(probe_only: bool) -> Config {
@@ -232,23 +192,16 @@ fn signed_handshake_response(
     issued_at: i64,
     expires_at: i64,
 ) -> SessionHandshakeResponse {
-    let mut grant = SessionGrantV1 {
-        version: 1,
-        key_id: verification_key_id(&signing.verifying_key()),
-        protocol_major: 1,
-        protocol_minor: 1,
-        node_id: node_id.as_bytes().to_vec(),
-        endpoint_id: endpoint_id.as_bytes().to_vec(),
+    let grant = sign_session_grant(
+        signing,
+        *node_id.as_bytes(),
+        *endpoint_id.as_bytes(),
         authorization_revision,
         session_epoch,
-        negotiated_capabilities: capabilities.clone(),
-        issued_at: Some(ts(issued_at, 0)),
-        expires_at: Some(ts(expires_at, 0)),
-        signature: Vec::new(),
-    };
-    let claims = session_grant_claims_v1(&grant).expect("grant claims");
-    let canonical = canonical_session_grant_v1(&claims).expect("canonical grant");
-    grant.signature = signing.sign(&canonical).to_bytes().to_vec();
+        capabilities.clone(),
+        issued_at,
+        expires_at,
+    );
     SessionHandshakeResponse {
         result: HandshakeResult::Accepted.into(),
         protocol_major: 1,
@@ -260,11 +213,12 @@ fn signed_handshake_response(
     }
 }
 
-fn serve_privd_once<F>(handle: F) -> (PathBuf, tokio::task::JoinHandle<()>)
+fn serve_privd_once<F>(handle: F) -> (PrivateTempDir, PathBuf, tokio::task::JoinHandle<()>)
 where
     F: FnOnce(PrivdRequest) -> privd_response::Result + Send + 'static,
 {
-    let socket = PathBuf::from(format!("/tmp/ocsa-{}.sock", Uuid::now_v7().simple()));
+    let dir = PrivateTempDir::new("ocsa");
+    let socket = dir.join("privd.sock");
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind privd fixture");
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
@@ -282,7 +236,7 @@ where
         .await
         .expect("write resp");
     });
-    (socket, task)
+    (dir, socket, task)
 }
 
 #[test]
@@ -294,7 +248,7 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
     let caps = vec!["synthetic.noop".to_owned()];
 
     // Overlapping journal processes: successor raises floor, old cached floor refreshes.
-    let dir = TempDir::new("floor-overlap");
+    let dir = PrivateTempDir::new("floor-overlap");
     let jpath = dir.join("journal.db");
     let active_agent = Journal::open(&jpath).expect("active");
     let successor = Journal::open(&jpath).expect("successor");
@@ -313,7 +267,7 @@ fn overlapping_agent_floor_and_handshake_activation_enforce_monotonic_epoch() {
     drop((successor, active_agent));
 
     // Handshake persists new session_epoch before activation and rejects replay across reopen.
-    let dir2 = TempDir::new("handshake-epoch");
+    let dir2 = PrivateTempDir::new("handshake-epoch");
     let jpath2 = dir2.join("journal.db");
     let mut journal = Journal::open(&jpath2).expect("journal");
     journal.raise_owner_fence_epoch_floor(7).expect("preseed");
@@ -400,7 +354,7 @@ fn invalid_session_handshakes_do_not_advance_the_durable_epoch() {
         ),
     ];
 
-    let dir = TempDir::new("epoch-negative");
+    let dir = PrivateTempDir::new("epoch-negative");
     let jpath = dir.join("journal.db");
     let mut journal = Journal::open(&jpath).expect("journal");
     journal.raise_owner_fence_epoch_floor(10).expect("preseed");
@@ -492,7 +446,7 @@ fn agent_protocol_session_grant_validation() {
 #[tokio::test]
 async fn session_capabilities_withhold_terminate_below_ocserv_1_4_2() {
     for (version, terminate) in [(Some("1.2.4"), false), (Some("1.4.2"), true), (None, false)] {
-        let (socket, server) = serve_privd_once(move |req| {
+        let (_dir, socket, server) = serve_privd_once(move |req| {
             assert!(matches!(
                 req.operation,
                 Some(privd_request::Operation::OcservVersion(_))
@@ -502,10 +456,9 @@ async fn session_capabilities_withhold_terminate_below_ocserv_1_4_2() {
                 |v| privd_response::Result::OcservVersion(OcservVersion { version: v.into() }),
             )
         });
-        let privd = PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("client");
+        let privd = PrivdClient::new(socket, Duration::from_secs(2)).expect("client");
         let caps = session_capabilities(&privd).await;
         server.await.expect("server");
-        std::fs::remove_file(&socket).expect("rm sock");
         let mut expected = supported_capabilities();
         expected.retain(|c| terminate || c != "ocserv.session.terminate");
         assert_eq!(caps, expected, "{version:?}");
@@ -556,7 +509,7 @@ fn startup_key_enrollment_and_token_requirements() {
     );
 
     // Fresh enrollment preparation reuses endpoint key for proof.
-    let prep_dir = TempDir::new("prepare");
+    let prep_dir = PrivateTempDir::new("prepare");
     let identity_dir = prep_dir.path().join("identity");
     let controller = iroh::SecretKey::generate().public();
     let mut prep = command_key_config(false);
@@ -605,7 +558,7 @@ fn startup_key_enrollment_and_token_requirements() {
         .expect("verify");
 
     // Enrollment token file requires strict mode & format.
-    let tok_dir = TempDir::new("enrollment");
+    let tok_dir = PrivateTempDir::new("enrollment");
     let token = tok_dir.join("enrollment.token");
     let valid = "0".repeat(43);
     let valid_token = format!("obt2_{valid}");
@@ -634,7 +587,7 @@ fn startup_key_enrollment_and_token_requirements() {
 
 #[test]
 fn custom_relay_count_and_security_contract() {
-    let dir = TempDir::new("relay-contract");
+    let dir = PrivateTempDir::new("relay-contract");
     let token = dir.join("token");
     std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("token");
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
@@ -732,7 +685,7 @@ fn privd_error_receipt_and_unexpected_result_classification() {
 #[tokio::test]
 async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
     // Password reconcile uses non-secret authoritative effect store.
-    let (socket, server) = serve_privd_once(|req| {
+    let (_dir, socket, server) = serve_privd_once(|req| {
         assert!(req.operation.is_none());
         assert_eq!(
             PrivilegedRequestMode::try_from(req.privileged_mode).expect("mode"),
@@ -751,7 +704,7 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
             observed_revision: obs.desired_revision,
         })
     });
-    let client = PrivdClient::new(socket.clone(), Duration::from_secs(2)).expect("client");
+    let client = PrivdClient::new(socket, Duration::from_secs(2)).expect("client");
     let pw_env = CommandEnvelope {
         command_id: Uuid::now_v7().as_bytes().to_vec(),
         idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
@@ -771,14 +724,12 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
         ExternalEffectObservation::AppliedExact
     );
     server.await.expect("server");
-    std::fs::remove_file(socket).expect("rm sock");
 
     // Interrupted config plan is safe to retry (Absent even when socket missing).
-    let missing_client = PrivdClient::new(
-        std::env::temp_dir().join(format!("missing-{}.sock", Uuid::now_v7())),
-        Duration::from_millis(20),
-    )
-    .expect("client");
+    let missing_dir = PrivateTempDir::new("agt-miss");
+    let missing_client =
+        PrivdClient::new(missing_dir.join("missing.sock"), Duration::from_millis(20))
+            .expect("client");
     let plan_env = CommandEnvelope {
         payload: Some(command_envelope::Payload::CompleteConfigPlan(
             CompleteConfigPlan::default(),
@@ -813,7 +764,7 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
             ExternalEffectObservation::Unknown,
         ),
     ] {
-        let (sock, srv) = serve_privd_once(move |req| {
+        let (_dir, sock, srv) = serve_privd_once(move |req| {
             assert!(req.operation.is_none());
             let Some(CommandEnvelope {
                 payload: Some(command_envelope::Payload::CompleteConfigApply(obs)),
@@ -828,7 +779,7 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
                 observed_revision: rev,
             })
         });
-        let c = PrivdClient::new(sock.clone(), Duration::from_secs(2)).expect("client");
+        let c = PrivdClient::new(sock, Duration::from_secs(2)).expect("client");
         let env = CommandEnvelope {
             command_id: Uuid::now_v7().as_bytes().to_vec(),
             idempotency_key: Uuid::now_v7().as_bytes().to_vec(),
@@ -849,6 +800,5 @@ async fn reconcile_observes_password_and_config_effects_and_retries_plan() {
             expected
         );
         srv.await.expect("srv");
-        std::fs::remove_file(sock).expect("rm sock");
     }
 }
