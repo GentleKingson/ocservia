@@ -62,9 +62,6 @@ type Store interface {
 	FindUserOperation(context.Context, uuid.UUID, string, string, string) (uuid.UUID, error)
 }
 
-func From(tx database.Tx) (Store, error) {
-	if p, ok := tx.(interface{ UserOperationsStore() Store }); ok {
-		return p.UserOperationsStore(), nil
-	}
-	return nil, database.ErrUnsupported
+func From(tx database.Tx) Store {
+	return database.Must[interface{ UserOperationsStore() Store }](tx).UserOperationsStore()
 }

@@ -29,11 +29,8 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 			claimed = []Dispatch{}
 			return nil
 		}
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		at, err := database.WallTime(ctx, tx)
+		store := operationstore.FromTransaction(tx)
+		at, err := tx.WallTime(ctx)
 		if err != nil {
 			return err
 		}
@@ -67,10 +64,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 			if err := commandlimit.Lock(check, tx); err != nil {
 				return err
 			}
-			store, err := operationstore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
+			store := operationstore.FromTransaction(tx)
 			for _, d := range claimed {
 				if err := store.LockDispatchOutbox(check, d); err != nil {
 					return err
@@ -119,11 +113,7 @@ func (s *Service) withinDispatchTx(ctx context.Context, fn func(database.Tx, ope
 		if err := commandlimit.Lock(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch completion: %w", err)
 		}
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return fn(tx, store)
+		return fn(tx, operationstore.FromTransaction(tx))
 	})
 }
 
@@ -139,7 +129,7 @@ func (s *Service) markFailed(ctx context.Context, d Dispatch, message string) er
 		if !status.LeaseValid || !status.AttemptValid || !status.OwnsOutboxLock || status.ResultAfterAttempt {
 			return database.ErrNotFound
 		}
-		at, err := database.WallTime(ctx, tx)
+		at, err := tx.WallTime(ctx)
 		if err != nil {
 			return err
 		}
@@ -177,7 +167,7 @@ func (s *Service) markSent(ctx context.Context, d Dispatch, envelope *agentv1.Co
 		if !status.OwnsOutboxLock && !status.ResultAfterAttempt {
 			return errors.New("dispatch outbox lock is no longer valid")
 		}
-		at, err := database.WallTime(ctx, tx)
+		at, err := tx.WallTime(ctx)
 		if err != nil {
 			return err
 		}
@@ -206,11 +196,7 @@ func (s *Service) markSent(ctx context.Context, d Dispatch, envelope *agentv1.Co
 		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if confirmed := database.Within(check, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := operationstore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			status, err := store.CompletedDispatch(check, d)
+			status, err := operationstore.FromTransaction(tx).CompletedDispatch(check, d)
 			if err != nil {
 				return err
 			}
@@ -246,11 +232,7 @@ func (s *Service) WorkspaceMetrics(ctx context.Context, workspaceID uuid.UUID) (
 
 func (s *Service) queueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (m QueueMetrics, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		m, err = store.QueueMetrics(ctx, workspaceID, all)
+		m, err = operationstore.FromTransaction(tx).QueueMetrics(ctx, workspaceID, all)
 		return err
 	})
 	return

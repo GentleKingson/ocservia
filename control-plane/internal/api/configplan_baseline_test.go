@@ -47,10 +47,10 @@ func TestHTTPConfigPlanResponseBaselineIntegration(t *testing.T) {
 	}
 	backend := postgres.WrapPool(pool)
 	ops := apiOperationService(pool)
-	certs := certificates.NewBackend(backend, ops, nil, nil, nil, commandauth.NewSignerFromSeed([32]byte{4}))
-	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: bytes.Repeat([]byte{7}, 32), SessionTTL: time.Hour})
+	certs := certificates.New(backend, ops, nil, nil, nil, commandauth.NewSignerFromSeed([32]byte{4}))
+	authn, err := auth.New(backend, auth.Config{LocalEnabled: true, SessionKey: bytes.Repeat([]byte{7}, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
-	s := newTestServer(t, testHTTPConfig(false), backend, Modules{Operations: ops, ConfigPlans: configplan.NewBackend(backend, ops), Certificates: certs}, Authorization{Authentication: authn})
+	s := newTestServer(t, testHTTPConfig(false), backend, Modules{Operations: ops, ConfigPlans: configplan.New(backend, ops), Certificates: certs}, Authorization{Authentication: authn})
 	adminName, adminPass := "baseline-"+uuid.NewString(), "a unique long baseline fixture password"
 	adminID, err := authn.CreateLocalCredential(ctx, adminName, adminPass)
 	testutil.NoError(t, err)

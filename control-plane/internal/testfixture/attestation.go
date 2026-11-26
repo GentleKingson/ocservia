@@ -8,7 +8,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/google/uuid"
@@ -23,13 +22,13 @@ func InstallKey(ctx context.Context, pool *pgxpool.Pool, nodeID uuid.UUID) (ed25
 	return InstallKeyBackend(ctx, postgres.WrapPool(pool), nodeID)
 }
 
-func InstallKeyBackend(ctx context.Context, backend database.Backend, nodeID uuid.UUID) (ed25519.PrivateKey, error) {
+func InstallKeyBackend(ctx context.Context, backend *postgres.Backend, nodeID uuid.UUID) (ed25519.PrivateKey, error) {
 	seed := sha256.Sum256(append([]byte("ocservia/test-only-privd-key/v1\x00"), nodeID[:]...))
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	keyID := privdattestation.PublicKeyID(publicKey)
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	tx, err := backend.Begin(ctx, database.ReadCommitted)
+	tx, err := backend.Pool().Begin(ctx)
 	if err != nil {
 		return nil, err
 	}

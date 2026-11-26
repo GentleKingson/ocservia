@@ -21,12 +21,8 @@ type cachedSummary struct {
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Operation, error) {
 	var result Operation
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		result, err = store.Get(ctx, id)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		result, err = operationstore.FromTransaction(tx).Get(ctx, id)
 		return err
 	})
 	return result, err
@@ -37,12 +33,8 @@ func (s *Service) ListInWorkspace(ctx context.Context, workspaceID, after uuid.U
 		return nil, false, errors.New("operation page size must be between 1 and 200")
 	}
 	var values []Operation
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		values, err = store.ListInWorkspace(ctx, workspaceID, after, limit+1)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		values, err = operationstore.FromTransaction(tx).ListInWorkspace(ctx, workspaceID, after, limit+1)
 		return err
 	})
 	if err != nil {
@@ -68,12 +60,8 @@ func (s *Service) SummaryInWorkspace(ctx context.Context, workspaceID uuid.UUID)
 		return cached.counts, nil
 	}
 	var summary OperationSummary
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		summary, err = store.SummaryInWorkspace(ctx, workspaceID)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		summary, err = operationstore.FromTransaction(tx).SummaryInWorkspace(ctx, workspaceID)
 		return err
 	})
 	if err != nil {

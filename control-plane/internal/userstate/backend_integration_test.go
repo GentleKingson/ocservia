@@ -17,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -25,7 +26,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func userStateBackend(t *testing.T) database.Backend {
+func userStateBackend(t *testing.T) *postgres.Backend {
 	t.Helper()
 	return testfixture.OpenRuntime(t)
 }
@@ -39,7 +40,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	row := func(query string, args ...any) database.Row {
+	row := func(query string, args ...any) postgres.Row {
 		return b.QueryRow(ctx, query, args...)
 	}
 	workspace, node, identity, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -53,8 +54,8 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	}
 	exec(`INSERT INTO node_sealing_keys(node_id,purpose,version,key_id,public_key_sha256,created_at)VALUES($1,1,1,'key',$2,now())`, node, bytes.Repeat([]byte{1}, 32))
 	signer := testfixture.CommandSigner(2)
-	queue := operations.NewBackend(b, 0, signer)
-	s := NewWithOperationsBackend(b, signer, queue)
+	queue := operations.New(b, 0, signer)
+	s := NewWithOperations(b, signer, queue)
 	request := func(kind MutationKind, name string, version int64) MutationRequest {
 		r := MutationRequest{NodeID: node, ActorIdentityID: identity, ActorSessionID: session, Kind: kind, Name: name, ExpectedVersion: version, Members: []string{}, IdempotencyKey: uuid.NewString(), TTL: time.Hour, ActorID: "operator", Reason: "Database backend desired state", RequestID: uuid.NewString(), Traceparent: testTraceparent}
 		if kind == UserCreate || kind == UserPasswordRotate {
@@ -212,10 +213,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	members := []string{"alpha", "beta", "long " + strings.Repeat("x", 500)}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	err = database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := userstore.From(tx)
-		if err != nil {
-			return err
-		}
+		store := userstore.From(tx)
 		if err := store.WriteDesired(ctx, userstore.Desired{NodeID: node, Kind: "group_apply", Name: "logical", Version: 7, Revision: 3, Members: members, At: now}); err != nil {
 			return err
 		}
@@ -238,10 +236,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	assertCounts := func(users, groups, memberships int) {
 		t.Helper()
 		if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := userstore.From(tx)
-			if err != nil {
-				return err
-			}
+			store := userstore.From(tx)
 			fresh := time.Now().UTC().Add(-90 * time.Second)
 			u, err := store.CountResources(ctx, node, "absent", false, fresh)
 			if err != nil {
@@ -281,7 +276,7 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	if !found {
 		t.Fatal("missing logical resource")
 	}
-	if _, err := audit.NewBackendManager(b, nil).Verify(ctx, workspace); err != nil {
+	if _, err := audit.NewManager(b, nil).Verify(ctx, workspace); err != nil {
 		t.Fatal("audit chain", err)
 	}
 }

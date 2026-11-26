@@ -144,12 +144,8 @@ func (s *Service) ListIPBans(ctx context.Context, nodeID uuid.UUID, limit int) (
 		return nil, errors.New("IP ban query is invalid")
 	}
 	var result []IPBan
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		result, err = store.IPBans(ctx, nodeID, limit)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		result, err = telemetrystore.FromTransaction(tx).IPBans(ctx, nodeID, limit)
 		return err
 	})
 	return result, err
@@ -164,13 +160,13 @@ type Service struct {
 	partitionsEnsuredAt     time.Time
 }
 
-// NewBackend enables ingestion, read models and maintenance through domain stores.
-func NewBackend(backend database.Backend) *Service { return &Service{backend: backend, now: time.Now} }
+// New enables ingestion, read models and maintenance through domain stores.
+func New(backend database.Backend) *Service { return &Service{backend: backend, now: time.Now} }
 
-// NewWithRecommendedAgentVersionBackend builds the read model with the
+// NewWithRecommendedAgentVersion builds the read model with the
 // operator-configured recommended agent version used to derive per-node
 // agent version state.
-func NewWithRecommendedAgentVersionBackend(backend database.Backend, recommendedAgentVersion string) *Service {
+func NewWithRecommendedAgentVersion(backend database.Backend, recommendedAgentVersion string) *Service {
 	return &Service{backend: backend, now: time.Now, recommendedAgentVersion: recommendedAgentVersion}
 }
 
@@ -190,12 +186,8 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 		return nil, false, errors.New("node page size must be between 1 and 200")
 	}
 	var stored []telemetrystore.Node
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		stored, err = store.Nodes(ctx, workspaceID, after, limit+1)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		stored, err = telemetrystore.FromTransaction(tx).Nodes(ctx, workspaceID, after, limit+1)
 		return err
 	})
 	if err != nil {
@@ -218,20 +210,12 @@ func (s *Service) ListNodesInWorkspace(ctx context.Context, workspaceID, after u
 func (s *Service) GetNode(ctx context.Context, id uuid.UUID) (Node, error) {
 	var stored telemetrystore.Node
 	var actions map[string]ActionAvailability
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		stored, err = telemetrystore.FromTransaction(tx).Node(ctx, id)
 		if err != nil {
 			return err
 		}
-		stored, err = store.Node(ctx, id)
-		if err != nil {
-			return err
-		}
-		enrollment, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
-		actions, err = nodeActions(ctx, enrollment, id, stored.Status)
+		actions, err = nodeActions(ctx, enrollmentstore.Enrollment(tx), id, stored.Status)
 		return err
 	})
 	if err != nil {
@@ -320,12 +304,8 @@ func (s *Service) ListSessions(ctx context.Context, nodeID uuid.UUID, after stri
 		return nil, false, errors.New("session page is invalid")
 	}
 	var result []telemetrystore.ReadSession
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		result, err = store.Sessions(ctx, nodeID, after, limit+1)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		result, err = telemetrystore.FromTransaction(tx).Sessions(ctx, nodeID, after, limit+1)
 		return err
 	})
 	if err != nil {
@@ -349,12 +329,8 @@ func (s *Service) History(ctx context.Context, nodeID uuid.UUID, metric, resolut
 		return nil, ErrInvalidResolution
 	}
 	var points []HistoryPoint
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		history, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		points, err = history.History(ctx, nodeID, metric, resolution, since.UTC())
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		points, err = telemetrystore.FromTransaction(tx).History(ctx, nodeID, metric, resolution, since.UTC())
 		return err
 	})
 	return points, err
@@ -366,10 +342,7 @@ func (s *Service) Maintain(ctx context.Context) error {
 	now := s.now().UTC()
 	ensurePartitions := s.partitionsEnsuredAt.IsZero() || now.Sub(s.partitionsEnsuredAt) >= time.Hour || now.Before(s.partitionsEnsuredAt)
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := telemetrystore.FromTransaction(tx)
 		if ensurePartitions {
 			if err := store.EnsureUpcomingPartitions(ctx); err != nil {
 				return err

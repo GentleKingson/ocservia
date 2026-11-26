@@ -23,11 +23,7 @@ import (
 func validateConfigurationIntent(ctx context.Context, tx database.Tx, request CreateRequest, workspaceID uuid.UUID, created time.Time) error {
 	switch payload := request.Payload.(type) {
 	case ConfigPlanPayload:
-		configStore, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		state, err := configStore.State(ctx, request.NodeID)
+		state, err := configurationstore.FromTransaction(tx).State(ctx, request.NodeID)
 		if err != nil {
 			return fmt.Errorf("read configuration revision: %w", err)
 		}
@@ -38,10 +34,7 @@ func validateConfigurationIntent(ctx context.Context, tx database.Tx, request Cr
 			return ErrStaleRevision
 		}
 	case ConfigApplyPayload:
-		configStore, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		configStore := configurationstore.FromTransaction(tx)
 		plan, err := configStore.Proof(ctx, payload.ApplyMetadata.PlanID)
 		if err != nil {
 			return fmt.Errorf("lock configuration plan: %w", err)
@@ -100,18 +93,11 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return fmt.Errorf("marshal configuration plan warnings: %w", err)
 		}
-		configStore, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		if err := configStore.InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.Candidate.Revision(), CandidateHash: payload.Candidate.Digest(), CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: warnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
+		if err := configurationstore.FromTransaction(tx).InsertPlan(ctx, configurationstore.PendingPlan{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, TemplateName: payload.PlanMetadata.TemplateName, ExpectedRevision: payload.Candidate.Revision(), CandidateHash: payload.Candidate.Digest(), CandidateRedacted: payload.PlanMetadata.CandidateRedacted, Warnings: warnings, ExpiresAt: expiry, CreatedBy: optionalUUID(payload.PlanMetadata.CreatedBy), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration plan: %w", err)
 		}
 	case ConfigApplyPayload:
-		configStore, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		configStore := configurationstore.FromTransaction(tx)
 		if err := configStore.InsertApply(ctx, configurationstore.PendingApply{ID: operationID, WorkspaceID: workspaceID, NodeID: request.NodeID, PlanID: payload.ApplyMetadata.PlanID, ExpectedRevision: payload.Candidate.Revision(), DesiredRevision: payload.DesiredRevision, CandidateHash: payload.Candidate.Digest(), PreviousHash: payload.ExpectedCurrentHash, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert configuration apply: %w", err)
 		}
@@ -127,28 +113,16 @@ func insertDomainIntent(ctx context.Context, tx database.Tx, intentStore operati
 		if err != nil {
 			return fmt.Errorf("marshal certificate DNS names: %w", err)
 		}
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		if err := store.InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: dnsNames, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
+		if err := certificatestore.FromTransaction(tx).InsertCSR(ctx, certificatestore.PendingCSR{ID: payload.CertificateID, WorkspaceID: workspaceID, NodeID: request.NodeID, OperationID: operationID, CommonName: payload.CommonName, DNSNames: dnsNames, KeyBits: payload.KeyBits, CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate request: %w", err)
 		}
 	case CertificateP12Payload:
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		if err := store.InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, ExpiresAt: payload.ArtifactMetadata.ExpiresAt.UTC(), CreatedAt: created}); err != nil {
+		if err := certificatestore.FromTransaction(tx).InsertArtifact(ctx, certificatestore.PendingArtifact{ID: payload.ArtifactID, WorkspaceID: workspaceID, NodeID: request.NodeID, CertificateID: payload.CertificateID, CertificateVersion: payload.CertificateVersion, OperationID: operationID, RequesterID: request.ActorIdentityID, TokenSHA256: payload.ArtifactMetadata.TokenSHA256, ExpiresAt: payload.ArtifactMetadata.ExpiresAt.UTC(), CreatedAt: created}); err != nil {
 			return fmt.Errorf("insert certificate artifact operation: %w", err)
 		}
 	case CertificateRevokePayload:
 		if payload.HoldDispatch {
-			store, err := certificatestore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			reserved, err := store.ReserveRevocation(ctx, payload.CertificateID, workspaceID, request.NodeID, payload.CertificateVersion, created)
+			reserved, err := certificatestore.FromTransaction(tx).ReserveRevocation(ctx, payload.CertificateID, workspaceID, request.NodeID, payload.CertificateVersion, created)
 			if err != nil {
 				return err
 			}

@@ -5,11 +5,10 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
 
-type authenticationStore struct{ tx database.Tx }
+type authenticationStore struct{ tx *transaction }
 
 func (b *Backend) HasLocalCredential(ctx context.Context, id uuid.UUID) (bool, error) {
 	var found bool
@@ -78,29 +77,19 @@ func (s authenticationStore) RecordBreakGlass(ctx context.Context, fingerprint [
 	return err
 }
 func (s authenticationStore) Workspaces(ctx context.Context) ([]uuid.UUID, error) {
-	return database.CollectColumn[uuid.UUID](s.tx.Query(ctx, `SELECT id FROM workspaces ORDER BY id`))
+	return collectColumn[uuid.UUID](ctx, s.tx.store, `SELECT id FROM workspaces ORDER BY id`)
 }
 func (s authenticationStore) AuthorizedWorkspaces(ctx context.Context, identity uuid.UUID, breakGlass bool) ([]authstore.Workspace, error) {
-	var rows database.Rows
-	var err error
+	query := `SELECT w.id,w.name,w.slug,w.version FROM workspaces w JOIN workspace_admins a ON a.workspace_id=w.id WHERE a.identity_id=$1 ORDER BY w.name,w.id`
+	args := []any{identity}
 	if breakGlass {
-		rows, err = s.tx.Query(ctx, `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`)
-	} else {
-		rows, err = s.tx.Query(ctx, `SELECT w.id,w.name,w.slug,w.version FROM workspaces w JOIN workspace_admins a ON a.workspace_id=w.id WHERE a.identity_id=$1 ORDER BY w.name,w.id`, identity)
+		query = `SELECT id,name,slug,version FROM workspaces ORDER BY name,id`
+		args = nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []authstore.Workspace
-	for rows.Next() {
-		var w authstore.Workspace
-		if err := rows.Scan(&w.ID, &w.Name, &w.Slug, &w.Version); err != nil {
-			return nil, err
-		}
-		out = append(out, w)
-	}
-	return out, rows.Err()
+	return collectRows(ctx, s.tx.store, query, func(r Rows) (w authstore.Workspace, err error) {
+		err = r.Scan(&w.ID, &w.Name, &w.Slug, &w.Version)
+		return
+	}, args...)
 }
 func (s authenticationStore) ActiveLocalUsername(ctx context.Context, id uuid.UUID) (string, error) {
 	var username string

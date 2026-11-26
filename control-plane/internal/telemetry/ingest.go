@@ -230,10 +230,7 @@ func (s *Service) IngestWireTransaction(ctx context.Context, tx database.Tx, exp
 }
 
 func (s *Service) ingestTx(ctx context.Context, tx database.Tx, batch Batch, payloadBytes int) (bool, error) {
-	store, err := telemetrystore.FromTransaction(tx)
-	if err != nil {
-		return false, err
-	}
+	store := telemetrystore.FromTransaction(tx)
 	if err := store.LockNode(ctx, batch.NodeID); errors.Is(err, database.ErrNotFound) {
 		return false, fmt.Errorf("%w: telemetry node is unavailable", ErrInvalidTelemetry)
 	} else if err != nil {

@@ -43,7 +43,7 @@ func testLogger() *slog.Logger {
 
 func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	pool := testPool(t)
-	manager, err := NewManagerBackend(postgres.WrapPool(pool), testLogger())
+	manager, err := NewManager(postgres.WrapPool(pool), testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -94,14 +94,14 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 		t.Fatalf("open session before restart: %v", err)
 	}
 	backend := postgres.WrapPool(pool)
-	successor, err := NewManagerBackend(backend, testLogger())
+	successor, err := NewManager(backend, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
 	if err := successor.CloseSession(context.Background(), nodeID, next.ConnectionID, next.SessionEpoch); err != nil {
 		t.Fatalf("close stale pre-restart session: %v", err)
 	}
-	state, err := connectionowner.ReadStateBackend(context.Background(), backend, nodeID)
+	state, err := connectionowner.ReadState(context.Background(), backend, nodeID)
 	if err != nil {
 		t.Fatalf("read state after stale close: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	if err := successor.CloseSession(context.Background(), nodeID, restarted.ConnectionID, restarted.SessionEpoch); err != nil {
 		t.Fatalf("close active pre-restart session: %v", err)
 	}
-	state, err = connectionowner.ReadStateBackend(context.Background(), backend, nodeID)
+	state, err = connectionowner.ReadState(context.Background(), backend, nodeID)
 	if err != nil {
 		t.Fatalf("read state after restart close: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 
 func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 	pool := testPool(t)
-	manager, err := NewManagerBackend(postgres.WrapPool(pool), testLogger())
+	manager, err := NewManager(postgres.WrapPool(pool), testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}

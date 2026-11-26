@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type operationStore struct{ database.Tx }
+type operationStore struct{ *transaction }
 
 func (t *transaction) OperationStore() operationstore.Store { return operationStore{t} }
 
@@ -67,16 +67,16 @@ func (s operationStore) QueueMetrics(ctx context.Context, workspaceID uuid.UUID,
 func (s operationStore) ExpireQueued(ctx context.Context) error {
 	// A leased command has an uncertain dispatch outcome. Only reconciliation
 	// may resolve it, even when its execution deadline has already elapsed.
-	commands, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id FROM commands c
+	commands, err := collectColumn[uuid.UUID](ctx, s.store, `SELECT c.id FROM commands c
 		JOIN outbox_events o ON o.command_id=c.id
 		WHERE c.state='queued' AND c.expires_at<=now()
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases lease WHERE lease.command_id=c.id)
-		ORDER BY o.id FOR UPDATE OF o SKIP LOCKED`))
+		ORDER BY o.id FOR UPDATE OF o SKIP LOCKED`)
 	if err != nil || len(commands) == 0 {
 		return err
 	}
 	// Recheck under the outbox locks in a fresh READ COMMITTED snapshot.
-	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `WITH expired AS (
+	ids, err := collectColumn[uuid.UUID](ctx, s.store, `WITH expired AS (
 		UPDATE commands SET state='expired',updated_at=now()
 		WHERE id=ANY($1::uuid[]) AND state='queued' AND expires_at<=now()
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases lease WHERE lease.command_id=commands.id)
@@ -85,7 +85,7 @@ func (s operationStore) ExpireQueued(ctx context.Context) error {
 		UPDATE outbox_events SET published_at=now(),locked_by=NULL,locked_until=NULL,last_error='command expired before dispatch'
 		FROM expired WHERE outbox_events.command_id=expired.id RETURNING expired.operation_id
 	) UPDATE operations SET state='expired',version=version+1,updated_at=now(),completed_at=now()
-	FROM stopped WHERE operations.id=stopped.operation_id AND operations.state='queued' RETURNING operations.id`, commands))
+	FROM stopped WHERE operations.id=stopped.operation_id AND operations.state='queued' RETURNING operations.id`, commands)
 	if err != nil || len(ids) == 0 {
 		return err
 	}
@@ -106,7 +106,7 @@ func (s operationStore) ExpireQueued(ctx context.Context) error {
 const operationColumns = `o.id::text,o.state,o.node_id::text,o.command_id::text,o.version,o.created_at,o.updated_at,o.expires_at,COALESCE(x.state,''),COALESCE(x.failure_code,''),COALESCE(u.state,''),COALESCE(u.target_version,'')`
 const operationJoins = ` FROM operations o LEFT JOIN config_apply_operations x ON x.operation_id=o.id LEFT JOIN agent_upgrade_operations u ON u.operation_id=o.id`
 
-func scanOperation(row database.Row, hash *[]byte) (v operationstore.Operation, err error) {
+func scanOperation(row interface{ Scan(...any) error }, hash *[]byte) (v operationstore.Operation, err error) {
 	args := []any{&v.ID, &v.State, &v.NodeID, &v.CommandID, &v.Version, &v.CreatedAt, &v.UpdatedAt, &v.ExpiresAt, &v.ConfigApplyState, &v.ConfigApplyFailureCode, &v.AgentUpgradeState, &v.AgentUpgradeTarget}
 	if hash != nil {
 		args = append(args, hash)
@@ -127,33 +127,21 @@ func (s operationStore) OperationState(ctx context.Context, id uuid.UUID) (state
 }
 
 func (s operationStore) ListInWorkspace(ctx context.Context, workspace, after uuid.UUID, limit int) ([]operationstore.Operation, error) {
-	var (
-		rows database.Rows
-		err  error
-	)
+	var query string
+	var args []any
 	switch {
 	case workspace == uuid.Nil && after == uuid.Nil:
-		rows, err = s.Query(ctx, `SELECT `+operationColumns+operationJoins+` ORDER BY o.id DESC LIMIT $1`, limit)
+		query, args = `SELECT `+operationColumns+operationJoins+` ORDER BY o.id DESC LIMIT $1`, []any{limit}
 	case workspace == uuid.Nil:
-		rows, err = s.Query(ctx, `SELECT `+operationColumns+operationJoins+` WHERE o.id<$1 ORDER BY o.id DESC LIMIT $2`, after, limit)
+		query, args = `SELECT `+operationColumns+operationJoins+` WHERE o.id<$1 ORDER BY o.id DESC LIMIT $2`, []any{after, limit}
 	case after == uuid.Nil:
-		rows, err = s.Query(ctx, `SELECT `+operationColumns+operationJoins+` WHERE o.workspace_id=$1 ORDER BY o.id DESC LIMIT $2`, workspace, limit)
+		query, args = `SELECT `+operationColumns+operationJoins+` WHERE o.workspace_id=$1 ORDER BY o.id DESC LIMIT $2`, []any{workspace, limit}
 	default:
-		rows, err = s.Query(ctx, `SELECT `+operationColumns+operationJoins+` WHERE o.workspace_id=$1 AND o.id<$2 ORDER BY o.id DESC LIMIT $3`, workspace, after, limit)
+		query, args = `SELECT `+operationColumns+operationJoins+` WHERE o.workspace_id=$1 AND o.id<$2 ORDER BY o.id DESC LIMIT $3`, []any{workspace, after, limit}
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := make([]operationstore.Operation, 0, limit)
-	for rows.Next() {
-		v, err := scanOperation(rows, nil)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, query, func(r Rows) (operationstore.Operation, error) {
+		return scanOperation(r, nil)
+	}, args...)
 }
 
 func (s operationStore) SummaryInWorkspace(ctx context.Context, workspace uuid.UUID) (v operationstore.Summary, err error) {
@@ -174,28 +162,16 @@ func (s operationStore) FindIdempotent(ctx context.Context, workspace uuid.UUID,
 }
 
 func (s operationStore) Events(ctx context.Context, id, after uuid.UUID, limit int) ([]operationstore.Event, error) {
-	var (
-		rows database.Rows
-		err  error
-	)
-	if after == uuid.Nil {
-		rows, err = s.Query(ctx, `SELECT id::text,operation_id::text,state,occurred_at,sequence FROM operation_events WHERE operation_id=$1 ORDER BY sequence LIMIT $2`, id, limit)
-	} else {
-		rows, err = s.Query(ctx, `SELECT id::text,operation_id::text,state,occurred_at,sequence FROM operation_events WHERE operation_id=$1 AND sequence>COALESCE((SELECT sequence FROM operation_events WHERE id=$2 AND operation_id=$1),0) ORDER BY sequence LIMIT $3`, id, after, limit)
+	query := `SELECT id::text,operation_id::text,state,occurred_at,sequence FROM operation_events WHERE operation_id=$1 ORDER BY sequence LIMIT $2`
+	args := []any{id, limit}
+	if after != uuid.Nil {
+		query = `SELECT id::text,operation_id::text,state,occurred_at,sequence FROM operation_events WHERE operation_id=$1 AND sequence>COALESCE((SELECT sequence FROM operation_events WHERE id=$2 AND operation_id=$1),0) ORDER BY sequence LIMIT $3`
+		args = []any{id, after, limit}
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []operationstore.Event
-	for rows.Next() {
-		var v operationstore.Event
-		if err := rows.Scan(&v.ID, &v.OperationID, &v.State, &v.OccurredAt, &v.Sequence); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, query, func(r Rows) (v operationstore.Event, err error) {
+		err = r.Scan(&v.ID, &v.OperationID, &v.State, &v.OccurredAt, &v.Sequence)
+		return
+	}, args...)
 }
 
 func (s operationStore) EventSequence(ctx context.Context, operation, event uuid.UUID) (sequence int64, err error) {
@@ -203,18 +179,10 @@ func (s operationStore) EventSequence(ctx context.Context, operation, event uuid
 	return
 }
 
-func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, payload string, at time.Time) error {
-	// Dispatch and command result ingestion lock outbox_events before commands.
-	// Lock outbox first and recheck eligibility after acquiring the lock so a
-	// concurrent dispatch claim cannot deadlock or be superseded in flight.
-	commands, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT o.command_id FROM outbox_events o
-		WHERE o.published_at IS NULL AND o.locked_by IS NULL
-		AND EXISTS(SELECT 1 FROM commands c WHERE c.id=o.command_id AND c.node_id=$1 AND c.payload_type=$2 AND c.state='queued'
-			AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id))
-		ORDER BY o.id FOR UPDATE`, node, payload))
-	if err != nil {
-		return err
-	}
+// supersedeQueuedCommands transitions pre-locked outbox candidates to superseded
+// after rechecking queued+unleased command eligibility in outbox->command lock order.
+func supersedeQueuedCommands(ctx context.Context, s store, commands []uuid.UUID, at time.Time, reason string) (bool, error) {
+	changed := false
 	for _, command := range commands {
 		var operation uuid.UUID
 		err := s.QueryRow(ctx, `SELECT operation_id FROM commands WHERE id=$1 AND state='queued' AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=commands.id) FOR UPDATE`, command).Scan(&operation)
@@ -222,26 +190,43 @@ func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, pa
 			continue
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		if _, err := s.Exec(ctx, `UPDATE commands SET state='superseded',updated_at=$2 WHERE id=$1`, command, at); err != nil {
-			return err
+			return false, err
 		}
 		if _, err := s.Exec(ctx, `UPDATE operations SET state='superseded',version=version+1,updated_at=$2,completed_at=$2 WHERE id=$1 AND state='queued'`, operation, at); err != nil {
-			return err
+			return false, err
 		}
-		if _, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=$2,last_error='superseded by newer intent' WHERE command_id=$1`, command, at); err != nil {
-			return err
+		if _, err := s.Exec(ctx, `UPDATE outbox_events SET published_at=$2,last_error=$3 WHERE command_id=$1`, command, at, reason); err != nil {
+			return false, err
 		}
 		event, err := uuid.NewV7()
 		if err != nil {
-			return err
+			return false, err
 		}
 		if _, err := s.Exec(ctx, `INSERT INTO operation_events(id,operation_id,state,occurred_at)VALUES($1,$2,'superseded',$3)`, event, operation, at); err != nil {
-			return err
+			return false, err
 		}
+		changed = true
 	}
-	return nil
+	return changed, nil
+}
+
+func (s operationStore) SupersedePending(ctx context.Context, node uuid.UUID, payload string, at time.Time) error {
+	// Dispatch and command result ingestion lock outbox_events before commands.
+	// Lock outbox first and recheck eligibility after acquiring the lock so a
+	// concurrent dispatch claim cannot deadlock or be superseded in flight.
+	commands, err := collectColumn[uuid.UUID](ctx, s.store, `SELECT o.command_id FROM outbox_events o
+		WHERE o.published_at IS NULL AND o.locked_by IS NULL
+		AND EXISTS(SELECT 1 FROM commands c WHERE c.id=o.command_id AND c.node_id=$1 AND c.payload_type=$2 AND c.state='queued'
+			AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id))
+		ORDER BY o.id FOR UPDATE`, node, payload)
+	if err != nil {
+		return err
+	}
+	_, err = supersedeQueuedCommands(ctx, s.store, commands, at, "superseded by newer intent")
+	return err
 }
 
 func (s operationStore) InsertIntent(ctx context.Context, v operationstore.QueuedIntent) error {

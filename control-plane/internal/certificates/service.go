@@ -129,9 +129,9 @@ type ArtifactDownload struct {
 	Grant          *agentv1.ArtifactGrantV1
 }
 
-// NewBackend uses common certificate transactions. CSR/P12/revocation also
+// New uses common certificate transactions. CSR/P12/revocation also
 // require an operations service configured for the same backend.
-func NewBackend(backend database.Backend, operationService *operations.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
+func New(backend database.Backend, operationService *operations.Service, signer Signer, sealer SecretSealer, artifacts ArtifactFetcher, grantSigner *commandauth.Signer) *Service {
 	return &Service{backend: backend, operations: operationService, signer: signer, sealer: sealer, artifacts: artifacts, grantSigner: grantSigner, now: func() time.Time { return time.Now().UTC() }}
 }
 
@@ -178,21 +178,13 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 
 func (s *Service) withStore(ctx context.Context, fn func(database.Tx, certificatestore.Store) error) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return fn(tx, store)
+		return fn(tx, certificatestore.FromTransaction(tx))
 	})
 }
 
 func (s *Service) withArtifactStore(ctx context.Context, fn func(database.Tx, certificatestore.ArtifactStore) error) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return fn(tx, store)
+		return fn(tx, certificatestore.ArtifactFromTransaction(tx))
 	})
 }
 

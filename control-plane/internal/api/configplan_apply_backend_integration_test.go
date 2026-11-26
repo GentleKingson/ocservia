@@ -21,7 +21,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configplan"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/privdattestation"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -38,7 +38,7 @@ type applyHTTPActor struct {
 
 type applyHTTPFixture struct {
 	t                 *testing.T
-	b, owner          database.Backend
+	b, owner          *postgres.Backend
 	s                 *Server
 	signer            *commandauth.Signer
 	workspace         uuid.UUID
@@ -51,7 +51,7 @@ func newApplyHTTPFixture(t *testing.T) applyHTTPFixture {
 	return newApplyHTTPFixtureWithBackend(t, b, owner)
 }
 
-func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) applyHTTPFixture {
+func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner *postgres.Backend) applyHTTPFixture {
 	t.Helper()
 	if owner == nil {
 		t.Fatal("owner connection required for isolated Apply fixtures")
@@ -60,12 +60,12 @@ func newApplyHTTPFixtureWithBackend(t *testing.T, b, owner database.Backend) app
 	if err := b.QueryRow(t.Context(), `SELECT current_user`).Scan(&user); err != nil || !strings.HasPrefix(user, "ocservia_app") {
 		t.Fatalf("restricted runtime required: %q %v", user, err)
 	}
-	authn, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	signer := commandauth.NewSignerFromSeed([32]byte{4})
-	ops := operations.NewBackend(b, 50, signer)
-	certs := certificates.NewBackend(b, ops, nil, nil, nil, signer)
-	s := newTestServer(t, testHTTPConfig(false), b, Modules{Operations: ops, ConfigPlans: configplan.NewBackend(b, ops), Certificates: certs}, Authorization{Authentication: authn})
+	ops := operations.New(b, 50, signer)
+	certs := certificates.New(b, ops, nil, nil, nil, signer)
+	s := newTestServer(t, testHTTPConfig(false), b, Modules{Operations: ops, ConfigPlans: configplan.New(b, ops), Certificates: certs}, Authorization{Authentication: authn})
 	f := applyHTTPFixture{t: t, b: b, owner: owner, s: s, signer: signer, workspace: uuid.Must(uuid.NewV7())}
 	stamp := time.Now().UTC()
 	f.exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Apply HTTP',$2,$3,$4)`, f.workspace, f.workspace.String(), stamp, stamp)
@@ -102,7 +102,7 @@ func (f applyHTTPFixture) exec(query string, args ...any) {
 	authSafetyExec(f.t, f.owner, query, args...)
 }
 
-func (f applyHTTPFixture) row(query string, args ...any) database.Row {
+func (f applyHTTPFixture) row(query string, args ...any) postgres.Row {
 	f.t.Helper()
 	return f.b.QueryRow(f.t.Context(), query, args...)
 }
@@ -215,7 +215,7 @@ func (f applyHTTPFixture) plan(validated bool) configplan.Plan {
 	}
 	event := uuid.Must(uuid.NewV7())
 	// Controlled signed result fixture, not evidence of a real Agent execution.
-	if err := transportevents.NewBackend(f.b, f.signer).Ingest(f.t.Context(), &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: resultBytes}); err != nil {
+	if err := transportevents.New(f.b, f.signer).Ingest(f.t.Context(), &transportv1.TransportEvent{EventId: event[:], NodeId: node[:], EndpointId: endpoint[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: envelope.GetTraceparent(), Payload: resultBytes}); err != nil {
 		f.t.Fatal(err)
 	}
 	w = f.call("GET", "/api/v1/config-plans/"+plan.ID.String(), "", "", f.requester.cookie, nil)
@@ -430,7 +430,7 @@ func TestConfigPlanApplyBackendHTTPIntegration(t *testing.T) {
 			}
 			event := uuid.Must(uuid.NewV7())
 			endpoint := sha256.Sum256(plan.NodeID[:])
-			if err := transportevents.NewBackend(g.b, g.signer).Ingest(t.Context(), &transportv1.TransportEvent{
+			if err := transportevents.New(g.b, g.signer).Ingest(t.Context(), &transportv1.TransportEvent{
 				EventId: event[:], NodeId: plan.NodeID[:], EndpointId: endpoint[:],
 				Type:       transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_DISCONNECTED,
 				OccurredAt: timestamppb.Now(), Traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01", Payload: []byte("connection closed"),

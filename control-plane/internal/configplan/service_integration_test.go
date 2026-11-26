@@ -56,8 +56,8 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	var commandSeed [32]byte
 	commandSeed[0] = 4
 	commandSigner := commandauth.NewSignerFromSeed(commandSeed)
-	creator := &recordingOperationCreator{delegate: operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner)}
-	service := NewBackend(postgres.WrapPool(pool), creator)
+	creator := &recordingOperationCreator{delegate: operations.New(postgres.WrapPool(pool), 50, commandSigner)}
+	service := New(postgres.WrapPool(pool), creator)
 	renderInput, oldNode := completeRenderFixture()
 	renderInput.Template.Directives[7].SecretRef.Key = strings.Replace(renderInput.Template.Directives[7].SecretRef.Key, oldNode.String(), nodeID.String(), 1)
 	rendered, err := renderComplete(renderInput, nodeID, 0)
@@ -198,7 +198,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	testutil.NoError(t, testfixture.AttachProof(&envelope, planResult, attestationKey, 1))
 	encodedPlanResult, err := proto.Marshal(planResult)
 	testutil.NoError(t, err)
-	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
+	if err := transportevents.New(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{
 		EventId: eventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT,
 		OccurredAt: timestamppb.New(completedPlan), Traceparent: request.Traceparent, Payload: encodedPlanResult,
 	}); err != nil {
@@ -283,7 +283,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE commands SET expires_at=created_at+interval '1 microsecond' WHERE id=$1`, applyCommandID); err != nil {
 		t.Fatal(err)
 	}
-	testutil.NoError(t, operations.NewBackend(postgres.WrapPool(pool), 50, commandSigner).Reap(ctx, 3))
+	testutil.NoError(t, operations.New(postgres.WrapPool(pool), 50, commandSigner).Reap(ctx, 3))
 	var commandState, operationState, missingOutcomeState string
 	var commandExpiry, operationExpiry time.Time
 	var missingOutcomeEnvelopeBytes []byte
@@ -309,7 +309,7 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	invalidResultBytes, err := proto.Marshal(&agentv1.CommandResult{CommandId: applyEnvelope.GetCommandId(), IdempotencyKey: applyEnvelope.GetIdempotencyKey(), PayloadSha256: payloadHash[:], SemanticPayloadHashVersion: agentv1.SemanticPayloadHashVersion_SEMANTIC_PAYLOAD_HASH_VERSION_V2, State: agentv1.CommandResultState_COMMAND_RESULT_STATE_SUCCEEDED, AcceptedAt: timestamppb.Now(), CompletedAt: timestamppb.Now()})
 	testutil.NoError(t, err)
 	invalidEventID := uuid.Must(uuid.NewV7())
-	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err != nil {
+	if err := transportevents.New(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: invalidEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: invalidResultBytes}); err != nil {
 		t.Fatalf("ingest invalid configuration evidence for reconciliation: %v", err)
 	}
 	var preEvidenceState string
@@ -338,23 +338,23 @@ func TestConfigPlanCreateReplayStaleAndTypedEnvelopeIntegration(t *testing.T) {
 	commandResultBytes, err := proto.Marshal(validResult)
 	testutil.NoError(t, err)
 	applyEventID := uuid.Must(uuid.NewV7())
-	testutil.NoError(t, transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}))
+	testutil.NoError(t, transportevents.New(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: applyEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: commandResultBytes}))
 	var applyState, lockReason string
 	var automationLocked bool
 	var criticalAlerts int
 	testutil.NoError(t, pool.QueryRow(ctx, `SELECT x.state,s.automation_locked,COALESCE(s.automation_lock_reason,''),(SELECT count(*) FROM security_alerts WHERE workspace_id=x.workspace_id AND kind='config_apply.rollback_failed') FROM config_apply_operations x JOIN node_config_state s ON s.node_id=x.node_id WHERE x.operation_id=$1`, applyOperationID).Scan(&applyState, &automationLocked, &lockReason, &criticalAlerts))
-	metrics, err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Metrics(ctx)
+	metrics, err := operations.New(postgres.WrapPool(pool), 50, nil).Metrics(ctx)
 	if err != nil || applyState != "failed_critical" || !automationLocked || lockReason != "config_apply_rollback_failed" || criticalAlerts != 1 || metrics.ConfigFailedCritical < 1 {
 		t.Fatalf("critical apply state=%s locked=%v reason=%s alerts=%d metrics=%+v err=%v", applyState, automationLocked, lockReason, criticalAlerts, metrics, err)
 	}
-	publicApply, err := operations.NewBackend(postgres.WrapPool(pool), 50, nil).Get(ctx, applyOperationID)
+	publicApply, err := operations.New(postgres.WrapPool(pool), 50, nil).Get(ctx, applyOperationID)
 	if err != nil || publicApply.ConfigApplyState != "failed_critical" || publicApply.ConfigApplyFailureCode != "rollback_failed" || publicApply.NodeID == nil || *publicApply.NodeID != nodeID.String() {
 		t.Fatalf("public critical apply=%+v err=%v", publicApply, err)
 	}
 	replayedResultBytes, err := proto.Marshal(validResult)
 	testutil.NoError(t, err)
 	replayEventID := uuid.Must(uuid.NewV7())
-	if err := transportevents.NewBackend(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: replayEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: replayedResultBytes}); err != nil {
+	if err := transportevents.New(postgres.WrapPool(pool), commandSigner).Ingest(ctx, &transportv1.TransportEvent{EventId: replayEventID[:], NodeId: nodeID[:], EndpointId: endpointID[:], Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: timestamppb.Now(), Traceparent: request.Traceparent, Payload: replayedResultBytes}); err != nil {
 		t.Fatalf("critical result replay failed: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_alerts WHERE workspace_id=$1 AND kind='config_apply.rollback_failed'`, workspaceID).Scan(&criticalAlerts); err != nil || criticalAlerts != 1 {

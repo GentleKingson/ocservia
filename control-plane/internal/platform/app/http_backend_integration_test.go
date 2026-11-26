@@ -45,7 +45,7 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	cfg.EventStreams.RetryAfter, cfg.EventStreams.RevalidateInterval = 7*time.Second, 5*time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	seedAuth, err := auth.NewBackend(runtime.Store, auth.Config{LocalEnabled: true, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+	seedAuth, err := auth.New(runtime.Store, auth.Config{LocalEnabled: true, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 	testutil.NoError(t, err)
 	username, password := "http-assembly-"+uuid.NewString(), "unique long HTTP assembly fixture password"
 	identity, err := seedAuth.CreateLocalCredential(ctx, username, password)
@@ -62,11 +62,11 @@ func testHTTPServerAssembly(t *testing.T, cfg config.Config, owner, runtime *con
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,version,created_at,updated_at) VALUES($1,$2,'HTTP assembly fixture','active',1,$3,$4)`, node, workspace, at, at)
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
 	signer := commandauth.NewSignerFromSeed([32]byte{1})
-	ops := operations.NewBackend(runtime.Store, 3, signer)
-	users := userstate.NewWithSignerBackend(runtime.Store, signer)
+	ops := operations.New(runtime.Store, 3, signer)
+	users := userstate.NewWithSigner(runtime.Store, signer)
 	modules := api.Modules{
-		Nodes: telemetry.NewWithRecommendedAgentVersionBackend(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.NewBackend(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrencyBackend(runtime.Store, users, 3),
-		Operations: ops, UserState: users, TransportEvents: transportevents.NewBackend(runtime.Store, signer),
+		Nodes: telemetry.NewWithRecommendedAgentVersion(runtime.Store, cfg.RecommendedAgentVersion), ConfigPlans: configplan.New(runtime.Store, ops), UserOperations: useroperations.NewWithConcurrency(runtime.Store, users, 3),
+		Operations: ops, UserState: users, TransportEvents: transportevents.New(runtime.Store, signer),
 	}
 	life := newLifecycle(ctx, afterTimeout(time.Second), quietLogger())
 	t.Cleanup(func() {

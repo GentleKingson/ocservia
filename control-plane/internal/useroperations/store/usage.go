@@ -55,14 +55,10 @@ type UsageStore interface {
 // RecordUsageTransaction resolves the usage store from the caller's transaction,
 // retaining node-before-cursor lock ordering.
 func RecordUsageTransaction(ctx context.Context, tx database.Tx, nodeID uuid.UUID, samples []UsageSample) error {
-	provider, ok := tx.(interface{ UsageStore() UsageStore })
-	if !ok {
-		return database.ErrUnsupported
-	}
 	if len(samples) == 0 {
 		return nil
 	}
-	usage := provider.UsageStore()
+	usage := database.Must[interface{ UsageStore() UsageStore }](tx).UsageStore()
 	if err := usage.LockNode(ctx, nodeID); err != nil {
 		return err
 	}

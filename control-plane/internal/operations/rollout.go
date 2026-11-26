@@ -227,10 +227,7 @@ func loadRolloutNodeObservation(ctx context.Context, store operationstore.Store,
 func (s *Service) GetAgentRollout(ctx context.Context, rolloutID uuid.UUID) (AgentRollout, error) {
 	var result AgentRollout
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := operationstore.FromTransaction(tx)
 		rollout, err := store.Rollout(ctx, rolloutID, false)
 		if err != nil {
 			return err
@@ -253,10 +250,7 @@ func (s *Service) ListAgentRollouts(ctx context.Context, workspaceID uuid.UUID, 
 	}
 	rollouts := []AgentRollout{}
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := operationstore.FromTransaction(tx)
 		rows, err := store.Rollouts(ctx, workspaceID, limit)
 		if err != nil {
 			return err
@@ -277,12 +271,8 @@ func (s *Service) ListAgentRollouts(ctx context.Context, workspaceID uuid.UUID, 
 // workspace-scoped request authorization.
 func (s *Service) RolloutWorkspace(ctx context.Context, rolloutID uuid.UUID) (uuid.UUID, error) {
 	var workspaceID uuid.UUID
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		workspaceID, err = store.RolloutWorkspace(ctx, rolloutID)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		workspaceID, err = operationstore.FromTransaction(tx).RolloutWorkspace(ctx, rolloutID)
 		return err
 	})
 	return workspaceID, err
@@ -302,12 +292,8 @@ func rolloutNodeModels(rows []operationstore.RolloutNode) []AgentRolloutNode {
 
 func (s *Service) loadRollout(ctx context.Context, id uuid.UUID) (rolloutRow, error) {
 	var row rolloutRow
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		row, err = store.Rollout(ctx, id, false)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		row, err = operationstore.FromTransaction(tx).Rollout(ctx, id, false)
 		return err
 	})
 	return row, err
@@ -343,10 +329,7 @@ func (s *Service) CreateAgentRollout(ctx context.Context, request CreateAgentRol
 		defer cancel()
 		_ = tx.Rollback(cleanup)
 	}()
-	store, err := operationstore.FromTransaction(tx)
-	if err != nil {
-		return AgentRollout{}, false, err
-	}
+	store := operationstore.FromTransaction(tx)
 	if err := auth.AuthorizeMutationTx(ctx, tx, request.ActorIdentityID, request.ActorSessionID, request.WorkspaceID); err != nil {
 		return AgentRollout{}, false, err
 	}

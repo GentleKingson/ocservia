@@ -25,7 +25,7 @@ func newAuthHTTPServer(t *testing.T, pool *pgxpool.Pool, local bool, httpConfigs
 	if pool == nil {
 		pool = &pgxpool.Pool{}
 	}
-	service, err := auth.NewBackend(postgres.WrapPool(pool), cfg)
+	service, err := auth.New(postgres.WrapPool(pool), cfg)
 	testutil.NoError(t, err)
 	config := testHTTPConfig(false)
 	if len(httpConfigs) > 0 {

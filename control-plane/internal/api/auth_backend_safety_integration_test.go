@@ -14,17 +14,18 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 )
 
-func authSafetyExec(t *testing.T, b database.Backend, query string, args ...any) {
+func authSafetyExec(t *testing.T, b *postgres.Backend, query string, args ...any) {
 	t.Helper()
 	if _, err := b.Exec(context.Background(), query, args...); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
+func authSafetyWorkspace(t *testing.T, owner *postgres.Backend) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	now := time.Now().UTC()
@@ -32,7 +33,7 @@ func authSafetyWorkspace(t *testing.T, owner database.Backend) uuid.UUID {
 	return id
 }
 
-func authSafetyAuditFailure(t *testing.T, owner database.Backend, workspace uuid.UUID, action string) func() {
+func authSafetyAuditFailure(t *testing.T, owner *postgres.Backend, workspace uuid.UUID, action string) func() {
 	t.Helper()
 	authSafetyExec(t, owner, `ALTER TABLE audit_events ADD CONSTRAINT test_auth_audit_failure CHECK(workspace_id <> '`+workspace.String()+`' OR action <> '`+action+`')`)
 	removed := false
@@ -71,11 +72,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		for i := range cap(results) {
 			go func() {
 				results <- database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-					store, err := authstore.From(tx)
-					if err != nil {
-						return err
-					}
-					admitted, err := store.ReserveAttempt(ctx, fmt.Sprintf("auth-capacity-%d", i), uuid.New(), baseline+8, 15*time.Minute, 30*time.Second)
+					admitted, err := authstore.From(tx).ReserveAttempt(ctx, fmt.Sprintf("auth-capacity-%d", i), uuid.New(), baseline+8, 15*time.Minute, 30*time.Second)
 					if err == nil && !admitted {
 						return errors.New("distinct account unexpectedly refused")
 					}
@@ -96,7 +93,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		}
 	})
 
-	s, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	s, err := auth.New(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	wid := authSafetyWorkspace(t, owner)
 	other := authSafetyWorkspace(t, owner)
@@ -121,19 +118,13 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 		holder, err := b.Begin(ctx, database.ReadCommitted)
 		testutil.NoError(t, err)
 		defer holder.Rollback(ctx)
-		store, err := authstore.From(holder)
-		testutil.NoError(t, err)
-		if err := store.LockManagement(ctx); err != nil {
+		if err := authstore.From(holder).LockManagement(ctx); err != nil {
 			t.Fatal(err)
 		}
 		wait, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 		defer cancel()
 		err = database.Within(wait, b, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := authstore.From(tx)
-			if err != nil {
-				return err
-			}
-			return store.LockManagement(wait)
+			return authstore.From(tx).LockManagement(wait)
 		})
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("management lock did not serialize the absent singleton: %v", err)
@@ -155,7 +146,7 @@ func TestAuthenticationBackendSafetyIntegration(t *testing.T) {
 	if succeeded != 1 {
 		t.Fatalf("concurrent bootstrap successes: %d", succeeded)
 	}
-	m := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32))
+	m := audit.NewManager(b, bytes.Repeat([]byte{7}, 32))
 	verified, err := m.Verify(ctx, wid)
 	if err != nil || !verified.Valid || verified.Events != 1 {
 		t.Fatalf("bootstrap audit rollback: %+v %v", verified, err)

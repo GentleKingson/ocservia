@@ -30,7 +30,7 @@ type trustConvergenceJob struct {
 	State transportv1.NodeTrustState
 }
 
-func NewTrustConvergenceWorkerBackend(backend database.Backend, transport TrustTransport, logger *slog.Logger) (*TrustConvergenceWorker, error) {
+func NewTrustConvergenceWorker(backend database.Backend, transport TrustTransport, logger *slog.Logger) (*TrustConvergenceWorker, error) {
 	workerID, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
@@ -211,10 +211,6 @@ func (w *TrustConvergenceWorker) release(ctx context.Context, job trustConvergen
 
 func (w *TrustConvergenceWorker) withTrust(ctx context.Context, action func(enrollmentstore.TrustStore) error) error {
 	return database.Within(ctx, w.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := enrollmentstore.Trust(tx)
-		if err != nil {
-			return err
-		}
-		return action(store)
+		return action(enrollmentstore.Trust(tx))
 	})
 }

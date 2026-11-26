@@ -16,10 +16,7 @@ import (
 func ExportSealingBinding(ctx context.Context, backend database.Backend, workspace, nodeID uuid.UUID, endpoint string) ([]byte, error) {
 	var output []byte
 	err := database.Within(ctx, backend, database.RepeatableRead, func(tx database.Tx) error {
-		store, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
+		store := enrollmentstore.Enrollment(tx)
 		node, err := store.NodeByID(ctx, nodeID, enrollmentstore.ForShare)
 		if err != nil {
 			return err

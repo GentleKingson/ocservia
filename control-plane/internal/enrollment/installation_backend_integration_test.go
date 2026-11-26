@@ -42,20 +42,16 @@ func (b installationRollbackBackend) Begin(ctx context.Context, isolation databa
 	}
 	return installationRollbackTx{tx}, nil
 }
-func (tx installationRollbackTx) EnrollmentStore() enrollmentstore.EnrollmentStore {
-	store, _ := enrollmentstore.Enrollment(tx.Tx)
-	return store
-}
+func (tx installationRollbackTx) Unwrap() database.Tx { return tx.Tx }
 func (tx installationRollbackTx) PrivdAttestationStore() privdattestation.Store {
-	store, _ := privdattestation.StoreFrom(tx.Tx)
-	return attestationRollbackStore{store}
+	return attestationRollbackStore{privdattestation.StoreFrom(tx.Tx)}
 }
 
 func TestInstallationBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	s := NewBackend(f.b, strings.Repeat("a", 64), "test", signer)
+	s := New(f.b, strings.Repeat("a", 64), "test", signer)
 	testutil.NoError(t, s.ConfigureInstallation(InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
 	now := time.Now().UTC()
 	s.now = func() time.Time { return now }
@@ -91,11 +87,7 @@ func TestInstallationBackendIntegration(t *testing.T) {
 		t.Fatal("initial registration challenge", err)
 	}
 	f.within(t, func(tx database.Tx) error {
-		store, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
-		caps, err := store.Capabilities(ctx, node, true)
+		caps, err := enrollmentstore.Enrollment(tx).Capabilities(ctx, node, true)
 		if err != nil {
 			return err
 		}
@@ -178,16 +170,11 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	if c, err := s.InstallationChallenge(ctx, binding); err != nil || !c.Registered {
 		t.Fatal("registered recovery status", err)
 	}
-	f.within(t, func(tx database.Tx) error {
-		var active int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM node_privd_attestation_keys WHERE node_id=$1 AND state='active' AND (valid_until IS NULL OR valid_until>$2)`, node, now).Scan(&active); err != nil {
-			return err
-		}
-		if active != 1 {
-			t.Fatal("duplicate keys", active)
-		}
-		return nil
-	})
+	var active int
+	testutil.NoError(t, f.b.QueryRow(ctx, `SELECT count(*) FROM node_privd_attestation_keys WHERE node_id=$1 AND state='active' AND (valid_until IS NULL OR valid_until>$2)`, node, now).Scan(&active))
+	if active != 1 {
+		t.Fatal("duplicate keys", active)
+	}
 	// An expired token must never authorize a first key, even after enrollment.
 	now = now.Add(-2 * time.Minute)
 	unregistered := makeToken()
@@ -201,7 +188,7 @@ func TestInstallationBackendIntegration(t *testing.T) {
 	if _, err := s.InstallationChallenge(ctx, InstallationBinding{Token: unregistered.Value, NodeID: id, EndpointID: hex.EncodeToString(unregisteredEndpoint)}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatal("expired token granted first registration", err)
 	}
-	if verified, err := audit.NewBackendManager(f.b, nil).Verify(ctx, f.workspace); err != nil || !verified.Valid {
+	if verified, err := audit.NewManager(f.b, nil).Verify(ctx, f.workspace); err != nil || !verified.Valid {
 		t.Fatal("installation audit chain", err)
 	}
 }

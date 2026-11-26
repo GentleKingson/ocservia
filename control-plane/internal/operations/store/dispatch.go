@@ -1,9 +1,6 @@
 package store
 
 import (
-	"context"
-	"time"
-
 	"github.com/google/uuid"
 )
 
@@ -26,17 +23,4 @@ type QueueMetrics struct {
 	Unknown              int64   `json:"command_unknown_total"`
 	ConfigRollbacks      int64   `json:"config_rollback_total"`
 	ConfigFailedCritical int64   `json:"config_failed_critical_total"`
-}
-
-type DispatchStore interface {
-	DispatchCandidates(context.Context, int, int, time.Time) ([]Dispatch, error)
-	ClaimDispatch(context.Context, Dispatch, uuid.UUID, time.Time, time.Time) (bool, error)
-	LockDispatchOutbox(context.Context, Dispatch) error
-	DispatchStatus(context.Context, Dispatch) (DispatchStatus, error)
-	CompletedDispatch(context.Context, Dispatch) (DispatchStatus, error)
-	PublishDispatch(context.Context, Dispatch, time.Time) error
-	RecordDispatched(context.Context, Dispatch, bool, time.Time) error
-	CloseDispatch(context.Context, Dispatch, time.Time) error
-	FailDispatch(context.Context, Dispatch, string, time.Time) error
-	QueueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (QueueMetrics, error)
 }

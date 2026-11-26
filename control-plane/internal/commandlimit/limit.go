@@ -27,22 +27,12 @@ type Store interface {
 	WorkspaceBacklog(context.Context, uuid.UUID, int) (int, error)
 }
 
-type Provider interface{ CommandLimitStore() Store }
-
-func storeFor(tx database.Tx) (Store, error) {
-	provider, ok := tx.(Provider)
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return provider.CommandLimitStore(), nil
+func storeFor(tx database.Tx) Store {
+	return database.Must[interface{ CommandLimitStore() Store }](tx).CommandLimitStore()
 }
 
 func Lock(ctx context.Context, tx database.Tx) error {
-	store, err := storeFor(tx)
-	if err != nil {
-		return err
-	}
-	return store.LockAdmission(ctx)
+	return storeFor(tx).LockAdmission(ctx)
 }
 
 // Available serializes dispatch reservations and returns the number of slots
@@ -51,11 +41,8 @@ func Available(ctx context.Context, tx database.Tx, limit int) (int, error) {
 	if limit < 1 {
 		return 0, nil
 	}
-	store, err := storeFor(tx)
-	if err != nil {
-		return 0, err
-	}
-	if err = store.LockAdmission(ctx); err != nil {
+	store := storeFor(tx)
+	if err := store.LockAdmission(ctx); err != nil {
 		return 0, err
 	}
 	active, err := store.Active(ctx, limit)
@@ -71,11 +58,8 @@ func Available(ctx context.Context, tx database.Tx, limit int) (int, error) {
 // ReserveBacklog bounds durable queued work independently from execution
 // concurrency so offline nodes cannot consume dispatch slots or unbounded DB.
 func ReserveBacklog(ctx context.Context, tx database.Tx, workspaceID, nodeID uuid.UUID) error {
-	store, err := storeFor(tx)
-	if err != nil {
-		return err
-	}
-	if err = store.LockBacklog(ctx); err != nil {
+	store := storeFor(tx)
+	if err := store.LockBacklog(ctx); err != nil {
 		return err
 	}
 	nodeCount, err := store.NodeBacklog(ctx, nodeID, MaxNodeBacklog)

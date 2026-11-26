@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"time"
-
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 )
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
@@ -15,12 +13,11 @@ func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	diagnostics, ok := s.backend.(database.Diagnostics)
-	if !ok {
+	if s.backend == nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
 		return
 	}
-	if err := diagnostics.CheckReadiness(ctx); err != nil {
+	if err := s.backend.CheckReadiness(ctx); err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is not ready", "database dependency is unavailable")
 		return
 	}

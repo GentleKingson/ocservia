@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 )
 
 const rolloutColumns = `id,workspace_id,target_version,state,batch_size,stop_on_failure,reason,request_hash,created_by,actor_session_id,current_batch,pause_code,exclusions,created_at,updated_at`
 
-func scanRollout(row database.Row) (v operationstore.Rollout, err error) {
+func scanRollout(row Row) (v operationstore.Rollout, err error) {
 	var exclusions json.RawMessage
 	err = row.Scan(&v.ID, &v.WorkspaceID, &v.TargetVersion, &v.State, &v.BatchSize, &v.StopOnFailure, &v.Reason, &v.RequestHash, &v.CreatedBy, &v.ActorSession, &v.CurrentBatch, &v.PauseCode, &exclusions, &v.CreatedAt, &v.UpdatedAt)
 	if err == nil {
@@ -30,41 +29,22 @@ func (s operationStore) Rollout(ctx context.Context, id uuid.UUID, lock bool) (o
 }
 
 func (s operationStore) Rollouts(ctx context.Context, workspace uuid.UUID, limit int) ([]operationstore.Rollout, error) {
-	rows, err := s.Query(ctx, `SELECT `+rolloutColumns+` FROM agent_rollouts WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT $2`, workspace, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := []operationstore.Rollout{}
-	for rows.Next() {
-		v, err := scanRollout(rows)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, `SELECT `+rolloutColumns+` FROM agent_rollouts WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT $2`, func(r Rows) (operationstore.Rollout, error) {
+		return scanRollout(Row{r})
+	}, workspace, limit)
 }
 
 func (s operationStore) RolloutNodes(ctx context.Context, id uuid.UUID) ([]operationstore.RolloutNode, error) {
-	rows, err := s.Query(ctx, `SELECT node_id,ordinal,batch,state,operation_id,from_version,failure_code,COALESCE(dispatch_node_version,0),dispatch_attempt,dispatch_lease_until FROM agent_rollout_nodes WHERE rollout_id=$1 ORDER BY ordinal`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := []operationstore.RolloutNode{}
-	for rows.Next() {
-		var v operationstore.RolloutNode
+	return collectRows(ctx, s.store, `SELECT node_id,ordinal,batch,state,operation_id,from_version,failure_code,COALESCE(dispatch_node_version,0),dispatch_attempt,dispatch_lease_until FROM agent_rollout_nodes WHERE rollout_id=$1 ORDER BY ordinal`, func(r Rows) (v operationstore.RolloutNode, err error) {
 		var operation *uuid.UUID
-		if err := rows.Scan(&v.NodeID, &v.Ordinal, &v.Batch, &v.State, &operation, &v.FromVersion, &v.FailureCode, &v.DispatchVersion, &v.DispatchAttempt, &v.DispatchLease); err != nil {
-			return nil, err
+		if err := r.Scan(&v.NodeID, &v.Ordinal, &v.Batch, &v.State, &operation, &v.FromVersion, &v.FailureCode, &v.DispatchVersion, &v.DispatchAttempt, &v.DispatchLease); err != nil {
+			return operationstore.RolloutNode{}, err
 		}
 		if operation != nil {
 			v.OperationID = *operation
 		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+		return v, nil
+	}, id)
 }
 
 func (s operationStore) RolloutWorkspace(ctx context.Context, id uuid.UUID) (workspace uuid.UUID, err error) {
@@ -102,7 +82,7 @@ func (s operationStore) ResumeRollout(ctx context.Context, id uuid.UUID, batch i
 }
 
 func (s operationStore) ActiveRollouts(ctx context.Context, limit int) ([]uuid.UUID, error) {
-	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT id FROM agent_rollouts WHERE state IN ('queued','running') ORDER BY created_at LIMIT $1`, limit))
+	return collectColumn[uuid.UUID](ctx, s.store, `SELECT id FROM agent_rollouts WHERE state IN ('queued','running') ORDER BY created_at LIMIT $1`, limit)
 }
 
 func (s operationStore) SetRolloutState(ctx context.Context, id uuid.UUID, state, code string, at time.Time) error {
@@ -116,20 +96,10 @@ func (s operationStore) SetRolloutBatch(ctx context.Context, id uuid.UUID, batch
 }
 
 func (s operationStore) TerminalRolloutNodes(ctx context.Context, id uuid.UUID) ([]operationstore.RolloutTerminalNode, error) {
-	rows, err := s.Query(ctx, `SELECT rn.node_id,rn.ordinal,rn.batch,rn.operation_id,u.state FROM agent_rollout_nodes rn JOIN operations op ON op.id=rn.operation_id JOIN agent_upgrade_operations u ON u.operation_id=rn.operation_id WHERE rn.rollout_id=$1 AND rn.state='running' AND u.completed_at IS NOT NULL`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := []operationstore.RolloutTerminalNode{}
-	for rows.Next() {
-		var v operationstore.RolloutTerminalNode
-		if err := rows.Scan(&v.NodeID, &v.Ordinal, &v.Batch, &v.OperationID, &v.Outcome); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, `SELECT rn.node_id,rn.ordinal,rn.batch,rn.operation_id,u.state FROM agent_rollout_nodes rn JOIN operations op ON op.id=rn.operation_id JOIN agent_upgrade_operations u ON u.operation_id=rn.operation_id WHERE rn.rollout_id=$1 AND rn.state='running' AND u.completed_at IS NOT NULL`, func(r Rows) (v operationstore.RolloutTerminalNode, err error) {
+		err = r.Scan(&v.NodeID, &v.Ordinal, &v.Batch, &v.OperationID, &v.Outcome)
+		return
+	}, id)
 }
 
 func (s operationStore) SetRolloutNodeOutcome(ctx context.Context, id, node uuid.UUID, state, code string, at time.Time) (bool, error) {

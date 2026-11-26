@@ -45,7 +45,7 @@ func TestAuditControllerIntegration(t *testing.T) {
 func runAuditControllerTest(t *testing.T, b database.Backend, workspace, actor uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
-	m := audit.NewBackendManager(b, bytes.Repeat([]byte{7}, 32))
+	m := audit.NewManager(b, bytes.Repeat([]byte{7}, 32))
 	appendEvent := func(ctx context.Context, after func() error) error {
 		return database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 			if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspace, ActorType: "user", ActorID: actor.String(), Action: "audit.workflow", ResourceType: "workspace", ResourceID: workspace, RequestID: uuid.NewString(), BeforeSummary: json.RawMessage(`{ "exact":9007199254740993.125,"null":null,"array":[true,"trailing ",null] }`), AfterSummary: json.RawMessage(" \n null \t")}); err != nil {
@@ -104,7 +104,7 @@ func runAuditControllerTest(t *testing.T, b database.Backend, workspace, actor u
 	}
 	// Commit an append and checkpoint between the verifier's two reads. Both
 	// reads must still see the original repeatable-read snapshot.
-	snapshot := audit.NewBackendManager(snapshotBackend{Backend: b, between: func() {
+	snapshot := audit.NewManager(snapshotBackend{Backend: b, between: func() {
 		if err := appendEvent(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -140,8 +140,10 @@ type snapshotTx struct {
 	between func()
 }
 
+func (tx snapshotTx) Unwrap() database.Tx { return tx.Tx }
+
 func (tx snapshotTx) AuditStore() auditstore.Store {
-	return snapshotStore{Store: tx.Tx.(auditstore.Provider).AuditStore(), between: tx.between}
+	return snapshotStore{Store: auditstore.Of(tx.Tx), between: tx.between}
 }
 
 type snapshotStore struct {
@@ -149,7 +151,7 @@ type snapshotStore struct {
 	between func()
 }
 
-func (s snapshotStore) Events(ctx context.Context, workspace uuid.UUID) (database.Rows, error) {
+func (s snapshotStore) Events(ctx context.Context, workspace uuid.UUID, visit func(auditstore.EventRow) error) error {
 	s.between()
-	return s.Store.Events(ctx, workspace)
+	return s.Store.Events(ctx, workspace, visit)
 }

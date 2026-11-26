@@ -55,17 +55,14 @@ func (m *Manager) CompactDetails(ctx context.Context, days int) error {
 		return errors.New("audit retention must be 90–2555 days")
 	}
 	return database.Within(ctx, m.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := auditstore.From(tx)
-		if err != nil {
-			return err
-		}
+		store := auditstore.Of(tx)
 		now, err := store.Clock(ctx)
 		if err != nil {
 			return err
 		}
 		at := now.UTC().Truncate(time.Microsecond)
 		cutoff := at.Add(-time.Duration(days) * 24 * time.Hour)
-		rows, err := store.ExpiredDetails(ctx, cutoff)
+		expired, err := store.ExpiredDetails(ctx, cutoff)
 		if err != nil {
 			return err
 		}
@@ -73,41 +70,27 @@ func (m *Manager) CompactDetails(ctx context.Context, days int) error {
 			id        uuid.UUID
 			hash, mac []byte
 		}
-		updates := []pending{}
-		for rows.Next() {
-			event, err := scanEventRow(rows, uuid.Nil, true)
+		updates := make([]pending, 0, len(expired))
+		for _, event := range expired {
+			record := recordFromEventRow(event)
+			hashValid, err := m.validEventHash(event, record, event.PreviousHash)
 			if err != nil {
-				rows.Close()
 				return err
 			}
-			hashValid, err := m.validEventHash(event, event.previous)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			if event.authVersion != eventAuthVersionV1 || event.compactedAt != nil || !hashValid {
-				rows.Close()
+			if event.AuthVersion != eventAuthVersionV1 || event.CompactedAt != nil || !hashValid {
 				return errors.New("audit retention: invalid original record")
 			}
 			if !m.validEventMAC(event) {
-				rows.Close()
 				return errors.New("audit retention: original authentication failed")
 			}
-			record := event.record
 			record.Reason = ""
 			record.BeforeSummary = nil
 			record.AfterSummary = nil
-			mac, err := compactionMAC(m.current.key, record, event.previous, event.hash, event.mac, at)
+			mac, err := compactionMAC(m.current.key, record, event.PreviousHash, event.EventHash, event.EventMAC, at)
 			if err != nil {
-				rows.Close()
 				return err
 			}
-			updates = append(updates, pending{record.EventID, event.hash, mac})
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
+			updates = append(updates, pending{record.EventID, event.EventHash, mac})
 		}
 		for _, update := range updates {
 			if err := store.CompactDetails(ctx, update.id, update.hash, m.current.keyID, update.mac, at); err != nil {

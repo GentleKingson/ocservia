@@ -127,10 +127,6 @@ type Store interface {
 	SecretReferenceResource(context.Context, uuid.UUID) (uuid.UUID, error)
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
-	p, ok := tx.(interface{ CertificateStore() Store })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.CertificateStore(), nil
+func FromTransaction(tx database.Tx) Store {
+	return database.Must[interface{ CertificateStore() Store }](tx).CertificateStore()
 }

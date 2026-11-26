@@ -72,7 +72,7 @@ func (s *Server) installationStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeInstallationError(w, r, err)
 		return
 	}
-	node, err := telemetry.NewBackend(s.backend).GetNode(r.Context(), body.NodeID)
+	node, err := telemetry.New(s.backend).GetNode(r.Context(), body.NodeID)
 	if err != nil {
 		s.writeInstallationError(w, r, err)
 		return

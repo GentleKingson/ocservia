@@ -266,7 +266,7 @@ func TestBrowserMutationAndBreakGlassOriginBoundaries(t *testing.T) {
 }
 
 func TestJSONMediaTypeGateAndForeignPayloadFields(t *testing.T) {
-	server := &Server{logger: quietLogger(), devAuth: true, enrollment: &enrollment.Service{}, operations: operations.NewBackend(nil, 1, nil)}
+	server := &Server{logger: quietLogger(), devAuth: true, enrollment: &enrollment.Service{}, operations: operations.New(nil, 1, nil)}
 	for _, tc := range []struct {
 		ct, body string
 		status   int

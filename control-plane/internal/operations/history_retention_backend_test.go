@@ -17,7 +17,7 @@ import (
 func TestHistoryRetentionBackendIntegration(t *testing.T) {
 	f := newOutboxFixture(t)
 	ctx := context.Background()
-	service := operations.NewBackend(f.backend, 1, f.signer)
+	service := operations.New(f.backend, 1, f.signer)
 	old := time.Now().UTC().Add(-100 * 24 * time.Hour)
 	created := old.Add(-time.Hour)
 	expired := old
