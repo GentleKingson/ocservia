@@ -10,7 +10,7 @@ publish = false
 hex.workspace = true
 iroh.workspace = true
 ocservia-command-authorization = { version = "=0.1.0", path = "../command-authorization", default-features = false }
-ocservia-contracts = { version = "=0.1.0", path = "../contracts" }
+ocservia-contracts = { version = "=0.1.0", path = "../contracts", features = ["relay"] }
 ocservia-observability = { version = "=0.1.0", path = "../observability" }
 prost.workspace = true
 prost-types.workspace = true

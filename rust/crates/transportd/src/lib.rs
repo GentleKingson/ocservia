@@ -19,9 +19,9 @@ use admission::SecurityHook;
 #[cfg(test)]
 use admission::{AttemptRejection, record_attempt, record_global_attempt};
 use artifacts::{artifact_stream_deadline, fetch_artifact_payload, finalize_artifact_consumption};
-use command_stream::{command_response_deadline, read_agent_events, validate_traceparent};
+use command_stream::{command_response_deadline, read_agent_events};
 #[cfg(test)]
-use command_stream::{event, new_traceparent, now_timestamp, privileged_result_proof_error};
+use command_stream::{event, now_timestamp, privileged_result_proof_error};
 use events::EventState;
 use iroh::endpoint::{
     AfterHandshakeOutcome, Connection, EndpointHooks, QuicTransportConfig, RelayMode, VarInt,
@@ -56,6 +56,9 @@ use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     transport_service_server::TransportService,
 };
 use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
+#[cfg(test)]
+use ocservia_contracts::traceparent::generate as new_traceparent;
+use ocservia_contracts::traceparent::validate_status as validate_traceparent;
 use prost::Message;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -710,18 +713,11 @@ async fn build_router_with_direct(
         .secret_key(secret_key)
         .relay_mode(relay_mode)
         .clear_address_lookup()
-        .dns_resolver(
-            iroh::dns::DnsResolver::builder()
-                .with_system_defaults()
-                .disable_fallback()
-                .build(),
-        )
+        .dns_resolver(ocservia_contracts::relay::system_dns_resolver())
         .transport_config(transport)
         .hooks(SecurityHook::new(policy.clone(), &trust));
-    if !relay_tls_roots.is_empty() {
-        endpoint_builder = endpoint_builder
-            .ca_tls_config(iroh::tls::CaTlsConfig::default().with_extra_roots(relay_tls_roots));
-    }
+    endpoint_builder =
+        ocservia_contracts::relay::with_relay_tls_roots(endpoint_builder, relay_tls_roots);
     if !direct_enabled {
         endpoint_builder = endpoint_builder.clear_ip_transports();
     }

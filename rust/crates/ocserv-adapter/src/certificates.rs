@@ -181,32 +181,14 @@ impl Adapter {
                 artifact_dir.join(format!(".{artifact}.p12")),
                 artifact_dir.join(format!(".{artifact}.chain.pem")),
             ] {
-                match tokio::fs::symlink_metadata(&path).await {
-                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                        tokio::fs::remove_file(path)
-                            .await
-                            .map_err(AdapterError::Io)?;
-                    }
-                    Ok(_) => return Err(AdapterError::InvalidResource),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(AdapterError::Io(error)),
-                }
+                remove_regular_file_if_exists(&path).await?;
             }
         }
         let key_path = self
             .resources
             .certificate_key_dir
             .join(format!("{id}.key.pem"));
-        match tokio::fs::symlink_metadata(&key_path).await {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(AdapterError::InvalidResource);
-            }
-            Ok(_) => tokio::fs::remove_file(&key_path)
-                .await
-                .map_err(AdapterError::Io)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(AdapterError::Io(error)),
-        }
+        remove_regular_file_if_exists(&key_path).await?;
         StagingFile::new(
             self.resources
                 .certificate_key_dir
@@ -383,16 +365,7 @@ impl Adapter {
         password: &[u8],
     ) -> Result<Vec<u8>, AdapterError> {
         for stale in [chain_path, staging_path] {
-            match tokio::fs::symlink_metadata(stale).await {
-                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                    tokio::fs::remove_file(stale)
-                        .await
-                        .map_err(AdapterError::Io)?;
-                }
-                Ok(_) => return Err(AdapterError::InvalidResource),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(AdapterError::Io(error)),
-            }
+            remove_regular_file_if_exists(stale).await?;
         }
         let mut chain_file = StdOpenOptions::new()
             .write(true)
@@ -461,38 +434,8 @@ impl Adapter {
         &self,
         sealed_password: &SealedSecretV1,
     ) -> Result<Zeroizing<Vec<u8>>, AdapterError> {
-        let key = self
-            .resources
-            .p12_secret_key
-            .to_str()
-            .ok_or(AdapterError::InvalidResource)?;
-        let decrypted = self
-            .execute_with_input(
-                &self.resources.openssl,
-                &[
-                    "pkeyutl",
-                    "-decrypt",
-                    "-inkey",
-                    key,
-                    "-pkeyopt",
-                    "rsa_padding_mode:oaep",
-                    "-pkeyopt",
-                    "rsa_oaep_md:sha256",
-                ],
-                &sealed_password.ciphertext,
-            )
-            .await?;
-        if !decrypted.stdout.is_empty()
-            && decrypted.stdout.len() <= 1024
-            && !decrypted
-                .stdout
-                .iter()
-                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
-        {
-            Ok(Zeroizing::new(decrypted.stdout))
-        } else {
-            Err(AdapterError::MalformedOutput)
-        }
+        self.decrypt_sealed_password(&self.resources.p12_secret_key, &sealed_password.ciphertext)
+            .await
     }
 
     /// Reads the complete bounded artifact once under the exact signed grant
@@ -584,16 +527,7 @@ impl Adapter {
             .certificate_key_dir
             .join("artifacts")
             .join(format!("{artifact}.p12"));
-        match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                tokio::fs::remove_file(&path)
-                    .await
-                    .map_err(AdapterError::Io)?;
-            }
-            Ok(_) => return Err(AdapterError::InvalidResource),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(AdapterError::Io(error)),
-        }
+        remove_regular_file_if_exists(&path).await?;
         if let Some(parent) = path.parent() {
             sync_directory(parent).await?;
         }
@@ -695,5 +629,16 @@ impl Adapter {
             }
         }
         sync_directory(&directory).await
+    }
+}
+
+async fn remove_regular_file_if_exists(path: &Path) -> Result<(), AdapterError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            tokio::fs::remove_file(path).await.map_err(AdapterError::Io)
+        }
+        Ok(_) => Err(AdapterError::InvalidResource),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AdapterError::Io(error)),
     }
 }

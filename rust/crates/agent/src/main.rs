@@ -9,13 +9,13 @@ mod tests;
 mod vpn_audit;
 use crate::session::{SessionContext, agent_endpoint_factory, supervise_controller_sessions};
 use crate::startup::{
-    invalid, load_controller_command_keys, load_relay_tls_roots, parse_args,
-    prepare_enrollment_if_requested, print_version_query, require_healthy_snapshot,
-    run_one_shot_mode,
+    invalid, load_controller_command_keys, parse_args, prepare_enrollment_if_requested,
+    print_version_query, require_healthy_snapshot, run_one_shot_mode,
 };
 use iroh::endpoint::{QuicTransportConfig, VarInt};
 use ocservia_agent::{CommandExecutor, MAX_WRITE_QUEUE, PrivdClient};
 use ocservia_command_journal::Journal;
+use ocservia_contracts::relay::load_relay_tls_roots;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -42,7 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
     let command_keys = load_controller_command_keys(&config)?;
-    let relay_tls_roots = std::sync::Arc::new(load_relay_tls_roots(&config)?);
+    let relay_tls_roots =
+        std::sync::Arc::new(load_relay_tls_roots(config.relay_ca_file.as_deref())?);
     let mut command_executor = CommandExecutor::new(Journal::open(&config.journal)?);
     let privd = PrivdClient::new(config.privd_socket, Duration::from_secs(5))?;
     // The startup snapshot is a health gate: it fails fast when privd or the
@@ -100,20 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         supervise_controller_sessions(bind_endpoint, controller, &config.relay_mode, &mut session);
     tokio::select! {
         () = run => {}
-        () = shutdown_signal() => tracing::info!("agent shutdown requested"),
+        () = ocservia_observability::shutdown_signal() => tracing::info!("agent shutdown requested"),
     }
     Ok(())
-}
-
-async fn shutdown_signal() {
-    let Ok(mut terminate) =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    else {
-        let _ = tokio::signal::ctrl_c().await;
-        return;
-    };
-    tokio::select! {
-        _ = terminate.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
-    }
 }

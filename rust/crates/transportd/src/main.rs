@@ -1,19 +1,27 @@
 use std::env;
 use std::io;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(test)]
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use iroh::SecretKey;
 use iroh::endpoint::RelayMode;
-use iroh::{RelayMap, RelayUrl, SecretKey};
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
+use ocservia_contracts::relay::{
+    load_relay_tls_roots, validate_owner_or_group_readonly_token_file,
+};
+use ocservia_contracts::uds::{
+    authenticate_peer, bind_socket, connect_verified_socket, remove_socket,
+};
+use ocservia_contracts::unix::O_NOFOLLOW;
 use ocservia_transportd::{
     IdentityPolicy, IrohTransportService, TrustAuthority, TrustBudgetConfig, TrustClass,
-    TrustClassLimit, build_router_with_trust_tls_roots,
+    build_router_with_trust_tls_roots,
 };
-use rustls_pki_types::pem::PemObject;
-use tokio::net::UnixListener;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -49,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let key = load_key(&config.key_file)?;
     let (listener, socket_identity) = bind_socket(&config.socket)?;
     let keyring = load_controller_keyring(&config)?;
-    let relay_tls_roots = load_relay_tls_roots(&config)?;
+    let relay_tls_roots = load_relay_tls_roots(config.relay_ca_file.as_deref())?;
     let policy = IdentityPolicy::default();
     let service = IrohTransportService::new(config.event_capacity, policy.clone(), keyring);
     let trust_socket = config.trust_socket;
@@ -100,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .add_service(health_service)
         .add_service(TransportServiceServer::new(service.clone()))
         .serve_with_incoming_shutdown(incoming, async move {
-            shutdown_signal().await;
+            ocservia_observability::shutdown_signal().await;
             shutdown_service.begin_shutdown().await;
         })
         .await;
@@ -129,43 +137,7 @@ fn parse_args() -> Result<Config, io::Error> {
     let mut controller_verification_key_files = Vec::new();
     let mut stats_file = None;
     let mut relay_ca_file = None;
-    let mut trust_limits = [
-        (
-            TrustClass::KnownAgentHandshake,
-            TrustClassLimit {
-                attempts_per_minute: 2400,
-                concurrency: 256,
-            },
-        ),
-        (
-            TrustClass::AgentAuthorization,
-            TrustClassLimit {
-                attempts_per_minute: 1200,
-                concurrency: 48,
-            },
-        ),
-        (
-            TrustClass::AgentRegistrationRecheck,
-            TrustClassLimit {
-                attempts_per_minute: 1200,
-                concurrency: 48,
-            },
-        ),
-        (
-            TrustClass::UnknownEnrollmentPreAuth,
-            TrustClassLimit {
-                attempts_per_minute: 120,
-                concurrency: 16,
-            },
-        ),
-        (
-            TrustClass::EnrollmentCompletion,
-            TrustClassLimit {
-                attempts_per_minute: 120,
-                concurrency: 8,
-            },
-        ),
-    ];
+    let mut trust_budgets = TrustBudgetConfig::default();
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -215,64 +187,114 @@ fn parse_args() -> Result<Config, io::Error> {
                 )?));
             }
             "--known-agent-handshake-rate" => {
-                trust_limits[0].1.attempts_per_minute = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--known-agent-handshake-rate")?,
                     "known Agent handshake rate",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::KnownAgentHandshake, |limit| {
+                        limit.attempts_per_minute = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--known-agent-handshake-concurrency" => {
-                trust_limits[0].1.concurrency = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--known-agent-handshake-concurrency")?,
                     "known Agent handshake concurrency",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::KnownAgentHandshake, |limit| {
+                        limit.concurrency = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--agent-authorization-rate" => {
-                trust_limits[1].1.attempts_per_minute = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--agent-authorization-rate")?,
                     "Agent authorization rate",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::AgentAuthorization, |limit| {
+                        limit.attempts_per_minute = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--agent-authorization-concurrency" => {
-                trust_limits[1].1.concurrency = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--agent-authorization-concurrency")?,
                     "Agent authorization concurrency",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::AgentAuthorization, |limit| {
+                        limit.concurrency = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--agent-registration-recheck-rate" => {
-                trust_limits[2].1.attempts_per_minute = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--agent-registration-recheck-rate")?,
                     "Agent registration recheck rate",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::AgentRegistrationRecheck, |limit| {
+                        limit.attempts_per_minute = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--agent-registration-recheck-concurrency" => {
-                trust_limits[2].1.concurrency = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--agent-registration-recheck-concurrency")?,
                     "Agent registration recheck concurrency",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::AgentRegistrationRecheck, |limit| {
+                        limit.concurrency = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--unknown-enrollment-preauth-rate" => {
-                trust_limits[3].1.attempts_per_minute = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--unknown-enrollment-preauth-rate")?,
                     "unknown enrollment pre-auth rate",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::UnknownEnrollmentPreAuth, |limit| {
+                        limit.attempts_per_minute = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--unknown-enrollment-preauth-concurrency" => {
-                trust_limits[3].1.concurrency = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--unknown-enrollment-preauth-concurrency")?,
                     "unknown enrollment pre-auth concurrency",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::UnknownEnrollmentPreAuth, |limit| {
+                        limit.concurrency = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--enrollment-completion-rate" => {
-                trust_limits[4].1.attempts_per_minute = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--enrollment-completion-rate")?,
                     "enrollment completion rate",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::EnrollmentCompletion, |limit| {
+                        limit.attempts_per_minute = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--enrollment-completion-concurrency" => {
-                trust_limits[4].1.concurrency = parse_usize(
+                let value = parse_usize(
                     &required_value(&mut args, "--enrollment-completion-concurrency")?,
                     "enrollment completion concurrency",
                 )?;
+                trust_budgets
+                    .update_limit(TrustClass::EnrollmentCompletion, |limit| {
+                        limit.concurrency = value;
+                    })
+                    .map_err(invalid)?;
             }
             "--stats-file" => {
                 stats_file = Some(PathBuf::from(required_value(&mut args, "--stats-file")?));
@@ -321,10 +343,6 @@ fn parse_args() -> Result<Config, io::Error> {
         relay_url.as_deref(),
         relay_token_file.as_deref(),
     )?;
-    let mut trust_budgets = TrustBudgetConfig::default();
-    for (class, limit) in trust_limits {
-        trust_budgets = trust_budgets.with_limit(class, limit).map_err(invalid)?;
-    }
     Ok(Config {
         socket,
         key_file,
@@ -340,28 +358,6 @@ fn parse_args() -> Result<Config, io::Error> {
     })
 }
 
-/// Loads the PEM relay certificate authority as additional TLS roots for the
-/// relay client. Deployments with publicly certificated relays leave this
-/// unset and keep the built-in root store unchanged.
-fn load_relay_tls_roots(
-    config: &Config,
-) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>, io::Error> {
-    let Some(path) = config.relay_ca_file.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let roots: Vec<_> = rustls_pki_types::CertificateDer::pem_file_iter(path)
-        .map_err(|error| invalid(&format!("relay CA file is unreadable: {error}")))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| invalid(&format!("relay CA PEM is invalid: {error}")))?;
-    if roots.is_empty() {
-        return Err(invalid("relay CA file contains no certificates"));
-    }
-    Ok(roots)
-}
-
-/// Loads the Controller command verification keys through the same safe path
-/// walk used for the transport key, pinned to the control-plane account that
-/// publishes them.
 fn load_controller_keyring(
     config: &Config,
 ) -> Result<Arc<ocservia_command_authorization::ControllerCommandKeyring>, io::Error> {
@@ -402,81 +398,11 @@ fn build_relay_mode(
     raw_url: Option<&str>,
     token_file: Option<&Path>,
 ) -> Result<RelayMode, io::Error> {
-    match mode {
-        "disabled" if raw_url.is_none() && token_file.is_none() => Ok(RelayMode::Disabled),
-        "disabled" => Err(invalid(
-            "relay URL and token are accepted only with custom relay mode",
-        )),
-        "custom" => {
-            let raw = raw_url.ok_or_else(|| invalid("custom relay mode requires --relay-url"))?;
-            let token_file = token_file
-                .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
-            let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
-            if url.scheme() != "https"
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.host_str().is_none()
-            {
-                return Err(invalid(
-                    "relay URL must be credential-free HTTPS without query or fragment",
-                ));
-            }
-            let token = read_relay_token(token_file)?;
-            Ok(RelayMode::Custom(
-                RelayMap::from_iter([url]).with_auth_token(token),
-            ))
-        }
-        _ => Err(invalid("relay mode must be disabled or custom")),
-    }
-}
-
-fn read_relay_token(path: &Path) -> Result<String, io::Error> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc_o_nofollow())
-        .open(path)?;
-    validate_relay_token_file(
-        &file,
-        rustix::process::geteuid().as_raw(),
-        rustix::process::getegid().as_raw(),
-    )?;
-    let mut raw = Vec::with_capacity(129);
-    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
-    let raw = Zeroizing::new(raw);
-    let token = std::str::from_utf8(&raw)
-        .map_err(|_| invalid("relay token must be UTF-8"))?
-        .trim_end_matches(['\n', '\r']);
-    if !(32..=512).contains(&token.len()) || token.chars().any(char::is_whitespace) {
-        return Err(invalid(
-            "relay token must be 32..512 non-whitespace UTF-8 bytes",
-        ));
-    }
-    Ok(token.to_owned())
-}
-
-// The Controller and transport share only the Relay bearer token. Endpoint
-// identity keys continue through validate_key_file's owner-only checks.
-fn validate_relay_token_file(
-    file: &std::fs::File,
-    expected_owner: u32,
-    expected_group: u32,
-) -> Result<(), io::Error> {
-    let metadata = file.metadata()?;
-    let owner_only = metadata.mode().trailing_zeros() >= 6;
-    let controller_readable = metadata.gid() == expected_group && metadata.mode() & 0o7777 == 0o440;
-    if !metadata.file_type().is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != expected_owner
-        || !(owner_only || controller_readable)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "relay token must be a single-link process-owned file with owner-only permissions or mode 0440 in the process group",
-        ));
-    }
-    Ok(())
+    let owner = rustix::process::geteuid().as_raw();
+    let group = rustix::process::getegid().as_raw();
+    ocservia_contracts::relay::build_relay_mode(mode, raw_url, token_file, |file| {
+        validate_owner_or_group_readonly_token_file(file, owner, group)
+    })
 }
 
 fn required_value(
@@ -490,7 +416,7 @@ fn required_value(
 fn load_key(path: &Path) -> Result<SecretKey, io::Error> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc_o_nofollow())
+        .custom_flags(O_NOFOLLOW)
         .open(path)?;
     validate_key_file(&file, rustix::process::geteuid().as_raw())?;
     let mut raw = Vec::with_capacity(65);
@@ -534,185 +460,8 @@ fn validate_key_file(file: &std::fs::File, expected_uid: u32) -> Result<(), io::
     Ok(())
 }
 
-#[allow(clippy::cast_possible_wrap)]
-const fn libc_o_nofollow() -> i32 {
-    rustix::fs::OFlags::NOFOLLOW.bits() as i32
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SocketIdentity {
-    device: u64,
-    inode: u64,
-}
-
-fn bind_socket(path: &Path) -> Result<(UnixListener, SocketIdentity), io::Error> {
-    validate_ancestry(path, rustix::process::geteuid().as_raw())?;
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            validate_socket(
-                path,
-                rustix::process::geteuid().as_raw(),
-                rustix::process::getegid().as_raw(),
-            )?;
-            match StdUnixStream::connect(path) {
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "socket is already accepting connections",
-                    ));
-                }
-                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                    std::fs::remove_file(path)?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "refusing to replace a non-socket path",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    let identity = validate_socket(
-        path,
-        rustix::process::geteuid().as_raw(),
-        rustix::process::getegid().as_raw(),
-    )?;
-    Ok((listener, identity))
-}
-
-fn validate_ancestry(path: &Path, expected_owner: u32) -> Result<(), io::Error> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(invalid("Unix socket path must be absolute and normalized"));
-    }
-    let mut current = path
-        .parent()
-        .ok_or_else(|| invalid("socket path has no parent"))?;
-    loop {
-        let metadata = std::fs::symlink_metadata(current)?;
-        if !metadata.file_type().is_dir()
-            || (metadata.uid() != 0 && metadata.uid() != expected_owner)
-            || metadata.mode() & 0o022 != 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Unix socket ancestry must be trusted-owner controlled and not group or world writable",
-            ));
-        }
-        let Some(parent) = current.parent() else {
-            break;
-        };
-        if parent == current {
-            break;
-        }
-        current = parent;
-    }
-    Ok(())
-}
-
-#[allow(clippy::similar_names)]
-fn validate_socket(
-    path: &Path,
-    expected_uid: u32,
-    expected_gid: u32,
-) -> Result<SocketIdentity, io::Error> {
-    validate_ancestry(path, expected_uid)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != expected_uid
-        || metadata.gid() != expected_gid
-        || metadata.mode() & 0o777 != 0o660
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Unix socket type, owner, group, or mode is invalid",
-        ));
-    }
-    Ok(SocketIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[allow(clippy::similar_names)]
-async fn connect_verified_socket(
-    path: &Path,
-    expected_uid: u32,
-    expected_gid: u32,
-) -> Result<tokio::net::UnixStream, io::Error> {
-    let identity = validate_socket(path, expected_uid, expected_gid)?;
-    let stream = tokio::net::UnixStream::connect(path).await?;
-    let credentials = stream.peer_cred()?;
-    if credentials.uid() != expected_uid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Unix socket server UID is not authorized",
-        ));
-    }
-    let retained = validate_socket(path, expected_uid, expected_gid)?;
-    if retained != identity {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Unix socket pathname changed while connecting",
-        ));
-    }
-    Ok(stream)
-}
-
-fn authenticate_peer(stream: &tokio::net::UnixStream, expected_uid: u32) -> Result<(), io::Error> {
-    let credentials = stream.peer_cred()?;
-    if credentials.uid() != expected_uid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Unix socket client UID is not authorized",
-        ));
-    }
-    Ok(())
-}
-
-fn remove_socket(path: &Path, expected: SocketIdentity) -> Result<(), io::Error> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata)
-            if metadata.file_type().is_socket()
-                && metadata.dev() == expected.device
-                && metadata.ino() == expected.inode =>
-        {
-            std::fs::remove_file(path)
-        }
-        Ok(_) => Err(io::Error::other("socket path changed during shutdown")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.to_owned())
-}
-
-async fn shutdown_signal() {
-    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
-    let Ok(mut terminate) = terminate else {
-        tracing::error!("failed to install SIGTERM handler");
-        let _ = tokio::signal::ctrl_c().await;
-        return;
-    };
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            if result.is_err() {
-                tracing::error!("failed to install Ctrl-C handler");
-            }
-        }
-        _ = terminate.recv() => {}
-    }
 }
 
 #[cfg(test)]
@@ -823,18 +572,22 @@ mod tests {
         let (uid, gid) = (metadata.uid(), metadata.gid());
         for mode in [0o400, 0o600, 0o440] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            assert!(validate_relay_token_file(&file, uid, gid).is_ok());
+            assert!(validate_owner_or_group_readonly_token_file(&file, uid, gid).is_ok());
         }
         assert!(validate_key_file(&file, uid).is_err());
-        assert!(validate_relay_token_file(&file, uid.wrapping_add(1), gid).is_err());
-        assert!(validate_relay_token_file(&file, uid, gid.wrapping_add(1)).is_err());
+        assert!(
+            validate_owner_or_group_readonly_token_file(&file, uid.wrapping_add(1), gid).is_err()
+        );
+        assert!(
+            validate_owner_or_group_readonly_token_file(&file, uid, gid.wrapping_add(1)).is_err()
+        );
         for mode in [0o640, 0o444, 0o644, 0o460] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            assert!(validate_relay_token_file(&file, uid, gid).is_err());
+            assert!(validate_owner_or_group_readonly_token_file(&file, uid, gid).is_err());
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
         std::fs::hard_link(&path, directory.join("alias")).unwrap();
-        assert!(validate_relay_token_file(&file, uid, gid).is_err());
+        assert!(validate_owner_or_group_readonly_token_file(&file, uid, gid).is_err());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -922,7 +675,7 @@ mod tests {
     #[test]
     fn nofollow_flag_matches_platform_and_rejects_symlinks() {
         assert_eq!(
-            libc_o_nofollow(),
+            O_NOFOLLOW,
             i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
         );
         let directory = socket_test_directory();
@@ -944,7 +697,12 @@ mod tests {
         let link_token = directory.join("link.token");
         std::os::unix::fs::symlink(&real_token, &link_token).expect("symlink token");
         assert!(
-            read_relay_token(&link_token).is_err(),
+            build_relay_mode(
+                "custom",
+                Some("https://relay.example.test"),
+                Some(&link_token),
+            )
+            .is_err(),
             "symlinked relay token must be rejected"
         );
     }

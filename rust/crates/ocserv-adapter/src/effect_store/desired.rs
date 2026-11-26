@@ -164,6 +164,27 @@ impl EffectStore {
         revision: u64,
         identity: EffectIdentity<'_>,
     ) -> Result<(), AdapterError> {
+        self.mark_state(mutation_kind, resource_key, revision, identity, "applied")
+    }
+
+    pub(crate) fn mark_absent(
+        &mut self,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        identity: EffectIdentity<'_>,
+    ) -> Result<(), AdapterError> {
+        self.mark_state(mutation_kind, resource_key, revision, identity, "absent")
+    }
+
+    fn mark_state(
+        &mut self,
+        mutation_kind: &str,
+        resource_key: &str,
+        revision: u64,
+        identity: EffectIdentity<'_>,
+        state: &'static str,
+    ) -> Result<(), AdapterError> {
         let now = effect_now()?;
         // Expiry is checked before execution. Do not turn a successfully
         // committed effect into a terminal rejection if it expires mid-call.
@@ -176,28 +197,7 @@ impl EffectStore {
             .ok_or(AdapterError::Unavailable)?;
         validate_effect_record(&self.hmac_key, &record)?;
         validate_same_effect(&record, identity)?;
-        update_effect_state(&transaction, &self.hmac_key, record, "applied", now)?;
-        transaction.commit().map_err(sqlite_io)
-    }
-
-    pub(crate) fn mark_absent(
-        &mut self,
-        mutation_kind: &str,
-        resource_key: &str,
-        revision: u64,
-        identity: EffectIdentity<'_>,
-    ) -> Result<(), AdapterError> {
-        let now = effect_now()?;
-        let identity = validate_effect_context(mutation_kind, resource_key, revision, identity, 0)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_io)?;
-        let record = query_effect(&transaction, mutation_kind, resource_key)?
-            .ok_or(AdapterError::Unavailable)?;
-        validate_effect_record(&self.hmac_key, &record)?;
-        validate_same_effect(&record, identity)?;
-        update_effect_state(&transaction, &self.hmac_key, record, "absent", now)?;
+        update_effect_state(&transaction, &self.hmac_key, record, state, now)?;
         transaction.commit().map_err(sqlite_io)
     }
 
@@ -307,6 +307,32 @@ pub(crate) fn validate_effect_context<'a>(
     })
 }
 
+fn decode_effect_row(
+    row: &rusqlite::Row<'_>,
+    prepared_only: bool,
+) -> rusqlite::Result<EffectRecord> {
+    let revision: i64 = row.get(2)?;
+    let state = match row.get::<_, String>(7)?.as_str() {
+        "prepared" => "prepared",
+        "applied" if !prepared_only => "applied",
+        "absent" if !prepared_only => "absent",
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(EffectRecord {
+        mutation_kind: row.get(0)?,
+        resource_key: row.get(1)?,
+        revision: u64::try_from(revision).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        command_id: fixed_blob(row.get(3)?)?,
+        idempotency_key: fixed_blob(row.get(4)?)?,
+        payload_sha256: fixed_blob(row.get(5)?)?,
+        expires_at: row.get(6)?,
+        state,
+        before_hmac: fixed_blob(row.get(8)?)?,
+        after_hmac: fixed_blob(row.get(9)?)?,
+        record_hmac: fixed_blob(row.get(10)?)?,
+    })
+}
+
 fn query_effect(
     connection: &Connection,
     mutation_kind: &str,
@@ -319,25 +345,7 @@ fn query_effect(
         .map_err(sqlite_io)?;
     statement
         .query_row(params![mutation_kind, resource_key], |row| {
-            let revision: i64 = row.get(2)?;
-            Ok(EffectRecord {
-                mutation_kind: row.get(0)?,
-                resource_key: row.get(1)?,
-                revision: u64::try_from(revision).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                command_id: fixed_blob(row.get(3)?)?,
-                idempotency_key: fixed_blob(row.get(4)?)?,
-                payload_sha256: fixed_blob(row.get(5)?)?,
-                expires_at: row.get(6)?,
-                state: match row.get::<_, String>(7)?.as_str() {
-                    "prepared" => "prepared",
-                    "applied" => "applied",
-                    "absent" => "absent",
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                },
-                before_hmac: fixed_blob(row.get(8)?)?,
-                after_hmac: fixed_blob(row.get(9)?)?,
-                record_hmac: fixed_blob(row.get(10)?)?,
-            })
+            decode_effect_row(row, false)
         })
         .optional()
         .map_err(sqlite_io)
@@ -353,25 +361,7 @@ fn query_prepared_effects(
         )
         .map_err(sqlite_io)?;
     let rows = statement
-        .query_map([config_effects], |row| {
-            let revision: i64 = row.get(2)?;
-            Ok(EffectRecord {
-                mutation_kind: row.get(0)?,
-                resource_key: row.get(1)?,
-                revision: u64::try_from(revision).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                command_id: fixed_blob(row.get(3)?)?,
-                idempotency_key: fixed_blob(row.get(4)?)?,
-                payload_sha256: fixed_blob(row.get(5)?)?,
-                expires_at: row.get(6)?,
-                state: match row.get::<_, String>(7)?.as_str() {
-                    "prepared" => "prepared",
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                },
-                before_hmac: fixed_blob(row.get(8)?)?,
-                after_hmac: fixed_blob(row.get(9)?)?,
-                record_hmac: fixed_blob(row.get(10)?)?,
-            })
-        })
+        .query_map([config_effects], |row| decode_effect_row(row, true))
         .map_err(sqlite_io)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_io)
 }

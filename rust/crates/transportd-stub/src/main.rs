@@ -1,14 +1,12 @@
 use std::env;
 use std::io;
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ocservia_contracts::generated::ocserv::platform::transport::v1::transport_service_server::TransportServiceServer;
+use ocservia_contracts::uds::{authenticate_peer, bind_socket, remove_socket};
 use ocservia_transportd_stub::{StubService, StubStats};
-use tokio::net::UnixListener;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -31,16 +29,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control_plane_uid = config.control_plane_uid;
     let incoming =
         UnixListenerStream::new(listener).filter_map(move |connection| match connection {
-            Ok(stream) => match stream.peer_cred() {
-                Ok(credentials) if credentials.uid() == control_plane_uid => Some(Ok(stream)),
-                Ok(_) | Err(_) => None,
-            },
+            Ok(stream) => authenticate_peer(&stream, control_plane_uid)
+                .ok()
+                .map(|()| Ok(stream)),
             Err(error) => Some(Err(error)),
         });
     let server = Server::builder()
         .add_service(health_service)
         .add_service(TransportServiceServer::new(service))
-        .serve_with_incoming_shutdown(incoming, shutdown());
+        .serve_with_incoming_shutdown(incoming, ocservia_observability::shutdown_signal());
     tokio::pin!(server);
     let result: Result<(), Box<dyn std::error::Error>> = if let Some(path) = config.stats_file {
         let mut writer = tokio::spawn(write_stats(stats_service, path));
@@ -220,131 +217,11 @@ fn stats_json(stats: StubStats) -> Vec<u8> {
     .expect("simulator stats contain only integers")
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SocketIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[allow(clippy::similar_names)]
-fn bind_socket(path: &Path) -> Result<(UnixListener, SocketIdentity), io::Error> {
-    let process_uid = rustix::process::geteuid().as_raw();
-    let process_gid = rustix::process::getegid().as_raw();
-    validate_ancestry(path, process_uid)?;
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            validate_socket(path, process_uid, process_gid)?;
-            match StdUnixStream::connect(path) {
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "socket is already accepting connections",
-                    ));
-                }
-                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                    std::fs::remove_file(path)?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "refusing to replace a non-socket path",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    let identity = validate_socket(path, process_uid, process_gid)?;
-    Ok((listener, identity))
-}
-
-fn validate_ancestry(path: &Path, expected_owner: u32) -> Result<(), io::Error> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Unix socket path must be absolute and normalized",
-        ));
-    }
-    let mut current = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"))?;
-    loop {
-        let metadata = std::fs::symlink_metadata(current)?;
-        if !metadata.file_type().is_dir()
-            || (metadata.uid() != 0 && metadata.uid() != expected_owner)
-            || metadata.mode() & 0o022 != 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Unix socket ancestry must be trusted-owner controlled and not group or world writable",
-            ));
-        }
-        let Some(parent) = current.parent() else {
-            break;
-        };
-        if parent == current {
-            break;
-        }
-        current = parent;
-    }
-    Ok(())
-}
-
-#[allow(clippy::similar_names)]
-fn validate_socket(
-    path: &Path,
-    expected_uid: u32,
-    expected_gid: u32,
-) -> Result<SocketIdentity, io::Error> {
-    validate_ancestry(path, expected_uid)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != expected_uid
-        || metadata.gid() != expected_gid
-        || metadata.mode() & 0o777 != 0o660
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Unix socket type, owner, group, or mode is invalid",
-        ));
-    }
-    Ok(SocketIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-fn remove_socket(path: &Path, expected: SocketIdentity) -> Result<(), io::Error> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata)
-            if metadata.file_type().is_socket()
-                && metadata.dev() == expected.device
-                && metadata.ino() == expected.inode =>
-        {
-            std::fs::remove_file(path)
-        }
-        Ok(_) => Err(io::Error::other("socket path changed during shutdown")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-async fn shutdown() {
-    let _signal = tokio::signal::ctrl_c().await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ocservia_test_support::PrivateTempDir;
+    use std::os::unix::fs::PermissionsExt;
 
     fn socket_test_directory() -> PrivateTempDir {
         PrivateTempDir::new("s")
