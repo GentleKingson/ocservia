@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	devsimstore "github.com/GentleKingson/ocservia/control-plane/internal/devsim/store"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
-	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
 
@@ -24,7 +24,7 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 		workspace, node := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 		labels := []string{`{"env":"prod","count":42}`, `["member"]`}[i]
 		err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-			local := eventstore.FromTransaction(tx)
+			local := devsimstore.FromTransaction(tx)
 			id, err := local.EnsureWorkspace(ctx, workspace, workspace.String(), at)
 			if err != nil || id != workspace {
 				t.Fatal("workspace", id, err)
@@ -46,7 +46,7 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 			if _, err := enroll.Activate(ctx, node, labels, "fixture", at); err != nil {
 				return err
 			}
-			if err := local.DisconnectNode(ctx, eventstore.GapNode{ID: node, Traceparent: "00-11111111111111111111111111111111-2222222222222222-01"}, uuid.Must(uuid.NewV7()), at); err != nil {
+			if err := local.DisconnectNode(ctx, devsimstore.GapNode{ID: node, Traceparent: "00-11111111111111111111111111111111-2222222222222222-01"}, uuid.Must(uuid.NewV7()), at); err != nil {
 				return err
 			}
 			_, err = enroll.Revoke(ctx, node, at)

@@ -17,38 +17,10 @@ type Event struct {
 	Sequence    int64     `json:"-"`
 }
 
-type SimulationJob struct {
-	OperationID, NodeID uuid.UUID
-	Envelope            []byte
-	Traceparent         string
-}
-
-type Simulation struct {
-	WorkspaceID, NodeID, OperationID, CommandID uuid.UUID
-	Endpoint                                    []byte
-	Envelope                                    []byte
-	RequestID, TraceID, Traceparent             string
-	At, ExpiresAt                               time.Time
-}
-
-type GapNode struct {
-	ID          uuid.UUID
-	Traceparent string
-}
-
 type Store interface {
-	EnsureWorkspace(context.Context, uuid.UUID, string, time.Time) (uuid.UUID, error)
-	InsertSimulation(context.Context, Simulation) error
 	Events(context.Context, uuid.UUID, uuid.UUID, int, bool) ([]Event, error)
 	EventSequence(context.Context, uuid.UUID, uuid.UUID) (int64, error)
-	GapNodes(context.Context, string) ([]GapNode, error)
 	InvalidateCursor(context.Context) error
-	UnknownDispatched(context.Context) error
-	DisconnectNode(context.Context, GapNode, uuid.UUID, time.Time) error
-	ClaimSimulationJobs(context.Context, int) ([]SimulationJob, error)
-	ExpireSimulationJobs(context.Context) error
-	MarkSimulationDispatchStarted(context.Context, uuid.UUID) (bool, error)
-	MarkSimulationDispatchError(context.Context, uuid.UUID, string) error
 }
 
 func FromTransaction(tx database.Tx) Store {
@@ -83,7 +55,6 @@ type IngressStore interface {
 	LockTrustShared(context.Context, uuid.UUID, []byte) (IngressTrust, error)
 	InsertEvent(context.Context, TransportEvent) (bool, error)
 	NodeStatus(context.Context, uuid.UUID, string, time.Time) error
-	SimulationOutcome(context.Context, uuid.UUID, string, string, bool, time.Time) error
 	InsertQuarantine(context.Context, Quarantine) (bool, error)
 	Quarantine(context.Context, uuid.UUID) (Quarantine, error)
 	QuarantineAlert(context.Context, uuid.UUID, uuid.UUID, Quarantine) error
