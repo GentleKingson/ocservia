@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "./csp";
+import { expect, test } from "@playwright/test";
 import { installEventSourceStub } from "./fixtures";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";

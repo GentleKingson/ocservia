@@ -59,11 +59,7 @@ export default defineConfig(
   {
     // The root script invocation uses --config web/eslint.config.ts from the
     // repository root, so these patterns are relative to that working directory.
-    files: [
-      "scripts/redact-release-upgrade-log.mjs",
-      "scripts/release-business-browser.mjs",
-      "scripts/test-release-upgrade.mjs",
-    ],
+    files: ["scripts/redact-release-upgrade-log.mjs"],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       sourceType: "module",
@@ -75,18 +71,6 @@ export default defineConfig(
         URLSearchParams: "readonly",
         setTimeout: "readonly",
         clearTimeout: "readonly",
-      },
-    },
-  },
-  {
-    // Playwright evaluate callbacks in this harness run in the browser.
-    files: ["scripts/release-business-browser.mjs"],
-    languageOptions: {
-      globals: {
-        document: "readonly",
-        window: "readonly",
-        sessionStorage: "readonly",
-        Image: "readonly",
       },
     },
   },
