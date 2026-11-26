@@ -67,7 +67,6 @@ export const i18n = createI18n({
         "The password change could not be confirmed. Try signing in with your new password or try again.",
       overview: "Overview",
       nodes: "Nodes",
-      fleet: "Fleet",
       fleetRefreshFailed:
         "Refresh failed. Showing the last successful snapshot.",
       fleetLoadFailed: "Nodes could not be loaded. No node data is shown.",
@@ -369,7 +368,6 @@ export const i18n = createI18n({
         "Password sealing needs WebCrypto in a secure browser context (HTTPS).",
       passwordTooLong:
         "The password is empty or exceeds this key's RSA-OAEP UTF-8 byte limit.",
-      sealedPassword: "Sealed password",
       members: "Members",
       noUsers: "No desired or observed users",
       noGroups: "No desired or observed groups",
@@ -477,7 +475,6 @@ export const i18n = createI18n({
         "Resume was not confirmed. Wait for the refreshed rollout state before resuming again.",
       rolloutUnavailable: "Rollout state is unavailable",
       rolloutNotFound: "Rollout not found in this workspace",
-      rolloutTarget: "Target",
       rolloutState_queued: "Queued",
       rolloutState_running: "Running",
       rolloutState_paused: "Paused",

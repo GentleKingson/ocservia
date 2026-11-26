@@ -12,13 +12,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import FormField from "@/components/common/FormField.vue";
 import OperationDialog from "@/components/common/OperationDialog.vue";
-import { useFleetStore } from "@/shared/fleet";
 import { operationStatusKey } from "@/shared/operation-status";
 
 const props = defineProps<{
   context: {
     currentNode: Readonly<Ref<NodeObservedState | undefined>>;
     readReady: Readonly<Ref<boolean>>;
+    trackOperation: (id: string) => Promise<void>;
   };
   actionAvailable: (action: string) => boolean;
   actionExplanation: (action: string) => string;
@@ -27,7 +27,6 @@ const { currentNode } = props.context;
 const issueExplanation = computed(() =>
   props.actionExplanation("certificate.issue"),
 );
-const fleet = useFleetStore();
 const { t } = useI18n();
 const {
   certificateDialog,
@@ -49,7 +48,7 @@ const {
   currentNode,
   readReady: props.context.readReady,
   workspaceId: cachedWorkspaceId,
-  trackOperation: (id) => fleet.trackOperation(id),
+  trackOperation: props.context.trackOperation,
   t,
 });
 

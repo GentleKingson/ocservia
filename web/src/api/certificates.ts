@@ -4,7 +4,13 @@ import type {
   CertificateP12Request,
   CertificateRevokeRequest,
 } from "./models";
-import { client, newIdempotencyKey, read, ResponseError } from "./transport";
+import {
+  client,
+  formatUuid,
+  newIdempotencyKey,
+  read,
+  unwrap,
+} from "./transport";
 
 export function createCertificate(
   nodeId: string,
@@ -75,10 +81,7 @@ export function newArtifactRequestId(): string {
   }
   bytes[6] = ((bytes[6] ?? 0) & 15) | 0x70;
   bytes[8] = ((bytes[8] ?? 0) & 63) | 0x80;
-  const hex = Array.from(bytes, (value) =>
-    value.toString(16).padStart(2, "0"),
-  ).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return formatUuid(bytes);
 }
 
 export function createCertificateP12(
@@ -128,13 +131,13 @@ export async function downloadCertificateArtifact(
   artifactId: string,
   token: string,
 ): Promise<Blob> {
-  const { data, response } = await client.GET("/artifacts/{artifact_id}", {
-    params: {
-      path: { artifact_id: artifactId },
-      header: { "X-Artifact-Token": token },
-    },
-    parseAs: "blob",
-  });
-  if (!data) throw new ResponseError(response);
-  return data;
+  return unwrap(
+    client.GET("/artifacts/{artifact_id}", {
+      params: {
+        path: { artifact_id: artifactId },
+        header: { "X-Artifact-Token": token },
+      },
+      parseAs: "blob",
+    }),
+  );
 }

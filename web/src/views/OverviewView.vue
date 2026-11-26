@@ -169,8 +169,8 @@ onBeforeUnmount(() => {
           :source="$t('overviewSourceNodes')"
         >
           <template v-if="fleetShown"
-            >{{ fleet.online }} {{ $t("online") }} · {{ fleet.offline }}
-            {{ $t("offline") }}</template
+            >{{ fleet.stats.online }} {{ $t("online") }} ·
+            {{ fleet.stats.offline }} {{ $t("offline") }}</template
           >
           <template v-else-if="fleetState === 'unavailable'">{{
             $t("systemsUnavailable")
@@ -181,7 +181,7 @@ onBeforeUnmount(() => {
           to="/nodes"
           :icon="Users"
           value-testid="overview-sessions"
-          :value="sourceValue(fleetState, fleet.sessionCount)"
+          :value="sourceValue(fleetState, fleet.stats.sessionCount)"
           :source="$t('overviewSourceSessions')"
           :warning="
             fleetShown && staleNodes
@@ -219,12 +219,13 @@ onBeforeUnmount(() => {
           :to="{ path: '/nodes', query: { columns: 'path' } }"
           :icon="Radio"
           value-testid="overview-connectivity"
-          :value="sourceValue(fleetState, fleet.direct)"
+          :value="sourceValue(fleetState, fleet.stats.direct)"
           :source="$t('overviewSourcePaths')"
         >
           <template v-if="fleetShown"
-            >{{ fleet.direct }} {{ $t("direct") }} · {{ fleet.relay }}
-            {{ $t("relay") }} · {{ $t("pathCountsIncludeOffline") }}</template
+            >{{ fleet.stats.direct }} {{ $t("direct") }} ·
+            {{ fleet.stats.relay }} {{ $t("relay") }} ·
+            {{ $t("pathCountsIncludeOffline") }}</template
           >
         </MetricCard>
         <MetricCard
@@ -232,13 +233,14 @@ onBeforeUnmount(() => {
           to="/nodes"
           :icon="PackageCheck"
           value-testid="overview-agent-versions"
-          :value="sourceValue(fleetState, fleet.agentCurrent)"
+          :value="sourceValue(fleetState, fleet.stats.agentCurrent)"
           :source="$t('overviewSourceAgents')"
         >
           <template v-if="fleetShown"
-            >{{ fleet.agentCurrent }} {{ $t("current") }} ·
-            {{ fleet.agentUpdateAvailable }} {{ $t("upgrade_available") }} ·
-            {{ fleet.agentAhead }} {{ $t("ahead") }} · {{ fleet.agentUnknown }}
+            >{{ fleet.stats.agentCurrent }} {{ $t("current") }} ·
+            {{ fleet.stats.agentUpdateAvailable }}
+            {{ $t("upgrade_available") }} · {{ fleet.stats.agentAhead }}
+            {{ $t("ahead") }} · {{ fleet.stats.agentUnknown }}
             {{ $t("unknown") }}</template
           >
         </MetricCard>

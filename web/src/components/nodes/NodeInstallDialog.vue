@@ -157,29 +157,27 @@ async function issue(): Promise<void> {
           class="font-mono text-xs"
         />
       </FormField>
-      <p v-if="step === 2" class="m-0 text-sm">
+      <p class="m-0 text-sm font-medium">
         {{ $t("installPreparation") }}
       </p>
-      <template v-if="step === 2">
-        <p class="m-0 text-sm">{{ $t("installTokenNotice") }}</p>
-        <Button type="button" :disabled="attempted" @click="issue">{{
-          $t(pending ? "installIssuing" : "installIssue")
-        }}</Button>
-        <template v-if="token">
-          <FormField id="install-token" :label="$t('installToken')">
-            <Textarea
-              id="install-token"
-              :model-value="token"
-              readonly
-              autocomplete="off"
-              spellcheck="false"
-              class="font-mono text-xs"
-            />
-          </FormField>
-          <p class="m-0 text-sm">
-            {{ $t("installExpires", { time: expires }) }}
-          </p>
-        </template>
+      <p class="m-0 text-sm">{{ $t("installTokenNotice") }}</p>
+      <Button type="button" :disabled="attempted" @click="issue">{{
+        $t(pending ? "installIssuing" : "installIssue")
+      }}</Button>
+      <template v-if="token">
+        <FormField id="install-token" :label="$t('installToken')">
+          <Textarea
+            id="install-token"
+            :model-value="token"
+            readonly
+            autocomplete="off"
+            spellcheck="false"
+            class="font-mono text-xs"
+          />
+        </FormField>
+        <p class="m-0 text-sm">
+          {{ $t("installExpires", { time: expires }) }}
+        </p>
       </template>
     </template>
     <template #footer>

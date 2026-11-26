@@ -1,5 +1,5 @@
 import type { ArtifactGrant } from "@/api/models";
-import { shallowReactive } from "vue";
+import { shallowReactive, type Ref } from "vue";
 import { abortableDelay } from "../shared/abortable-delay";
 
 export interface NodeWorkflowContext {
@@ -76,7 +76,7 @@ export function readNodeWorkflowReference(
   }
 }
 
-interface NodeMutationTicket {
+export interface NodeMutationTicket {
   key: string;
   settled: Promise<void>;
   resolve(): void;
@@ -210,5 +210,71 @@ export function consumeCertificateGrant(
     delete grant.downloadToken;
     // Retain the password until expiry so a download completed after closing
     // the dialog is still usable when the user reopens it.
+  }
+}
+
+export interface NodeMutationOptions {
+  workflow: ReturnType<typeof createNodeWorkflow>;
+  context: NodeWorkflowContext | undefined;
+  kind: "config" | "certificate";
+  loading: Ref<boolean>;
+  error: Ref<string>;
+  fallbackError: () => string;
+  run: (
+    ticket: NodeMutationTicket,
+    context: NodeWorkflowContext,
+  ) => Promise<void>;
+  onError?: (cause: unknown) => void;
+}
+
+export async function runNodeMutation({
+  workflow,
+  context,
+  kind,
+  loading,
+  error,
+  fallbackError,
+  run,
+  onError,
+}: NodeMutationOptions): Promise<void> {
+  if (!context || !workflow.isCurrent(context) || loading.value) return;
+  const ticket = beginNodeMutation(context, kind);
+  if (!ticket) return;
+  loading.value = true;
+  error.value = "";
+  try {
+    await run(ticket, context);
+  } catch (cause) {
+    onError?.(cause);
+    if (!workflow.isCurrent(context)) return;
+    error.value = (cause instanceof Error && cause.message) || fallbackError();
+  } finally {
+    finishNodeMutation(ticket);
+    if (workflow.isCurrent(context)) loading.value = false;
+  }
+}
+
+export async function pollNodeResource<T>(
+  workflow: ReturnType<typeof createNodeWorkflow>,
+  context: NodeWorkflowContext,
+  initial: T,
+  shouldContinue: (value: T) => boolean,
+  fetchNext: (value: T, signal: AbortSignal) => Promise<T>,
+  onUpdate: (value: T) => void,
+  maxAttempts = 30,
+): Promise<void> {
+  if (!workflow.isCurrent(context)) return;
+  let value = initial;
+  onUpdate(value);
+  for (
+    let attempt = 0;
+    attempt < maxAttempts && shouldContinue(value);
+    attempt += 1
+  ) {
+    await waitForNodePoll(context.signal);
+    if (!workflow.isCurrent(context)) return;
+    value = await fetchNext(value, context.signal);
+    if (!workflow.isCurrent(context)) return;
+    onUpdate(value);
   }
 }

@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { ListVpnAuditRecordsRequest } from "@/api/events";
 import type { VpnAuditRecord } from "@/api/models";
 import { listVpnAuditRecords } from "@/api/events";
+import { downloadBlob } from "@/shared/download";
 import { formatTimestamp } from "@/shared/timestamp";
 import { createReadRequest } from "@/shared/read-request";
 import SectionCard from "@/components/common/SectionCard.vue";
@@ -89,18 +90,12 @@ function duration(row: VpnAuditRecord) {
 
 function download() {
   if (!items.value?.length) return;
-  const href = URL.createObjectURL(
+  downloadBlob(
     new Blob([JSON.stringify(items.value, null, 2)], {
       type: "application/json",
     }),
+    `vpn-${displayed.value}.json`,
   );
-  const link = document.createElement("a");
-  link.href = href;
-  link.download = `vpn-${displayed.value}.json`;
-  link.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(href);
-  }, 1000);
 }
 </script>
 <template>

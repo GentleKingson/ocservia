@@ -66,7 +66,6 @@ export type OperationPage = Camel<Schemas["OperationPage"]>;
 export type OperationSummary = Camel<Schemas["OperationSummary"]>;
 export type PlatformEvent = Camel<Schemas["PlatformEvent"]>;
 export type PlatformEventPage = Camel<Schemas["PlatformEventPage"]>;
-export type Readiness = Camel<Schemas["Readiness"]>;
 export type UserGroupResourceState = Camel<Schemas["UserGroupResourceState"]>;
 export type UserPasswordSealingKey = Camel<Schemas["UserPasswordSealingKey"]>;
 export type UserPolicy = Camel<Schemas["UserPolicy"]>;

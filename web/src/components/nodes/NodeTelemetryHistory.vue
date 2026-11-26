@@ -2,6 +2,15 @@
 import { ref, watchEffect } from "vue";
 import type { NodeObservedState, Schemas } from "@/api/models";
 import { listNodeTelemetry } from "@/api/nodes";
+import { NativeSelect } from "@/components/ui/native-select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { formatTimestamp } from "@/shared/timestamp";
 
 const props = defineProps<{ node: NodeObservedState }>();
@@ -17,6 +26,15 @@ const metric = ref<Schemas["TelemetryMetric"]>("cpu_usage_ratio");
 const open = ref(false);
 const samples = ref<Schemas["TelemetryPoint"][]>([]);
 const status = ref<"loading" | "unavailable" | "telemetryEmpty" | null>(null);
+
+function setMetric(value: unknown): void {
+  if (
+    typeof value === "string" &&
+    (metrics as readonly string[]).includes(value)
+  ) {
+    metric.value = value as Schemas["TelemetryMetric"];
+  }
+}
 
 watchEffect((cleanup) => {
   if (!open.value) return;
@@ -50,41 +68,38 @@ watchEffect((cleanup) => {
     </summary>
     <label class="my-3 flex items-center gap-3"
       >{{ $t("telemetryMetric") }}
-      <select
-        v-model="metric"
-        class="border-border bg-card rounded-md border px-2 py-1"
-      >
+      <NativeSelect :model-value="metric" @update:model-value="setMetric">
         <option v-for="name in metrics" :key="name" :value="name">
           {{ $t(name) }}
         </option>
-      </select>
+      </NativeSelect>
     </label>
     <p v-if="status" role="status">{{ $t(status) }}</p>
     <div v-else class="max-h-64 overflow-auto">
-      <table class="w-full text-left tabular-nums">
-        <thead>
-          <tr>
-            <th scope="col">{{ $t("telemetryTime") }}</th>
-            <th scope="col">{{ $t(metric) }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="sample in samples" :key="sample.at">
-            <td>
+      <Table class="tabular-nums">
+        <TableHeader>
+          <TableRow class="hover:bg-transparent">
+            <TableHead scope="col">{{ $t("telemetryTime") }}</TableHead>
+            <TableHead scope="col">{{ $t(metric) }}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow v-for="sample in samples" :key="sample.at">
+            <TableCell>
               <time :datetime="sample.at">{{
                 formatTimestamp(sample.at)
               }}</time>
-            </td>
-            <td>
+            </TableCell>
+            <TableCell>
               {{
                 (
                   sample.average * (metric === "cpu_usage_ratio" ? 100 : 1)
                 ).toLocaleString()
               }}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
     </div>
   </details>
 </template>

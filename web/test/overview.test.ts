@@ -120,11 +120,11 @@ describe("operational overview", () => {
     await fleet.rebuild();
 
     expect(fleet.nodes).toHaveLength(3);
-    expect(fleet.online).toBe(2);
-    expect(fleet.offline).toBe(1);
-    expect(fleet.direct).toBe(1);
-    expect(fleet.relay).toBe(1);
-    expect(fleet.sessionCount).toBe(6);
+    expect(fleet.stats.online).toBe(2);
+    expect(fleet.stats.offline).toBe(1);
+    expect(fleet.stats.direct).toBe(1);
+    expect(fleet.stats.relay).toBe(1);
+    expect(fleet.stats.sessionCount).toBe(6);
     fleet.$dispose();
   });
 

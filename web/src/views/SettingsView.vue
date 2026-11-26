@@ -4,13 +4,15 @@ import type { BuildInfo, Workspace } from "@/api/models";
 import { ResponseError } from "@/api/transport";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import DataState from "../components/common/DataState.vue";
+import FormField from "../components/common/FormField.vue";
 import PageHeader from "../components/common/PageHeader.vue";
+import SectionCard from "../components/common/SectionCard.vue";
 import { getWorkspace } from "../api/workspace";
 import { changeLocalPassword, getVersion } from "../api/platform";
+import { createReadRequest } from "../shared/read-request";
 import { useReadinessStore } from "../shared/readiness";
 
 const readiness = useReadinessStore();
@@ -19,7 +21,7 @@ const buildInfo = ref<BuildInfo>();
 const loading = ref(true);
 const unavailable = ref(false);
 const buildUnavailable = ref(false);
-let loadSequence = 0;
+const reads = createReadRequest();
 const currentPassword = ref("");
 const newPassword = ref("");
 const confirmNewPassword = ref("");
@@ -64,7 +66,7 @@ async function submitPassword(): Promise<void> {
 }
 
 async function loadWorkspace(): Promise<void> {
-  const sequence = ++loadSequence;
+  const request = reads.begin();
   loading.value = true;
   unavailable.value = false;
   buildUnavailable.value = false;
@@ -77,25 +79,23 @@ async function loadWorkspace(): Promise<void> {
         () => ({ value: undefined, unavailable: true }),
       ),
     ]);
-    if (sequence !== loadSequence) return;
+    if (!request.current()) return;
     workspace.value = workspaceResult;
     buildInfo.value = buildResult.value;
     buildUnavailable.value = buildResult.unavailable;
   } catch {
-    if (sequence !== loadSequence) return;
+    if (!request.current()) return;
     workspace.value = undefined;
     unavailable.value = true;
   } finally {
-    if (sequence === loadSequence) loading.value = false;
+    if (request.finish()) loading.value = false;
   }
 }
 
 onMounted(() => {
   void loadWorkspace();
 });
-onBeforeUnmount(() => {
-  loadSequence++;
-});
+onBeforeUnmount(reads.cancel);
 </script>
 
 <template>
@@ -108,19 +108,13 @@ onBeforeUnmount(() => {
       :message="$t('noWorkspace')"
     />
     <div v-else class="grid gap-4 md:grid-cols-2">
-      <section
-        class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs md:col-span-2"
-        aria-labelledby="settings-change-password"
-      >
-        <h2 id="settings-change-password" class="m-0 text-sm font-semibold">
-          {{ $t("changePassword") }}
-        </h2>
-        <p class="text-muted-foreground mt-2 mb-4 text-sm">
+      <SectionCard class="mb-0 md:col-span-2" :title="$t('changePassword')">
+        <p class="text-muted-foreground m-0 text-sm">
           {{ $t("passwordChangeSignInAgain") }}
         </p>
         <form
           class="grid max-w-sm gap-3"
-          aria-labelledby="settings-change-password"
+          :aria-label="$t('changePassword')"
           @submit.prevent="submitPassword"
         >
           <p
@@ -130,40 +124,45 @@ onBeforeUnmount(() => {
           >
             {{ $t(passwordError) }}
           </p>
-          <Label for="settings-current-password">{{
-            $t("currentPassword")
-          }}</Label>
-          <Input
+          <FormField
             id="settings-current-password"
-            v-model="currentPassword"
-            type="password"
-            name="current-password"
-            autocomplete="current-password"
-            required
-            :disabled="changingPassword"
-          />
-          <Label for="settings-new-password">{{ $t("newPassword") }}</Label>
-          <Input
-            id="settings-new-password"
-            v-model="newPassword"
-            type="password"
-            name="new-password"
-            autocomplete="new-password"
-            required
-            :disabled="changingPassword"
-          />
-          <Label for="settings-confirm-password">{{
-            $t("confirmNewPassword")
-          }}</Label>
-          <Input
+            :label="$t('currentPassword')"
+          >
+            <Input
+              id="settings-current-password"
+              v-model="currentPassword"
+              type="password"
+              name="current-password"
+              autocomplete="current-password"
+              required
+              :disabled="changingPassword"
+            />
+          </FormField>
+          <FormField id="settings-new-password" :label="$t('newPassword')">
+            <Input
+              id="settings-new-password"
+              v-model="newPassword"
+              type="password"
+              name="new-password"
+              autocomplete="new-password"
+              required
+              :disabled="changingPassword"
+            />
+          </FormField>
+          <FormField
             id="settings-confirm-password"
-            v-model="confirmNewPassword"
-            type="password"
-            name="confirm-password"
-            autocomplete="new-password"
-            required
-            :disabled="changingPassword"
-          />
+            :label="$t('confirmNewPassword')"
+          >
+            <Input
+              id="settings-confirm-password"
+              v-model="confirmNewPassword"
+              type="password"
+              name="confirm-password"
+              autocomplete="new-password"
+              required
+              :disabled="changingPassword"
+            />
+          </FormField>
           <Button
             class="justify-self-start"
             type="submit"
@@ -172,22 +171,9 @@ onBeforeUnmount(() => {
             {{ $t(changingPassword ? "changingPassword" : "changePassword") }}
           </Button>
         </form>
-      </section>
-      <section
-        class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs"
-        aria-labelledby="settings-workspace"
-      >
-        <header class="border-border border-b pb-3">
-          <p
-            class="text-muted-foreground m-0 mb-1 text-xs font-medium tracking-wide"
-          >
-            {{ $t("workspace") }}
-          </p>
-          <h2 id="settings-workspace" class="m-0 text-sm font-semibold">
-            {{ $t("workspaceInformation") }}
-          </h2>
-        </header>
-        <dl class="m-0 mt-2 text-sm">
+      </SectionCard>
+      <SectionCard class="mb-0" :title="$t('workspaceInformation')">
+        <dl class="m-0 text-sm">
           <div
             class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
           >
@@ -215,22 +201,9 @@ onBeforeUnmount(() => {
             </dd>
           </div>
         </dl>
-      </section>
-      <section
-        class="bg-card border-border min-w-0 rounded-xl border p-5 shadow-xs"
-        aria-labelledby="settings-platform"
-      >
-        <header class="border-border border-b pb-3">
-          <p
-            class="text-muted-foreground m-0 mb-1 text-xs font-medium tracking-wide"
-          >
-            {{ $t("platform") }}
-          </p>
-          <h2 id="settings-platform" class="m-0 text-sm font-semibold">
-            {{ $t("platformContext") }}
-          </h2>
-        </header>
-        <dl class="m-0 mt-2 text-sm">
+      </SectionCard>
+      <SectionCard class="mb-0" :title="$t('platformContext')">
+        <dl class="m-0 text-sm">
           <div
             class="border-border flex justify-between gap-4 border-b py-2.5 last:border-b-0"
           >
@@ -264,7 +237,7 @@ onBeforeUnmount(() => {
             </dd>
           </div>
         </dl>
-      </section>
+      </SectionCard>
     </div>
   </main>
 </template>

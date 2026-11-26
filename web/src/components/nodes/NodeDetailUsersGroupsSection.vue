@@ -8,9 +8,9 @@ import {
   UserX,
 } from "@lucide/vue";
 import type { UserGroupResourceState } from "@/api/models";
-import { ref } from "vue";
+import { ref, type Component } from "vue";
 
-import DataState from "@/components/common/DataState.vue";
+import NodeSectionState from "@/components/nodes/NodeSectionState.vue";
 import type { DetailReadState } from "@/shared/fleet";
 import SectionCard from "@/components/common/SectionCard.vue";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +47,48 @@ function convergenceTone(key: string): string {
   return key === "convergence_drifted"
     ? "text-destructive"
     : "text-muted-foreground";
+}
+
+interface RowAction {
+  kind: DesiredDialogKind;
+  titleKey: string;
+  icon: Component;
+  destructive?: boolean;
+}
+
+const recoveryActions: Record<string, RowAction> = {
+  create: { kind: "create", titleKey: "retryCreateUser", icon: UserPlus },
+  rotate: { kind: "rotate", titleKey: "retryRotatePassword", icon: KeyRound },
+  disable: {
+    kind: "disable",
+    titleKey: "retryDisableUser",
+    icon: UserX,
+    destructive: true,
+  },
+  enable: { kind: "enable", titleKey: "retryEnableUser", icon: UserCheck },
+};
+
+function userRowActions(item: UserGroupResourceState): RowAction[] {
+  const actions: RowAction[] = [];
+  const recovery = recoveryDialogKind(item);
+  if (recovery && recovery in recoveryActions) {
+    const action = recoveryActions[recovery];
+    if (action) actions.push(action);
+  }
+  if (!item.recoveryRequired) {
+    actions.push(
+      { kind: "rotate", titleKey: "rotatePassword", icon: KeyRound },
+      item.desiredEnabled === false
+        ? { kind: "enable", titleKey: "enableUser", icon: UserCheck }
+        : {
+            kind: "disable",
+            titleKey: "disableUser",
+            icon: UserX,
+            destructive: true,
+          },
+    );
+  }
+  return actions;
 }
 </script>
 
@@ -108,19 +150,7 @@ function convergenceTone(key: string): string {
     >
       {{ (stateTab === "users" ? userAction : groupAction).explanation }}
     </p>
-    <DataState
-      v-if="readState !== 'ready'"
-      :kind="readState === 'loading' ? 'loading' : 'error'"
-      :message="
-        $t(
-          readState === 'loading'
-            ? 'loading'
-            : readState === 'stale'
-              ? 'nodeSectionStale'
-              : 'nodeSectionUnavailable',
-        )
-      "
-    />
+    <NodeSectionState :state="readState" />
     <template
       v-if="
         (readState === 'ready' || readState === 'stale') && stateTab === 'users'
@@ -160,104 +190,29 @@ function convergenceTone(key: string): string {
               <SlidersHorizontal aria-hidden="true" />
             </Button>
             <Button
-              v-if="recoveryDialogKind(item) === 'create'"
+              v-for="action in userRowActions(item)"
+              :key="`${action.kind}:${action.titleKey}`"
               type="button"
               variant="ghost"
               size="icon-sm"
+              :class="
+                action.destructive
+                  ? 'text-destructive hover:text-destructive'
+                  : undefined
+              "
               :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('retryCreateUser')"
-              :aria-label="$t('retryCreateUser')"
+              :title="$t(action.titleKey)"
+              :aria-label="$t(action.titleKey)"
               @click="
-                $emit('desired', 'create', item.name, item.desiredVersion ?? 0)
+                $emit(
+                  'desired',
+                  action.kind,
+                  item.name,
+                  item.desiredVersion ?? 0,
+                )
               "
             >
-              <UserPlus aria-hidden="true" />
-            </Button>
-            <Button
-              v-else-if="recoveryDialogKind(item) === 'rotate'"
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('retryRotatePassword')"
-              :aria-label="$t('retryRotatePassword')"
-              @click="
-                $emit('desired', 'rotate', item.name, item.desiredVersion ?? 0)
-              "
-            >
-              <KeyRound aria-hidden="true" />
-            </Button>
-            <Button
-              v-else-if="recoveryDialogKind(item) === 'disable'"
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              class="text-destructive hover:text-destructive"
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('retryDisableUser')"
-              :aria-label="$t('retryDisableUser')"
-              @click="
-                $emit('desired', 'disable', item.name, item.desiredVersion ?? 0)
-              "
-            >
-              <UserX aria-hidden="true" />
-            </Button>
-            <Button
-              v-else-if="recoveryDialogKind(item) === 'enable'"
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('retryEnableUser')"
-              :aria-label="$t('retryEnableUser')"
-              @click="
-                $emit('desired', 'enable', item.name, item.desiredVersion ?? 0)
-              "
-            >
-              <UserCheck aria-hidden="true" />
-            </Button>
-            <Button
-              v-if="!item.recoveryRequired"
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('rotatePassword')"
-              :aria-label="$t('rotatePassword')"
-              @click="
-                $emit('desired', 'rotate', item.name, item.desiredVersion ?? 0)
-              "
-            >
-              <KeyRound aria-hidden="true" />
-            </Button>
-            <Button
-              v-if="!item.recoveryRequired && item.desiredEnabled === false"
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('enableUser')"
-              :aria-label="$t('enableUser')"
-              @click="
-                $emit('desired', 'enable', item.name, item.desiredVersion ?? 0)
-              "
-            >
-              <UserCheck aria-hidden="true" />
-            </Button>
-            <Button
-              v-else-if="!item.recoveryRequired"
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              class="text-destructive hover:text-destructive"
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
-              :title="$t('disableUser')"
-              :aria-label="$t('disableUser')"
-              @click="
-                $emit('desired', 'disable', item.name, item.desiredVersion ?? 0)
-              "
-            >
-              <UserX aria-hidden="true" />
+              <component :is="action.icon" aria-hidden="true" />
             </Button>
           </span>
         </li>
@@ -291,27 +246,27 @@ function convergenceTone(key: string): string {
             >
           </span>
           <Button
-            v-if="recoveryDialogKind(item) === 'group'"
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            :disabled="busy || !groupAction.allowed"
-            :title="$t('retryApplyGroup')"
-            :aria-label="$t('retryApplyGroup')"
-            @click="
-              $emit('desired', 'group', item.name, item.desiredVersion ?? 0)
+            v-if="
+              recoveryDialogKind(item) === 'group' || !item.recoveryRequired
             "
-          >
-            <ListPlus aria-hidden="true" />
-          </Button>
-          <Button
-            v-else-if="!item.recoveryRequired"
             type="button"
             variant="ghost"
             size="icon-sm"
             :disabled="busy || !groupAction.allowed"
-            :title="$t('applyGroup')"
-            :aria-label="$t('applyGroup')"
+            :title="
+              $t(
+                recoveryDialogKind(item) === 'group'
+                  ? 'retryApplyGroup'
+                  : 'applyGroup',
+              )
+            "
+            :aria-label="
+              $t(
+                recoveryDialogKind(item) === 'group'
+                  ? 'retryApplyGroup'
+                  : 'applyGroup',
+              )
+            "
             @click="
               $emit('desired', 'group', item.name, item.desiredVersion ?? 0)
             "

@@ -1,16 +1,6 @@
 import type { NodeObservedState } from "./models";
-import { client, newIdempotencyKey, read } from "./transport";
+import { client, fencedRequest, read } from "./transport";
 import { getWorkspaceId } from "./workspace";
-
-function controlledRequest(node: NodeObservedState, reason: string) {
-  return {
-    header: {
-      "Idempotency-Key": newIdempotencyKey(),
-      "If-Match": `"revision-${String(node.version)}"`,
-    },
-    body: { reason, expected_version: node.version, ttl_seconds: 60 },
-  };
-}
 
 export async function listOperations(
   cursor?: string,
@@ -46,38 +36,49 @@ export function getOperation(operationId: string, signal?: AbortSignal) {
   );
 }
 
-export async function disconnectSession(
+async function sessionAction(
+  action: "disconnect" | "terminate",
   node: NodeObservedState,
   sessionId: string,
   reason: string,
   signal?: AbortSignal,
 ) {
   if (!node.bootId) throw new Error("Node boot identity is unavailable");
-  const { header, body } = controlledRequest(node, reason);
+  const { header, body } = fencedRequest(node.version, reason, 60);
+  const options = {
+    params: { path: { node_id: node.id, session_id: sessionId }, header },
+    body: { ...body, boot_id: node.bootId },
+    signal: signal ?? null,
+  };
   return read(
-    client.POST("/nodes/{node_id}/sessions/{session_id}:disconnect", {
-      params: { path: { node_id: node.id, session_id: sessionId }, header },
-      body: { ...body, boot_id: node.bootId },
-      signal: signal ?? null,
-    }),
+    action === "disconnect"
+      ? client.POST(
+          "/nodes/{node_id}/sessions/{session_id}:disconnect",
+          options,
+        )
+      : client.POST(
+          "/nodes/{node_id}/sessions/{session_id}:terminate",
+          options,
+        ),
   );
 }
 
-export async function terminateSession(
+export function disconnectSession(
   node: NodeObservedState,
   sessionId: string,
   reason: string,
   signal?: AbortSignal,
 ) {
-  if (!node.bootId) throw new Error("Node boot identity is unavailable");
-  const { header, body } = controlledRequest(node, reason);
-  return read(
-    client.POST("/nodes/{node_id}/sessions/{session_id}:terminate", {
-      params: { path: { node_id: node.id, session_id: sessionId }, header },
-      body: { ...body, boot_id: node.bootId },
-      signal: signal ?? null,
-    }),
-  );
+  return sessionAction("disconnect", node, sessionId, reason, signal);
+}
+
+export function terminateSession(
+  node: NodeObservedState,
+  sessionId: string,
+  reason: string,
+  signal?: AbortSignal,
+) {
+  return sessionAction("terminate", node, sessionId, reason, signal);
 }
 
 export function removeIpBan(
@@ -86,7 +87,7 @@ export function removeIpBan(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = controlledRequest(node, reason);
+  const { header, body } = fencedRequest(node.version, reason, 60);
   return read(
     client.POST("/nodes/{node_id}/ip-bans/{ip}:remove", {
       params: { path: { node_id: node.id, ip }, header },
@@ -101,7 +102,7 @@ export function reloadService(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = controlledRequest(node, reason);
+  const { header, body } = fencedRequest(node.version, reason, 60);
   return read(
     client.POST("/nodes/{node_id}/service:reload", {
       params: { path: { node_id: node.id }, header },

@@ -155,7 +155,6 @@ export const useOverviewStore = defineStore("overview", () => {
   );
 
   return {
-    operations,
     events,
     operationsLoaded,
     eventsLoaded,

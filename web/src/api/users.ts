@@ -1,5 +1,5 @@
 import type { UserPolicyRequest } from "./models";
-import { client, newIdempotencyKey, read } from "./transport";
+import { client, fencedRequest, newIdempotencyKey, read } from "./transport";
 
 export function getUserPasswordSealingKey(
   nodeId: string,
@@ -11,16 +11,6 @@ export function getUserPasswordSealingKey(
       signal: signal ?? null,
     }),
   );
-}
-
-function desiredRequest(version: number, reason: string) {
-  return {
-    header: {
-      "Idempotency-Key": newIdempotencyKey(),
-      "If-Match": `"revision-${String(version)}"`,
-    },
-    body: { reason, expected_version: version, ttl_seconds: 86400 },
-  };
 }
 
 function passwordEnvelope(ciphertext: string, keyId: string) {
@@ -41,7 +31,7 @@ export function createUser(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = desiredRequest(version, reason);
+  const { header, body } = fencedRequest(version, reason, 86400);
   return read(
     client.POST("/nodes/{node_id}/users", {
       params: { path: { node_id: nodeId }, header },
@@ -62,7 +52,7 @@ export function disableUser(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = desiredRequest(version, reason);
+  const { header, body } = fencedRequest(version, reason, 86400);
   return read(
     client.POST("/nodes/{node_id}/users/{username}:disable", {
       params: { path: { node_id: nodeId, username }, header },
@@ -79,7 +69,7 @@ export function enableUser(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = desiredRequest(version, reason);
+  const { header, body } = fencedRequest(version, reason, 86400);
   return read(
     client.POST("/nodes/{node_id}/users/{username}:enable", {
       params: { path: { node_id: nodeId, username }, header },
@@ -98,7 +88,7 @@ export function rotateUserPassword(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = desiredRequest(version, reason);
+  const { header, body } = fencedRequest(version, reason, 86400);
   return read(
     client.POST("/nodes/{node_id}/users/{username}:rotate-password", {
       params: { path: { node_id: nodeId, username }, header },
@@ -119,7 +109,7 @@ export function applyGroup(
   reason: string,
   signal?: AbortSignal,
 ) {
-  const { header, body } = desiredRequest(version, reason);
+  const { header, body } = fencedRequest(version, reason, 86400);
   return read(
     client.PUT("/nodes/{node_id}/groups/{group_name}", {
       params: { path: { node_id: nodeId, group_name: groupName }, header },
