@@ -6,21 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-[features]
-identity = ["dep:hex", "dep:iroh", "dep:ocservia-canonical-cbor", "dep:rustix", "dep:serde", "dep:sha2", "dep:zeroize"]
-
 [dependencies]
-hex = { workspace = true, optional = true }
-iroh = { workspace = true, optional = true }
-ocservia-canonical-cbor = { version = "=0.1.0", path = "../canonical-cbor", optional = true }
 ocservia-contracts = { version = "=0.1.0", path = "../contracts", default-features = false }
 prost.workspace = true
 prost-types.workspace = true
-rustix = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
-zeroize = { workspace = true, optional = true }
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod enrollment;
 mod keyring;
 mod semantic_hash;
 #[cfg(test)]
@@ -18,6 +19,10 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
+pub use crate::enrollment::{
+    ENROLLMENT_PROOF_VERSION_V1, ENROLLMENT_PROTOCOL_MAJOR, ENROLLMENT_PROTOCOL_MINOR,
+    authorize_enrollment_with, enrollment_canonical_v1,
+};
 pub use crate::keyring::{ControllerCommandKeyring, VerifiedCommand, load_verification_key};
 pub use crate::semantic_hash::{semantic_payload_hash_v2, verify_semantic_payload_hash};
 
