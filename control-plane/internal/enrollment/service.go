@@ -27,7 +27,6 @@ import (
 
 const (
 	DefaultTokenTTL = 15 * time.Minute
-	MaxPendingNodes = 100
 	MaxClockSkew    = 5 * time.Minute
 	SessionGrantTTL = 5 * time.Minute
 	ProtocolMajor   = 1
@@ -39,7 +38,6 @@ var (
 	ErrInvalidToken      = errors.New("enrollment token is invalid or expired")
 	ErrEndpointMismatch  = errors.New("endpoint does not match enrollment token")
 	ErrEndpointProof     = errors.New("endpoint proof of possession is invalid")
-	ErrPendingLimit      = errors.New("pending node limit reached")
 	ErrInvalidTransition = errors.New("node state transition is invalid")
 	ErrNotFound          = errors.New("resource not found")
 	ErrInvalidRequest    = errors.New("enrollment request is invalid")
@@ -181,7 +179,7 @@ func (s *Service) ValidateEnrollment(ctx context.Context, request *agentv1.Enrol
 			return ErrInvalidToken
 		}
 		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
-		if err != nil || node.WorkspaceID != token.WorkspaceID || !bootstrapNodeState(request.GetToken(), node) || !slices.Equal(node.Endpoint, token.Endpoint) {
+		if err != nil || node.WorkspaceID != token.WorkspaceID || !bootstrapNodeState(node) || !slices.Equal(node.Endpoint, token.Endpoint) {
 			return ErrInvalidToken
 		}
 		return nil
@@ -223,7 +221,7 @@ func bootstrapTokenDigest(value string) ([sha256.Size]byte, bool) {
 	return sha256.Sum256([]byte(value)), true
 }
 
-func bootstrapNodeState(_ string, node enrollmentstore.Node) bool {
+func bootstrapNodeState(node enrollmentstore.Node) bool {
 	return (node.Status == "active" || node.Status == "offline") && node.EndpointState == "active"
 }
 
@@ -253,7 +251,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 			return nil, ErrEndpointMismatch
 		}
 		node, err := store.NodeByID(ctx, *token.ConsumedNode, enrollmentstore.ForShare)
-		if err != nil || node.WorkspaceID != workspaceID || !bootstrapNodeState(request.GetToken(), node) || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
+		if err != nil || node.WorkspaceID != workspaceID || !bootstrapNodeState(node) || subtle.ConstantTimeCompare(node.Endpoint, request.GetEndpointId()) != 1 {
 			return nil, ErrInvalidToken
 		}
 		if match, err := sealingKeysMatch(ctx, store, node.ID, request.GetSealingKeys()); err != nil || !match {
@@ -262,7 +260,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 		if match, err := supportedCapabilitiesMatch(ctx, store, node.ID, request.GetCapabilities()); err != nil || !match {
 			return nil, ErrEndpointMismatch
 		}
-		return &agentv1.EnrollResponse{Result: bootstrapResult(request.GetToken()), NodeId: (*token.ConsumedNode)[:], ControllerEndpointId: s.controllerEndpointID}, nil
+		return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED, NodeId: (*token.ConsumedNode)[:], ControllerEndpointId: s.controllerEndpointID}, nil
 	}
 	if !tokenUnexpired(token.ExpiresAt, s.now()) || len(token.Endpoint) != 0 || token.ConsumedNode != nil {
 		return nil, ErrInvalidToken
@@ -276,13 +274,6 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	}
 	if endpointExists {
 		return nil, ErrEndpointMismatch
-	}
-	pending, err := store.PendingCount(ctx, workspaceID)
-	if err != nil {
-		return nil, fmt.Errorf("count pending nodes: %w", err)
-	}
-	if pending >= MaxPendingNodes {
-		return nil, ErrPendingLimit
 	}
 	now := s.now().UTC()
 	nodeID := uuid.Must(uuid.NewV7())
@@ -330,7 +321,7 @@ func (s *Service) enrollBootstrap(ctx context.Context, request *agentv1.EnrollRe
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit node bootstrap enrollment: %w", err)
 	}
-	return &agentv1.EnrollResponse{Result: bootstrapResult(request.GetToken()), NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
+	return &agentv1.EnrollResponse{Result: agentv1.HandshakeResult_HANDSHAKE_RESULT_ACCEPTED, NodeId: nodeID[:], ControllerEndpointId: s.controllerEndpointID}, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust, error) {
@@ -467,10 +458,6 @@ func (s *Service) AuthorizeSession(ctx context.Context, request *transportv1.Aut
 		nodeID = node.ID
 		status, endpointState := node.Status, node.EndpointState
 		authorizationRevision = node.AuthorizationRevision
-		if status == "pending" {
-			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_PENDING_APPROVAL
-			return nil
-		}
 		if (status != "active" && status != "offline") || endpointState != "active" || authorizationRevision == 0 || !slices.Equal(nodeID[:], handshake.GetNodeId()) {
 			earlyResult = agentv1.HandshakeResult_HANDSHAKE_RESULT_REVOKED
 			return nil

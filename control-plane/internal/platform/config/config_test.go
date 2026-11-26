@@ -109,7 +109,7 @@ func TestConfigValidationGuards(t *testing.T) {
 
 func TestProductionConfigurationAndFailClosedGates(t *testing.T) {
 	base := prodBaseEnv(t)
-	if cfg, err := loadEnv(nil, base); err != nil || !cfg.LocalAuthEnabled() || cfg.BrowserOrigin() != "https://controller.example.test" {
+	if cfg, err := loadEnv(nil, base); err != nil || !cfg.LocalAuth || cfg.BrowserOrigin() != "https://controller.example.test" {
 		t.Fatalf("valid production config rejected: err=%v origin=%q", err, cfg.BrowserOrigin())
 	}
 

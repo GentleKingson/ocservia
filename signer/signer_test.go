@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"net"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -28,6 +27,10 @@ import (
 	"github.com/google/uuid"
 	bolt "go.etcd.io/bbolt"
 )
+
+func openStore(path string, ca *authority, initialize bool) (*service, error) {
+	return openLedger(path, ca, initialize, false)
+}
 
 func fixture(t *testing.T) (*service, string) {
 	t.Helper()
@@ -465,50 +468,6 @@ func TestSealInteropHelper(t *testing.T) {
 		}
 		must(t, json.Unmarshal(response.Body.Bytes(), &v))
 		must(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("signer-%d.bin", i)), v.Sealed, 0600))
-	}
-}
-
-// Disposable image-smoke material, never a production initialization command.
-func TestImageFixture(t *testing.T) {
-	dir := os.Getenv("SIGNER_IMAGE_FIXTURE_DIR")
-	if dir == "" {
-		t.Skip("image fixture generation only")
-	}
-	s, source := fixture(t)
-	for name, original := range map[string]string{"issuer-chain.pem": "ca.pem", "issuer-key.pem": "key.pem", "tls-ca.pem": "ca.pem"} {
-		data, err := os.ReadFile(filepath.Join(source, original))
-		must(t, err)
-		must(t, os.WriteFile(filepath.Join(dir, name), data, 0600))
-	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	must(t, err)
-	leaf := &x509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "signer"}, DNSNames: []string{"signer", "localhost"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, leaf, s.ca.cert, key.Public(), s.ca.key)
-	must(t, err)
-	must(t, os.WriteFile(dir+"/tls-cert.pem", append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), s.ca.chain...), 0600))
-	der, err = x509.MarshalPKCS8PrivateKey(key)
-	must(t, err)
-	must(t, os.WriteFile(dir+"/tls-key.pem", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600))
-	must(t, os.WriteFile(dir+"/api-token", []byte(s.token), 0600))
-}
-
-func TestImageBindingsFixture(t *testing.T) {
-	dir := os.Getenv("SIGNER_IMAGE_BINDINGS_DIR")
-	if dir == "" {
-		t.Skip("image binding generation only")
-	}
-	b, _ := approvedKeys(t)
-	public, err := json.Marshal(b)
-	must(t, err)
-	must(t, os.WriteFile(dir+"/keys-public.json", public, 0600))
-	for i := range b.Keys {
-		b.Keys[i].DER = nil
-	}
-	approved, err := json.Marshal(b)
-	must(t, err)
-	must(t, os.WriteFile(dir+"/keys-approved.json", approved, 0600))
-	for name, value := range map[string]string{"node-id": b.NodeID, "workspace-id": b.WorkspaceID, "endpoint-id": b.EndpointID} {
-		must(t, os.WriteFile(dir+"/"+name, []byte(value), 0600))
 	}
 }
 

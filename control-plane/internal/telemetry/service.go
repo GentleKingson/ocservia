@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
+	platformtelemetry "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/google/uuid"
@@ -390,13 +390,13 @@ func (s *Service) Maintain(ctx context.Context) error {
 	defer s.maintenanceMu.Unlock()
 	now := s.now().UTC()
 	ensurePartitions := s.partitionsEnsuredAt.IsZero() || now.Sub(s.partitionsEnsuredAt) >= time.Hour || now.Before(s.partitionsEnsuredAt)
-	err := telemetrystore.Maintain(ctx, s.backend, now, func(ctx context.Context, tx database.Tx) error {
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := telemetrystore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
-		if ensurer, ok := store.(telemetrystore.PartitionEnsurer); ensurePartitions && ok {
-			if err := ensurer.EnsureUpcomingPartitions(ctx); err != nil {
+		if ensurePartitions {
+			if err := store.EnsureUpcomingPartitions(ctx); err != nil {
 				return err
 			}
 		}
@@ -405,20 +405,14 @@ func (s *Service) Maintain(ctx context.Context) error {
 			return err
 		}
 		for _, id := range offline {
-			if err := store.MarkOffline(ctx, id, uuid.Must(uuid.NewV7()), now, newTraceparent()); err != nil {
+			if err := store.MarkOffline(ctx, id, uuid.Must(uuid.NewV7()), now, platformtelemetry.NewTraceparent()); err != nil {
 				return err
 			}
 		}
-		return nil
-	}, nil)
+		return store.MaintainHistory(ctx, now)
+	})
 	if err == nil && ensurePartitions {
 		s.partitionsEnsuredAt = now
 	}
 	return err
-}
-
-func newTraceparent() string {
-	trace := uuid.Must(uuid.NewV7())
-	span := uuid.Must(uuid.NewV7())
-	return "00-" + hex.EncodeToString(trace[:]) + "-" + hex.EncodeToString(span[:8]) + "-01"
 }

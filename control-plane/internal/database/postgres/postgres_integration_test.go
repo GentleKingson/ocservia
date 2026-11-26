@@ -98,9 +98,10 @@ func TestUsageCrossStoreTransactionIntegration(t *testing.T) {
 			if err := userstore.RecordUsageTx(ctx, a, node, []userstore.UsageSample{sample}); err != nil {
 				return err
 			}
-			prior, err := other.LockCursor(ctx, node, userstore.UsageCursor{SessionID: sample.SessionID, Connected: now})
-			if err != nil || prior.RXBytes != 10 {
-				t.Fatalf("second store cannot see uncommitted cursor: %+v %v", prior, err)
+			key := userstore.UsageKey{SessionID: sample.SessionID, Connected: now}
+			cursors, err := other.LockCursors(ctx, node, []userstore.UsageKey{key})
+			if err != nil || cursors[key].RXBytes != 10 {
+				t.Fatalf("second store cannot see uncommitted cursor: %+v %v", cursors[key], err)
 			}
 			sample.RXBytes = 15
 			sample.ObservedAt = now.Add(time.Second)

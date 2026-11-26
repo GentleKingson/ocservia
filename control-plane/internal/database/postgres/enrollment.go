@@ -69,11 +69,6 @@ func (s enrollmentStore) NodeByID(ctx context.Context, id uuid.UUID, lock enroll
 	return scanEnrollmentNode(s.QueryRow(ctx, enrollmentNodeColumns+`WHERE n.id=$1`+enrollmentNodeLock(lock), id))
 }
 
-func (s enrollmentStore) PendingCount(ctx context.Context, workspace uuid.UUID) (v int, err error) {
-	err = s.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE workspace_id=$1 AND status='pending'`, workspace).Scan(&v)
-	return
-}
-
 func (s enrollmentStore) EndpointExists(ctx context.Context, endpoint []byte) (v bool, err error) {
 	err = s.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM node_endpoint_keys WHERE endpoint_id=$1)`, endpoint).Scan(&v)
 	return

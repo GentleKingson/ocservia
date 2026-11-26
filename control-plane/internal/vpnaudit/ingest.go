@@ -78,14 +78,7 @@ func Ingest(ctx context.Context, backend database.Backend, req *wire.StoreVpnAud
 		if e != nil {
 			return e
 		}
-		var trust ingress.IngressTrust
-		if shared, ok := trustStore.(interface {
-			LockTrustShared(context.Context, uuid.UUID, []byte) (ingress.IngressTrust, error)
-		}); ok {
-			trust, e = shared.LockTrustShared(ctx, node, req.EndpointId)
-		} else {
-			trust, e = trustStore.LockTrust(ctx, node, req.EndpointId)
-		}
+		trust, e := trustStore.LockTrustShared(ctx, node, req.EndpointId)
 		if e != nil {
 			return e
 		}

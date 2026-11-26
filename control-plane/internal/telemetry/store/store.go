@@ -117,16 +117,9 @@ type Store interface {
 	InsertHistory(context.Context, uuid.UUID, uuid.UUID, []Sample) error
 	History(context.Context, uuid.UUID, string, string, time.Time) ([]Point, error)
 	MaintainHistory(context.Context, time.Time) error
+	EnsureUpcomingPartitions(context.Context) error
 
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error
-}
-
-type PartitionEnsurer interface {
-	EnsureUpcomingPartitions(context.Context) error
-}
-
-type BatchMaintainer interface {
-	MaintainBatch(context.Context, time.Time) (done bool, err error)
 }
 
 func FromTransaction(tx database.Tx) (Store, error) {
@@ -134,40 +127,4 @@ func FromTransaction(tx database.Tx) (Store, error) {
 		return provider.TelemetryStore(), nil
 	}
 	return nil, database.ErrUnsupported
-}
-
-// Maintain checks the caller's leadership fence before committing each batch when supplied.
-// beforeFirst stays atomic with the first batch; already committed progress survives recovery.
-func Maintain(ctx context.Context, backend database.Backend, now time.Time, beforeFirst, fence func(context.Context, database.Tx) error) error {
-	first := true
-	for {
-		done := true
-		err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-			if first && beforeFirst != nil {
-				if err := beforeFirst(ctx, tx); err != nil {
-					return err
-				}
-			}
-			store, err := FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			if batch, ok := store.(BatchMaintainer); ok {
-				done, err = batch.MaintainBatch(ctx, now)
-			} else {
-				err = store.MaintainHistory(ctx, now)
-			}
-			if err != nil {
-				return err
-			}
-			if fence != nil {
-				return fence(ctx, tx)
-			}
-			return nil
-		})
-		if err != nil || done {
-			return err
-		}
-		first = false
-	}
 }

@@ -42,7 +42,7 @@ func ResetLocalAdminPassword(ctx context.Context, cfg config.Config) (string, st
 	if _, err := newAuditManager(conn.Store, cfg); err != nil {
 		return "", "", err
 	}
-	service, err := auth.NewBackend(conn.Store, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+	service, err := auth.NewBackend(conn.Store, auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 	if err != nil {
 		return "", "", err
 	}
@@ -106,7 +106,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 	}
 
 	if cfg.BootstrapLocalAdmin {
-		service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: cfg.LocalAuthEnabled(), SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+		service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 		if err != nil {
 			return nil, errors.New("configure bootstrap authentication failed")
 		}

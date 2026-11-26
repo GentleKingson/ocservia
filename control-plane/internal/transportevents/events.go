@@ -15,10 +15,6 @@ const (
 	ListEventsDescending = "desc"
 )
 
-func (s *Service) ListEvents(ctx context.Context, after uuid.UUID, limit int) ([]Event, bool, error) {
-	return s.ListEventsInWorkspace(ctx, uuid.Nil, after, limit, ListEventsAscending)
-}
-
 func (s *Service) ListEventsInWorkspace(ctx context.Context, workspace, after uuid.UUID, limit int, order string) ([]Event, bool, error) {
 	if limit < 1 || limit > 200 {
 		return nil, false, errors.New("event page size must be between 1 and 200")

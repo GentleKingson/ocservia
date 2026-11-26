@@ -49,7 +49,6 @@ type EnrollmentStore interface {
 	ConsumeToken(context.Context, uuid.UUID, uuid.UUID, []byte, time.Time) (bool, error)
 	NodeByEndpoint(context.Context, []byte, uuid.UUID, Lock) (Node, error)
 	NodeByID(context.Context, uuid.UUID, Lock) (Node, error)
-	PendingCount(context.Context, uuid.UUID) (int, error)
 	EndpointExists(context.Context, []byte) (bool, error)
 	InsertNode(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
 	InsertEndpoint(context.Context, uuid.UUID, []byte, time.Time) error
