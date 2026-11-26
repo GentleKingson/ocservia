@@ -10,7 +10,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"google.golang.org/protobuf/proto"
@@ -21,7 +20,7 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 		return ErrInvalidRequest
 	}
 	return database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		if err := commandlimit.Lock(ctx, tx); err != nil {
+		if err := operationstore.LockCommandAdmission(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch lease reaping: %w", err)
 		}
 		store := operationstore.FromTransaction(tx)

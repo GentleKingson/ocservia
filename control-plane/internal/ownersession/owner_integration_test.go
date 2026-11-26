@@ -1,4 +1,4 @@
-package ownersession
+package ownersession_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,7 +44,7 @@ func testLogger() *slog.Logger {
 
 func TestManagerSessionOwnershipIntegration(t *testing.T) {
 	pool := testPool(t)
-	manager, err := NewManager(postgres.WrapPool(pool), testLogger())
+	manager, err := ownersession.NewManager(postgres.WrapPool(pool), testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 		t.Fatalf("open session before restart: %v", err)
 	}
 	backend := postgres.WrapPool(pool)
-	successor, err := NewManager(backend, testLogger())
+	successor, err := ownersession.NewManager(backend, testLogger())
 	if err != nil {
 		t.Fatalf("new successor manager: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestManagerSessionOwnershipIntegration(t *testing.T) {
 
 func TestManagerConcurrentLifecycleIsRaceFreeIntegration(t *testing.T) {
 	pool := testPool(t)
-	manager, err := NewManager(postgres.WrapPool(pool), testLogger())
+	manager, err := ownersession.NewManager(postgres.WrapPool(pool), testLogger())
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}

@@ -15,8 +15,8 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
@@ -400,14 +400,14 @@ func validatePolicyRequest(request PolicyRequest) error {
 	return nil
 }
 
-func policyDigest(request PolicyRequest) idempotency.Digest {
+func policyDigest(request PolicyRequest) canonicalcbor.IntentDigest {
 	intent := struct {
 		NodeID                      uuid.UUID `json:"node_id"`
 		Username, Period, Direction string
 		Bytes, Version              int64
 		Expires                     *time.Time
 	}{request.NodeID, request.Username, request.QuotaPeriod, request.QuotaDirection, request.QuotaBytes, request.ExpectedVersion, request.ExpiresAt}
-	return idempotency.New("user-policy", struct {
+	return canonicalcbor.NewIntentDigest("user-policy", struct {
 		Intent                      any
 		ActorIdentity, ActorSession uuid.UUID
 		Reason                      string
