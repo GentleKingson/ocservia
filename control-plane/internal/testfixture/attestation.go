@@ -63,8 +63,8 @@ func AttachProof(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResul
 	if result.GetCompletedAt() == nil {
 		result.CompletedAt = proto.Clone(result.GetAcceptedAt()).(*timestamppb.Timestamp)
 	}
-	commandKind := commandKind(envelope)
-	resultKind := resultKind(envelope, result)
+	commandKind := privdattestation.CommandKind(envelope)
+	resultKind := privdattestation.ResultKind(envelope, result)
 	if commandKind == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED || resultKind == agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_UNSPECIFIED {
 		return fmt.Errorf("attestation fixture command or result kind is unsupported")
 	}
@@ -160,64 +160,5 @@ func certificateBinding(envelope *agentv1.CommandEnvelope, result *agentv1.Comma
 		return &agentv1.PrivdCertificateReceiptBindingV1{CertificateId: request.CertificateRevoke.GetCertificateId()}, nil
 	default:
 		return nil, nil
-	}
-}
-
-func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKind {
-	switch envelope.GetPayload().(type) {
-	case *agentv1.CommandEnvelope_SessionDisconnect:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_SESSION_DISCONNECT
-	case *agentv1.CommandEnvelope_SessionTerminate:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_SESSION_TERMINATE
-	case *agentv1.CommandEnvelope_IpBanRemove:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_IP_BAN_REMOVE
-	case *agentv1.CommandEnvelope_ServiceReload:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_SERVICE_RELOAD
-	case *agentv1.CommandEnvelope_UserCreate:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_USER_CREATE
-	case *agentv1.CommandEnvelope_UserDisable:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_USER_DISABLE
-	case *agentv1.CommandEnvelope_UserEnable:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_USER_ENABLE
-	case *agentv1.CommandEnvelope_UserPasswordRotate:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_USER_PASSWORD_ROTATE
-	case *agentv1.CommandEnvelope_GroupApply:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_GROUP_APPLY
-	case *agentv1.CommandEnvelope_ConfigPlan, *agentv1.CommandEnvelope_CompleteConfigPlan:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_PLAN
-	case *agentv1.CommandEnvelope_ConfigApply, *agentv1.CommandEnvelope_CompleteConfigApply:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_APPLY
-	case *agentv1.CommandEnvelope_CertificateCsr:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR
-	case *agentv1.CommandEnvelope_CertificateP12:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12
-	case *agentv1.CommandEnvelope_CertificateRevoke:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE
-	case *agentv1.CommandEnvelope_AgentUpgrade:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE
-	default:
-		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED
-	}
-}
-
-func resultKind(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) agentv1.PrivilegedResultKind {
-	if result.GetState() == agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED {
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR
-	}
-	switch commandKind(envelope) {
-	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_PLAN:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CONFIG_PLAN
-	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_APPLY:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CONFIG_APPLY
-	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_CSR:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_CSR
-	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_P12:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_P12
-	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CERTIFICATE_REVOKE:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CERTIFICATE_REVOKE
-	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_AGENT_UPGRADE:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_AGENT_UPGRADE_SCHEDULED
-	default:
-		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_MUTATION
 	}
 }

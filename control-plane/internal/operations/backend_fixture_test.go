@@ -6,12 +6,10 @@ import (
 	"errors"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
@@ -78,41 +76,3 @@ func outboxRequest(node uuid.UUID) operations.CreateRequest {
 }
 
 var lostCommit = errors.New("injected lost commit acknowledgement")
-
-type commitFaultBackend struct {
-	database.Backend
-	armed  atomic.Bool
-	commit bool
-}
-
-func (b *commitFaultBackend) Begin(ctx context.Context, isolation database.Isolation) (database.Tx, error) {
-	tx, err := b.Backend.Begin(ctx, isolation)
-	if err != nil {
-		return nil, err
-	}
-	if !b.armed.CompareAndSwap(true, false) {
-		return tx, nil
-	}
-	return &commitFaultTx{Tx: tx, commit: b.commit}, nil
-}
-
-// Only the commit acknowledgement is injected. Every store and SQL statement
-// still uses the real caller-owned transaction and restricted database user.
-type commitFaultTx struct {
-	database.Tx
-	commit bool
-}
-
-func (t *commitFaultTx) Commit(ctx context.Context) error {
-	var err error
-	if t.commit {
-		err = t.Tx.Commit(ctx)
-	} else {
-		err = t.Tx.Rollback(ctx)
-	}
-	if err != nil {
-		return err
-	}
-	return lostCommit
-}
-func (t *commitFaultTx) Unwrap() database.Tx { return t.Tx }
