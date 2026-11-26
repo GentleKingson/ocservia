@@ -288,7 +288,7 @@ func TestPolicyAndBounds(t *testing.T) {
 
 func approvedKeys(t *testing.T) (binding, []*rsa.PrivateKey) {
 	t.Helper()
-	b := binding{WorkspaceID: uuid.NewString(), NodeID: uuid.NewString(), EndpointID: strings.Repeat("a", 64), ApprovalID: uuid.NewString(), ApprovalHash: strings.Repeat("b", 64), ExportedAt: time.Now().UTC()}
+	b := binding{WorkspaceID: uuid.NewString(), NodeID: uuid.NewString(), EndpointID: strings.Repeat("a", 64), ExportedAt: time.Now().UTC()}
 	var private []*rsa.PrivateKey
 	for _, use := range []string{"user_password", "certificate_p12_password"} {
 		key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -432,7 +432,7 @@ func TestSealInteropHelper(t *testing.T) {
 		t.Skip("Rust interop helper only")
 	}
 	s, _ := fixture(t)
-	b := binding{WorkspaceID: uuid.NewString(), NodeID: uuid.NewString(), EndpointID: strings.Repeat("a", 64), ApprovalID: uuid.NewString(), ApprovalHash: strings.Repeat("b", 64), ExportedAt: time.Now().UTC()}
+	b := binding{WorkspaceID: uuid.NewString(), NodeID: uuid.NewString(), EndpointID: strings.Repeat("a", 64), ExportedAt: time.Now().UTC()}
 	for i, use := range []string{"user_password", "certificate_p12_password"} {
 		prefix := "user"
 		id := "fixture-user-key"
@@ -473,22 +473,12 @@ func TestSealInteropHelper(t *testing.T) {
 
 func TestSingleAdminEnrollmentBinding(t *testing.T) {
 	b, _ := approvedKeys(t)
-	b.ApprovalID, b.ApprovalHash = "", ""
 	if err := validateBinding(b); err != nil {
 		t.Fatalf("single administrator binding: %v", err)
 	}
 	s, _ := fixture(t)
 	must(t, s.importBinding(b, b))
 	must(t, s.importBinding(b, b))
-	b.ApprovalHash = strings.Repeat("b", 64)
-	if err := validateBinding(b); err == nil {
-		t.Fatal("orphaned legacy approval hash accepted")
-	}
-	b.ApprovalHash = ""
-	b.ApprovalID = uuid.NewString()
-	if err := validateBinding(b); err == nil {
-		t.Fatal("orphaned legacy approval id accepted")
-	}
 }
 
 func TestCertificateTTL(t *testing.T) {

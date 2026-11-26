@@ -24,14 +24,12 @@ type descriptor struct {
 }
 
 type binding struct {
-	WorkspaceID  string       `json:"workspace_id"`
-	NodeID       string       `json:"node_id"`
-	EndpointID   string       `json:"endpoint_id"`
-	ApprovalID   string       `json:"approval_id"`
-	ApprovalHash string       `json:"approval_hash"`
-	ExportedAt   time.Time    `json:"exported_at"`
-	Keys         []descriptor `json:"keys"`
-	Disabled     bool         `json:"disabled,omitempty"`
+	WorkspaceID string       `json:"workspace_id"`
+	NodeID      string       `json:"node_id"`
+	EndpointID  string       `json:"endpoint_id"`
+	ExportedAt  time.Time    `json:"exported_at"`
+	Keys        []descriptor `json:"keys"`
+	Disabled    bool         `json:"disabled,omitempty"`
 }
 
 func validUUID(s string) bool {
@@ -45,7 +43,7 @@ func validLowerHex32Bytes(s string) bool {
 func validSealPurpose(s string) bool { return s == "user_password" || s == "certificate_p12_password" }
 
 func validateBinding(b binding) error {
-	if !validUUID(b.WorkspaceID) || !validUUID(b.NodeID) || !((b.ApprovalID == "" && b.ApprovalHash == "") || (validUUID(b.ApprovalID) && validLowerHex32Bytes(b.ApprovalHash))) || !validLowerHex32Bytes(b.EndpointID) || b.ExportedAt.IsZero() || len(b.Keys) != 2 {
+	if !validUUID(b.WorkspaceID) || !validUUID(b.NodeID) || !validLowerHex32Bytes(b.EndpointID) || b.ExportedAt.IsZero() || len(b.Keys) != 2 {
 		return errors.New("invalid enrollment binding")
 	}
 	for _, k := range b.Keys {

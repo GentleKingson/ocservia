@@ -53,7 +53,7 @@ type ChainRecord struct {
 	ResourceID                               uuid.UUID
 	RequestID, TraceID, Reason               string
 	Result, ErrorType                        string
-	SessionID, NodeID, CommandID, ApprovalID *uuid.UUID
+	SessionID, NodeID, CommandID             *uuid.UUID
 	BeforeSummary, AfterSummary              json.RawMessage
 	At                                       time.Time
 }
@@ -215,7 +215,6 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 		RequestID:     record.RequestID,
 		TraceID:       record.TraceID,
 		CommandID:     record.CommandID,
-		ApprovalID:    record.ApprovalID,
 		Result:        record.Result,
 		Reason:        record.Reason,
 		BeforeSummary: before,
@@ -243,28 +242,28 @@ func encodeChainPayload(previous []byte, record ChainRecord) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(struct {
-		Previous                                 []byte          `json:"previous"`
-		EventID                                  uuid.UUID       `json:"event_id"`
-		WorkspaceID                              uuid.UUID       `json:"workspace_id"`
-		OccurredAt                               time.Time       `json:"occurred_at"`
-		ActorType                                string          `json:"actor_type"`
-		ActorID                                  string          `json:"actor_id"`
-		Action                                   string          `json:"action"`
-		ResourceType                             string          `json:"resource_type"`
-		ResourceID                               uuid.UUID       `json:"resource_id"`
-		RequestID                                string          `json:"request_id"`
-		TraceID                                  string          `json:"trace_id"`
-		Result                                   string          `json:"result"`
-		Reason                                   string          `json:"reason"`
-		SessionID, NodeID, CommandID, ApprovalID *uuid.UUID      `json:",omitempty"`
-		BeforeSummary, AfterSummary              json.RawMessage `json:",omitempty"`
-		ErrorType                                string          `json:"error_type,omitempty"`
+		Previous                     []byte          `json:"previous"`
+		EventID                      uuid.UUID       `json:"event_id"`
+		WorkspaceID                  uuid.UUID       `json:"workspace_id"`
+		OccurredAt                   time.Time       `json:"occurred_at"`
+		ActorType                    string          `json:"actor_type"`
+		ActorID                      string          `json:"actor_id"`
+		Action                       string          `json:"action"`
+		ResourceType                 string          `json:"resource_type"`
+		ResourceID                   uuid.UUID       `json:"resource_id"`
+		RequestID                    string          `json:"request_id"`
+		TraceID                      string          `json:"trace_id"`
+		Result                       string          `json:"result"`
+		Reason                       string          `json:"reason"`
+		SessionID, NodeID, CommandID *uuid.UUID      `json:",omitempty"`
+		BeforeSummary, AfterSummary  json.RawMessage `json:",omitempty"`
+		ErrorType                    string          `json:"error_type,omitempty"`
 	}{
 		Previous: previous, EventID: record.EventID, WorkspaceID: record.WorkspaceID, OccurredAt: record.At.UTC(),
 		ActorType: record.ActorType, ActorID: record.ActorID, Action: record.Action,
 		ResourceType: record.ResourceType, ResourceID: record.ResourceID, RequestID: record.RequestID,
 		TraceID: record.TraceID, Result: record.Result, Reason: record.Reason,
-		SessionID: record.SessionID, NodeID: record.NodeID, CommandID: record.CommandID, ApprovalID: record.ApprovalID,
+		SessionID: record.SessionID, NodeID: record.NodeID, CommandID: record.CommandID,
 		BeforeSummary: before, AfterSummary: after, ErrorType: record.ErrorType,
 	})
 }
@@ -324,7 +323,6 @@ func recordFromEventRow(ev auditstore.EventRow) ChainRecord {
 		SessionID:     ev.SessionID,
 		NodeID:        ev.NodeID,
 		CommandID:     ev.CommandID,
-		ApprovalID:    ev.ApprovalID,
 		BeforeSummary: ev.BeforeSummary,
 		AfterSummary:  ev.AfterSummary,
 		At:            ev.At.UTC().Truncate(time.Microsecond),

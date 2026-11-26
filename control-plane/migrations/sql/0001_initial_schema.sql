@@ -112,44 +112,6 @@ $$;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
-CREATE FUNCTION public.telemetry_drop_expired_partitions(cutoff timestamp with time zone) RETURNS integer
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    SET "TimeZone" TO 'UTC'
-    AS $_$
-DECLARE
-    partition record;
-BEGIN
-    IF cutoff IS NULL OR NOT isfinite(cutoff)
-       OR cutoff > clock_timestamp() - interval '14 days' + interval '5 minutes' THEN
-        RAISE EXCEPTION 'telemetry retention cutoff outside permitted window';
-    END IF;
-    cutoff := least(cutoff,clock_timestamp() - interval '14 days');
-    FOR partition IN
-        SELECT child.relname FROM pg_catalog.pg_inherits
-        JOIN pg_catalog.pg_class parent ON parent.oid=inhparent
-        JOIN pg_catalog.pg_namespace parent_namespace ON parent_namespace.oid=parent.relnamespace
-        JOIN pg_catalog.pg_class child ON child.oid=inhrelid
-        JOIN pg_catalog.pg_namespace child_namespace ON child_namespace.oid=child.relnamespace
-        WHERE parent_namespace.nspname='public' AND parent.relname='telemetry_samples'
-          AND child_namespace.nspname='public'
-          AND child.relname ~ '^telemetry_samples_[0-9]{6}$'
-          AND to_timestamp(substring(child.relname from '[0-9]{6}$'),'YYYYMM') + interval '1 month' <= cutoff
-        ORDER BY child.relname LIMIT 1
-    LOOP
-        -- Backfill a whole expired month before dropping it, including when
-        -- maintenance was offline longer than the ingestion lateness window.
-        EXECUTE format('INSERT INTO public.telemetry_rollups_5m(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin(''5 minutes'',sampled_at,''2000-01-01 00:00:00+00''::timestamptz),count(*),min(value),max(value),avg(value) FROM public.%I WHERE sampled_at >= date_bin(''5 minutes'',clock_timestamp()-interval ''90 days'',''2000-01-01 00:00:00+00''::timestamptz) GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value',partition.relname);
-        EXECUTE format('INSERT INTO public.telemetry_rollups_1h(node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value) SELECT node_id,metric,date_bin(''1 hour'',sampled_at,''2000-01-01 00:00:00+00''::timestamptz),count(*),min(value),max(value),avg(value) FROM public.%I WHERE sampled_at >= date_bin(''1 hour'',clock_timestamp()-interval ''13 months'',''2000-01-01 00:00:00+00''::timestamptz) GROUP BY 1,2,3 ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value',partition.relname);
-        EXECUTE format('DROP TABLE public.%I',partition.relname);
-        RETURN 1;
-    END LOOP;
-    RETURN 0;
-END;
-$_$;
--- +goose StatementEnd
-
--- +goose StatementBegin
 CREATE FUNCTION public.telemetry_ensure_month_partition(sample_time timestamp with time zone) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
@@ -166,6 +128,33 @@ BEGIN
     END IF;
     EXECUTE format('CREATE TABLE IF NOT EXISTS public.%I PARTITION OF public.telemetry_samples FOR VALUES FROM (%L) TO (%L)', partition_name, start_at, end_at);
     EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON public.%I (node_id, metric, sampled_at DESC)', partition_name || '_query_idx', partition_name);
+END;
+$$;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE FUNCTION public.telemetry_ensure_upcoming_partitions() RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    SET "TimeZone" TO 'UTC'
+AS $$
+DECLARE
+    month_start timestamptz := date_trunc('month', now());
+    sample_month timestamptz;
+    partition_name text;
+BEGIN
+    FOR month_offset IN 0..2 LOOP
+        sample_month := month_start + make_interval(months => month_offset);
+        partition_name := 'telemetry_samples_' || to_char(sample_month, 'YYYYMM');
+        IF to_regclass('public.' || partition_name || '_query_idx') IS NULL OR NOT EXISTS (
+            SELECT 1 FROM pg_inherits
+            WHERE inhparent='public.telemetry_samples'::regclass
+            AND inhrelid=to_regclass('public.' || partition_name)
+            AND NOT inhdetachpending
+        ) THEN
+            PERFORM public.telemetry_ensure_month_partition(sample_month);
+        END IF;
+    END LOOP;
 END;
 $$;
 -- +goose StatementEnd
@@ -200,15 +189,17 @@ $$;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
-CREATE FUNCTION public.telemetry_reject_runtime_default() RETURNS trigger
+CREATE FUNCTION public.telemetry_queue_rollups() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
-    AS $$
+AS $$
 BEGIN
-    IF NOT pg_has_role(current_user, (SELECT relowner FROM pg_class WHERE oid=TG_RELID), 'USAGE') THEN
-        RAISE EXCEPTION 'telemetry month is not provisioned' USING ERRCODE='23514';
-    END IF;
-    RETURN NEW;
+    INSERT INTO public.telemetry_rollup_queue(bucket_at,node_id,metric)
+    SELECT DISTINCT date_bin(interval '5 minutes',sampled_at,'2000-01-01 00:00:00+00'::timestamptz),node_id,metric
+    FROM inserted_samples WHERE sampled_at > '-infinity'::timestamptz
+    ORDER BY 1,2,3
+    ON CONFLICT (bucket_at,node_id,metric) DO UPDATE SET metric=EXCLUDED.metric;
+    RETURN NULL;
 END;
 $$;
 -- +goose StatementEnd
@@ -336,7 +327,6 @@ CREATE TABLE public.artifact_operations (
     content_sha256 bytea,
     content_size bigint,
     token_sha256 bytea CONSTRAINT "artifact_operations_token_sha256_not_null" NOT NULL,
-    request_hash bytea CONSTRAINT "artifact_operations_request_hash_not_null" NOT NULL,
     expires_at timestamp with time zone CONSTRAINT "artifact_operations_expires_at_not_null" NOT NULL,
     lease_until timestamp with time zone,
     consumed_at timestamp with time zone,
@@ -360,7 +350,6 @@ CREATE TABLE public.artifact_operations (
     CONSTRAINT artifact_operations_content_size_check CHECK (((content_size IS NULL) OR ((content_size >= 1) AND (content_size <= 67108864)))),
     CONSTRAINT artifact_operations_grant_check CHECK ((((state = 'leased'::text) AND (active_grant_id IS NOT NULL) AND (active_grant_subject IS NOT NULL) AND (active_grant_expires_at IS NOT NULL)) OR (state <> 'leased'::text))),
     CONSTRAINT artifact_operations_purpose_check CHECK ((purpose = 'certificate_p12'::text)),
-    CONSTRAINT artifact_operations_request_hash_check CHECK ((octet_length(request_hash) = 32)),
     CONSTRAINT artifact_operations_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'ready'::text, 'leased'::text, 'consuming'::text, 'consumed'::text, 'expired'::text, 'revoked'::text, 'failed'::text]))),
     CONSTRAINT artifact_operations_token_sha256_check CHECK ((octet_length(token_sha256) = 32))
 );
@@ -396,7 +385,6 @@ CREATE TABLE public.audit_events (
     source_session_id uuid,
     node_id uuid,
     command_id uuid,
-    approval_id uuid,
     before_summary jsonb,
     after_summary jsonb,
     error_type text,
@@ -458,7 +446,6 @@ CREATE TABLE public.certificates (
     not_after timestamp with time zone,
     revoked_at timestamp with time zone,
     revocation_reason text,
-    issue_request_hash bytea,
     issue_actor_identity_id uuid,
     created_at timestamp with time zone CONSTRAINT "certificates_created_at_not_null" NOT NULL,
     updated_at timestamp with time zone CONSTRAINT "certificates_updated_at_not_null" NOT NULL,
@@ -475,7 +462,6 @@ CREATE TABLE public.certificates (
     CONSTRAINT certificates_csr_receipt_check CHECK ((((state = ANY (ARRAY['csr_ready'::text, 'signing'::text, 'signer_unavailable'::text, 'issued'::text, 'expiring'::text, 'expired'::text, 'revoking'::text, 'revocation_unknown'::text, 'revoked'::text])) AND (csr_receipt_verified_at IS NOT NULL) AND (octet_length(csr_receipt_sha256) = 32) AND (csr_privd_attestation_key_id IS NOT NULL) AND (octet_length(csr_der_sha256) = 32)) OR csr_receipt_legacy OR (state = ANY (ARRAY['csr_pending'::text, 'failed'::text, 'unknown'::text])))),
     CONSTRAINT certificates_dns_names_check CHECK ((jsonb_typeof(dns_names) = 'array'::text)),
     CONSTRAINT certificates_issue_certificate_version_check CHECK ((issue_certificate_version > 0)),
-    CONSTRAINT certificates_issue_request_hash_check CHECK (((issue_request_hash IS NULL) OR (octet_length(issue_request_hash) = 32))),
     CONSTRAINT certificates_key_bits_check CHECK ((key_bits = ANY (ARRAY[2048, 3072, 4096]))),
     CONSTRAINT certificates_public_key_sha256_check CHECK (((public_key_sha256 IS NULL) OR (octet_length(public_key_sha256) = 32))),
     CONSTRAINT certificates_revocation_reason_check CHECK (((revocation_reason IS NULL) OR ((length(revocation_reason) >= 1) AND (length(revocation_reason) <= 128)))),
@@ -1024,11 +1010,13 @@ CREATE TABLE public.outbox_events (
     attempts integer DEFAULT 0 CONSTRAINT "outbox_events_attempts_not_null" NOT NULL,
     last_error text,
     created_at timestamp with time zone CONSTRAINT "outbox_events_created_at_not_null" NOT NULL,
+    receipt_recovery_attempt_limit integer,
     CONSTRAINT outbox_events_attempts_check CHECK ((attempts >= 0)),
     CONSTRAINT outbox_events_check CHECK (((locked_by IS NULL) = (locked_until IS NULL))),
     CONSTRAINT outbox_events_check1 CHECK (((published_at IS NULL) OR (locked_by IS NULL))),
     CONSTRAINT outbox_events_event_type_check CHECK ((event_type = 'command.dispatch'::text)),
-    CONSTRAINT outbox_events_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1048576)))
+    CONSTRAINT outbox_events_payload_check CHECK (((octet_length(payload) >= 1) AND (octet_length(payload) <= 1048576))),
+    CONSTRAINT outbox_events_receipt_recovery_attempt_limit_check CHECK ((receipt_recovery_attempt_limit > 0))
 );
 
 COMMENT ON TABLE public.outbox_events IS 'Transactional outbox; delivery correctness never depends on LISTEN/NOTIFY.';
@@ -1080,6 +1068,12 @@ CREATE TABLE public.telemetry_ingest_batches (
     CONSTRAINT telemetry_ingest_batches_sequence_check CHECK ((sequence >= 0))
 );
 
+CREATE TABLE public.telemetry_partition_retirements (
+    partition_name text PRIMARY KEY
+        CHECK (partition_name ~ '^telemetry_samples_[1-9][0-9]{3}(0[1-9]|1[0-2])$'),
+    relation_oid regclass NOT NULL UNIQUE
+);
+
 CREATE TABLE public.telemetry_rollups_1h (
     node_id uuid CONSTRAINT telemetry_rollups_5m_node_id_not_null NOT NULL,
     metric text CONSTRAINT telemetry_rollups_5m_metric_not_null NOT NULL,
@@ -1102,6 +1096,13 @@ CREATE TABLE public.telemetry_rollups_5m (
     CONSTRAINT telemetry_rollups_5m_sample_count_check CHECK ((sample_count > 0))
 );
 
+CREATE TABLE public.telemetry_rollup_queue (
+    bucket_at timestamp with time zone NOT NULL,
+    node_id uuid NOT NULL,
+    metric text NOT NULL,
+    PRIMARY KEY (bucket_at, node_id, metric)
+);
+
 CREATE TABLE public.telemetry_samples (
     node_id uuid CONSTRAINT "telemetry_samples_node_id_not_null" NOT NULL,
     batch_id uuid CONSTRAINT "telemetry_samples_batch_id_not_null" NOT NULL,
@@ -1114,16 +1115,6 @@ CREATE TABLE public.telemetry_samples (
 PARTITION BY RANGE (sampled_at);
 
 COMMENT ON TABLE public.telemetry_samples IS 'Monthly-partitioned raw telemetry retained independently from current observed state and rollups.';
-
-CREATE TABLE public.telemetry_samples_default (
-    node_id uuid CONSTRAINT telemetry_samples_node_id_not_null NOT NULL,
-    batch_id uuid CONSTRAINT telemetry_samples_batch_id_not_null NOT NULL,
-    sampled_at timestamp with time zone CONSTRAINT telemetry_samples_sampled_at_not_null NOT NULL,
-    metric text CONSTRAINT telemetry_samples_metric_not_null NOT NULL,
-    value double precision CONSTRAINT telemetry_samples_value_not_null NOT NULL,
-    CONSTRAINT telemetry_samples_metric_check CHECK ((metric = ANY (ARRAY['cpu_usage_ratio'::text, 'memory_used_bytes'::text, 'network_rx_bytes'::text, 'network_tx_bytes'::text, 'session_count'::text, 'connection_rtt_ms'::text]))),
-    CONSTRAINT telemetry_samples_value_check CHECK ((value <> ALL (ARRAY['Infinity'::double precision, '-Infinity'::double precision, 'NaN'::double precision])))
-);
 
 CREATE TABLE public.telemetry_security_events (
     event_id uuid CONSTRAINT "telemetry_security_events_event_id_not_null" NOT NULL,
@@ -1303,8 +1294,6 @@ CREATE TABLE public.workspaces (
     archived_at timestamp with time zone,
     CONSTRAINT workspaces_version_check CHECK ((version > 0))
 );
-
-ALTER TABLE ONLY public.telemetry_samples ATTACH PARTITION public.telemetry_samples_default DEFAULT;
 
 ALTER TABLE ONLY public.agent_command_results
     ADD CONSTRAINT agent_command_results_pkey PRIMARY KEY (event_id);
@@ -1525,9 +1514,6 @@ ALTER TABLE ONLY public.telemetry_rollups_5m
 ALTER TABLE ONLY public.telemetry_samples
     ADD CONSTRAINT telemetry_samples_pkey PRIMARY KEY (sampled_at, node_id, batch_id, metric);
 
-ALTER TABLE ONLY public.telemetry_samples_default
-    ADD CONSTRAINT telemetry_samples_default_pkey PRIMARY KEY (sampled_at, node_id, batch_id, metric);
-
 ALTER TABLE ONLY public.telemetry_security_events
     ADD CONSTRAINT telemetry_security_events_pkey PRIMARY KEY (event_id);
 
@@ -1597,6 +1583,8 @@ CREATE INDEX artifact_operations_expiry_idx ON public.artifact_operations USING 
 
 CREATE UNIQUE INDEX artifact_operations_one_live_certificate_idx ON public.artifact_operations USING btree (certificate_id) WHERE (state = ANY (ARRAY['pending'::text, 'ready'::text, 'leased'::text, 'consuming'::text]));
 
+CREATE INDEX audit_checkpoints_latest_idx ON public.audit_checkpoints USING btree (workspace_id, created_at DESC, id DESC);
+
 CREATE INDEX audit_detail_retention_idx ON public.audit_events USING btree (occurred_at, id) WHERE (details_compacted_at IS NULL);
 
 CREATE INDEX audit_events_workspace_time_idx ON public.audit_events USING btree (workspace_id, occurred_at DESC, id DESC);
@@ -1659,8 +1647,6 @@ CREATE INDEX telemetry_rollups_1h_retention_idx ON public.telemetry_rollups_1h U
 
 CREATE INDEX telemetry_rollups_5m_retention_idx ON public.telemetry_rollups_5m USING btree (bucket_at, node_id, metric);
 
-CREATE INDEX telemetry_samples_default_query_idx ON public.telemetry_samples_default USING btree (node_id, metric, sampled_at DESC);
-
 CREATE INDEX telemetry_security_node_time_idx ON public.telemetry_security_events USING btree (node_id, observed_at DESC);
 
 CREATE INDEX transport_event_quarantine_node_time_idx ON public.transport_event_quarantine USING btree (node_id, observed_at DESC);
@@ -1687,15 +1673,13 @@ CREATE INDEX vpn_session_history_open_idx ON public.vpn_session_history USING bt
 
 CREATE INDEX vpn_session_history_user_time_idx ON public.vpn_session_history USING btree (username, connected_at DESC);
 
-ALTER INDEX public.telemetry_samples_pkey ATTACH PARTITION public.telemetry_samples_default_pkey;
-
 CREATE TRIGGER audit_checkpoints_append_only BEFORE DELETE OR UPDATE OR TRUNCATE ON public.audit_checkpoints FOR EACH STATEMENT EXECUTE FUNCTION public.reject_audit_checkpoint_mutation();
 
 CREATE TRIGGER audit_events_append_only BEFORE DELETE OR UPDATE ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.check_audit_compaction();
 
 CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON public.audit_events FOR EACH STATEMENT EXECUTE FUNCTION public.reject_audit_event_mutation();
 
-CREATE TRIGGER telemetry_default_owner_only BEFORE INSERT OR UPDATE ON public.telemetry_samples_default FOR EACH ROW EXECUTE FUNCTION public.telemetry_reject_runtime_default();
+CREATE TRIGGER telemetry_queue_rollups AFTER INSERT ON public.telemetry_samples REFERENCING NEW TABLE AS inserted_samples FOR EACH STATEMENT EXECUTE FUNCTION public.telemetry_queue_rollups();
 
 ALTER TABLE ONLY public.agent_command_results
     ADD CONSTRAINT agent_command_results_command_id_fkey FOREIGN KEY (command_id) REFERENCES public.commands(id) ON DELETE RESTRICT;
@@ -1973,10 +1957,10 @@ REVOKE ALL ON FUNCTION public.reject_audit_event_mutation() FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.security_compact_details(p_cutoff timestamp with time zone) FROM PUBLIC;
 
-REVOKE ALL ON FUNCTION public.telemetry_drop_expired_partitions(cutoff timestamp with time zone) FROM PUBLIC;
-
 REVOKE ALL ON FUNCTION public.telemetry_ensure_month_partition(sample_time timestamp with time zone) FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION public.telemetry_ensure_upcoming_partitions() FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION public.telemetry_prune_rollups(maintenance_time timestamp with time zone) FROM PUBLIC;
 
-REVOKE ALL ON FUNCTION public.telemetry_reject_runtime_default() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.telemetry_queue_rollups() FROM PUBLIC;

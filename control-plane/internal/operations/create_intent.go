@@ -235,19 +235,8 @@ func bindCommandCapability(ctx context.Context, intentStore operationstore.Store
 		if err != nil {
 			return fmt.Errorf("check operation capability: %w", err)
 		}
-		if !approved && request.Payload.kind() == AgentUpgrade {
-			capability = "ocserv.agent.upgrade.v1"
-			approved, err = intentStore.HasCapability(ctx, request.NodeID, capability)
-			if err != nil {
-				return fmt.Errorf("check operation capability: %w", err)
-			}
-		}
 		if !approved {
 			return ErrCapabilityMissing
-		}
-		if payload, ok := request.Payload.(AgentUpgradePayload); ok {
-			payload.upgradeCapability = capability
-			request.Payload = payload
 		}
 	}
 	return nil
