@@ -144,6 +144,41 @@ stat_string() {
   stat -c '%u:%g:%a:%h' -- "$1"
 }
 
+read_env_assignment() {
+  sed -n "s/^$2=//p" "$1" | tail -n 1
+}
+
+require_regular_file_metadata() {
+  local path="$1" label="$2" expected_desc="$3" expected_a="$4" expected_b="${5:-}" metadata
+  if ! test -f "${path}" || test -L "${path}"; then
+    fail "${label} ${path} is not a regular file"
+  fi
+  metadata="$(stat_string "${path}")"
+  if [[ "${metadata}" != "${expected_a}" && ( -z "${expected_b}" || "${metadata}" != "${expected_b}" ) ]]; then
+    fail "${label} ${path} has unsafe metadata (${metadata}); expected ${expected_desc}"
+  fi
+}
+
+verify_enrolled_sealing_fingerprint() {
+  local key="$1" actual="$2" label="$3" expected
+  expected="$(read_env_assignment "${AGENT_ENV_FILE}" "${key}")"
+  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "the enrolled ${AGENT_ENV_FILE} has no valid ${key} fingerprint; resolve it deliberately"
+  [[ "${actual}" == "${expected}" ]] ||
+    fail "the ${label} sealing key re-derives ${actual} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
+}
+
+run_agent_prepare_enrollment() {
+  local fail_message="$1" invalid_message="$2" output endpoint_id
+  output="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
+    --identity-dir "${IDENTITY_DIR}" \
+    --controller "${CONTROLLER_ENDPOINT_ID}" \
+    --prepare-enrollment)" || fail "${fail_message}"
+  endpoint_id="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
+  [[ "${endpoint_id}" =~ ^[0-9a-f]{64}$ ]] || fail "${invalid_message}"
+  printf '%s\n' "${endpoint_id}"
+}
+
 forward_root_lifecycle() {
   local variable
   local -a forwarded_environment=()
@@ -325,14 +360,11 @@ install_native_package() {
 }
 
 ensure_sealing_key() {
-  local path="$1" purpose="$2" metadata
+  local path="$1" purpose="$2"
   if path_exists "${path}"; then
-    metadata="$(stat_string "${path}")"
-    if ! test -f "${path}" || test -L "${path}"; then
-      fail "the existing ${purpose} sealing key ${path} is not a regular file; refusing to overwrite or reuse it"
-    fi
-    [[ "${metadata}" == "0:0:600:1" ]] ||
-      fail "the existing ${purpose} sealing key ${path} has unsafe metadata (${metadata}); expected root:root mode 0600 with a single link — resolve it deliberately, the installer never overwrites sealing material"
+    require_regular_file_metadata "${path}" "the existing ${purpose} sealing key" \
+      "root:root mode 0600 with a single link — resolve it deliberately, the installer never overwrites sealing material" \
+      "0:0:600:1"
     echo "preserved existing ${purpose} sealing key"
     return
   fi
@@ -357,15 +389,11 @@ write_config_atomic() {
 }
 
 ensure_relays_env() {
-  local metadata existing_a staging
+  local existing_a staging
   if path_exists "${RELAYS_ENV_FILE}"; then
-    metadata="$(stat_string "${RELAYS_ENV_FILE}")"
-    if ! test -f "${RELAYS_ENV_FILE}" || test -L "${RELAYS_ENV_FILE}"; then
-      fail "the existing ${RELAYS_ENV_FILE} is not a regular file"
-    fi
-    [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
-      fail "the existing ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-    existing_a="$(sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+    require_regular_file_metadata "${RELAYS_ENV_FILE}" "the existing" \
+      "root:ocserv-agent mode 0640" "0:${AGENT_GID}:640:1"
+    existing_a="$(read_env_assignment "${RELAYS_ENV_FILE}" RELAY_URL_A)"
     if [[ "${existing_a}" == "${RELAY_URL_A}" ]]; then
       echo "preserved existing relay configuration (${RELAYS_ENV_FILE})"
       return
@@ -380,14 +408,10 @@ ensure_relays_env() {
 }
 
 ensure_protected_install() {
-  local source="$1" target="$2" purpose="$3" metadata
+  local source="$1" target="$2" purpose="$3"
   if path_exists "${target}"; then
-    metadata="$(stat_string "${target}")"
-    if ! test -f "${target}" || test -L "${target}"; then
-      fail "the existing ${purpose} ${target} is not a regular file"
-    fi
-    [[ "${metadata}" == "0:${AGENT_GID}:640:1" || "${metadata}" == "0:${AGENT_GID}:440:1" ]] ||
-      fail "the existing ${purpose} ${target} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640 or 0440"
+    require_regular_file_metadata "${target}" "the existing ${purpose}" \
+      "root:ocserv-agent mode 0640 or 0440" "0:${AGENT_GID}:640:1" "0:${AGENT_GID}:440:1"
     echo "preserved existing ${purpose} (${target})"
     return
   fi
@@ -396,16 +420,11 @@ ensure_protected_install() {
 }
 
 prepare_bootstrap_token() {
-  local metadata
   [[ -z "${ENROLLED_NODE_ID}" ]] || return 0
   [[ -n "${BOOTSTRAP_TOKEN_SOURCE}" ]] || return 0
   if path_exists "${ENROLLMENT_TOKEN_FILE}"; then
-    metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
-    if ! test -f "${ENROLLMENT_TOKEN_FILE}" || test -L "${ENROLLMENT_TOKEN_FILE}"; then
-      fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} is not a regular file"
-    fi
-    [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
-      fail "the existing bootstrap token ${ENROLLMENT_TOKEN_FILE} must be root:ocserv-agent mode 0640 (found ${metadata})"
+    require_regular_file_metadata "${ENROLLMENT_TOKEN_FILE}" "the existing bootstrap token" \
+      "root:ocserv-agent mode 0640" "0:${AGENT_GID}:640:1"
     cmp -s -- "${BOOTSTRAP_TOKEN_SOURCE}" "${ENROLLMENT_TOKEN_FILE}" ||
       fail "the protected bootstrap token source does not match the already staged token; resolve the conflicting secret deliberately"
     return
@@ -419,16 +438,12 @@ detect_enrolled_node() {
   # step that could create node state. The enrolled state is a validation
   # boundary: from here on the bootstrap must not regenerate identity or
   # sealing material the Controller-side enrollment binding depends on.
-  local metadata node_id
+  local node_id
   ENROLLED_NODE_ID=""
   path_exists "${AGENT_ENV_FILE}" || return 0
-  metadata="$(stat_string "${AGENT_ENV_FILE}")"
-  if ! test -f "${AGENT_ENV_FILE}" || test -L "${AGENT_ENV_FILE}"; then
-    fail "the existing ${AGENT_ENV_FILE} is not a regular file"
-  fi
-  [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
-    fail "the existing ${AGENT_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-  node_id="$(sed -n 's/^NODE_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  require_regular_file_metadata "${AGENT_ENV_FILE}" "the existing" \
+    "root:ocserv-agent mode 0640" "0:${AGENT_GID}:640:1"
+  node_id="$(read_env_assignment "${AGENT_ENV_FILE}" NODE_ID)"
   [[ -n "${node_id}" ]] ||
     fail "the existing ${AGENT_ENV_FILE} has no NODE_ID line; resolve it deliberately instead of overwriting node configuration"
   if is_final_node_id "${node_id}"; then
@@ -443,7 +458,7 @@ validate_enrolled_sealing_keys() {
   # regenerated key would no longer match the enrolled binding — the same
   # mismatch the upgrade preflight fails closed on — so the bootstrap never
   # generates replacements here.
-  local path purpose metadata expected
+  local path purpose
   for path in "${USER_SEAL_KEY_FILE}" "${P12_SEAL_KEY_FILE}"; do
     case "${path}" in
       "${USER_SEAL_KEY_FILE}") purpose=user-password ;;
@@ -452,31 +467,20 @@ validate_enrolled_sealing_keys() {
     if ! path_exists "${path}"; then
       fail "the enrolled node is missing its ${purpose} sealing private key ${path}; regenerating it would no longer match the enrolled Controller binding — restore the key from protected backups or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
     fi
-    if ! test -f "${path}" || test -L "${path}"; then
-      fail "the existing ${purpose} sealing key ${path} is not a regular file; refusing to reuse it"
-    fi
-    metadata="$(stat_string "${path}")"
-    [[ "${metadata}" == "0:0:600:1" ]] ||
-      fail "the enrolled ${purpose} sealing key ${path} has unsafe metadata (${metadata}); expected root:root mode 0600 with a single link — resolve it deliberately, the installer never overwrites sealing material"
+    require_regular_file_metadata "${path}" "the enrolled ${purpose} sealing key" \
+      "root:root mode 0600 with a single link — resolve it deliberately, the installer never overwrites sealing material" \
+      "0:0:600:1"
   done
   USER_SEAL_DESCRIPTOR="$(sealing_descriptor "${USER_SEAL_KEY_FILE}")"
   P12_SEAL_DESCRIPTOR="$(sealing_descriptor "${P12_SEAL_KEY_FILE}")"
   [[ "${USER_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ && "${P12_SEAL_DESCRIPTOR}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "an enrolled sealing key is not a usable RSA private key; resolve it deliberately instead of regenerating it"
-  expected="$(sed -n 's/^USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
-  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "the enrolled ${AGENT_ENV_FILE} has no valid USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
-  [[ "${USER_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
-    fail "the user-password sealing key re-derives ${USER_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
-  expected="$(sed -n 's/^P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
-  [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "the enrolled ${AGENT_ENV_FILE} has no valid P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 fingerprint; resolve it deliberately"
-  [[ "${P12_SEAL_DESCRIPTOR}" == "${expected}" ]] ||
-    fail "the p12-password sealing key re-derives ${P12_SEAL_DESCRIPTOR} but the enrolled agent.env pins ${expected}; a regenerated or replaced key cannot silently take the enrolled binding — restore the enrolled key or re-enroll deliberately (docs/operations/agent-lifecycle.md)"
+  verify_enrolled_sealing_fingerprint USER_PASSWORD_SEAL_PUBLIC_KEY_SHA256 "${USER_SEAL_DESCRIPTOR}" user-password
+  verify_enrolled_sealing_fingerprint P12_PASSWORD_SEAL_PUBLIC_KEY_SHA256 "${P12_SEAL_DESCRIPTOR}" p12-password
   # Replays use the identifiers bound with these keys, even when the launcher
   # no longer exports the first attempt's optional public key names.
-  USER_PASSWORD_SEAL_KEY_ID="$(sed -n 's/^USER_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
-  P12_PASSWORD_SEAL_KEY_ID="$(sed -n 's/^P12_PASSWORD_SEAL_KEY_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  USER_PASSWORD_SEAL_KEY_ID="$(read_env_assignment "${AGENT_ENV_FILE}" USER_PASSWORD_SEAL_KEY_ID)"
+  P12_PASSWORD_SEAL_KEY_ID="$(read_env_assignment "${AGENT_ENV_FILE}" P12_PASSWORD_SEAL_KEY_ID)"
   [[ "${USER_PASSWORD_SEAL_KEY_ID}" =~ ^[A-Za-z0-9._-]{1,128}$ &&
      "${P12_PASSWORD_SEAL_KEY_ID}" =~ ^[A-Za-z0-9._-]{1,128}$ &&
      "${USER_PASSWORD_SEAL_KEY_ID}" != "${P12_PASSWORD_SEAL_KEY_ID}" ]] ||
@@ -498,23 +502,18 @@ validate_enrolled_identity() {
   # persists the enrolled Agent EndpointID in agent.env and the rerun fails
   # closed unless the loaded identity derives exactly that EndpointID — the
   # same key the Controller bound at enrollment.
-  local file output endpoint_id enrolled_endpoint_id
+  local file endpoint_id enrolled_endpoint_id
   for file in "${IDENTITY_DIR}/endpoint.key" "${IDENTITY_DIR}/controller.endpoint"; do
     if ! path_exists "${file}" || ! test -f "${file}" || test -L "${file}"; then
       fail "the enrolled node is missing its persistent identity file ${file}; regenerating the identity would break the Controller enrollment binding — restore ${IDENTITY_DIR} from protected backups or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
     fi
   done
-  enrolled_endpoint_id="$(sed -n 's/^AGENT_ENDPOINT_ID=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  enrolled_endpoint_id="$(read_env_assignment "${AGENT_ENV_FILE}" AGENT_ENDPOINT_ID)"
   [[ "${enrolled_endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
     fail "the enrolled ${AGENT_ENV_FILE} has no valid AGENT_ENDPOINT_ID enrollment binding; resolve it deliberately instead of trusting an unbound enrolled identity (docs/operations/agent-lifecycle.md#enroll-the-node)"
-  output="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
-    --identity-dir "${IDENTITY_DIR}" \
-    --controller "${CONTROLLER_ENDPOINT_ID}" \
-    --prepare-enrollment)" ||
-    fail "the enrolled persistent identity in ${IDENTITY_DIR} did not pass the Agent identity validation; the bootstrap never regenerates an enrolled identity — restore the identity material or re-enroll deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
-  endpoint_id="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
-  [[ "${endpoint_id}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "the Agent did not print a valid EndpointID while validating the enrolled identity"
+  endpoint_id="$(run_agent_prepare_enrollment \
+    "the enrolled persistent identity in ${IDENTITY_DIR} did not pass the Agent identity validation; the bootstrap never regenerates an enrolled identity — restore the identity material or re-enroll deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)" \
+    "the Agent did not print a valid EndpointID while validating the enrolled identity")"
   [[ "${endpoint_id}" == "${enrolled_endpoint_id}" ]] ||
     fail "the enrolled identity now presents EndpointID ${endpoint_id} but the enrolled ${AGENT_ENV_FILE} pins ${enrolled_endpoint_id}; a replaced endpoint secret key cannot silently take the Controller enrollment binding — restore the identity material or re-enroll as a new node deliberately (docs/operations/agent-lifecycle.md#enroll-the-node)"
   ENDPOINT_ID="${endpoint_id}"
@@ -525,17 +524,13 @@ validate_enrolled_relays() {
   # On an enrolled node relays.env is the running relay configuration. It
   # must already exist, be safe, and name the configured dedicated relay;
   # a validation-only rerun never writes it.
-  local metadata existing_a
+  local existing_a
   if ! path_exists "${RELAYS_ENV_FILE}"; then
     fail "the enrolled node is missing its relay configuration ${RELAYS_ENV_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun (docs/operations/agent-lifecycle.md#install-a-managed-node)"
   fi
-  if ! test -f "${RELAYS_ENV_FILE}" || test -L "${RELAYS_ENV_FILE}"; then
-    fail "the enrolled relay configuration ${RELAYS_ENV_FILE} is not a regular file"
-  fi
-  metadata="$(stat_string "${RELAYS_ENV_FILE}")"
-  [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
-    fail "the enrolled relay configuration ${RELAYS_ENV_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640"
-  existing_a="$(sed -n 's/^RELAY_URL_A=//p' "${RELAYS_ENV_FILE}" | tail -n 1)"
+  require_regular_file_metadata "${RELAYS_ENV_FILE}" "the enrolled relay configuration" \
+    "root:ocserv-agent mode 0640" "0:${AGENT_GID}:640:1"
+  existing_a="$(read_env_assignment "${RELAYS_ENV_FILE}" RELAY_URL_A)"
   [[ "${existing_a}" == "${RELAY_URL_A}" ]] ||
     fail "the enrolled ${RELAYS_ENV_FILE} names ${existing_a:-<none>}, not the configured dedicated relay; a rerun never rewrites the running relay configuration — resolve the mismatch deliberately"
 }
@@ -545,16 +540,11 @@ validate_enrolled_relay_token() {
   # On an enrolled node it must already exist as non-empty protected
   # material; a validation-only rerun never reinstalls it from the operator
   # source.
-  local metadata
   if ! path_exists "${RELAY_TOKEN_FILE}"; then
     fail "the enrolled node is missing its relay access token ${RELAY_TOKEN_FILE}; restoring it is a deliberate recovery operation, not a bootstrap rerun"
   fi
-  if ! test -f "${RELAY_TOKEN_FILE}" || test -L "${RELAY_TOKEN_FILE}"; then
-    fail "the enrolled relay access token ${RELAY_TOKEN_FILE} is not a regular file"
-  fi
-  metadata="$(stat_string "${RELAY_TOKEN_FILE}")"
-  [[ "${metadata}" == "0:${AGENT_GID}:640:1" || "${metadata}" == "0:${AGENT_GID}:440:1" ]] ||
-    fail "the enrolled relay access token ${RELAY_TOKEN_FILE} has unsafe metadata (${metadata}); expected root:ocserv-agent mode 0640 or 0440"
+  require_regular_file_metadata "${RELAY_TOKEN_FILE}" "the enrolled relay access token" \
+    "root:ocserv-agent mode 0640 or 0440" "0:${AGENT_GID}:640:1" "0:${AGENT_GID}:440:1"
   test -s "${RELAY_TOKEN_FILE}" ||
     fail "the enrolled relay access token ${RELAY_TOKEN_FILE} is empty"
 }
@@ -591,7 +581,7 @@ validate_enrolled_command_key() {
   matches="$(grep -c '^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=' "${AGENT_ENV_FILE}" || true)"
   [[ "${matches}" == 1 ]] ||
     fail "the enrolled ${AGENT_ENV_FILE} must contain exactly one CONTROLLER_COMMAND_VERIFICATION_KEY_FILE assignment"
-  configured="$(sed -n 's/^CONTROLLER_COMMAND_VERIFICATION_KEY_FILE=//p' "${AGENT_ENV_FILE}" | tail -n 1)"
+  configured="$(read_env_assignment "${AGENT_ENV_FILE}" CONTROLLER_COMMAND_VERIFICATION_KEY_FILE)"
   [[ "${configured}" == "${COMMAND_KEY_FILE}" ]] ||
     fail "the enrolled agent.env pins the command verification key ${configured:-<none>}, not the installed ${COMMAND_KEY_FILE}; resolve the mismatch deliberately"
   validate_enrolled_key_ancestry
@@ -642,15 +632,9 @@ prepare_production_node() {
 }
 
 prepare_identity() {
-  local output
-  output="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
-    --identity-dir "${IDENTITY_DIR}" \
-    --controller "${CONTROLLER_ENDPOINT_ID}" \
-    --prepare-enrollment)" ||
-    fail "the Agent could not prepare the persistent identity; a changed controller pin or replaced identity directory is a new trust decision (see docs/operations/agent-lifecycle.md#enroll-the-node)"
-  ENDPOINT_ID="$(printf '%s\n' "${output}" | awk 'NF {last=$0} END {print last}')"
-  [[ "${ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "the Agent did not print a valid EndpointID"
+  ENDPOINT_ID="$(run_agent_prepare_enrollment \
+    "the Agent could not prepare the persistent identity; a changed controller pin or replaced identity directory is a new trust decision (see docs/operations/agent-lifecycle.md#enroll-the-node)" \
+    "the Agent did not print a valid EndpointID")"
   echo "persistent identity prepared; EndpointID: ${ENDPOINT_ID}"
 }
 
@@ -661,10 +645,8 @@ is_final_node_id() {
 
 cleanup_enrollment_copy() {
   if ! path_exists "${ENROLLMENT_TOKEN_FILE}"; then return; fi
-  if ! test -f "${ENROLLMENT_TOKEN_FILE}" || test -L "${ENROLLMENT_TOKEN_FILE}" \
-    || [[ "$(stat_string "${ENROLLMENT_TOKEN_FILE}")" != "0:${AGENT_GID}:640:1" ]]; then
-    fail "registered node has an unsafe enrollment token copy; inspect ${ENROLLMENT_TOKEN_FILE} deliberately (expected one-link root:ocserv-agent 0640)"
-  fi
+  require_regular_file_metadata "${ENROLLMENT_TOKEN_FILE}" "registered node has an unsafe enrollment token copy" \
+    "one-link root:ocserv-agent 0640" "0:${AGENT_GID}:640:1"
   rm -f -- "${ENROLLMENT_TOKEN_FILE}"
   echo "removed the known stale token copy after confirming the local enrollment binding"
 }
@@ -684,7 +666,7 @@ converge_enrollment() {
       fail "the Relay CA must contain a readable PEM certificate"
     relay_args+=(--relay-ca-file "${RELAY_CA_FILE}")
   fi
-  local node_id staging metadata
+  local node_id staging
   if [[ -n "${ENROLLED_NODE_ID}" ]]; then
     cleanup_enrollment_copy
     node_bootstrap_complete "${ENROLLED_NODE_ID}"
@@ -692,12 +674,8 @@ converge_enrollment() {
   fi
   path_exists "${ENROLLMENT_TOKEN_FILE}" ||
     fail "derived enrollment credential is missing; preserve identity and rerun --resume-install"
-  metadata="$(stat_string "${ENROLLMENT_TOKEN_FILE}")"
-  if ! test -f "${ENROLLMENT_TOKEN_FILE}" || test -L "${ENROLLMENT_TOKEN_FILE}"; then
-    fail "the enrollment token ${ENROLLMENT_TOKEN_FILE} is not a regular file"
-  fi
-  [[ "${metadata}" == "0:${AGENT_GID}:640:1" ]] ||
-    fail "the enrollment token ${ENROLLMENT_TOKEN_FILE} must be root:ocserv-agent mode 0640 (found ${metadata})"
+  require_regular_file_metadata "${ENROLLMENT_TOKEN_FILE}" "the enrollment token" \
+    "root:ocserv-agent mode 0640" "0:${AGENT_GID}:640:1"
   node_id="$(runuser -u ocserv-agent -- "${AGENT_BINARY}" \
     --identity-dir "${IDENTITY_DIR}" \
     --controller "${CONTROLLER_ENDPOINT_ID}" \
