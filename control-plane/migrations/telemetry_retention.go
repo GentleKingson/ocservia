@@ -94,8 +94,6 @@ func finishTelemetryRetirement(ctx context.Context, conn *pgx.Conn, name, child 
 	// this preserves all rollups still within retention before raw data is dropped.
 	if _, err := tx.Exec(ctx, `WITH source AS (
 		SELECT node_id,metric,sampled_at,value FROM `+child+`
-		UNION ALL
-		SELECT node_id,metric,sampled_at,value FROM public.telemetry_samples_default WHERE sampled_at >= $1 AND sampled_at < $2
 	), five AS MATERIALIZED (
 		SELECT node_id,metric,date_bin(interval '5 minutes',sampled_at,'2000-01-01 00:00:00+00'::timestamptz) bucket_at,
 			count(*) sample_count,min(value) min_value,max(value) max_value,avg(value) avg_value
@@ -110,7 +108,7 @@ func finishTelemetryRetirement(ctx context.Context, conn *pgx.Conn, name, child 
 	SELECT node_id,metric,date_bin(interval '1 hour',bucket_at,'2000-01-01 00:00:00+00'::timestamptz),
 		sum(sample_count),min(min_value),max(max_value),sum(avg_value::numeric*sample_count)/sum(sample_count)
 	FROM five GROUP BY 1,2,3
-	ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`, start, start.AddDate(0, 1, 0)); err != nil {
+	ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value`); err != nil {
 		return fmt.Errorf("preserve rollups from %s: %w", name, err)
 	}
 	if _, err := tx.Exec(ctx, `DROP TABLE `+child); err != nil {

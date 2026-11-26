@@ -128,9 +128,6 @@ func loadEnvSettings(lookup LookupEnv, cfg *Config) error {
 	if err := setStringOrFile(lookup, "OCSERV_DATABASE_URL", &cfg.DatabaseURL); err != nil {
 		return err
 	}
-	if backend, ok := lookup("OCSERV_DATABASE_BACKEND"); ok && backend != "postgres" {
-		return errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
-	}
 	for name, target := range map[string]*string{
 		"OCSERV_DATABASE_TLS_CA_FILE":       &cfg.DatabaseTLSCAFile,
 		"OCSERV_RUNTIME_DATABASE_ROLE":      &cfg.RuntimeDBRole,
@@ -268,7 +265,6 @@ func loadFlags(args []string, lookup LookupEnv, cfg *Config) error {
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
 	resetLocalAdmin := fs.Bool("reset-local-admin", false, "generate a new password for the existing Local administrator, then exit")
-	role := fs.String("role", "all", "legacy compatibility flag; only all is supported")
 	migrateOnly := fs.Bool("migrate-only", false, "apply migrations and grant runtime privileges, then exit")
 	telemetryRetentionOnly := fs.Bool("telemetry-retention-only", false, "prune expired telemetry partitions as the database owner, then exit")
 	telemetryRetentionInterval := fs.Duration("telemetry-retention-interval", cfg.TelemetryRetentionInterval, "periodic telemetry partition retention interval (1h to 168h)")
@@ -293,9 +289,6 @@ func loadFlags(args []string, lookup LookupEnv, cfg *Config) error {
 			return errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
 		}
 		cfg.LocalBootstrapPassword = password
-	}
-	if *role != "all" {
-		return fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", *role)
 	}
 	cfg.MigrateOnly = *migrateOnly
 	cfg.TelemetryRetentionOnly = *telemetryRetentionOnly

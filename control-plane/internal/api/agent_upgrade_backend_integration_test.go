@@ -34,7 +34,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
 	f.exec(`INSERT INTO node_endpoint_keys(node_id,endpoint_id,state,bound_at) VALUES($1,$2,'active',$3)`, node, []byte(key), at)
 	f.exec(`INSERT INTO node_privd_attestation_keys(node_id,key_id,algorithm,public_key,state,created_at,approved_at,activated_at) VALUES($1,$2,'ed25519',$3,'active',$4,$5,$6)`, node, privdattestation.PublicKeyID(key), []byte(key), at, at, at)
-	for _, capability := range []string{"ocserv.agent.upgrade.v1", privdattestation.AttestationCapability} {
+	for _, capability := range []string{"ocserv.agent.upgrade.v2", privdattestation.AttestationCapability} {
 		f.exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,$2,true)`, node, capability)
 	}
 	manifest := filepath.Join(t.TempDir(), "releases.json")
@@ -189,7 +189,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		upgrade := envelope.GetAgentUpgrade()
-		if envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v1" {
+		if envelope.GetRequiredCapability() != "ocserv.agent.upgrade.v2" {
 			t.Fatalf("command did not bind the node's actual capability: %q", envelope.GetRequiredCapability())
 		}
 		if upgrade.GetTargetVersion() != "2.0.0" || upgrade.GetArchitecture() != "amd64" || !bytes.Equal(upgrade.GetPackageSha256(), bytes.Repeat([]byte{0x43}, 32)) {
