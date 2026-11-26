@@ -168,7 +168,9 @@ impl TrustService for TestTrustService {
             negotiated_capabilities: caps.clone(),
             issued_at_seconds: now - 1,
             issued_at_nanos: 0,
-            expires_at_seconds: now + ttl,
+            // Grants use whole seconds. Allow for the truncated fraction so a
+            // one-second fixture has at least a full second for its handshake.
+            expires_at_seconds: now + ttl + 1,
             expires_at_nanos: 0,
         };
         let canonical =
@@ -2408,9 +2410,14 @@ async fn session_epoch_monotonicity_supersession_and_expiry() {
     let exp_node = *Uuid::now_v7().as_bytes();
     let (_k, _hs, r3, c3, conn3) =
         agent_session_with_options(&service, &key, exp_node, Some(1), Some(1)).await;
-    tokio::time::timeout(Duration::from_secs(5), conn3.closed())
+    let closed = tokio::time::timeout(Duration::from_secs(5), conn3.closed())
         .await
         .expect("expired session closes");
+    let iroh::endpoint::ConnectionError::ApplicationClosed(close) = closed else {
+        panic!("expected session grant expiry, got {closed:?}");
+    };
+    assert_eq!(close.error_code, iroh::endpoint::VarInt::from_u32(0x109));
+    assert_eq!(close.reason.as_ref(), b"session grant expired");
     shutdown(&service, r3).await.expect("shut");
     c3.close().await;
 }

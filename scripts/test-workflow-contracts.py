@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Static quality, supply-chain and coverage guards for GitHub Actions workflows."""
+"""Quality, supply-chain and regression guards for GitHub Actions workflows."""
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SHA_PIN = re.compile(r'^[^/]+/[^@]+@[0-9a-f]{40}$')
@@ -160,6 +162,12 @@ def check_specific_contracts(errors):
         if isinstance(on_triggers, dict) and 'workflow_call' in on_triggers:
             errors.append(f'{wf_name}: unused workflow_call trigger must stay removed')
 
+    for job_id, job in ci_doc['jobs'].items():
+        for step in job.get('steps') or []:
+            if str(step.get('uses', '')).startswith('actions/checkout@'):
+                if (step.get('with') or {}).get('ref') != '${{ github.sha }}':
+                    errors.append(f'ci.yml:{job_id}: checkout must pin the event SHA so PR merges cannot change the tested revision')
+
     recovery_steps = ci_doc['jobs']['database-recovery-full'].get('steps') or []
     for step in recovery_steps:
         if isinstance(step, dict) and step.get('uses') == './.github/actions/setup-tools':
@@ -204,6 +212,51 @@ def check_required_go_tests(errors):
                 )
 
 
+def check_missing_pr_head():
+    # Model a squash-merged PR: its head survives only in refs/pull, which a
+    # normal branch checkout does not fetch. Exercise the real baseline runner.
+    with tempfile.TemporaryDirectory(prefix='ocservia-contract-base-') as directory:
+        root = Path(directory)
+        remote, checkout = root / 'remote', root / 'checkout'
+
+        def git(*args, cwd=remote):
+            return subprocess.check_output(['git', *args], cwd=cwd, text=True, stderr=subprocess.PIPE).strip()
+
+        remote.mkdir()
+        git('init', '-b', 'main')
+        git('config', 'user.name', 'CI test')
+        git('config', 'user.email', 'ci@example.invalid')
+        git('commit', '--allow-empty', '-m', 'base')
+        base = git('rev-parse', 'HEAD')
+        git('checkout', '-b', 'topic')
+        git('commit', '--allow-empty', '-m', 'PR head')
+        head = git('rev-parse', 'HEAD')
+        git('update-ref', 'refs/pull/1/head', head)
+        git('checkout', 'main')
+        git('branch', '-D', 'topic')
+        git('clone', '--no-local', str(remote), str(checkout), cwd=root)
+        assert subprocess.run(['git', 'cat-file', '-e', head], cwd=checkout, capture_output=True).returncode != 0
+        scripts = checkout / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(ROOT / 'scripts/ci-tools-check.sh', scripts / 'ci-tools-check.sh')
+        # Stub expensive downstream suites; baseline resolution still uses Git.
+        for name in ('env.sh', 'lint.sh', 'generated-clean.sh'):
+            (scripts / name).write_text('true\n')
+        (scripts / 'check-breaking.sh').write_text('test "$1" = "$EXPECTED_BASE"\n')
+        output = root / 'output'
+        env = {**os.environ, 'CI_SUITES': 'contracts', 'CONTRACT_EVENT': 'pull_request',
+               'CONTRACT_BASE_REF': base, 'CONTRACT_HEAD_SHA': head,
+               'EXPECTED_BASE': base, 'GITHUB_OUTPUT': str(output)}
+        # Both the missing-object and already-fetched paths must resolve correctly.
+        for _ in range(2):
+            subprocess.run(['bash', str(scripts / 'ci-tools-check.sh')], cwd=checkout,
+                           env=env, check=True, capture_output=True, text=True)
+        assert output.read_text().splitlines() == [f'contract_base_sha={base}'] * 2
+        env['CONTRACT_HEAD_SHA'] = '0' * 40
+        assert subprocess.run(['bash', str(scripts / 'ci-tools-check.sh')], cwd=checkout,
+                              env=env, capture_output=True).returncode != 0
+
+
 def main():
     errors = []
     valid_profiles = bootstrap_profiles()
@@ -212,6 +265,7 @@ def main():
     check_web_e2e_coverage(errors)
     check_specific_contracts(errors)
     check_required_go_tests(errors)
+    check_missing_pr_head()
     if errors:
         for err in errors:
             print(f'workflow-contract FAIL: {err}', file=sys.stderr)

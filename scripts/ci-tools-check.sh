@@ -64,7 +64,12 @@ for suite in ${CI_SUITES}; do
       baseline="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
     fi
     if [[ "${CONTRACT_EVENT:-}" == pull_request ]]; then
-      baseline="$(git merge-base "${baseline}" "${CONTRACT_HEAD_SHA:?PR head is required}")"
+      head_sha="${CONTRACT_HEAD_SHA:?PR head is required}"
+      # A merged/deleted PR branch may no longer be included in checkout's refs.
+      if ! git rev-parse --verify --end-of-options "${head_sha}^{commit}" >/dev/null 2>&1; then
+        git fetch --no-tags -- origin "${head_sha}"
+      fi
+      baseline="$(git merge-base "${baseline}" "${head_sha}")"
     fi
     base_sha="$(git rev-parse --verify --end-of-options "${baseline}^{commit}")"
   fi
