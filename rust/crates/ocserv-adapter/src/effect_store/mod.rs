@@ -132,57 +132,12 @@ impl EffectStore {
             connection,
             hmac_key,
         };
-        store.migrate_schema()?;
         store.ensure_authorized_schema()?;
         store.ensure_artifact_schema()?;
         store.ensure_owner_fence_schema()?;
         store.ensure_receipt_sequence_schema()?;
         store.validate_identity()?;
         Ok(store)
-    }
-
-    fn migrate_schema(&self) -> Result<(), AdapterError> {
-        let schema: String = self
-            .connection
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='desired_effects'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sqlite_io)?;
-        if !schema.contains("'absent'") {
-            self.connection
-                .execute_batch(
-                    "BEGIN IMMEDIATE;
-                     ALTER TABLE desired_effects RENAME TO desired_effects_legacy;
-                     CREATE TABLE desired_effects (
-                       mutation_kind TEXT NOT NULL,
-                       resource_key TEXT NOT NULL,
-                       revision INTEGER NOT NULL CHECK(revision > 0),
-                       command_id BLOB NOT NULL CHECK(length(command_id)=16),
-                       idempotency_key BLOB NOT NULL CHECK(length(idempotency_key)=16),
-                       payload_sha256 BLOB NOT NULL CHECK(length(payload_sha256)=32),
-                       expires_at INTEGER NOT NULL,
-                       state TEXT NOT NULL CHECK(state IN ('prepared','applied','absent')),
-                       before_hmac BLOB NOT NULL CHECK(length(before_hmac)=32),
-                       after_hmac BLOB NOT NULL CHECK(length(after_hmac)=32),
-                       record_hmac BLOB NOT NULL CHECK(length(record_hmac)=32),
-                       updated_at INTEGER NOT NULL,
-                       PRIMARY KEY(mutation_kind,resource_key)
-                     ) STRICT;
-                     INSERT INTO desired_effects
-                        SELECT * FROM desired_effects_legacy;
-                     DROP TABLE desired_effects_legacy;
-                     COMMIT;",
-                )
-                .map_err(sqlite_io)?;
-        }
-        self.connection
-            .execute_batch(
-                "CREATE INDEX IF NOT EXISTS desired_effects_state_idx
-                   ON desired_effects(state);",
-            )
-            .map_err(sqlite_io)
     }
 
     fn ensure_authorized_schema(&self) -> Result<(), AdapterError> {
