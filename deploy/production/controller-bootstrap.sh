@@ -331,7 +331,6 @@ collect_inputs() {
       install_ui_prompt OCSERV_PUBLIC_HOST 'Controller DNS name'
       install_ui_prompt OCSERV_CONTROLLER_PUBLIC_URL 'Controller HTTPS URL' "https://${OCSERV_PUBLIC_HOST}"
       install_ui_prompt OCSERV_PUBLIC_ORIGIN 'Authentication public origin' "https://${OCSERV_PUBLIC_HOST}"
-      export OCSERV_DATABASE_BACKEND="${OCSERV_DATABASE_BACKEND:-postgres}"
       install_ui_prompt OCSERV_DATABASE_DEPLOYMENT 'Database location (bundled/external)' bundled
       if [[ "${OCSERV_DATABASE_DEPLOYMENT}" == external ]]; then
         install_ui_prompt OCSERV_DATABASE_BACKUP_HOST 'Database backup host'
@@ -371,9 +370,9 @@ validate_manual_inputs() {
   done
   valid_domain "${OCSERV_PUBLIC_HOST}" || fail "OCSERV_PUBLIC_HOST must be a lowercase DNS name"
   [[ "${OCSERV_CONTROLLER_ENDPOINT_ID}" =~ ^[0-9a-f]{64}$ ]] || fail "Controller EndpointID must be 64 lowercase hex characters"
-  case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
-    postgres:bundled|postgres:external) ;;
-    *) fail "unsupported database topology; only OCSERV_DATABASE_BACKEND=postgres with bundled or external is supported" ;;
+  case "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
+    bundled|external) ;;
+    *) fail "unsupported database topology; OCSERV_DATABASE_DEPLOYMENT must be bundled or external" ;;
   esac
   if [[ "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == external ]]; then
     [[ -n "${OCSERV_DATABASE_BACKUP_HOST:-}" ]] || fail "OCSERV_DATABASE_BACKUP_HOST is required"
@@ -462,7 +461,7 @@ fi
 if [[ "${INTERACTIVE}" == true ]]; then
   echo "Release: ${VERSION}; runtime: ${TARGET}; root lifecycle: ${ROOT_LIFECYCLE}; Quick: ${QUICK}"
   if [[ "${QUICK}" == false ]]; then
-    echo "Controller: ${OCSERV_PUBLIC_HOST}; deployment: ${OCSERV_DEPLOYMENT_MODE:-standalone}; database: ${OCSERV_DATABASE_BACKEND:-postgres}/${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
+    echo "Controller: ${OCSERV_PUBLIC_HOST}; deployment: ${OCSERV_DEPLOYMENT_MODE:-standalone}; database: postgres/${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
     echo "Local login: ${OCSERV_LOCAL_AUTH_ENABLED:-false}"
     echo "Configuration will be saved to ${CONFIG_FILE} (protected file paths only)."
   fi

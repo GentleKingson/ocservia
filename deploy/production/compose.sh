@@ -87,20 +87,19 @@ if [[ -n "${OCSERV_OTEL_BACKEND_ENDPOINT:-}" ]]; then
   otel_enabled=true
 fi
 
-database_backend="${OCSERV_DATABASE_BACKEND:-postgres}"
 database_deployment="${OCSERV_DATABASE_DEPLOYMENT:-bundled}"
-case "${database_backend}:${database_deployment}" in
-  postgres:bundled)
+case "${database_deployment}" in
+  bundled)
     unset OCSERV_DATABASE_BACKUP_HOST OCSERV_DATABASE_BACKUP_PORT OCSERV_DATABASE_BACKUP_NAME OCSERV_DATABASE_BACKUP_USER
     ;;
-  postgres:external)
+  external)
     : "${OCSERV_DATABASE_BACKUP_HOST:?set the external PostgreSQL backup host}"
     export OCSERV_DATABASE_NETWORK=database-egress OCSERV_DATABASE_BUNDLED_POSTGRES=false
     export OCSERV_DATABASE_CA_SECRET=database_ca OCSERV_DATABASE_TLS_CA_FILE=/run/secrets/database_ca
     export OCSERV_BACKUP_SSLMODE=verify-full
     ;;
   *)
-    echo "OCSERV_DATABASE_BACKEND must be postgres and OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
+    echo "OCSERV_DATABASE_DEPLOYMENT must be bundled or external" >&2
     exit 2
     ;;
 esac

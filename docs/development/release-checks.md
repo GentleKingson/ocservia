@@ -24,20 +24,18 @@ a pass in one layer does not substitute for another:
 
 ## Entry-point compatibility
 
-The Controller accepts legacy `--role=all` and `OCSERV_DATABASE_BACKEND=postgres`
-only at input boundaries; new deployments omit both. The local sealing export
-CLI also accepts `--backend=postgres`. Unsupported values fail closed, and
-split `api`, `worker`, or `scheduler` processes are unsupported even in tests.
-The manual `database-controller-e2e.sh` harness still accepts its old
+Retired Controller `--role`, `OCSERV_DATABASE_BACKEND`, and
+`ocserv-sealing-export --backend` flags and environment variables have been
+removed for `v2.0.0`. Unknown CLI flags and non-PostgreSQL DSNs fail closed,
+and split `api`, `worker`, or `scheduler` processes are unsupported even in
+tests. The manual `database-controller-e2e.sh` harness still accepts its old
 `postgres all` positional arguments at entry; new invocations omit them.
-Keep acceptance/rejection tests at these entrypoints. Remove the compatibility
-arguments only in an explicitly announced CLI/configuration contract change,
-after supported installer and operator automation no longer supplies them.
 
 The `/version` response retains `role: "all"` as a stable wire field. Database
 engine identities in schema receipts, existing SQL artifacts and checksums,
-persisted deployment-profile keys, historical audit values, journals, and signed
-protocol bytes retain their original identifiers; they are not runtime configuration selectors.
+persisted deployment-profile keys (`database_backend: "postgres"`), historical
+audit values, journals, and signed protocol bytes retain their original
+identifiers; they are not runtime configuration selectors.
 
 ## Choose the validation scope
 
@@ -177,7 +175,7 @@ variants fails the check. Production allowlists are never auto-generated from
 descriptors; adding a protocol field requires an explicit review of the
 protocol version, capability negotiation, and strict wire policy. The vectors
 test raw wire decoding, not authenticated execution: they populate deprecated
-fields, carry dummy signature bytes, and do not relax protocol 1.1's runtime
+fields, carry dummy signature bytes, and do not relax protocol 1.2's runtime
 rejection of legacy password fields. Canonical signing inputs, owner fences, and
 privd receipts have their own golden suites.
 
