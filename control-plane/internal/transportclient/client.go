@@ -160,8 +160,7 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 	if grant == nil || len(grant.GetNodeId()) != 16 || len(grant.GetArtifactId()) != 16 || grant.GetMaxBytes() < 1 || grant.GetMaxBytes() > 256<<10 {
 		return nil, errors.New("artifact request is invalid")
 	}
-	nodeID, err := uuid.FromBytes(grant.GetNodeId())
-	if err != nil {
+	if _, err := uuid.FromBytes(grant.GetNodeId()); err != nil {
 		return nil, errors.New("artifact node is invalid")
 	}
 	artifactID, err := uuid.FromBytes(grant.GetArtifactId())
@@ -176,11 +175,7 @@ func (c *Client) FetchArtifact(ctx context.Context, grant *agentv1.ArtifactGrant
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	payload, err := transportv1.NewTransportServiceClient(connection).FetchArtifact(rpcCtx, &transportv1.FetchArtifactRequest{
-		NodeId:     nodeID[:],
-		ArtifactId: artifactID[:],
-		Purpose:    "certificate_p12",
-		MaxBytes:   uint64(maxBytes),
-		Grant:      grant,
+		Grant: grant,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fetch artifact: %w", err)
@@ -217,7 +212,6 @@ func (c *Client) consumeArtifact(ctx context.Context, grant *agentv1.ArtifactGra
 	rpcCtx, cancel := context.WithTimeout(ctx, c.deadline)
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).ConsumeArtifact(rpcCtx, &transportv1.ConsumeArtifactRequest{
-		NodeId:      grant.GetNodeId(),
 		Grant:       grant,
 		Sha256:      bytes.Clone(digest),
 		Size:        uint64(size),

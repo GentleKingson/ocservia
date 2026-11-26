@@ -172,11 +172,7 @@ fn certificate_binding(
 }
 
 pub(crate) fn terminal_result_error_code(error: &PrivdError) -> Option<&'static str> {
-    match ErrorKind::try_from(error.kind).unwrap_or(ErrorKind::Unspecified) {
-        ErrorKind::CapacityExceeded => Some("capacity_exceeded"),
-        ErrorKind::InvalidRequest | ErrorKind::PermissionDenied | ErrorKind::MalformedOutput => {
-            Some("privd_rejected")
-        }
-        _ => None,
-    }
+    ErrorKind::try_from(error.kind)
+        .ok()
+        .and_then(ErrorKind::terminal_code)
 }

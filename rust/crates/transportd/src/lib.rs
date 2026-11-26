@@ -50,10 +50,10 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 use ocservia_contracts::generated::ocserv::platform::transport::v1::TransportEventType;
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, ConsumeArtifactRequest,
-    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest,
-    HealthResponse, HealthStatus, NodeConnection, NodeTrustState, SendCommandRequest,
-    SendCommandResponse, TransportEvent, TrustUpdateDisposition, UpdateNodeTrustRequest,
-    UpdateNodeTrustResponse, WatchEventsRequest, transport_service_server::TransportService,
+    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, NodeConnection,
+    NodeTrustState, SendCommandRequest, SendCommandResponse, TransportEvent,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    transport_service_server::TransportService,
 };
 use ocservia_contracts::session::{ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME};
 use prost::Message;
@@ -370,16 +370,6 @@ impl IrohTransportService {
 impl TransportService for IrohTransportService {
     type WatchEventsStream = EventStream;
 
-    async fn health(
-        &self,
-        _request: Request<HealthRequest>,
-    ) -> Result<Response<HealthResponse>, Status> {
-        Ok(Response::new(HealthResponse {
-            status: HealthStatus::Serving.into(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        }))
-    }
-
     async fn get_node_connection(
         &self,
         request: Request<GetNodeConnectionRequest>,
@@ -485,39 +475,30 @@ impl TransportService for IrohTransportService {
         request: Request<FetchArtifactRequest>,
     ) -> Result<Response<ArtifactPayload>, Status> {
         let request = request.into_inner();
-        let node_id = validate_uuid(&request.node_id, "node_id")?;
-        let artifact_id = validate_uuid(&request.artifact_id, "artifact_id")?;
         let grant = request
             .grant
             .as_ref()
             .ok_or_else(|| Status::permission_denied("artifact grant is required"))?;
-        if request.purpose != "certificate_p12"
-            || request.max_bytes == 0
-            || request.max_bytes > 256 * 1024
-            || grant.node_id != request.node_id
-            || grant.artifact_id != request.artifact_id
-            || grant.purpose != request.purpose
-            || grant.max_bytes != request.max_bytes
+        let node_id = validate_uuid(&grant.node_id, "node_id")?;
+        let artifact_id = validate_uuid(&grant.artifact_id, "artifact_id")?;
+        if grant.purpose != "certificate_p12"
+            || grant.max_bytes == 0
+            || grant.max_bytes > 256 * 1024
         {
             return Err(Status::invalid_argument("artifact request is invalid"));
         }
+        let max_bytes = grant.max_bytes;
         let connection = self.shared.artifact_connection(&node_id).await?;
         let deadline = artifact_stream_deadline(grant)?;
         let payload = ArtifactFetchRequest {
             artifact_id: artifact_id.clone(),
-            purpose: request.purpose,
-            max_bytes: request.max_bytes,
+            purpose: grant.purpose.clone(),
+            max_bytes,
             grant: request.grant,
         }
         .encode_to_vec();
-        let artifact = fetch_artifact_payload(
-            connection,
-            payload,
-            &artifact_id,
-            request.max_bytes,
-            deadline,
-        )
-        .await?;
+        let artifact =
+            fetch_artifact_payload(connection, payload, &artifact_id, max_bytes, deadline).await?;
         Ok(Response::new(artifact))
     }
 
@@ -526,13 +507,12 @@ impl TransportService for IrohTransportService {
         request: Request<ConsumeArtifactRequest>,
     ) -> Result<Response<ConsumeArtifactResponse>, Status> {
         let request = request.into_inner();
-        let node_id = validate_uuid(&request.node_id, "node_id")?;
         let grant = request
             .grant
             .as_ref()
             .ok_or_else(|| Status::permission_denied("artifact grant is required"))?;
-        if grant.node_id != request.node_id
-            || grant.artifact_id.len() != 16
+        let node_id = validate_uuid(&grant.node_id, "node_id")?;
+        if grant.artifact_id.len() != 16
             || grant.grant_id.len() != 16
             || grant.purpose != "certificate_p12"
             || request.sha256.len() != 32

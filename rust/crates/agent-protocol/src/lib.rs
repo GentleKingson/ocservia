@@ -7,9 +7,14 @@ pub mod identity;
 
 use std::io;
 
+#[cfg(test)]
+use ocservia_contracts::generated::ocserv::platform::agent::v1::AgentUpgradeOutcomeState;
+pub use ocservia_contracts::generated::ocserv::platform::agent::v1::{
+    AgentUpgradeResultReport, AgentUpgradeScheduledResult, CertificateArtifactResult,
+    CertificateCsrResult, CertificateRevokeResult, ConfigApplyResult, ConfigPlanResult,
+};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgradeResultProof, ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof,
-    SessionGrantV1,
+    ArtifactGrantV1, CommandEnvelope, PrivilegedResultProof, SessionGrantV1,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -92,9 +97,7 @@ pub enum PrivilegedRequestMode {
 pub mod privd_request {
     use prost::Oneof;
 
-    use super::{
-        ArtifactConsumeRequest, ArtifactReadRequest, ReadRequest, UpgradeResultListRequest,
-    };
+    use super::{ArtifactConsumeRequest, ArtifactReadRequest, ReadRequest};
 
     /// Fixed operation allowlist.
     #[derive(Clone, PartialEq, Eq, Oneof)]
@@ -130,69 +133,15 @@ pub mod privd_request {
         /// operation ID. Fixed read-only evidence; no operation ID set can be
         /// selected or influenced by the caller.
         #[prost(message, tag = "44")]
-        UpgradeResultList(UpgradeResultListRequest),
+        UpgradeResultList(ReadRequest),
     }
-}
-
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct CertificateCsrResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub certificate_id: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub csr_der: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub public_key_sha256: Vec<u8>,
-}
-
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct CertificateRevokeResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub certificate_id: Vec<u8>,
-    #[prost(bool, tag = "2")]
-    pub key_removed: bool,
-}
-
-/// Mirrors the platform `AgentUpgradeScheduledResult`: privd accepted and
-/// scheduled the signed upgrade intent. It never claims the target version is
-/// running.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct AgentUpgradeScheduledResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub operation_id: Vec<u8>,
-    #[prost(string, tag = "2")]
-    pub target_version: String,
-    #[prost(bytes = "vec", tag = "3")]
-    pub package_sha256: Vec<u8>,
-}
-
-/// Empty marker for the fixed read-only upgrade outcome list query.
-#[derive(Clone, Copy, PartialEq, Eq, Message)]
-pub struct UpgradeResultListRequest {}
-
-/// One durable terminal upgrade outcome read from the fixed upgrader store.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct UpgradeOperationResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub operation_id: Vec<u8>,
-    #[prost(string, tag = "2")]
-    pub state: String,
-    #[prost(string, tag = "3")]
-    pub target_version: String,
-    #[prost(uint64, tag = "4")]
-    pub completed_unix_ms: u64,
-    #[prost(string, tag = "5")]
-    pub detail: String,
-    #[prost(bytes = "vec", tag = "6")]
-    pub package_sha256: Vec<u8>,
-    #[prost(message, optional, tag = "7")]
-    pub privileged_result_proof: Option<AgentUpgradeResultProof>,
 }
 
 /// Bounded most-recent durable upgrade outcomes.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct UpgradeResultList {
     #[prost(message, repeated, tag = "1")]
-    pub results: Vec<UpgradeOperationResult>,
+    pub results: Vec<AgentUpgradeResultReport>,
 }
 
 #[derive(Clone, PartialEq, Eq, Message)]
@@ -223,58 +172,6 @@ pub struct ArtifactData {
     pub data: Vec<u8>,
     #[prost(bytes = "vec", tag = "4")]
     pub sha256: Vec<u8>,
-}
-
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct CertificateArtifactResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub certificate_id: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub artifact_id: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub artifact_sha256: Vec<u8>,
-    #[prost(uint64, tag = "4")]
-    pub artifact_size: u64,
-}
-
-/// Secret-safe result of validating a staged candidate.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct ConfigPlanResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub candidate_hash: Vec<u8>,
-    #[prost(string, tag = "2")]
-    pub diff_redacted: String,
-    #[prost(string, repeated, tag = "3")]
-    pub warnings: Vec<String>,
-    #[prost(bool, tag = "4")]
-    pub current_unchanged: bool,
-    #[prost(bool, tag = "5")]
-    pub staging_cleaned: bool,
-    #[prost(bytes = "vec", tag = "6")]
-    pub current_hash: Vec<u8>,
-    #[prost(bytes = "vec", tag = "7")]
-    pub materialized_hash: Vec<u8>,
-}
-
-/// Secret-safe final transaction outcome.
-#[derive(Clone, PartialEq, Eq, Message)]
-pub struct ConfigApplyResult {
-    #[prost(bytes = "vec", tag = "1")]
-    pub candidate_hash: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub previous_hash: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub observed_hash: Vec<u8>,
-    #[prost(uint64, tag = "4")]
-    pub applied_revision: u64,
-    #[prost(bool, tag = "5")]
-    pub healthy: bool,
-    #[prost(bool, tag = "6")]
-    pub rolled_back: bool,
-    #[prost(bool, tag = "7")]
-    pub failed_critical: bool,
-    #[prost(string, tag = "8")]
-    pub failure_code: String,
 }
 
 /// Stable result of independently checking one desired-state effect.
@@ -461,6 +358,21 @@ pub enum ErrorKind {
     Unavailable = 7,
     /// A mutation would exceed a bounded authoritative-state capacity.
     CapacityExceeded = 8,
+}
+
+impl ErrorKind {
+    /// Returns the controller-facing terminal failure code if this error class
+    /// definitively rejects a command without retrying or reconciling.
+    #[must_use]
+    pub const fn terminal_code(self) -> Option<&'static str> {
+        match self {
+            Self::CapacityExceeded => Some("capacity_exceeded"),
+            Self::InvalidRequest | Self::PermissionDenied | Self::MalformedOutput => {
+                Some("privd_rejected")
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A response from privd.
@@ -734,9 +646,7 @@ mod tests {
             authorization_command: None,
             privileged_mode: PrivilegedRequestMode::Unspecified.into(),
             session_grant: None,
-            operation: Some(privd_request::Operation::UpgradeResultList(
-                UpgradeResultListRequest {},
-            )),
+            operation: Some(privd_request::Operation::UpgradeResultList(ReadRequest {})),
         };
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &request)
@@ -752,13 +662,12 @@ mod tests {
             privileged_result_proof: None,
             result: Some(privd_response::Result::UpgradeResultList(
                 UpgradeResultList {
-                    results: vec![UpgradeOperationResult {
+                    results: vec![AgentUpgradeResultReport {
                         operation_id: vec![1; 16],
-                        state: "succeeded".to_owned(),
+                        state: i32::from(AgentUpgradeOutcomeState::Succeeded),
                         target_version: "2.0.0".to_owned(),
                         completed_unix_ms: 1_751_000_000_000,
                         detail: "activated release 2.0.0".to_owned(),
-                        package_sha256: vec![2; 32],
                         privileged_result_proof: None,
                     }],
                 },

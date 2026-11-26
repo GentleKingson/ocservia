@@ -2124,14 +2124,8 @@ async fn stalled_artifact_fetch(
     grant.expires_at = Some((SystemTime::now() + ttl).into());
     let svc = service.clone();
     let fetch_task = tokio::spawn(async move {
-        svc.fetch_artifact(Request::new(FetchArtifactRequest {
-            node_id: node_id.to_vec(),
-            artifact_id: art_id.to_vec(),
-            purpose: "certificate_p12".into(),
-            max_bytes: 32,
-            grant: Some(grant),
-        }))
-        .await
+        svc.fetch_artifact(Request::new(FetchArtifactRequest { grant: Some(grant) }))
+            .await
     });
     let (send, mut recv) = tokio::time::timeout(Duration::from_secs(5), conn.accept_bi())
         .await
@@ -2156,16 +2150,8 @@ async fn assert_artifact_stream_aborted(send: &mut iroh::endpoint::SendStream) {
 async fn artifact_grant_validation_and_unary_forwarding() {
     // Unsigned artifact requests fail before connection lookup.
     let s0 = test_service(8);
-    let n0 = Uuid::now_v7();
-    let a0 = Uuid::now_v7();
     let Err(fetch_err) = s0
-        .fetch_artifact(Request::new(FetchArtifactRequest {
-            node_id: n0.as_bytes().to_vec(),
-            artifact_id: a0.as_bytes().to_vec(),
-            purpose: "certificate_p12".into(),
-            max_bytes: 32,
-            grant: None,
-        }))
+        .fetch_artifact(Request::new(FetchArtifactRequest { grant: None }))
         .await
     else {
         panic!("unsigned fetch must fail");
@@ -2173,7 +2159,6 @@ async fn artifact_grant_validation_and_unary_forwarding() {
     assert_eq!(fetch_err.code(), tonic::Code::PermissionDenied);
     assert_eq!(
         s0.consume_artifact(Request::new(ConsumeArtifactRequest {
-            node_id: n0.as_bytes().to_vec(),
             grant: None,
             sha256: vec![0; 32],
             size: 32,
@@ -2197,14 +2182,8 @@ async fn artifact_grant_validation_and_unary_forwarding() {
         let svc = service.clone();
         let g = grant.clone();
         async move {
-            svc.fetch_artifact(Request::new(FetchArtifactRequest {
-                node_id: node_id.to_vec(),
-                artifact_id: art_id.to_vec(),
-                purpose: "certificate_p12".into(),
-                max_bytes: 32,
-                grant: Some(g),
-            }))
-            .await
+            svc.fetch_artifact(Request::new(FetchArtifactRequest { grant: Some(g) }))
+                .await
         }
     });
 
@@ -2243,7 +2222,6 @@ async fn artifact_grant_validation_and_unary_forwarding() {
         let g = grant.clone();
         async move {
             svc.consume_artifact(Request::new(ConsumeArtifactRequest {
-                node_id: node_id.to_vec(),
                 grant: Some(g),
                 sha256: vec![0x11; 32],
                 size: 32,

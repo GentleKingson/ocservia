@@ -1,13 +1,10 @@
 use crate::HANDSHAKE_TIMEOUT;
 use crate::session::SessionContext;
 use crate::startup::invalid;
-use ocservia_agent_protocol::{
-    MAX_MANAGED_RESOURCES, PrivdResponse, UpgradeOperationResult, privd_response,
-};
+use ocservia_agent_protocol::{MAX_MANAGED_RESOURCES, PrivdResponse, privd_response};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgradeOutcomeState, AgentUpgradeResultReport, GroupObservation, IpBanObservation,
-    MetricSample, ObservedSnapshot, SessionObservation, TelemetryBatch, TelemetryDropCounters,
-    TelemetryPriority, UserObservation,
+    AgentUpgradeResultReport, GroupObservation, IpBanObservation, MetricSample, ObservedSnapshot,
+    SessionObservation, TelemetryBatch, TelemetryDropCounters, TelemetryPriority, UserObservation,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -83,7 +80,7 @@ pub(super) fn build_telemetry(
     session: &mut SessionContext<'_>,
     sequence: u64,
     observations: &[PrivdResponse],
-    upgrade_outcomes: Vec<UpgradeOperationResult>,
+    upgrade_outcomes: Vec<AgentUpgradeResultReport>,
     connection: &iroh::endpoint::Connection,
     drops: [u64; 4],
 ) -> Result<TelemetryBatch, io::Error> {
@@ -234,7 +231,7 @@ pub(super) fn build_telemetry(
             ocserv_json: serde_json::to_vec(&ocserv).unwrap_or_else(|_| b"{}".to_vec()),
             system_json: serde_json::to_vec(&system)?,
             path_json: serde_json::to_vec(&path).unwrap_or_else(|_| b"{}".to_vec()),
-            upgrade_results: upgrade_outcomes.into_iter().map(upgrade_report).collect(),
+            upgrade_results: upgrade_outcomes,
             dropped: Some(TelemetryDropCounters {
                 security: drops[0],
                 health: drops[1],
@@ -253,22 +250,6 @@ pub(super) fn build_telemetry(
         return Err(invalid("telemetry payload size invalid"));
     }
     Ok(batch)
-}
-
-fn upgrade_report(outcome: UpgradeOperationResult) -> AgentUpgradeResultReport {
-    AgentUpgradeResultReport {
-        operation_id: outcome.operation_id,
-        state: match outcome.state.as_str() {
-            "succeeded" => AgentUpgradeOutcomeState::Succeeded,
-            "failed" => AgentUpgradeOutcomeState::Failed,
-            "rolled_back" => AgentUpgradeOutcomeState::RolledBack,
-            _ => AgentUpgradeOutcomeState::Unspecified,
-        } as i32,
-        target_version: outcome.target_version,
-        completed_unix_ms: outcome.completed_unix_ms,
-        detail: outcome.detail,
-        privileged_result_proof: outcome.privileged_result_proof,
-    }
 }
 
 fn group_observation(group_name: String, members: Vec<String>, revision: u64) -> GroupObservation {
