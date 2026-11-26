@@ -13,9 +13,14 @@ use super::{
 pub(super) use self::artifacts::query_artifact;
 #[cfg(test)]
 pub(super) use self::authorized::query_authorized_effect;
+#[cfg(test)]
+pub(super) use self::desired::validate_effect_context;
 pub(super) use self::desired::{PrepareEffect, validate_effect_identity};
 #[cfg(test)]
-pub(super) use self::hmac::{authenticate_artifact_record, authenticate_authorized_record};
+pub(super) use self::hmac::{
+    authenticate_artifact_record, authenticate_authorized_record, authenticate_file,
+    authenticate_record,
+};
 
 use self::hmac::{authenticate_store_identity, verify_mac};
 
