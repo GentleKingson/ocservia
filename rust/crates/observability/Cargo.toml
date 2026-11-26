@@ -12,6 +12,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
 [dev-dependencies]
+ocservia-test-support = { version = "=0.1.0", path = "../test-support" }
 serde_json.workspace = true
 
 [lints]
