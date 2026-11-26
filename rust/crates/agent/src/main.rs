@@ -1,5 +1,6 @@
 mod artifacts;
 mod commands;
+mod host_metrics;
 mod session;
 mod startup;
 mod telemetry;
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         endpoint_id: identity.endpoint_id(),
         privd: &privd,
         command_executor: &mut command_executor,
+        host_metrics: host_metrics::HostMetrics::default(),
         session_cache: telemetry::SessionCache::default(),
         boot_id: &boot_id,
         os_release: &os_release,

@@ -43,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let adapter = Adapter::new(FixedResources::default(), Limits::default());
         if let Err((check, error)) = adapter.host_preflight().await {
             eprintln!("host preflight failed: check={check}: {error}");
+            if check == "occtl.show-status" {
+                eprintln!(
+                    "Set use-occtl = true in ocserv.conf, check occtl-socket-file (normally /run/occtl.socket) and its permissions, then run sudo occtl --json show status."
+                );
+            }
             eprintln!(
                 "Check the named resource and ocserv/occtl access; correct it deliberately, then rerun. No host state was changed."
             );

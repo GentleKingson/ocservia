@@ -223,6 +223,7 @@ async fn host_preflight_reuses_snapshot_checks_without_mutating_host() {
         r#"case "$*" in
     --version) echo 'ocserv 1.3.0';;
     'show ocserv.service '*) printf 'LoadState=loaded\nActiveState=active\nSubState=running\n';;
+    '--json show status') cat "${0%/*}/control-ready";;
     '--json show users') cat "${0%/*}/sessions.json";;
     '--json show ip bans') echo '[]';;
     *) exit 99;;
@@ -253,6 +254,17 @@ esac"#,
     let adapter = Adapter::new(resources, Limits::default());
     let sessions = dir.join("sessions.json");
     std::fs::write(&sessions, b"[]").expect("valid session output");
+    assert!(matches!(
+        adapter.host_preflight().await,
+        Err(("occtl.show-status", _))
+    ));
+    std::fs::write(dir.join("control-ready"), br#"{"Status":"offline"}"#).expect("offline socket");
+    assert!(matches!(
+        adapter.host_preflight().await,
+        Err(("occtl.show-status", AdapterError::Unavailable))
+    ));
+    std::fs::write(dir.join("control-ready"), br#"{"Status":"online"}"#)
+        .expect("enable socket fixture");
     adapter.host_preflight().await.expect("healthy snapshot");
     assert_eq!(std::fs::read(&config).expect("config"), b"tcp-port = 443\n");
     assert_eq!(

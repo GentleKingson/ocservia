@@ -9,11 +9,21 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	telemetrystore "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestDisconnectedOwnerWithRecentTelemetry(t *testing.T) {
+	now := time.Now()
+	active := false
+	node := readNode(telemetrystore.Node{Heartbeat: &now, OwnerActive: &active}, now)
+	if node.ConnectionState != "offline" || node.Freshness != "fresh" {
+		t.Fatalf("connection=%s freshness=%s", node.ConnectionState, node.Freshness)
+	}
+}
 
 func testBatch(nodeID uuid.UUID, sequence uint64, observed time.Time) Batch {
 	return Batch{

@@ -29,6 +29,7 @@ import NodeDetailUsersGroupsSection from "../components/nodes/NodeDetailUsersGro
 import NodeDetailNav from "../components/nodes/NodeDetailNav.vue";
 import NodeDetailSkeleton from "../components/nodes/NodeDetailSkeleton.vue";
 import NodeObservedDetails from "../components/nodes/NodeObservedDetails.vue";
+import NodeTelemetryHistory from "../components/nodes/NodeTelemetryHistory.vue";
 import NodeStatusSummary from "../components/nodes/NodeStatusSummary.vue";
 import UserPolicyDialog from "../components/nodes/UserPolicyDialog.vue";
 import { useFleetStore } from "../shared/fleet";
@@ -193,6 +194,7 @@ function openPolicy(username: string): void {
         :node="currentNode"
         :session-count="currentNode.sessionCount"
       />
+      <NodeTelemetryHistory :node="currentNode" />
       <NodeDetailNav />
       <NodeObservedDetails id="node-overview" :node="currentNode">
         <div class="mb-4 grid gap-3">

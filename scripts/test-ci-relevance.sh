@@ -47,6 +47,14 @@ while IFS= read -r path; do
   [[ "${reason}" != unknown_path:* ]] || die "tracked file fell through to ${reason}"
 done < <(git ls-files)
 
+while read -r interpreter entry _; do
+  case "${interpreter}" in bash|node|python3) ;; *) die "unknown interpreter: ${interpreter}" ;; esac
+  [[ -f "${entry}" ]] || die "missing release test: ${entry}"
+  reset_state
+  classify_path "${entry}"
+  [[ " ${ci_suites[*]} " == *" release "* && "${reason}" == recognized_paths ]] || die "unrouted release test: ${entry}"
+done < scripts/ci-release-tests.txt
+
 # 2. Unknown paths, shared contracts, toolchains and shared CI actions must fail closed.
 for path in unknown-top/probe.txt proto/buf.yaml openapi/openapi.yaml toolchains.lock .github/actions/setup-tools/action.yml; do
   reset_state

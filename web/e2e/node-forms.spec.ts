@@ -370,3 +370,36 @@ test("submits an authorized reload directly and handles server denial", async ({
     ttl_seconds: 60,
   });
 });
+
+test("reads host telemetry history and switches metrics", async ({ page }) => {
+  await openNode(page, {});
+  await page.route(`**/api/v1/nodes/${nodeId}/telemetry?**`, (route) => {
+    const metric = new URL(route.request().url()).searchParams.get("metric");
+    return route.fulfill({
+      json: {
+        resolution: "raw",
+        items:
+          metric === "cpu_usage_ratio"
+            ? [
+                {
+                  at: new Date().toISOString(),
+                  metric,
+                  minimum: 0.375,
+                  maximum: 0.375,
+                  average: 0.375,
+                  count: 1,
+                },
+              ]
+            : [],
+      },
+    });
+  });
+  await page.getByText("Telemetry history · last 10 minutes").click();
+  await expect(page.getByRole("cell", { name: "37.5" })).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "Metric", exact: true })
+    .selectOption("memory_used_bytes");
+  await expect(
+    page.getByText("No samples in the last 10 minutes."),
+  ).toBeVisible();
+});

@@ -27,7 +27,9 @@ class BusinessEnvironment:
 
     @cached_property
     def tls_context(self):
-        return ssl.create_default_context(cafile=str(self.work / 'ca.crt'))
+        context = ssl.create_default_context(cafile=str(self.work / 'ca.crt'))
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        return context
 
 
 @cache

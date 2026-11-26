@@ -196,9 +196,6 @@ services:
       - audit_checkpoint_key
       - source: audit_event_key
         target: audit_event_key
-        uid: "65534"
-        gid: "65532"
-        mode: 0400
     tmpfs:
       - /tmp:size=8m,mode=0700
     networks: ["${OCSERV_DATABASE_NETWORK:-database}"]
@@ -291,22 +288,13 @@ services:
       - audit_checkpoint_key
       - source: relay_access_token
         target: relay_access_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0440
       - source: audit_event_key
         target: audit_event_key
-        uid: "65534"
-        gid: "65532"
-        mode: 0400
       - source: ${OCSERV_SIGNER_CA_SECRET:-system_ca}
         target: certificate_signer_ca
       - certificate_signer_token
       - source: controller_command_signing_key
         target: controller_command_signing_key
-        uid: "65534"
-        gid: "65532"
-        mode: 0400
     volumes:
       - type: volume
         source: transport-runtime
@@ -382,19 +370,10 @@ services:
         target: ${OCSERV_RELAY_TRUST_TARGET:-system_ca}
       - source: controller_command_verification_key
         target: controller_command_verification_key
-        uid: "0"
-        gid: "65532"
-        mode: 0440
       - source: relay_access_token
         target: relay_access_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
       - source: controller_iroh_key
         target: controller_iroh_key
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
     volumes:
       - type: volume
         source: transport-runtime

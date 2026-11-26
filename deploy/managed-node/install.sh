@@ -57,7 +57,7 @@ IDENTITY_DIR="/var/lib/ocservia-agent/identity"
 PLACEHOLDER_RELAY_URL_A="https://relay-a.example.com"
 PLACEHOLDER_NODE_ID="00000000-0000-7000-8000-000000000000"
 SUPPORTED_HOSTS="Ubuntu 22.04/24.04/26.04 and Debian 12/13 (dpkg), Rocky Linux 9 (rpm), x86_64/aarch64, systemd"
-VERSION="${DEFAULT_VERSION}"
+RELEASE_TAG="${DEFAULT_VERSION}"
 ARCH_WORD=""
 RPM_ARCH=""
 PACKAGE_FAMILY=""
@@ -107,7 +107,7 @@ while (($# > 0)); do
     --help|-h) usage ;;
     --version)
       [[ "${version_seen}" == false && $# -ge 2 ]] || usage
-      VERSION="$2"
+      RELEASE_TAG="$2"
       version_seen=true
       shift 2
       ;;
@@ -127,10 +127,11 @@ done
 if [[ -z "${JOIN_TOKEN_FILE}" ]]; then
   [[ -t 0 && -t 1 ]] || fail "installation token input requires a TTY; use --join-token-file or --resume-install"
 fi
-[[ -n "${VERSION}" ]] || fail "use the pinned Release installer or supply --version vX.Y.Z"
-[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
-  fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
-RELEASE_VERSION="${VERSION#v}"
+[[ -n "${RELEASE_TAG}" ]] || fail "use the pinned Release installer or supply --version vX.Y.Z"
+[[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+  fail "unsupported version '${RELEASE_TAG}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
+readonly RELEASE_TAG
+readonly RELEASE_VERSION="${RELEASE_TAG#v}"
 
 USER_PASSWORD_SEAL_KEY_ID="${USER_PASSWORD_SEAL_KEY_ID:-}"
 P12_PASSWORD_SEAL_KEY_ID="${P12_PASSWORD_SEAL_KEY_ID:-}"
@@ -156,7 +157,7 @@ forward_root_lifecycle() {
   # The --version pin is operator-chosen public release identity, not node
   # configuration: it re-crosses the privilege boundary as the same explicit
   # command-line argument instead of an environment variable.
-  reexec_arguments+=(--version "${VERSION}")
+  reexec_arguments+=(--version "${RELEASE_TAG}")
   [[ -z "${EXPECTED_PACKAGE_DIGEST}" ]] || reexec_arguments+=(--package-sha256 "${EXPECTED_PACKAGE_DIGEST}")
   for variable in USER_PASSWORD_SEAL_KEY_ID P12_PASSWORD_SEAL_KEY_ID; do
     [[ -z "${!variable}" ]] || forwarded_environment+=("${variable}=${!variable}")
@@ -182,12 +183,10 @@ detect_platform() {
   local os_id os_version_id
   [[ -r "/etc/os-release" ]] ||
     fail "cannot read the OS release file /etc/os-release; supported hosts are ${SUPPORTED_HOSTS}"
-  # shellcheck disable=SC1090
-  . "/etc/os-release"
-  # shellcheck disable=SC2154
-  os_id="${ID:-}"
-  # shellcheck disable=SC2154
-  os_version_id="${VERSION_ID:-}"
+  read -r os_id os_version_id < <(
+    . /etc/os-release
+    printf '%s %s\n' "${ID:-}" "${VERSION_ID:-}"
+  )
   case "${os_id} ${os_version_id}" in
     "ubuntu 22.04" | "ubuntu 24.04" | "ubuntu 26.04" | "debian 12" | "debian 13")
       PACKAGE_FAMILY=deb
@@ -306,7 +305,7 @@ install_native_package() {
   install -d -o root -g root -m 0700 -- "${PACKAGE_SPOOL}"
   PACKAGE_DOWNLOAD="$(mktemp "${PACKAGE_SPOOL}/.download.XXXXXX")"
   curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-    --output "${PACKAGE_DOWNLOAD}" "${DOWNLOAD_BASE}/${VERSION}/${PACKAGE_FILE}"
+    --output "${PACKAGE_DOWNLOAD}" "${DOWNLOAD_BASE}/${RELEASE_TAG}/${PACKAGE_FILE}"
   [[ -s "${PACKAGE_DOWNLOAD}" ]] || fail "empty native package download"
   if [[ -n "${EXPECTED_PACKAGE_DIGEST}" ]]; then
     printf '%s  %s\n' "${EXPECTED_PACKAGE_DIGEST}" "${PACKAGE_DOWNLOAD}" | sha256sum --check --status ||
@@ -733,7 +732,7 @@ converge_enrollment() {
 # Every source enters the same root lifecycle before reading token state.
 ((EUID == 0)) || forward_root_lifecycle
 unset SUDO_USER
-echo "release identity: ${VERSION}"
+echo "release identity: ${RELEASE_TAG}"
 resolve_architecture
 detect_platform
 require_commands

@@ -438,6 +438,14 @@ acceptance or license compliance.
 
 ### Path routing
 
+From a clean candidate commit, run `scripts/ci-preflight.sh origin/main` to
+print the PR routing decisions and run the selected CI tool suites locally.
+Use the same base commit as the PR and install its selected tool profiles
+with `scripts/bootstrap.sh`. GitHub runs CodeQL and the other selected jobs.
+Register release tests in `scripts/ci-release-tests.txt`, one interpreter,
+script path and optional whitespace-separated arguments per line. The suite
+executes each entry directly and the router uses its path to select release checks.
+
 [`scripts/ci-relevance.sh`](../../scripts/ci-relevance.sh) evaluates changed
 paths with ordered first-match patterns instead of package or call-graph
 analysis and is the source of the exact rule order:
@@ -1208,6 +1216,13 @@ After an RC's Release workflow has uploaded its assets, run
 [`release-asset-smoke.sh`](../../scripts/release-asset-smoke.sh) against the
 published tag (`VERSION=<X.Y.Z-rc.N>`) on a disposable native runner to download the
 exact release's DEB, RPM, and managed-node bootstrap over HTTPS. The smoke check validates the embedded release tag and installs the downloaded native packages. The summary records the requested version, architecture, and asset URLs.
+
+For published Agent enrollment, use a separate Ubuntu 26.04 ARM64 systemd
+runner with ocserv configured and no Agent package installed. Set
+`RELEASE_JOIN_TOKEN_FILE` to the protected installation token and
+`RELEASE_DEB_SHA256` to the verified release digest, in addition to
+`RUN_ID` and `ARTIFACT_DIR`. The same script then runs the stamped installer
+through Controller-confirmed enrollment and leaves the test node enrolled.
 
 ### Existing checks
 

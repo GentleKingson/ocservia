@@ -39,6 +39,7 @@ usage() {
   echo "usage: controller-bootstrap.sh --version vX.Y.Z [--root-lifecycle] [--check]" >&2
   echo "       controller-bootstrap.sh --version vX.Y.Z --quick --controller-domain NAME [--relay-domain NAME]" >&2
   echo "         --acme-email ADDRESS [--root-ca-passphrase-file PATH] [--root-ca-export-dir PATH] [--root-lifecycle] [--check]" >&2
+  echo "         Non-interactive Quick requires --root-ca-passphrase-file PATH, including with --check." >&2
   exit 2
 }
 

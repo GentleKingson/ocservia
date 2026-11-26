@@ -763,6 +763,7 @@ mod tests {
             endpoint_id: iroh::SecretKey::generate().public(),
             privd: &privd,
             command_executor: &mut executor,
+            host_metrics: crate::host_metrics::HostMetrics::default(),
             session_cache: crate::telemetry::SessionCache::default(),
             boot_id: "",
             os_release: "",

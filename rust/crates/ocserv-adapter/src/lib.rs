@@ -600,6 +600,15 @@ impl Adapter {
         self.service_status()
             .await
             .map_err(|error| ("systemctl.ocserv-service-status", error))?;
+        let status = self
+            .execute(&self.resources.occtl, &["--json", "show", "status"])
+            .await
+            .map_err(|error| ("occtl.show-status", error))?;
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout)
+            .map_err(|_| ("occtl.show-status", AdapterError::MalformedOutput))?;
+        if status.get("Status").and_then(serde_json::Value::as_str) != Some("online") {
+            return Err(("occtl.show-status", AdapterError::Unavailable));
+        }
         self.session_list()
             .await
             .map_err(|error| ("occtl.show-users-json", error))?;

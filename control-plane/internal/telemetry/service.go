@@ -334,6 +334,9 @@ func readNode(v telemetrystore.Node, now time.Time) Node {
 		n.Freshness = "stale"
 		n.ConnectionState = "offline"
 	}
+	if v.OwnerActive != nil && !*v.OwnerActive {
+		n.ConnectionState = "offline"
+	}
 	return n
 }
 

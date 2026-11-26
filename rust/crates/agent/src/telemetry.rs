@@ -175,7 +175,7 @@ pub(super) fn build_telemetry(
             _ => {}
         }
     }
-    let sessions = sessions.ok_or_else(|| invalid("privd session snapshot incomplete"))?;
+    let sessions = sessions.ok_or_else(|| invalid("privd session snapshot incomplete: check use-occtl = true and run sudo occtl --json show status"))?;
     if !user_snapshot_complete || !group_snapshot_complete {
         return Err(invalid("privd user/group snapshot incomplete"));
     }
@@ -185,21 +185,37 @@ pub(super) fn build_telemetry(
     }
     let paths = connection.paths();
     let selected = paths.iter().find(iroh::endpoint::Path::is_selected);
-    let (mode, rtt) = selected.map_or(("unknown", 0), |path| {
-        (
-            if path.is_ip() {
-                "direct"
-            } else if path.is_relay() {
-                "relay"
-            } else {
-                "unknown"
-            },
-            u64::try_from(path.rtt().as_millis()).unwrap_or(u64::MAX),
-        )
-    });
     let ocserv = serde_json::json!({"service":service,"configuration":fingerprint});
-    let path = serde_json::json!({"mode":mode,"rtt_ms":rtt});
+    let system = session.host_metrics.sample();
     let session_count = f64::from(u32::try_from(sessions.len()).unwrap_or(u32::MAX));
+    let mut samples = Vec::new();
+    let mut sample = |metric: &str, value| {
+        samples.push(MetricSample {
+            sampled_at: Some(now.into()),
+            metric: metric.to_owned(),
+            value,
+        });
+    };
+    sample("session_count", session_count);
+    for (name, value) in &system {
+        if let Some(number) = value.as_f64() {
+            sample(name, number);
+        }
+    }
+    let path = if let Some(path_info) = selected {
+        let mode = if path_info.is_ip() {
+            "direct"
+        } else if path_info.is_relay() {
+            "relay"
+        } else {
+            "unknown"
+        };
+        let rtt = path_info.rtt();
+        sample("connection_rtt_ms", rtt.as_secs_f64() * 1000.0);
+        serde_json::json!({"mode": mode, "rtt_ms": u64::try_from(rtt.as_millis()).unwrap_or(u64::MAX)})
+    } else {
+        serde_json::json!({"mode":"unknown","rtt_ms":0})
+    };
     let batch = TelemetryBatch {
         batch_id: Uuid::now_v7().as_bytes().to_vec(),
         node_id: session.node_id.as_bytes().to_vec(),
@@ -216,7 +232,7 @@ pub(super) fn build_telemetry(
                 .unwrap_or_default()
                 .to_owned(),
             ocserv_json: serde_json::to_vec(&ocserv).unwrap_or_else(|_| b"{}".to_vec()),
-            system_json: b"{}".to_vec(),
+            system_json: serde_json::to_vec(&system)?,
             path_json: serde_json::to_vec(&path).unwrap_or_else(|_| b"{}".to_vec()),
             upgrade_results: upgrade_outcomes.into_iter().map(upgrade_report).collect(),
             dropped: Some(TelemetryDropCounters {
@@ -227,11 +243,7 @@ pub(super) fn build_telemetry(
             }),
         }),
         sessions,
-        samples: vec![MetricSample {
-            sampled_at: Some(now.into()),
-            metric: "session_count".to_owned(),
-            value: session_count,
-        }],
+        samples,
         security_events: Vec::new(),
         ip_bans,
         users,

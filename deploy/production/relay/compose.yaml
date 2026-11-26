@@ -22,9 +22,6 @@ services:
     secrets:
       - source: relay_access_token
         target: relay_access_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
       - relay_tls_certificate
       - relay_tls_private_key
     volumes:

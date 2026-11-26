@@ -902,10 +902,16 @@ Every 30 seconds it emits a bounded telemetry batch over a dedicated
 unidirectional Iroh stream. The Web console queries the persisted data through
 the HTTP API.
 
-A node appears offline once its most recent heartbeat is older than 90 seconds
+A confirmed disconnect of the current transport session marks the node offline immediately. A node also appears offline once its most recent heartbeat is older than 90 seconds
 or if it has never reported one. The API computes freshness (`fresh`, `stale`,
 `never`) at read time. Background scheduler maintenance persists the offline
 state transition separately.
+
+The Agent reports CPU busy time as the fraction of aggregate CPU ticks since
+the previous sample (idle and I/O wait excluded), used memory as total minus
+available bytes, and summed RX/TX byte counters for non-loopback interfaces.
+RTT is measured on the selected transport path in milliseconds. Unavailable
+measurements are omitted. Historical samples use the Agent observation time.
 
 ### Data classes and limits
 

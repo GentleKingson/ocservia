@@ -191,8 +191,28 @@ docker run --rm --entrypoint /usr/local/bin/iroh-relay \
 record products_ready
 
 next_stage dependency_install
+if systemctl is-active --quiet systemd-resolved; then
+  resolver_active=true
+  resolvectl query github.com >/dev/null
+  ss -lntup 'sport = :53' >"${ARTIFACT_DIR}/dns-listeners-before.txt"
+else
+  resolver_active=false
+fi
 sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 update -qq
-sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 install -y --no-install-recommends ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools
+native_dependencies=(ocserv openconnect vpnc-scripts sqlite3 iputils-ping libnss3-tools)
+if [[ "${resolver_active}" == true ]]; then
+  LC_ALL=C apt-get -s --no-install-recommends install "${native_dependencies[@]}" >"${work}/ocserv-dependencies.txt"
+  if grep -Eq '^Inst dnsmasq(:[^ ]+)? ' "${work}/ocserv-dependencies.txt"; then
+    echo 'ocserv transaction would install dnsmasq alongside the active system resolver' >&2
+    exit 1
+  fi
+fi
+sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::Retries=3 install -y --no-install-recommends "${native_dependencies[@]}"
+if [[ "${resolver_active}" == true ]]; then
+  systemctl is-active --quiet systemd-resolved
+  resolvectl query github.com >/dev/null
+  ss -lntup 'sport = :53' >"${ARTIFACT_DIR}/dns-listeners-after.txt"
+fi
 sudo systemctl stop ocserv
 { dpkg-query -W ocserv openconnect libgnutls30t64 openssl systemd; ocserv --version; } >>"${ARTIFACT_DIR}/environment.txt" 2>&1
 
@@ -359,6 +379,20 @@ sudo openssl pkey -pubin -in "${OCSERV_SECRET_DIR}/controller-command-verificati
 [[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem")" == 0:65532:440:1 ]]
 docker inspect "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" | jq -e '.[0].Mounts | all(.[]; .Destination != "/run/secrets/controller_command_signing_key")' >/dev/null
 docker exec "${OCSERVIA_BUSINESS_TEST_TRANSPORT_CONTAINER}" test ! -e /run/secrets/controller_command_signing_key
+# File-backed Compose secrets inherit the source inode's permissions.
+check_secret_mount() {
+  local service=$1 name=$2 expected=$3
+  local path="/run/secrets/${name}"
+  [[ "$(compose exec -T "${service}" stat -c '%u:%g:%a' "${path}")" == "${expected}" ]]
+  compose exec -T "${service}" test -r "${path}"
+  compose exec -T --user 65531:65531 "${service}" test ! -r "${path}"
+}
+check_secret_mount transportd controller_command_verification_key 0:65532:440
+check_secret_mount transportd controller_iroh_key 65532:65532:400
+check_secret_mount transportd relay_access_token 65532:65532:440
+check_secret_mount control-plane relay_access_token 65532:65532:440
+check_secret_mount control-plane audit_event_key 65534:65532:400
+check_secret_mount control-plane controller_command_signing_key 65534:65532:400
 printf 'SPKI public key, regular one-link root:65532 0440; no Controller signing-key mount\n' >"${ARTIFACT_DIR}/transport-key-boundary.txt"
 [[ "$(sudo stat -c '%u:%g:%a:%h' "${OCSERV_SECRET_DIR}/relay-ca.pem")" == 0:0:444:1 ]]
 [[ "$(sudo stat -c '%u:%g:%a:%h' /etc/ocservia-agent/relay-ca.pem)" == 0:0:444:1 ]]
@@ -402,6 +436,7 @@ config_ref="$(jq -r .id "${work}/config-reference.json")"
 write_node_config "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-cert.pem" "/etc/ocservia-agent/config-tls/${config_ref}/v1/server-key.pem"
 sudo ocserv --test-config -c /etc/ocserv/ocserv.conf
 sudo systemctl restart ocserv
+scenario config_renew
 scenario signer_import
 record production_signer_active_binding
 bash "${ROOT}/deploy/managed-node/install.sh" --non-interactive --resume-install "${managed_options[@]}" >"${ARTIFACT_DIR}/managed-active.log"

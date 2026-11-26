@@ -48,6 +48,25 @@ grep -qxF "readonly DEFAULT_VERSION=\"${release_tag}\"" "${work}/managed-node-bo
 chmod 0700 "${work}/managed-node-bootstrap.sh"
 printf 'installer_embedded_version=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
 
+# Dedicated clean ARM64 enrollment host with ocserv prerequisites and an
+# operator-issued one-time token. The installer downloads the DEB itself.
+if [[ -n "${RELEASE_JOIN_TOKEN_FILE:-}" ]]; then
+  [[ "${arch}" == arm64 && "$( . /etc/os-release; echo "${ID}:${VERSION_ID}" )" == ubuntu:26.04 ]]
+  if dpkg-query -W -f='${db:Status-Status}' ocservia-agent 2>/dev/null | grep -qx installed; then
+    echo 'published enrollment requires a clean Agent host' >&2
+    exit 1
+  fi
+  : "${RELEASE_DEB_SHA256:?supply the independently verified release DEB SHA-256}"
+  {
+    sudo bash "${work}/managed-node-bootstrap.sh" --non-interactive --join-token-file "${RELEASE_JOIN_TOKEN_FILE}" \
+      --package-sha256 "${RELEASE_DEB_SHA256}"
+  } >"${work}/enrollment.log"
+  grep -Fxq ONLINE "${work}/enrollment.log"
+  printf 'published_arm64_enrollment=PASS\n' >>"${ARTIFACT_DIR}/release-assets-summary.txt"
+  result=PASS
+  exit 0
+fi
+
 # The existing smoke executes the actual downloaded native binaries/packages,
 # including package ownership, installation and removal.
 PRODUCTS_DIR="${work}" VERSION="${version}" RC_LIFECYCLE=false \
