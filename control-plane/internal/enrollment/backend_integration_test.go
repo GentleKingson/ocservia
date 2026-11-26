@@ -103,12 +103,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: "ocserv-platform/agent/1"}); err != nil || !allowed {
 		t.Fatal("active agent not permitted", allowed, err)
 	}
-	at := time.Now().UTC()
-	expires := at.Add(time.Hour)
-	requester, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'enrollment',$2,$3,$4)`, requester, requester.String(), at, at)
-	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,$3)`, workspace, requester, at)
-	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,$3,$4)`, session, requester, expires, at)
+	requester, session := testfixture.InsertWorkspaceAdminSession(t, ctx, b.Pool(), workspace, "enrollment")
 	exported, err := ExportSealingBinding(ctx, b, workspace, node, hex.EncodeToString(endpoint))
 	if err != nil {
 		t.Fatal("active sealing export", err)

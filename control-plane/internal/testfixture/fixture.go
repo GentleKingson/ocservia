@@ -3,10 +3,12 @@ package testfixture
 import (
 	"context"
 	"crypto/sha256"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,3 +63,67 @@ func InsertActiveNode(t testing.TB, ctx context.Context, pool *pgxpool.Pool, wor
 	)
 	return nodeID, endpointID
 }
+
+// InsertWorkspaceAdminSession inserts an identity, workspace admin membership,
+// and active auth session using PostgreSQL wall-clock timestamps.
+func InsertWorkspaceAdminSession(t testing.TB, ctx context.Context, pool *pgxpool.Pool, workspaceID uuid.UUID, issuer string) (identityID, sessionID uuid.UUID) {
+	t.Helper()
+	identityID, sessionID = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	for _, stmt := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO identities(id,issuer,subject,created_at,updated_at) VALUES($1,$2,$3,now(),now())`, []any{identityID, issuer, issuer + "-" + identityID.String()}},
+		{`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,now()-interval '1 minute')`, []any{workspaceID, identityID}},
+		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,now()+interval '1 hour',now())`, []any{sessionID, identityID}},
+	} {
+		testutil.Exec(t, ctx, pool, stmt.query, stmt.args...)
+	}
+	return identityID, sessionID
+}
+
+// CommitFaultBackend wraps a real database.Backend to inject commit failures
+// without introducing fake SQL storage.
+type CommitFaultBackend struct {
+	database.Backend
+	CommitBeforeFail bool
+	Err              error
+	Always           bool
+	armed            atomic.Bool
+}
+
+// Arm enables commit failure injection for the next Begin call.
+func (b *CommitFaultBackend) Arm() { b.armed.Store(true) }
+
+// Begin intercepts transaction commits when Always or Arm is set.
+func (b *CommitFaultBackend) Begin(ctx context.Context, isolation database.Isolation) (database.Tx, error) {
+	tx, err := b.Backend.Begin(ctx, isolation)
+	if err != nil {
+		return nil, err
+	}
+	if !b.Always && !b.armed.CompareAndSwap(true, false) {
+		return tx, nil
+	}
+	return &commitFaultTx{Tx: tx, commitBeforeFail: b.CommitBeforeFail, err: b.Err}, nil
+}
+
+type commitFaultTx struct {
+	database.Tx
+	commitBeforeFail bool
+	err              error
+}
+
+func (t *commitFaultTx) Commit(ctx context.Context) error {
+	var err error
+	if t.commitBeforeFail {
+		err = t.Tx.Commit(ctx)
+	} else {
+		err = t.Tx.Rollback(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	return t.err
+}
+
+func (t *commitFaultTx) Unwrap() database.Tx { return t.Tx }

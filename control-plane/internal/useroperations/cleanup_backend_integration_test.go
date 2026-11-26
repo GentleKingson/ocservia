@@ -241,7 +241,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 			t.Fatal("canceled cleanup succeeded", err)
 		}
 		failure := errors.New("injected commit failure")
-		broken := New(cleanupCommitBackend{Backend: f.b, failure: failure}, nil)
+		broken := New(&testfixture.CommitFaultBackend{Backend: f.b, Always: true, Err: fmt.Errorf("commit: %w", failure)}, nil)
 		if err := broken.cleanupEnforcement(t.Context(), item, false); !errors.Is(err, failure) || f.count(t, item) != 1 {
 			t.Fatal("commit failure lost rollback", err)
 		}
@@ -286,27 +286,4 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 			t.Fatal("missing recovery receipt", receipts, err)
 		}
 	})
-}
-
-type cleanupCommitBackend struct {
-	database.Backend
-	failure error
-}
-
-func (b cleanupCommitBackend) Begin(ctx context.Context, isolation database.Isolation) (database.Tx, error) {
-	tx, err := b.Backend.Begin(ctx, isolation)
-	if err != nil {
-		return nil, err
-	}
-	return cleanupCommitTx{Tx: tx, failure: b.failure}, nil
-}
-
-type cleanupCommitTx struct {
-	database.Tx
-	failure error
-}
-
-func (tx cleanupCommitTx) Unwrap() database.Tx { return tx.Tx }
-func (tx cleanupCommitTx) Commit(context.Context) error {
-	return fmt.Errorf("commit: %w", tx.failure)
 }
