@@ -366,6 +366,9 @@ test("submits an authorized reload directly and handles server denial", async ({
 
 test("reads host telemetry history and switches metrics", async ({ page }) => {
   await openNode(page, {});
+  // Keep a timestamp containing the metric text to catch ambiguous cell locators.
+  const sampleTime = new Date();
+  sampleTime.setUTCMinutes(sampleTime.getUTCMinutes() - 1, 37, 549);
   await page.route(`**/api/v1/nodes/${nodeId}/telemetry?**`, (route) => {
     const metric = new URL(route.request().url()).searchParams.get("metric");
     return route.fulfill({
@@ -375,7 +378,7 @@ test("reads host telemetry history and switches metrics", async ({ page }) => {
           metric === "cpu_usage_ratio"
             ? [
                 {
-                  at: new Date().toISOString(),
+                  at: sampleTime.toISOString(),
                   metric,
                   minimum: 0.375,
                   maximum: 0.375,
@@ -388,7 +391,9 @@ test("reads host telemetry history and switches metrics", async ({ page }) => {
     });
   });
   await page.getByText("Telemetry history · last 10 minutes").click();
-  await expect(page.getByRole("cell", { name: "37.5" })).toBeVisible();
+  await expect(
+    page.getByRole("cell", { name: "37.5", exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("combobox", { name: "Metric", exact: true })
     .selectOption("memory_used_bytes");
