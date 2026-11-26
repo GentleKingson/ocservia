@@ -567,15 +567,16 @@ mod tests {
     use ocservia_contracts::generated::ocserv::platform::agent::v1::{
         GroupApply, ServiceReload, SessionGrantV1,
     };
-    use ocservia_test_support::{keyring, sign_command_envelope_v2, sign_command_v2};
+    use ocservia_test_support::{
+        PrivateTempDir, keyring, sign_command_envelope_v2, sign_command_v2,
+    };
     use std::time::Duration;
 
     use super::*;
 
     #[test]
     fn settlement_publishes_canonical_receipt_failure_codes() {
-        let directory = std::env::temp_dir().join(format!("ocservia-receipt-{}", Uuid::now_v7()));
-        std::fs::create_dir(&directory).expect("test directory");
+        let directory = PrivateTempDir::new("agt-rcpt");
         let journal = Journal::open(&directory.join("journal.sqlite3")).expect("test journal");
         let mut executor = CommandExecutor::new(journal);
         let signing = SigningKey::from_bytes(&[49; 32]);
@@ -625,14 +626,11 @@ mod tests {
             assert_eq!(result.error_code, code);
             assert!(result.privileged_result_proof.is_none());
         }
-        drop(executor);
-        std::fs::remove_dir_all(directory).expect("cleanup journal");
     }
 
     #[tokio::test]
     async fn reconciliation_rejects_malformed_receipts_before_using_effect_observation() {
-        let directory = std::env::temp_dir().join(format!("ocservia-reconcile-{}", Uuid::now_v7()));
-        std::fs::create_dir(&directory).expect("test directory");
+        let directory = PrivateTempDir::new("agt-rec");
         let mut executor = CommandExecutor::new(
             Journal::open(&directory.join("journal.sqlite3")).expect("test journal"),
         );
@@ -724,7 +722,5 @@ mod tests {
             assert_eq!(outcome.record.error_code.as_deref(), Some(code));
         }
         server.await.expect("test server");
-        drop(executor);
-        std::fs::remove_dir_all(directory).expect("cleanup journal");
     }
 }

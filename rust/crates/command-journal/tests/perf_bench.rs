@@ -1,21 +1,14 @@
 #![allow(clippy::missing_panics_doc)]
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use ocservia_command_journal::{Journal, TelemetryInsert};
+use ocservia_test_support::PrivateTempDir;
 
 #[test]
 #[ignore = "run explicitly via scripts/perf-bench.sh"]
 fn perf_journal_telemetry_enqueue_evict_drain() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "ocservia-journal-bench-{}-{nonce}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("mkdir");
+    let dir = PrivateTempDir::new("cj-bench");
     let db_path = dir.join("journal.db");
     let mut journal = Journal::open(&db_path).expect("open journal");
 
@@ -95,7 +88,4 @@ fn perf_journal_telemetry_enqueue_evict_drain() {
         batch_ids.len(),
         batch_ack_elapsed.as_secs_f64() * 1000.0
     );
-
-    drop(journal);
-    let _ = std::fs::remove_dir_all(&dir);
 }
