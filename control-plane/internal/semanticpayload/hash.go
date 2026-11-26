@@ -75,17 +75,6 @@ type cborGroupApply struct {
 	DesiredRevision uint64   `cbor:"desired_revision"`
 }
 
-type cborConfigPlan struct {
-	CandidateHash    []byte `cbor:"candidate_hash"`
-	ExpectedRevision uint64 `cbor:"expected_revision"`
-}
-
-type cborConfigApply struct {
-	CandidateHash       []byte `cbor:"candidate_hash"`
-	ExpectedCurrentHash []byte `cbor:"expected_current_hash"`
-	DesiredRevision     uint64 `cbor:"desired_revision"`
-}
-
 type cborCompleteConfigPlan struct {
 	CandidateHash []byte `cbor:"candidate_hash"`
 }
@@ -169,27 +158,6 @@ func hashV2(envelope *agentv1.CommandEnvelope, normalizedConfig bool) ([sha256.S
 	case *agentv1.CommandEnvelope_ServiceReload:
 		payloadKind = 105
 		payloadValue = cborEmpty{}
-	case *agentv1.CommandEnvelope_ConfigPlan:
-		payloadKind = 103
-		p := envelope.GetConfigPlan()
-		if len(p.GetCandidateHash()) != sha256.Size {
-			return [sha256.Size]byte{}, errors.New("candidate hash is malformed")
-		}
-		payloadValue = cborConfigPlan{
-			CandidateHash:    p.GetCandidateHash(),
-			ExpectedRevision: p.GetExpectedRevision(),
-		}
-	case *agentv1.CommandEnvelope_ConfigApply:
-		payloadKind = 104
-		p := envelope.GetConfigApply()
-		if len(p.GetCandidateHash()) != sha256.Size || len(p.GetExpectedCurrentHash()) != sha256.Size || p.GetDesiredRevision() == 0 {
-			return [sha256.Size]byte{}, errors.New("configuration apply identity is malformed")
-		}
-		payloadValue = cborConfigApply{
-			CandidateHash:       p.GetCandidateHash(),
-			ExpectedCurrentHash: p.GetExpectedCurrentHash(),
-			DesiredRevision:     p.GetDesiredRevision(),
-		}
 	case *agentv1.CommandEnvelope_CompleteConfigPlan:
 		p := envelope.GetCompleteConfigPlan()
 		if !normalizedConfig {

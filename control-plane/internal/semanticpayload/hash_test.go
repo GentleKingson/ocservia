@@ -13,12 +13,13 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 )
 
-func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
+func TestHashV2MatchesSharedUserDisableVector(t *testing.T) {
 	type vector struct {
 		NodeIDHex             string `json:"node_id_hex"`
 		AuthorizationRevision uint64 `json:"authorization_revision"`
-		CandidateHashHex      string `json:"candidate_hash_hex"`
-		ConfigExpected        uint64 `json:"config_expected_revision"`
+		PayloadKind           uint32 `json:"payload_kind"`
+		Username              string `json:"username"`
+		DesiredRevision       uint64 `json:"desired_revision"`
 		ExpectedSHA256        string `json:"expected_sha256"`
 	}
 	var fixture struct {
@@ -27,16 +28,17 @@ func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "semantic-payload-hash-v2.json"))
 	testutil.NoError(t, err)
 	testutil.NoError(t, json.Unmarshal(raw, &fixture))
+	if fixture.Vector.PayloadKind != 102 {
+		t.Fatalf("fixture payload kind = %d", fixture.Vector.PayloadKind)
+	}
 	nodeID, err := hex.DecodeString(fixture.Vector.NodeIDHex)
-	testutil.NoError(t, err)
-	candidateHash, err := hex.DecodeString(fixture.Vector.CandidateHashHex)
 	testutil.NoError(t, err)
 	envelope := &agentv1.CommandEnvelope{
 		NodeId:           nodeID,
 		ExpectedRevision: fixture.Vector.AuthorizationRevision,
-		Payload: &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{
-			CandidateHash:    candidateHash,
-			ExpectedRevision: fixture.Vector.ConfigExpected,
+		Payload: &agentv1.CommandEnvelope_UserDisable{UserDisable: &agentv1.UserDisable{
+			Username:        fixture.Vector.Username,
+			DesiredRevision: fixture.Vector.DesiredRevision,
 		}},
 	}
 	digest, err := HashV2(envelope)
@@ -44,12 +46,20 @@ func TestHashV2MatchesSharedConfigPlanVector(t *testing.T) {
 	if hex.EncodeToString(digest[:]) != fixture.Vector.ExpectedSHA256 {
 		t.Fatalf("v2 digest=%x want=%s", digest, fixture.Vector.ExpectedSHA256)
 	}
-	changed := *envelope.GetConfigPlan()
-	changed.ExpectedRevision++
-	envelope.Payload = &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &changed}
+	changed := *envelope.GetUserDisable()
+	changed.DesiredRevision++
+	envelope.Payload = &agentv1.CommandEnvelope_UserDisable{UserDisable: &changed}
 	changedDigest, err := HashV2(envelope)
 	if err != nil || changedDigest == digest {
-		t.Fatalf("ConfigPlan revision was not bound: digest=%x err=%v", changedDigest, err)
+		t.Fatalf("UserDisable revision was not bound: digest=%x err=%v", changedDigest, err)
+	}
+	for _, legacy := range []*agentv1.CommandEnvelope{
+		{NodeId: nodeID, ExpectedRevision: 1, Payload: &agentv1.CommandEnvelope_ConfigPlan{ConfigPlan: &agentv1.ConfigPlan{CandidateHash: make([]byte, 32)}}},
+		{NodeId: nodeID, ExpectedRevision: 1, Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{CandidateHash: make([]byte, 32), ExpectedCurrentHash: make([]byte, 32), DesiredRevision: 1}}},
+	} {
+		if _, err := HashV2(legacy); err == nil {
+			t.Fatal("legacy config payload was hashed")
+		}
 	}
 }
 

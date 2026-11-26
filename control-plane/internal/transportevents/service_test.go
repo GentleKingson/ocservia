@@ -126,8 +126,8 @@ func TestEventNamesAcceptPathChanged(t *testing.T) {
 func TestNormalizeConfigApplyResultRejectsUnprovedOutcomes(t *testing.T) {
 	candidate := bytesOf(0x11)
 	previous := bytesOf(0x22)
-	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{
-		CandidateHash: candidate, ExpectedCurrentHash: previous, DesiredRevision: 7,
+	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{
+		CandidateHash: candidate, MaterializedHash: candidate, ExpectedCurrentHash: previous, DesiredRevision: 7,
 	}}}
 	valid := &agentv1.ConfigApplyResult{CandidateHash: candidate, PreviousHash: previous, ObservedHash: candidate, AppliedRevision: 7, Healthy: true}
 	validBytes, err := proto.Marshal(valid)
@@ -161,8 +161,8 @@ func TestNormalizeConfigApplyResultRejectsUnprovedOutcomes(t *testing.T) {
 func TestNormalizeConfigApplyResultSupportsIdempotentTerminalStates(t *testing.T) {
 	candidate := bytesOf(0x11)
 	previous := bytesOf(0x22)
-	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_ConfigApply{ConfigApply: &agentv1.ConfigApply{
-		CandidateHash: candidate, ExpectedCurrentHash: previous, DesiredRevision: 7,
+	envelope := &agentv1.CommandEnvelope{Payload: &agentv1.CommandEnvelope_CompleteConfigApply{CompleteConfigApply: &agentv1.CompleteConfigApply{
+		CandidateHash: candidate, MaterializedHash: candidate, ExpectedCurrentHash: previous, DesiredRevision: 7,
 	}}}
 	cases := []struct {
 		want   string

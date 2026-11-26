@@ -1444,14 +1444,13 @@ fn canonical_semantic_hash_v2_matches_shared_config_plan_vector() {
         serde_json::from_str(&std::fs::read_to_string(&path).expect("read v2 fixture"))
             .expect("parse");
     let v = &fixture["vector"];
+    assert_eq!(v["payload_kind"].as_u64(), Some(102));
     let mut env = CommandEnvelope {
         node_id: hex::decode(v["node_id_hex"].as_str().expect("node")).expect("hex"),
         expected_revision: v["authorization_revision"].as_u64().expect("auth rev"),
-        payload: Some(command_envelope::Payload::ConfigPlan(ConfigPlan {
-            candidate_hash: hex::decode(v["candidate_hash_hex"].as_str().expect("cand"))
-                .expect("hex"),
-            expected_revision: v["config_expected_revision"].as_u64().expect("cfg rev"),
-            ..ConfigPlan::default()
+        payload: Some(command_envelope::Payload::UserDisable(UserDisable {
+            username: v["username"].as_str().expect("username").into(),
+            desired_revision: v["desired_revision"].as_u64().expect("rev"),
         })),
         ..CommandEnvelope::default()
     };
@@ -1460,11 +1459,19 @@ fn canonical_semantic_hash_v2_matches_shared_config_plan_vector() {
         hex::encode(digest),
         v["expected_sha256"].as_str().expect("sha256")
     );
-    let Some(command_envelope::Payload::ConfigPlan(p)) = env.payload.as_mut() else {
-        panic!("ConfigPlan");
+    let Some(command_envelope::Payload::UserDisable(p)) = env.payload.as_mut() else {
+        panic!("UserDisable");
     };
-    p.expected_revision += 1;
+    p.desired_revision += 1;
     assert_ne!(semantic_payload_hash_v2(&env).expect("changed"), digest);
+
+    let legacy_plan = CommandEnvelope {
+        node_id: env.node_id,
+        expected_revision: 1,
+        payload: Some(command_envelope::Payload::ConfigPlan(ConfigPlan::default())),
+        ..CommandEnvelope::default()
+    };
+    assert!(semantic_payload_hash_v2(&legacy_plan).is_err());
 }
 
 #[test]

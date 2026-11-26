@@ -36,8 +36,6 @@ use crate::keyring::verification_key_metadata_allowed;
 
 /// The signed command revision with immutable execution deadlines.
 pub const COMMAND_PROTOCOL_VERSION: &str = "1.2";
-/// Legacy recovery grants may have lost their original execution deadline.
-pub const LEGACY_COMMAND_PROTOCOL_VERSION: &str = "1.1";
 const DOMAIN_SEPARATOR: &str = "ocservia/controller-command/cbor.v1\0";
 const SESSION_GRANT_DOMAIN_SEPARATOR: &str = "ocservia/controller-session-grant/cbor.v1\0";
 const ARTIFACT_GRANT_DOMAIN_SEPARATOR: &str = "ocservia/artifact-grant/cbor.v1\0";
@@ -421,9 +419,7 @@ pub fn claims_from_envelope_v1(
     if proof.version != 1 {
         return Err(AuthorizationError::UnsupportedVersion);
     }
-    if envelope.protocol_version != COMMAND_PROTOCOL_VERSION
-        && envelope.protocol_version != LEGACY_COMMAND_PROTOCOL_VERSION
-    {
+    if envelope.protocol_version != COMMAND_PROTOCOL_VERSION {
         return Err(AuthorizationError::ClaimsInvalid(
             "command_protocol_version_unsupported",
         ));
@@ -572,12 +568,6 @@ fn payload_authorization(
         }
         Some(command_envelope::Payload::UserDisable(_)) => {
             (102, "user.disable", "ocserv.users.write")
-        }
-        Some(command_envelope::Payload::ConfigPlan(_)) => {
-            (103, "config.plan", "ocserv.config.plan")
-        }
-        Some(command_envelope::Payload::ConfigApply(_)) => {
-            (104, "config.apply", "ocserv.config.apply")
         }
         Some(command_envelope::Payload::CompleteConfigPlan(_)) => (
             129,

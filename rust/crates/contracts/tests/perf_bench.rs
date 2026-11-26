@@ -12,7 +12,7 @@ use prost::Message;
 #[ignore = "run explicitly via scripts/perf-bench.sh"]
 fn perf_strict_wire_validate_certificate_p12() {
     let envelope = CommandEnvelope {
-        protocol_version: "1.1".to_owned(),
+        protocol_version: "1.2".to_owned(),
         command_id: vec![1; 16],
         operation_id: vec![2; 16],
         node_id: vec![3; 16],

@@ -355,7 +355,7 @@ mod tests {
         {
             let bytes = decode_hex(hex);
             let command = decode_strict_command_envelope(&bytes).expect("Go command accepted");
-            assert_eq!(command.protocol_version, "1.1");
+            assert_eq!(command.protocol_version, "1.2");
             let secret = match (name.as_str(), command.payload.expect("payload")) {
                 ("user_create", Payload::UserCreate(value)) => {
                     assert_eq!(value.username, "alice");
@@ -639,7 +639,7 @@ mod tests {
             nanos: 456,
         });
         CommandEnvelope {
-            protocol_version: "1.1".into(),
+            protocol_version: "1.2".into(),
             message_id: b"message".to_vec(),
             command_id: b"command".to_vec(),
             idempotency_key: b"idempotency".to_vec(),
@@ -685,7 +685,7 @@ mod tests {
                 full_envelope(payload)
             } else {
                 CommandEnvelope {
-                    protocol_version: "1.1".into(),
+                    protocol_version: "1.2".into(),
                     payload: Some(payload),
                     ..CommandEnvelope::default()
                 }

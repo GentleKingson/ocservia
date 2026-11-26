@@ -169,7 +169,7 @@ func markRecoveryProjection(ctx context.Context, store operationstore.Store, ope
 			return nil
 		}
 	}
-	projection := operationstore.RecoveryProjection{OperationID: operationID, ConfigApply: envelope.GetConfigApply() != nil || envelope.GetCompleteConfigApply() != nil, Artifact: envelope.GetCertificateP12() != nil, At: at}
+	projection := operationstore.RecoveryProjection{OperationID: operationID, ConfigApply: envelope.GetCompleteConfigApply() != nil, Artifact: envelope.GetCertificateP12() != nil, At: at}
 	var certificateID []byte
 	if csr := envelope.GetCertificateCsr(); csr != nil {
 		certificateID = csr.GetCertificateId()

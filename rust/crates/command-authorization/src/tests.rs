@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePublicKey as _, spki::der::pem::LineEnding};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, CommandAuthorizationProof, ConfigApply, SyntheticEcho, command_envelope,
-    complete_config_directive,
+    AgentUpgrade, CommandAuthorizationProof, CompleteConfigApply, ConfigApply, ConfigPlan,
+    SyntheticEcho, command_envelope, complete_config_directive,
 };
 use prost_types::Timestamp;
 use serde_json::Value;
@@ -146,7 +146,7 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
             s(v, "name")
         );
         let payload = match c.payload_kind {
-            104 => command_envelope::Payload::ConfigApply(ConfigApply::default()),
+            130 => command_envelope::Payload::CompleteConfigApply(CompleteConfigApply::default()),
             108 => command_envelope::Payload::SyntheticEcho(SyntheticEcho::default()),
             k => panic!("unsupported payload kind {k}"),
         };
@@ -175,6 +175,31 @@ fn rust_verifies_go_command_session_and_artifact_vectors() {
         };
         kr.verify(&env)
             .unwrap_or_else(|e| panic!("{} Go sig: {e}", s(v, "name")));
+        if c.payload_kind == 108 {
+            let mut legacy_proto = env.clone();
+            legacy_proto.protocol_version = "1.1".into();
+            assert_eq!(
+                claims_from_envelope_v1(&legacy_proto),
+                Err(AuthorizationError::ClaimsInvalid(
+                    "command_protocol_version_unsupported"
+                ))
+            );
+            for legacy_payload in [
+                command_envelope::Payload::ConfigPlan(ConfigPlan::default()),
+                command_envelope::Payload::ConfigApply(ConfigApply::default()),
+            ] {
+                let mut unsupported = env.clone();
+                unsupported.payload = Some(legacy_payload);
+                assert_eq!(
+                    claims_from_envelope_v1(&unsupported),
+                    Err(AuthorizationError::PayloadUnsupported)
+                );
+                assert_eq!(
+                    semantic_payload_hash_v2(&unsupported),
+                    Err(AuthorizationError::PayloadUnsupported)
+                );
+            }
+        }
     }
 
     // Session grant v1 vector (including session_epoch).

@@ -12,7 +12,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 #[ignore = "run explicitly via scripts/perf-bench.sh"]
 fn perf_semantic_payload_hash_and_keyring_clone() {
     let envelope = CommandEnvelope {
-        protocol_version: "1.1".to_owned(),
+        protocol_version: "1.2".to_owned(),
         command_id: vec![1; 16],
         operation_id: vec![2; 16],
         node_id: vec![3; 16],
