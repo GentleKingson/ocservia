@@ -576,9 +576,7 @@ fn startup_key_enrollment_and_token_requirements() {
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
     );
-    let identity =
-        ocservia_agent_protocol::identity::Identity::provision(&identity_dir, controller)
-            .expect("reload");
+    let identity = crate::identity::Identity::provision(&identity_dir, controller).expect("reload");
     assert_eq!(ep_hex, hex::encode(identity.endpoint_id().as_bytes()));
     let mut req = EnrollRequest {
         token: "a".repeat(43),
@@ -599,7 +597,7 @@ fn startup_key_enrollment_and_token_requirements() {
     };
     identity.authorize_enrollment(&mut req).expect("authorize");
     let canonical =
-        ocservia_agent_protocol::identity::enrollment_canonical_v1(&req).expect("canonical");
+        ocservia_command_authorization::enrollment_canonical_v1(&req).expect("canonical");
     let sig = Signature::from_slice(&req.proof.expect("proof").signature).expect("sig");
     VerifyingKey::from_bytes(identity.endpoint_id().as_bytes())
         .expect("vk")

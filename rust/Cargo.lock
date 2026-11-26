@@ -2340,17 +2340,10 @@ dependencies = [
 name = "ocservia-agent-protocol"
 version = "0.1.0"
 dependencies = [
- "hex",
- "iroh",
- "ocservia-canonical-cbor",
  "ocservia-contracts",
  "prost",
  "prost-types",
- "rustix",
- "serde",
- "sha2 0.10.9",
  "tokio",
- "zeroize",
 ]
 
 [[package]]
@@ -2512,7 +2505,6 @@ dependencies = [
  "hyper-util",
  "iroh",
  "iroh-relay",
- "ocservia-agent-protocol",
  "ocservia-command-authorization",
  "ocservia-contracts",
  "ocservia-observability",
