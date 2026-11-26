@@ -2,9 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "identity")]
-pub mod identity;
-
 use std::io;
 
 #[cfg(test)]

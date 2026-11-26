@@ -30,7 +30,6 @@ rustls-pki-types.workspace = true
 ed25519-dalek.workspace = true
 iroh = { workspace = true, features = ["test-utils"] }
 iroh-relay = { workspace = true, features = ["test-utils"] }
-ocservia-agent-protocol = { version = "=0.1.0", path = "../agent-protocol", features = ["identity"] }
 ocservia-privd-attestation = { version = "=0.1.0", path = "../privd-attestation" }
 ocservia-test-support = { version = "=0.1.0", path = "../test-support" }
 
