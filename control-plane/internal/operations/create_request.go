@@ -70,8 +70,7 @@ type AgentUpgradePayload struct {
 	Architecture  string
 	// RolloutID binds generated upgrades to their durable fleet rollout.
 	// Dispatch validates the stored intent independently of the browser session.
-	RolloutID         uuid.UUID
-	upgradeCapability string
+	RolloutID uuid.UUID
 }
 
 func (SyntheticNoopPayload) kind() Kind     { return SyntheticNoop }
@@ -188,7 +187,7 @@ func sessionTarget(p Payload) (sessionID, bootID string, ok bool) {
 }
 
 func requestCapability(r CreateRequest) string {
-	switch p := r.Payload.(type) {
+	switch r.Payload.(type) {
 	case SessionDisconnectPayload:
 		return "ocserv.session.disconnect"
 	case SessionTerminatePayload:
@@ -206,9 +205,6 @@ func requestCapability(r CreateRequest) string {
 	case CertificateRevokePayload:
 		return "ocserv.certificate.revoke"
 	case AgentUpgradePayload:
-		if p.upgradeCapability != "" {
-			return p.upgradeCapability
-		}
 		return "ocserv.agent.upgrade.v2"
 	default:
 		return ""
