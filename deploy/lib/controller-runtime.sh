@@ -16,9 +16,13 @@ runtime_safe_path() {
   return 1
 }
 
+runtime_valid_tag() {
+  [[ "$1" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]]
+}
+
 runtime_identity() {
   local root="$1" tag="$2" commit="${3:-}" actual_tag actual_commit extra
-  [[ "${tag}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]] || fail "exact runtime release required"
+  runtime_valid_tag "${tag}" || fail "exact runtime release required"
   [[ -d "${root}" && ! -L "${root}" ]] || fail "runtime must be a regular directory: ${root}"
   [[ -f "${root}/RELEASE" && ! -L "${root}/RELEASE" && -f "${root}/SHA256SUMS" && ! -L "${root}/SHA256SUMS" ]] ||
     fail "runtime release metadata is missing"
@@ -44,7 +48,7 @@ runtime_validate() (
 
 runtime_fetch() (
   local target="$1" tag="$2" commit="${3:-}" temporary archive base hash name entry
-  [[ "${tag}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][1-9][0-9]*)?$ ]] || fail "exact runtime release required"
+  runtime_valid_tag "${tag}" || fail "exact runtime release required"
   if [[ -e "${target}" || -L "${target}" ]]; then
     runtime_validate "${target}" "${tag}" "${commit}"
     return

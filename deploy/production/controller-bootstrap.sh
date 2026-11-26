@@ -438,7 +438,7 @@ if [[ "${QUICK}" == true ]]; then
 elif ((${#QUICK_ARGS[@]} > 0)); then
   usage
 fi
-[[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[.][1-9][0-9]*)?$ ]] ||
+runtime_valid_tag "${VERSION}" ||
   fail "unsupported version '${VERSION}': an exact vX.Y.Z or vX.Y.Z-rc.N release tag is required (latest, branches, commits, and other pre-releases are not accepted)"
 
 load_config
