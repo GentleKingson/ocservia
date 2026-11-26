@@ -147,7 +147,7 @@ quick_install() {
     [[ "${variable}" != OCSERV_* ]] || unset "${variable}"
   done < <(compgen -e)
 
-  config_keys=(OCSERV_DEPLOYMENT_MODE OCSERV_DATABASE_BACKEND OCSERV_DATABASE_DEPLOYMENT OCSERV_TLS_MODE
+  config_keys=(OCSERV_DEPLOYMENT_MODE OCSERV_DATABASE_DEPLOYMENT OCSERV_TLS_MODE
     OCSERV_ACME_EMAIL OCSERV_ACME_DIRECTORY_URL OCSERV_ACME_CA_FILE OCSERV_PUBLIC_HOST OCSERV_RELAY_PUBLIC_HOST
     OCSERV_LOCAL_AUTH_ENABLED OCSERV_SECRET_DIR OCSERV_RELAY_SECRET_DIR OCSERV_SIGNER_SECRET_DIR
     OCSERV_SIGNER_STATE_DIR OCSERV_BACKUP_DIR OCSERV_AUDIT_EVENT_KEY_ID OCSERV_CONTROLLER_ENDPOINT_ID)
@@ -286,9 +286,9 @@ sudo_args=()
 if [[ -z "${OCSERV_INSTALL_ENV_RESOLVED:-}" ]]; then
   install_env_load "${CONFIG_FILE}" "${CONTROLLER_INSTALL_ENV_NAMES[@]}"
 fi
-case "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
-  postgres:bundled|postgres:external) ;;
-  *) fail 'unsupported database configuration; only OCSERV_DATABASE_BACKEND=postgres with OCSERV_DATABASE_DEPLOYMENT=bundled or external is supported' ;;
+case "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" in
+  bundled|external) ;;
+  *) fail 'unsupported database configuration; OCSERV_DATABASE_DEPLOYMENT must be bundled or external' ;;
 esac
 STATE_ROOT="${OCSERV_CONTROLLER_STATE_ROOT:-${OCSERV_CONTROLLER_STATE_DIR:-/var/lib/ocservia-controller}}"
 if [[ "${OCSERV_DEPLOYMENT_MODE:-standalone}" == integrated && "${ROOT_LIFECYCLE}" != true ]] && (( EUID != 0 )); then

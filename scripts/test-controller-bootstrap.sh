@@ -96,7 +96,7 @@ DEPENDENCIES
 cat >"${fixture}/payload/deploy/production/install.sh" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"${TEST_ROOT}/handoff"
-printf '%s\n' "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_DATABASE_BACKEND:-}" >"${TEST_ROOT}/environment"
+printf '%s\n' "${OCSERV_PUBLIC_HOST:-}" "${OCSERV_DATABASE_DEPLOYMENT:-}" >"${TEST_ROOT}/environment"
 for name in OCSERV_LOCAL_AUTH_ENABLED OCSERV_PUBLIC_ORIGIN OCSERV_SESSION_TTL; do
   printf '%s=%s\n' "${name}" "${!name-<unset>}"
 done >"${TEST_ROOT}/auth-environment"
@@ -151,7 +151,7 @@ grep -Fq 'has no IPv4' "${fixture}/output"
 if PORT_BUSY=true run "${quick[@]}" >"${fixture}/output" 2>&1; then exit 1; fi
 grep -Fq 'already in use' "${fixture}/output"
 [[ ! -e "${fixture}/quick-releases" ]]
-if OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external OCSERV_DATABASE_BACKUP_HOST=db.example.test \
+if OCSERV_DATABASE_DEPLOYMENT=sqlite OCSERV_DATABASE_BACKUP_HOST=db.example.test \
 run --non-interactive >"${fixture}/output" 2>&1; then exit 1; fi
 grep -Fq 'unsupported database topology' "${fixture}/output"
 [[ ! -e "${fixture}/quick-releases" ]]
