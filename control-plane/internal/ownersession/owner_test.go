@@ -61,6 +61,9 @@ func TestReadSessionInventoryCoversFiveHundredNodesWithinDeadline(t *testing.T) 
 
 	var active atomic.Int64
 	var peak atomic.Int64
+	var arrived atomic.Int64
+	twoConcurrent := make(chan struct{})
+	var closeOnce sync.Once
 	var visitedMu sync.Mutex
 	visited := make([]int, nodeCount)
 	readConnection := func(ctx context.Context, nodeID []byte) (*transportv1.NodeConnection, error) {
@@ -79,14 +82,18 @@ func TestReadSessionInventoryCoversFiveHundredNodesWithinDeadline(t *testing.T) 
 				break
 			}
 		}
+		if arrived.Add(1) >= 2 {
+			closeOnce.Do(func() { close(twoConcurrent) })
+		} else {
+			select {
+			case <-twoConcurrent:
+			case <-ctx.Done():
+			}
+		}
 		visitedMu.Lock()
 		visited[index]++
 		visitedMu.Unlock()
-		timer := time.NewTimer(10 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return &transportv1.NodeConnection{

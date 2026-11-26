@@ -20,6 +20,7 @@ import (
 )
 
 func TestCreateInstallationTokenValidatesAuthorityMetadata(t *testing.T) {
+	t.Parallel()
 	service := installationValidationService(t)
 	identity, session := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	valid := BootstrapTokenSpec{

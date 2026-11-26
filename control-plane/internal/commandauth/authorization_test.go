@@ -91,6 +91,7 @@ type artifactGrantGolden struct {
 }
 
 func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
+	t.Parallel()
 	document := loadGoldenDocument(t)
 	if document.Version != 1 || len(document.Vectors) < 2 {
 		t.Fatalf("invalid command authorization fixture version=%d vectors=%d", document.Version, len(document.Vectors))
@@ -123,6 +124,7 @@ func TestCanonicalV1AndGoSignaturesMatchSharedGoldenVectors(t *testing.T) {
 }
 
 func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "session-grant-v1.json"))
 	testutil.NoError(t, err)
 	var vector sessionGrantGolden
@@ -154,6 +156,7 @@ func TestSessionGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
 }
 
 func TestArtifactGrantV1CanonicalAndGoSignatureMatchSharedGolden(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "artifact-grant-v1.json"))
 	testutil.NoError(t, err)
 	var vector artifactGrantGolden
