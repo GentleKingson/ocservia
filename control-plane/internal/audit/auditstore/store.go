@@ -35,7 +35,6 @@ type EventRow struct {
 	RequestID, TraceID           string
 	Result, Reason               string
 	SessionID, NodeID, CommandID *uuid.UUID
-	ApprovalID                   *uuid.UUID
 	BeforeSummary, AfterSummary  []byte
 	ErrorType                    string
 	PreviousHash, EventHash      []byte

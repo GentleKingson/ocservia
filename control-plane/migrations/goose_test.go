@@ -25,8 +25,8 @@ func TestEmbeddedGooseMigrationsParseCleanly(t *testing.T) {
 		t.Fatalf("parse embedded goose migrations: %v", err)
 	}
 	sources := provider.ListSources()
-	if len(sources) == 0 {
-		t.Fatal("expected at least one embedded migration")
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 embedded migration, got %d", len(sources))
 	}
 	if sources[0].Version != 1 {
 		t.Fatalf("first migration version = %d, want 1", sources[0].Version)

@@ -20,7 +20,7 @@ type telemetryStore struct{ tx *transaction }
 
 func (t *transaction) TelemetryStore() telemetrystore.Store { return telemetryStore{t} }
 
-const telemetryNodeSelect = `SELECT n.id,n.name,n.version,n.status,f.active,o.observed_at,o.last_heartbeat_at,COALESCE(o.boot_id,''),COALESCE(o.agent_instance_id::text,''),COALESCE(o.agent_version,''),COALESCE(o.ocserv_version,''),COALESCE(o.os_release,''),COALESCE(o.architecture,''),o.ocserv,o.system,o.path,COALESCE(o.dropped_security,0),COALESCE(o.dropped_health,0),COALESCE(o.dropped_aggregate,0),COALESCE(o.dropped_raw,0),(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id),COALESCE(c.revision,0),(EXISTS(SELECT 1 FROM node_capabilities nc WHERE nc.node_id=n.id AND nc.capability IN ('ocserv.agent.upgrade.v1','ocserv.agent.upgrade.v2') AND nc.approved=true) AND NOT EXISTS(SELECT 1 FROM agent_upgrade_operations auo WHERE auo.node_id=n.id AND auo.completed_at IS NULL AND auo.state IN ('queued','accepted','running','unknown'))) FROM nodes n LEFT JOIN connection_owner_fencing f ON f.node_id=uuid_send(n.id) LEFT JOIN node_observed_snapshots o ON o.node_id=n.id LEFT JOIN node_config_state c ON c.node_id=n.id`
+const telemetryNodeSelect = `SELECT n.id,n.name,n.version,n.status,f.active,o.observed_at,o.last_heartbeat_at,COALESCE(o.boot_id,''),COALESCE(o.agent_instance_id::text,''),COALESCE(o.agent_version,''),COALESCE(o.ocserv_version,''),COALESCE(o.os_release,''),COALESCE(o.architecture,''),o.ocserv,o.system,o.path,COALESCE(o.dropped_security,0),COALESCE(o.dropped_health,0),COALESCE(o.dropped_aggregate,0),COALESCE(o.dropped_raw,0),(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id),COALESCE(c.revision,0),(EXISTS(SELECT 1 FROM node_capabilities nc WHERE nc.node_id=n.id AND nc.capability='ocserv.agent.upgrade.v2' AND nc.approved=true) AND NOT EXISTS(SELECT 1 FROM agent_upgrade_operations auo WHERE auo.node_id=n.id AND auo.completed_at IS NULL AND auo.state IN ('queued','accepted','running','unknown'))) FROM nodes n LEFT JOIN connection_owner_fencing f ON f.node_id=uuid_send(n.id) LEFT JOIN node_observed_snapshots o ON o.node_id=n.id LEFT JOIN node_config_state c ON c.node_id=n.id`
 
 func scanTelemetryNode(row Row) (telemetrystore.Node, error) {
 	var n telemetrystore.Node
@@ -296,11 +296,7 @@ func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, r
 	if since.IsZero() {
 		return nil, database.ErrConstraint
 	}
-	query := `SELECT sampled_at,metric,1,value,value,value FROM (
-		SELECT sampled_at,metric,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at>=$3
-		UNION ALL
-		SELECT sampled_at,metric,value FROM telemetry_samples_default WHERE node_id=$1 AND metric=$2 AND sampled_at>=$3
-	) samples ORDER BY sampled_at LIMIT 2000`
+	query := `SELECT sampled_at,metric,1,value,value,value FROM telemetry_samples WHERE node_id=$1 AND metric=$2 AND sampled_at>=$3 ORDER BY sampled_at LIMIT 2000`
 	switch resolution {
 	case "raw":
 	case "5m", "1h":
@@ -356,10 +352,6 @@ func (s telemetryStore) refreshRollups(ctx context.Context, keys []byte) error {
 			SELECT value FROM telemetry_samples
 			WHERE node_id=d.node_id AND metric=d.metric
 			AND sampled_at BETWEEN d.bucket_at AND d.bucket_at+interval '5 minutes'-interval '1 microsecond'
-			UNION ALL
-			SELECT value FROM telemetry_samples_default
-			WHERE node_id=d.node_id AND metric=d.metric
-			AND sampled_at BETWEEN d.bucket_at AND d.bucket_at+interval '5 minutes'-interval '1 microsecond'
 		) s GROUP BY 1,2,3
 		ON CONFLICT(node_id,metric,bucket_at) DO UPDATE SET sample_count=EXCLUDED.sample_count,min_value=EXCLUDED.min_value,max_value=EXCLUDED.max_value,avg_value=EXCLUDED.avg_value
 		RETURNING node_id,metric,bucket_at,sample_count,min_value,max_value,avg_value
@@ -393,8 +385,6 @@ func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 		AND has_function_privilege(current_user,'prune_vpn_history()','EXECUTE')
 		AND has_function_privilege(current_user,'telemetry_prune_rollups(timestamptz)','EXECUTE')
 		AND has_function_privilege(current_user,'telemetry_ensure_upcoming_partitions()','EXECUTE')
-		AND has_table_privilege(current_user,'telemetry_samples_default','SELECT')
-		AND NOT has_table_privilege(current_user,'telemetry_samples_default','INSERT,UPDATE,DELETE,TRUNCATE')
 		AND NOT pg_has_role(current_user,(SELECT relowner FROM pg_class WHERE oid='public.telemetry_samples'::regclass),'USAGE')
 		AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb
 		FROM pg_catalog.pg_roles WHERE rolname=current_user`).Scan(&safe)

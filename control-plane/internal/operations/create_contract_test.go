@@ -62,11 +62,6 @@ func TestCreateContractFingerprints(t *testing.T) {
 		CreateRequest{Payload: ConfigPlanPayload{Candidate: normalized, OcservVersion: "1.2.3", PlanMetadata: &ConfigPlanMetadata{TemplateName: "complete", CandidateRedacted: "config"}}},
 		CreateRequest{Payload: ConfigApplyPayload{Candidate: normalized, ExpectedCurrentHash: bytes.Repeat([]byte{2}, 32), DesiredRevision: 4, MaterializedHash: bytes.Repeat([]byte{3}, 32), PlanExpiresAt: timestamppb.New(now.Add(time.Minute)), ApplyMetadata: &ConfigApplyMetadata{PlanID: id}}},
 	)
-	legacyUpgrade := cases[9]
-	legacyPayload := legacyUpgrade.Payload.(AgentUpgradePayload)
-	legacyPayload.upgradeCapability = "ocserv.agent.upgrade.v1"
-	legacyUpgrade.Payload = legacyPayload
-	cases = append(cases, legacyUpgrade)
 	expected := map[string]string{
 		"noop":                  "synthetic_noop/573987eed37239bc16f39149f4198cf0cacc0a9ba89a3621b4ab54ce9d06314e/c7b6c8496c488b80c85be1d07855eb8c1cea2ba5de0c6eec0609d6d1b53a31c4245668cd51c4598eb55b4b75b9e0d10ea5c0eb847ed9dd6aca56b1e82c2a7806",
 		"echo":                  "synthetic_echo/9a20c470875e96c14a983fce6e74806f9c23bd1176331e2e2c91fc5cafee61dc/d3942a346f2b3f8362b856025ea061ec2795b0cb225b6fad816ce51ddd26a20ea58c10fee5439fc15df7d44aacc371c8fe7cd72b0c8726c2afbd43dadc2b9806",
@@ -80,7 +75,6 @@ func TestCreateContractFingerprints(t *testing.T) {
 		"agent_upgrade":         "agent_upgrade/0ebc35874ec113db09684e3a6e6984fb4bd19625bc31d5b1172e70e3cda6b7fc/3061c87bac685a45a0658611d33a0900d4b24463e6da486dc5d7ee8264eb04769683ab5a537d5519feeb5971e6bbe587e738a2c54a6f770bc811aba23a52d401",
 		"complete_config_plan":  "config_plan/57ded24c4210f7060e5bd79cad781fabc9769466048db6d41340c4171f77922f/e50842778e032fdd4129726a878fa1ca1c43e88ee5f7efa9d4bb0b370b533c6703721185fb50ac2acb126900b921c7974b2ca2185e9fd9fee288e4ab6ed2d509",
 		"complete_config_apply": "config_apply/549a11ee7f2daef53be87697baeedae48356db76ef4c560d4fbd357172cb5819/cf398e0ca6ff07bd69f3c572e9538003649d139dace3880d85cef5da4bc15a5e495db0d25ba69f59763cf2076e056754613d8aa54ef5ec44f1fdaf2edd29170c",
-		"legacy_agent_upgrade":  "agent_upgrade/0ebc35874ec113db09684e3a6e6984fb4bd19625bc31d5b1172e70e3cda6b7fc/2170720b79775f28f7c91d454956373bbd7cada99b8e6efd30a936ece7ce7b73162a3ae20f047502c30591e587b8ef879d14bc0f677ca65dea9f226c4533d503",
 	}
 	for _, request := range cases {
 		request.NodeID, request.ExpectedVersion, request.TTL = id, 3, time.Minute
@@ -119,13 +113,9 @@ func TestCreateContractFingerprints(t *testing.T) {
 		}
 		got := fmt.Sprintf("%s/%x/%x", payloadType, envelope.SemanticPayloadSha256, envelope.Authorization.Signature)
 		key := string(request.Payload.kind())
-		switch p := request.Payload.(type) {
+		switch request.Payload.(type) {
 		case ConfigPlanPayload, ConfigApplyPayload:
 			key = "complete_" + key
-		case AgentUpgradePayload:
-			if p.upgradeCapability != "" {
-				key = "legacy_" + key
-			}
 		}
 
 		want := expected[key]
