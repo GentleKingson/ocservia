@@ -142,7 +142,7 @@ async function refresh(): Promise<void> {
     if (!request.current()) return;
     const value = await getAgentRollout(rolloutId, request.signal);
     if (!request.current()) return;
-    if (value.id !== rolloutId || value.workspaceId !== workspaceId)
+    if (value.id !== rolloutId || value.workspace_id !== workspaceId)
       throw new Error("rollout outside the requested workspace");
     rollout.value = value;
     unavailable.value = false;
@@ -175,7 +175,7 @@ async function resume(): Promise<void> {
   try {
     const result = await resumeAgentRollout(value.id);
     if (ticket !== sequence) return;
-    if (result.id !== value.id || result.workspaceId !== value.workspaceId)
+    if (result.id !== value.id || result.workspace_id !== value.workspace_id)
       throw new Error(t("rolloutResumeUnconfirmed"));
     rollout.value = result;
     if (!activeStates.has(result.state)) foregroundRefresh.stop();
@@ -257,12 +257,12 @@ onBeforeUnmount(() => {
               {{ $t("targetVersion") }}
             </dt>
             <dd class="m-0 break-all">
-              <code>{{ rollout.targetVersion }}</code>
+              <code>{{ rollout.target_version }}</code>
             </dd>
           </div>
           <div class="grid min-w-0 gap-1">
             <dt class="text-muted-foreground text-xs">{{ $t("batchSize") }}</dt>
-            <dd class="m-0">{{ rollout.batchSize }}</dd>
+            <dd class="m-0">{{ rollout.batch_size }}</dd>
           </div>
           <div class="grid min-w-0 gap-1">
             <dt class="text-muted-foreground text-xs">{{ $t("canary") }}</dt>
@@ -306,9 +306,9 @@ onBeforeUnmount(() => {
         <div class="grid min-w-0 gap-1 text-sm">
           <strong>{{ $t("rolloutState_paused") }}</strong>
           <span>{{ $t("pausedNotice") }}</span>
-          <small v-if="rollout.pauseCode"
+          <small v-if="rollout.pause_code"
             >{{ $t("pauseCode") }}:
-            <code class="break-all">{{ rollout.pauseCode }}</code></small
+            <code class="break-all">{{ rollout.pause_code }}</code></small
           >
         </div>
         <Button
@@ -353,29 +353,29 @@ onBeforeUnmount(() => {
         <ul class="m-0 grid list-none gap-0 p-0">
           <li
             v-for="node in batch.nodes"
-            :key="node.nodeId"
+            :key="node.node_id"
             class="border-border flex flex-wrap items-center gap-x-3 gap-y-1 border-b py-2 text-sm last:border-b-0"
           >
             <RouterLink
-              :to="{ name: 'node-detail', params: { nodeId: node.nodeId } }"
+              :to="{ name: 'node-detail', params: { nodeId: node.node_id } }"
               class="text-primary font-mono underline-offset-4 hover:underline"
-              :title="node.nodeId"
-              >{{ node.nodeId.slice(0, 8) }}</RouterLink
+              :title="node.node_id"
+              >{{ node.node_id.slice(0, 8) }}</RouterLink
             >
             <StatusBadge
               :tone="rolloutNodeTone(node.state)"
               :label="$t(`rolloutNode_${node.state}`)"
             />
             <code
-              v-if="node.operationId"
+              v-if="node.operation_id"
               class="text-muted-foreground text-xs"
-              :title="node.operationId"
-              >{{ node.operationId.slice(0, 8) }}</code
+              :title="node.operation_id"
+              >{{ node.operation_id.slice(0, 8) }}</code
             >
             <code
-              v-if="node.failureCode"
+              v-if="node.failure_code"
               class="text-destructive text-xs break-all"
-              >{{ node.failureCode }}</code
+              >{{ node.failure_code }}</code
             >
           </li>
         </ul>
@@ -391,9 +391,9 @@ onBeforeUnmount(() => {
             :key="index"
             class="flex flex-wrap items-center gap-3"
           >
-            <template v-if="exclusion.nodeId">
-              <code :title="exclusion.nodeId">{{
-                exclusion.nodeId.slice(0, 8)
+            <template v-if="exclusion.node_id">
+              <code :title="exclusion.node_id">{{
+                exclusion.node_id.slice(0, 8)
               }}</code>
               <span class="text-muted-foreground">{{
                 $te(`exclusion_${exclusion.reason}`)

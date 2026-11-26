@@ -75,10 +75,10 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
     const action = recoveryActions[recovery];
     if (action) actions.push(action);
   }
-  if (!item.recoveryRequired) {
+  if (!item.recovery_required) {
     actions.push(
       { kind: "rotate", titleKey: "rotatePassword", icon: KeyRound },
-      item.desiredEnabled === false
+      item.desired_enabled === false
         ? { kind: "enable", titleKey: "enableUser", icon: UserCheck }
         : {
             kind: "disable",
@@ -170,7 +170,7 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
               >{{ $t(resourceStatusKey(item)) }}</Badge
             >
             <Badge
-              v-if="item.recoveryRequired && !item.recoveryMutationKind"
+              v-if="item.recovery_required && !item.recovery_mutation_kind"
               variant="outline"
               class="text-destructive"
               >{{ $t("manualReconciliationRequired") }}</Badge
@@ -178,11 +178,11 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
           </span>
           <span class="flex shrink-0 gap-1">
             <Button
-              v-if="item.desiredVersion"
+              v-if="item.desired_version"
               type="button"
               variant="ghost"
               size="icon-sm"
-              :disabled="busy || !item.desiredVersion"
+              :disabled="busy || !item.desired_version"
               :title="$t('quotaAndExpiry')"
               :aria-label="$t('quotaAndExpiry')"
               @click="$emit('policy', item.name)"
@@ -200,7 +200,7 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
                   ? 'text-destructive hover:text-destructive'
                   : undefined
               "
-              :disabled="busy || !userAction.allowed || !item.desiredVersion"
+              :disabled="busy || !userAction.allowed || !item.desired_version"
               :title="$t(action.titleKey)"
               :aria-label="$t(action.titleKey)"
               @click="
@@ -208,7 +208,7 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
                   'desired',
                   action.kind,
                   item.name,
-                  item.desiredVersion ?? 0,
+                  item.desired_version ?? 0,
                 )
               "
             >
@@ -239,7 +239,7 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
               >{{ $t(resourceStatusKey(item)) }}</Badge
             >
             <Badge
-              v-if="item.recoveryRequired && !item.recoveryMutationKind"
+              v-if="item.recovery_required && !item.recovery_mutation_kind"
               variant="outline"
               class="text-destructive"
               >{{ $t("manualReconciliationRequired") }}</Badge
@@ -247,7 +247,7 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
           </span>
           <Button
             v-if="
-              recoveryDialogKind(item) === 'group' || !item.recoveryRequired
+              recoveryDialogKind(item) === 'group' || !item.recovery_required
             "
             type="button"
             variant="ghost"
@@ -268,7 +268,7 @@ function userRowActions(item: UserGroupResourceState): RowAction[] {
               )
             "
             @click="
-              $emit('desired', 'group', item.name, item.desiredVersion ?? 0)
+              $emit('desired', 'group', item.name, item.desired_version ?? 0)
             "
           >
             <ListPlus aria-hidden="true" />

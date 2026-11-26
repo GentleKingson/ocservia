@@ -294,7 +294,7 @@ describe("node workflow context isolation", () => {
     expect(view.configuration.configDialog).toBe(true);
     expect(mocks.fleet.trackOperation).not.toHaveBeenCalled();
     mocks.route.params.nodeId = "node-a";
-    mocks.fleet.selected = { id: "node-a", configRevision: 7 };
+    mocks.fleet.selected = { id: "node-a", config_revision: 7 };
     await nextTick();
     await nextTick();
     await view.configuration.openConfigPlan();
@@ -385,7 +385,7 @@ describe("node workflow context isolation", () => {
       }
       mocks.getOperation.mockResolvedValueOnce({
         ...operation,
-        nodeId: "node-b",
+        node_id: "node-b",
       });
       if (kind === "config") await view.configuration.openConfigPlan();
       else await view.certificates.openCertificate();

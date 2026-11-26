@@ -144,14 +144,7 @@ export function setUserPolicy(
         path: { node_id: nodeId, username },
         header: { "Idempotency-Key": newIdempotencyKey() },
       },
-      body: {
-        quota_period: policy.quotaPeriod,
-        quota_direction: policy.quotaDirection,
-        quota_bytes: policy.quotaBytes,
-        expected_version: policy.expectedVersion,
-        reason: policy.reason,
-        ...(policy.expiresAt ? { expires_at: policy.expiresAt } : {}),
-      },
+      body: policy,
       signal: signal ?? null,
     }),
   );

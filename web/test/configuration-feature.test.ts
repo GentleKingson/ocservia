@@ -15,9 +15,9 @@ vi.mock("../src/api/operations", () => ({ getOperation: vi.fn() }));
 const scopes: EffectScope[] = [];
 const plan = {
   id: "plan-a",
-  nodeId: "node-a",
-  workspaceId: "workspace-a",
-  operationId: "plan-operation",
+  node_id: "node-a",
+  workspace_id: "workspace-a",
+  operation_id: "plan-operation",
   state: "succeeded",
   validation: "valid",
 } as ConfigPlan;
@@ -26,7 +26,7 @@ const omitted = Symbol("omitted");
 
 function setup(revision: unknown = 7) {
   const node: Record<string, unknown> = { id: "node-a", version: 31 };
-  if (revision !== omitted) node.configRevision = revision;
+  if (revision !== omitted) node.config_revision = revision;
   const currentNode = ref(node as unknown as NodeObservedState);
   const readReady = ref(true);
   const trackOperation = vi.fn().mockResolvedValue(undefined);
@@ -93,9 +93,9 @@ describe("configuration feature without a page or store", () => {
     expect(api.createConfigPlan).toHaveBeenCalledExactlyOnceWith(
       "node-a",
       expect.objectContaining({
-        expectedRevision: 7,
+        expected_revision: 7,
         reason: "plan",
-        ttlSeconds: 900,
+        ttl_seconds: 900,
       }),
     );
     feature.configApplyReason.value = " apply ";
@@ -120,7 +120,7 @@ describe("configuration feature without a page or store", () => {
       await feature.submitConfigPlan();
       expect(api.createConfigPlan).toHaveBeenCalledExactlyOnceWith(
         "node-a",
-        expect.objectContaining({ expectedRevision: revision }),
+        expect.objectContaining({ expected_revision: revision }),
       );
     },
   );
@@ -144,13 +144,13 @@ describe("configuration feature without a page or store", () => {
     currentNode.value = {
       id: "node-a",
       version: 32,
-      configRevision: 8,
+      config_revision: 8,
     } as NodeObservedState;
     api.createConfigPlan.mockRejectedValueOnce(new Error("stale revision"));
     await feature.submitConfigPlan();
     expect(api.createConfigPlan).toHaveBeenCalledExactlyOnceWith(
       "node-a",
-      expect.objectContaining({ expectedRevision: 7 }),
+      expect.objectContaining({ expected_revision: 7 }),
     );
     expect(feature.configError.value).toBe("stale revision");
   });

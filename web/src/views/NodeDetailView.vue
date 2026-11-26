@@ -86,7 +86,7 @@ const groupsState = computed(() =>
 );
 const currentOperation = computed(() => {
   const operation = fleet.latestOperation;
-  return currentNode.value && operation?.nodeId === currentNode.value.id
+  return currentNode.value && operation?.node_id === currentNode.value.id
     ? operation
     : undefined;
 });
@@ -138,18 +138,18 @@ const detailStatus = computed<{
 
 const upgradeEligible = computed(
   () =>
-    Boolean(currentNode.value?.agentUpgradeEligible) &&
-    Boolean(currentNode.value?.recommendedAgentVersion),
+    Boolean(currentNode.value?.agent_upgrade_eligible) &&
+    Boolean(currentNode.value?.recommended_agent_version),
 );
 
 function actionAvailable(action: string): boolean {
   return (
     readReady.value &&
-    currentNode.value?.effectiveActions?.[action]?.allowed === true
+    currentNode.value?.effective_actions?.[action]?.allowed === true
   );
 }
 function actionExplanation(action: string): string {
-  const availability = currentNode.value?.effectiveActions?.[action];
+  const availability = currentNode.value?.effective_actions?.[action];
   return availability?.allowed
     ? ""
     : t("action_" + (availability?.reason ?? "unknown"));
@@ -197,7 +197,7 @@ function openPolicy(username: string): void {
     <template v-else-if="currentNode">
       <NodeStatusSummary
         :node="currentNode"
-        :session-count="currentNode.sessionCount"
+        :session-count="currentNode.session_count"
       />
       <NodeTelemetryHistory :node="currentNode" />
       <NodeDetailNav />
@@ -232,7 +232,7 @@ function openPolicy(username: string): void {
               @click="
                 nodeAction?.open(
                   'upgradeAgent',
-                  currentNode.recommendedAgentVersion ?? '',
+                  currentNode.recommended_agent_version ?? '',
                   $t('upgradeAgentTitle'),
                 )
               "
@@ -261,9 +261,9 @@ function openPolicy(username: string): void {
               data-testid="operation-state"
             />
             <code
-              v-if="currentOperation.agentUpgradeTargetVersion"
+              v-if="currentOperation.agent_upgrade_target_version"
               class="text-xs"
-              >{{ currentOperation.agentUpgradeTargetVersion }}</code
+              >{{ currentOperation.agent_upgrade_target_version }}</code
             >
             <Button
               v-if="
@@ -306,7 +306,7 @@ function openPolicy(username: string): void {
               <span class="grid min-w-0 text-sm">
                 <strong class="break-words">{{ session.username }}</strong>
                 <span class="text-muted-foreground text-xs">{{
-                  session.clientIp
+                  session.client_ip
                 }}</span>
               </span>
               <span class="flex shrink-0 gap-1">
@@ -318,7 +318,7 @@ function openPolicy(username: string): void {
                     operationBusy ||
                     !readReady ||
                     fleet.sessionsState !== 'ready' ||
-                    !currentNode.bootId
+                    !currentNode.boot_id
                   "
                   :title="$t('disconnect')"
                   :aria-label="$t('disconnect')"
@@ -337,7 +337,7 @@ function openPolicy(username: string): void {
                     operationBusy ||
                     !readReady ||
                     fleet.sessionsState !== 'ready' ||
-                    !currentNode.bootId
+                    !currentNode.boot_id
                   "
                   :title="$t('terminate')"
                   :aria-label="$t('terminate')"

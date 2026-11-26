@@ -1,5 +1,5 @@
 import type { operations } from "./generated/schema";
-import { fromWire, type AuditVerification, type Schemas } from "./models";
+import type { AuditVerification, Schemas } from "./models";
 import { client, devAuthToken, read } from "./transport";
 import { getWorkspaceId } from "./workspace";
 
@@ -71,7 +71,7 @@ export async function verifyAuditChain(
     )
   )
     throw new Error("Invalid audit verification response");
-  return fromWire(verification as Schemas["AuditVerification"]);
+  return verification as Schemas["AuditVerification"];
 }
 
 export type ListVpnAuditRecordsRequest = NonNullable<

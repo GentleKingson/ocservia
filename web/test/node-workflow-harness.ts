@@ -25,7 +25,7 @@ export interface NodeDetailViewState {
     certificateError: string;
     certificate?: Certificate;
     certificateOperation?: Operation;
-    certificateGrant?: { downloadToken?: string; password?: string };
+    certificateGrant?: { download_token?: string; password?: string };
     certificateCommonName: string;
     certificateReason: string;
     openCertificate(): Promise<void>;
@@ -78,10 +78,10 @@ export interface NodeDetailMocks {
 
 export const workflowPlan = {
   id: "plan-a",
-  nodeId: "node-a",
-  workspaceId: "workspace-a",
-  operationId: "plan-operation",
-  expectedRevision: 7,
+  node_id: "node-a",
+  workspace_id: "workspace-a",
+  operation_id: "plan-operation",
+  expected_revision: 7,
   state: "succeeded",
   validation: "valid",
   warnings: [],
@@ -89,27 +89,27 @@ export const workflowPlan = {
 
 export const workflowCertificate = {
   id: "certificate-a",
-  nodeId: "node-a",
-  workspaceId: "workspace-a",
-  operationId: "csr-operation",
+  node_id: "node-a",
+  workspace_id: "workspace-a",
+  operation_id: "csr-operation",
   version: 3,
   state: "csr_ready",
 } as Certificate;
 
 export const workflowOperation = {
   id: "operation-a",
-  nodeId: "node-a",
+  node_id: "node-a",
   state: "succeeded",
 } as Operation;
 
 export const p12Grant = (
-  overrides: Partial<{ downloadToken: string; password: string }> = {},
+  overrides: Partial<{ download_token: string; password: string }> = {},
 ) => ({
-  artifactId: "artifact-a",
+  artifact_id: "artifact-a",
   operation: workflowOperation,
-  downloadToken: "one-time-token",
+  download_token: "one-time-token",
   password: "one-time-secret",
-  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  expires_at: new Date(Date.now() + 60_000).toISOString(),
   ...overrides,
 });
 
@@ -136,7 +136,7 @@ export function useNodeDetailHarness(mocks: NodeDetailMocks) {
       id: "node-a",
       name: "Node A",
       version: 31,
-      configRevision: 7,
+      config_revision: 7,
     };
     const { app, instance } = mountNodeDetail();
     unmount = () => {
@@ -215,7 +215,7 @@ export function useNodeDetailHarness(mocks: NodeDetailMocks) {
         id: "node-b",
         name: "Node B",
         version: 31,
-        configRevision: 7,
+        config_revision: 7,
       };
     } else if (kind === "unmount") {
       unmount?.();

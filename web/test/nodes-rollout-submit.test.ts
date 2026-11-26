@@ -31,8 +31,8 @@ async function mount(): Promise<View> {
       {
         id: "node-a",
         name: "Node A",
-        agentUpgradeEligible: true,
-        recommendedAgentVersion: "0.2.0",
+        agent_upgrade_eligible: true,
+        recommended_agent_version: "0.2.0",
       },
     ],
     onStarted: mocks.onStarted,

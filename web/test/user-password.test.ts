@@ -13,14 +13,14 @@ const { publicKey, privateKey } = generateKeyPairSync("rsa", {
 });
 const der = publicKey.export({ type: "spki", format: "der" });
 const binding: UserPasswordSealingKey = {
-  workspaceId: "workspace",
-  nodeId: "node",
-  endpointId: "a".repeat(64),
+  workspace_id: "workspace",
+  node_id: "node",
+  endpoint_id: "a".repeat(64),
   purpose: "user_password",
   version: 1,
-  keyId: "user-key",
-  publicKeySha256: createHash("sha256").update(der).digest("hex"),
-  publicKeyDer: der.toString("base64"),
+  key_id: "user-key",
+  public_key_sha256: createHash("sha256").update(der).digest("hex"),
+  public_key_der: der.toString("base64"),
 };
 
 describe("browser password envelope", () => {
@@ -41,13 +41,13 @@ describe("browser password envelope", () => {
     expect(bytes.every((byte) => byte === 0)).toBe(true);
   });
   it.each([
-    { nodeId: "other" },
-    { workspaceId: "other" },
+    { node_id: "other" },
+    { workspace_id: "other" },
     { purpose: "certificate_p12_password" },
     { version: 2 },
-    { keyId: "" },
-    { publicKeyDer: "malformed" },
-    { endpointId: "invalid" },
+    { key_id: "" },
+    { public_key_der: "malformed" },
+    { endpoint_id: "invalid" },
   ])("rejects an invalid binding %j and clears input", async (change) => {
     const bytes = new TextEncoder().encode("temporary secret");
     await expect(
@@ -60,7 +60,7 @@ describe("browser password envelope", () => {
     await expect(
       sealUserPassword(
         bytes,
-        { ...binding, publicKeySha256: "" },
+        { ...binding, public_key_sha256: "" },
         "workspace",
         "node",
       ),

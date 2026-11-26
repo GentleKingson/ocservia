@@ -17,8 +17,8 @@ const pathMode = computed(() =>
 const identities = computed(() =>
   (
     [
-      ["bootId", props.node.bootId],
-      ["agentInstanceId", props.node.agentInstanceId],
+      ["bootId", props.node.boot_id],
+      ["agentInstanceId", props.node.agent_instance_id],
     ] as const
   ).map(([label, value]) => ({ label, value })),
 );
@@ -45,20 +45,20 @@ const detail = "m-0 min-w-0 text-sm break-words";
           <dd :class="detail">
             {{ $t(pathMode) }}
             <template v-if="node.path">
-              · {{ Math.round(node.path.rttMs) }} {{ $t("milliseconds") }}
+              · {{ Math.round(node.path.rtt_ms) }} {{ $t("milliseconds") }}
             </template>
           </dd>
         </div>
         <div :class="row">
           <dt :class="term">{{ $t("ocserv") }}</dt>
           <dd :class="detail">
-            {{ node.ocservVersion ?? $t("notAvailable") }}
+            {{ node.ocserv_version ?? $t("notAvailable") }}
           </dd>
         </div>
         <div :class="row">
           <dt :class="term">{{ $t("agent") }}</dt>
           <dd :class="detail" class="flex flex-wrap items-center gap-2">
-            {{ node.agentVersion ?? $t("notAvailable") }}
+            {{ node.agent_version ?? $t("notAvailable") }}
             <Badge variant="outline" data-testid="agent-version-state">{{
               $t(agentVersionLabel(node))
             }}</Badge>
@@ -72,13 +72,14 @@ const detail = "m-0 min-w-0 text-sm break-words";
           <dt :class="term">{{ $t("recommendedAgentVersion") }}</dt>
           <dd :class="detail">
             {{
-              node.recommendedAgentVersion || $t("recommendationNotConfigured")
+              node.recommended_agent_version ||
+              $t("recommendationNotConfigured")
             }}
           </dd>
         </div>
         <div :class="row">
           <dt :class="term">{{ $t("osRelease") }}</dt>
-          <dd :class="detail">{{ node.osRelease ?? $t("notAvailable") }}</dd>
+          <dd :class="detail">{{ node.os_release ?? $t("notAvailable") }}</dd>
         </div>
         <div :class="row">
           <dt :class="term">{{ $t("architecture") }}</dt>
@@ -89,15 +90,15 @@ const detail = "m-0 min-w-0 text-sm break-words";
         <div :class="row">
           <dt :class="term">{{ $t("configRevision") }}</dt>
           <dd :class="detail">
-            {{ node.configRevision ?? $t("notAvailable") }}
+            {{ node.config_revision ?? $t("notAvailable") }}
           </dd>
         </div>
         <div :class="row">
           <dt :class="term">{{ $t("observedAt") }}</dt>
           <dd :class="detail">
             {{
-              node.observedAt
-                ? formatTimestamp(node.observedAt)
+              node.observed_at
+                ? formatTimestamp(node.observed_at)
                 : $t("notObserved")
             }}
           </dd>

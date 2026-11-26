@@ -215,7 +215,7 @@ defineExpose({ open: openConfigPlan, close, currentConfigRevision });
             {{ $t("configSourceRevision") }}
           </dt>
           <dd class="m-0">
-            <code class="text-xs">{{ configPlan.expectedRevision }}</code>
+            <code class="text-xs">{{ configPlan.expected_revision }}</code>
           </dd>
         </div>
       </dl>
@@ -223,9 +223,9 @@ defineExpose({ open: openConfigPlan, close, currentConfigRevision });
         {{ $t("configCandidateSource") }}
       </p>
       <pre
-        v-if="configPlan.diffRedacted"
+        v-if="configPlan.diff_redacted"
         class="bg-background border-border m-0 max-h-80 overflow-auto rounded-md border p-3 text-xs"
-        >{{ configPlan.diffRedacted }}</pre>
+        >{{ configPlan.diff_redacted }}</pre>
       <ul
         v-if="configPlan.warnings.length"
         class="m-0 list-disc pl-5 text-sm text-amber-900"
@@ -264,12 +264,12 @@ defineExpose({ open: openConfigPlan, close, currentConfigRevision });
       </template>
     </div>
     <p
-      v-if="configOperation || configPlan?.operationId"
+      v-if="configOperation || configPlan?.operation_id"
       class="m-0 flex flex-wrap items-center gap-2 text-sm"
     >
       {{ $t("operationId") }}:
       <code class="text-xs break-all">{{
-        configOperation?.id ?? configPlan?.operationId
+        configOperation?.id ?? configPlan?.operation_id
       }}</code>
       <span v-if="configOperation">{{
         $t(operationStatusKey(configOperation))

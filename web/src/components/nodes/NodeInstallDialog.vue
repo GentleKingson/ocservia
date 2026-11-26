@@ -82,7 +82,7 @@ async function issue(): Promise<void> {
       controller.signal,
     );
     if (!isActive()) return;
-    const expiry = Date.parse(result.expiresAt);
+    const expiry = Date.parse(result.expires_at);
     if (
       !/^oit1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(result.token) ||
       !Number.isFinite(expiry)
@@ -91,7 +91,7 @@ async function issue(): Promise<void> {
       return;
     }
     token.value = result.token;
-    expires.value = result.expiresAt;
+    expires.value = result.expires_at;
     const remaining = expiry - Date.now();
     const delay = remaining > 0 ? Math.min(remaining, 900_000) : 900_000;
     expiryTimer = setTimeout(() => {

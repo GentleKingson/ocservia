@@ -129,9 +129,10 @@ function createDetailSection<T>(empty: T, onSettled: () => void) {
 }
 
 async function collectAllPages<T>(
-  readPage: (
-    cursor: string | undefined,
-  ) => Promise<{ items: T[]; page: { hasMore: boolean; nextCursor?: string } }>,
+  readPage: (cursor: string | undefined) => Promise<{
+    items: T[];
+    page: { has_more: boolean; next_cursor?: string };
+  }>,
   canContinue: () => boolean,
 ): Promise<T[] | undefined> {
   const items: T[] = [];
@@ -140,7 +141,7 @@ async function collectAllPages<T>(
     const page = await readPage(cursor);
     if (!canContinue()) return undefined;
     items.push(...page.items);
-    cursor = page.page.hasMore ? page.page.nextCursor : undefined;
+    cursor = page.page.has_more ? page.page.next_cursor : undefined;
   } while (cursor);
   return items;
 }
@@ -185,7 +186,7 @@ export const useFleetStore = defineStore("fleet", () => {
   const selectReads = createReadRequest();
   let operationController: AbortController | undefined;
 
-  // Single-pass fleet rollup; agentVersionState is optional on the wire, so
+  // Single-pass fleet rollup; agent_version_state is optional on the wire, so
   // anything missing or not yet classified (unknown, unsupported) rolls up as
   // unknown and current + update + ahead + unknown always sum to nodes.length.
   const fleetStats = computed(() => {
@@ -199,13 +200,13 @@ export const useFleetStore = defineStore("fleet", () => {
     let aheadCount = 0;
     let unknownCount = 0;
     for (const node of nodes.value) {
-      if (node.connectionState === "online") onlineCount += 1;
+      if (node.connection_state === "online") onlineCount += 1;
       else offlineCount += 1;
       const mode = node.path?.mode;
       if (mode === "relay") relayCount += 1;
       else if (mode === "direct") directCount += 1;
-      totalSessions += node.sessionCount;
-      switch (node.agentVersionState) {
+      totalSessions += node.session_count;
+      switch (node.agent_version_state) {
         case "current":
           currentCount += 1;
           break;
@@ -334,7 +335,7 @@ export const useFleetStore = defineStore("fleet", () => {
     const selectSequenceAtStart = selectReads.revision;
     const isLatestOperation = () => operationController === controller;
     function observeOperation(operation: Operation): void {
-      if (operation.nodeId !== nodeId)
+      if (operation.node_id !== nodeId)
         throw new Error("Operation does not belong to the selected node");
       latestOperation.value = operation;
     }
