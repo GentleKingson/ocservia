@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -21,34 +20,17 @@ func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Invalid page size", "page_size must be between 1 and 200")
 		return
 	}
-	store, err := auditstore.From(s.backend)
+	if s.backend == nil {
+		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
+		return
+	}
+	items, err := auditstore.Of(s.backend).RecentEvents(r.Context(), workspace(r), limit)
 	if err != nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
 		return
 	}
-	rows, err := store.RecentEvents(r.Context(), workspace(r), limit)
-	if err != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
-		return
-	}
-	defer rows.Close()
-	items := []map[string]any{}
-	for rows.Next() {
-		var id uuid.UUID
-		var occurred time.Time
-		var actorType, actorID, action, resourceType, requestID, result string
-		var resourceID, nodeID, commandID *uuid.UUID
-		var traceID, reason, errorType *string
-		var previous, hash []byte
-		if err := rows.Scan(&id, &occurred, &actorType, &actorID, &action, &resourceType, &resourceID, &nodeID, &requestID, &traceID, &commandID, &result, &reason, &errorType, &previous, &hash); err != nil {
-			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
-			return
-		}
-		items = append(items, map[string]any{"id": id, "occurred_at": occurred, "actor_type": actorType, "actor_id": actorID, "action": action, "resource_type": resourceType, "resource_id": resourceID, "node_id": nodeID, "request_id": requestID, "trace_id": traceID, "command_id": commandID, "result": result, "reason": reason, "error_type": errorType, "previous_event_hash": hex.EncodeToString(previous), "event_hash": hex.EncodeToString(hash)})
-	}
-	if err := rows.Err(); err != nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Audit unavailable", "audit records are temporarily unavailable")
-		return
+	if items == nil {
+		items = []auditstore.RecentEvent{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -73,25 +55,6 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusConflict
 	}
 	writeJSON(w, status, result)
-}
-
-type vpnAuditRecord struct {
-	NodeID          uuid.UUID  `json:"node_id"`
-	SessionID       string     `json:"session_id"`
-	Username        string     `json:"username"`
-	ClientIP        string     `json:"client_ip"`
-	VPNIP           *string    `json:"vpn_ip,omitempty"`
-	ConnectedAt     *time.Time `json:"connected_at,omitempty"`
-	BytesIn         *string    `json:"bytes_in,omitempty"`
-	BytesOut        *string    `json:"bytes_out,omitempty"`
-	LastSeenAt      time.Time  `json:"last_seen_at"`
-	AbsentAt        *time.Time `json:"absent_at,omitempty"`
-	EventType       string     `json:"event_type"`
-	EventID         *uuid.UUID `json:"event_id,omitempty"`
-	DestinationIP   *string    `json:"destination_ip,omitempty"`
-	DestinationPort *int32     `json:"destination_port,omitempty"`
-	Protocol        *string    `json:"protocol,omitempty"`
-	FlowStartedAt   *time.Time `json:"flow_started_at,omitempty"`
 }
 
 func parseVpnAuditFilter(r *http.Request) (auditstore.VpnAuditFilter, bool) {
@@ -169,53 +132,39 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 	unavailable := func() {
 		writeProblem(w, r, 503, "https://ocservia.dev/problems/database-unavailable", "VPN audit unavailable", "VPN audit records could not be read")
 	}
-	store, err := auditstore.From(s.backend)
+	if s.backend == nil {
+		unavailable()
+		return
+	}
+	records, err := auditstore.Of(s.backend).VpnAuditRecords(r.Context(), q)
 	if err != nil {
 		unavailable()
 		return
 	}
-	rows, err := store.VpnAuditRecords(r.Context(), q)
-	if err != nil {
-		unavailable()
-		return
+	items := records
+	if items == nil {
+		items = []auditstore.VpnAuditRecord{}
 	}
-	defer rows.Close()
-	items := []vpnAuditRecord{}
-	var cursor auditstore.VpnAuditCursor
 	var next string
-	for rows.Next() {
-		if len(items) == q.Limit {
-			b, err := json.Marshal(cursor)
-			if err != nil {
-				unavailable()
-				return
-			}
-			next = base64.RawURLEncoding.EncodeToString(b)
-			break
-		}
-		var item vpnAuditRecord
-		if err := rows.Scan(&item.NodeID, &item.SessionID, &item.Username, &item.ClientIP, &item.VPNIP, &item.ConnectedAt, &item.BytesIn, &item.BytesOut, &item.LastSeenAt, &item.AbsentAt, &item.EventType, &item.EventID, &item.DestinationIP, &item.DestinationPort, &item.Protocol, &item.FlowStartedAt); err != nil {
+	if len(records) > q.Limit {
+		items = records[:q.Limit]
+		last := items[len(items)-1]
+		at := last.LastSeenAt
+		key := last.SessionID
+		if last.EventID != nil {
+			key = last.EventID.String()
+		} else if last.ConnectedAt != nil {
+			at = *last.ConnectedAt
+		} else {
 			unavailable()
 			return
 		}
-		if len(items)+1 == q.Limit {
-			at := item.LastSeenAt
-			key := item.SessionID
-			if item.EventID != nil {
-				key = item.EventID.String()
-			} else if item.ConnectedAt != nil {
-				at = *item.ConnectedAt
-			} else {
-				unavailable()
-				return
-			}
-			cursor = auditstore.VpnAuditCursor{At: at.UTC(), Node: item.NodeID, Key: key, Kind: q.Kind}
+		b, err := json.Marshal(auditstore.VpnAuditCursor{At: at.UTC(), Node: last.NodeID, Key: key, Kind: q.Kind})
+		if err != nil {
+			unavailable()
+			return
 		}
-		items = append(items, item)
-	}
-	if rows.Err() != nil {
-		unavailable()
-		return
+		next = base64.RawURLEncoding.EncodeToString(b)
 	}
 	page := map[string]any{"items": items}
 	if next != "" {

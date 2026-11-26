@@ -65,7 +65,7 @@ func TestBootstrapTokenRejectsMalformedEndpointRestriction(t *testing.T) {
 
 func installationValidationService(t *testing.T) *Service {
 	t.Helper()
-	service := NewBackend(nil, "", "test", commandauth.NewSignerFromSeed([32]byte{1}))
+	service := New(nil, "", "test", commandauth.NewSignerFromSeed([32]byte{1}))
 	if err := service.ConfigureInstallation(InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}); err != nil {
 		t.Fatal(err)
 	}

@@ -235,7 +235,7 @@ func TestWorkerDispatchBatchIsolatesStalledNodeAndBoundsConcurrency(t *testing.T
 	}
 
 	backend := newFaultDispatchBackend(jobs)
-	service := NewBackend(backend, 64, signer)
+	service := New(backend, 64, signer)
 	sender := &faultInjectingSender{
 		stalledNode:  jobs[0].NodeID,
 		stalledEnter: make(chan struct{}),
@@ -335,7 +335,7 @@ func TestWorkerLeavesSendingLeaseOnAmbiguousErrorAndFailsPreSendRejection(t *tes
 			job := newJob()
 			backend := newFaultDispatchBackend([]Dispatch{job})
 			backend.records[job.CommandID].claimed = true
-			service := NewBackend(backend, 64, signer)
+			service := New(backend, 64, signer)
 			worker, err := NewWorker(service, staticSender{err: tc.sendErr}, logger)
 			testutil.NoError(t, err)
 			worker.dispatchOne(context.Background(), job)

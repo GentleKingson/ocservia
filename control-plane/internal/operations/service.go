@@ -127,8 +127,8 @@ type Service struct {
 	notify                    chan struct{}
 }
 
-// NewBackend supplies the common operation and background Worker lifecycle.
-func NewBackend(backend database.Backend, commandLimit int, signer *commandauth.Signer) *Service {
+// New supplies the common operation and background Worker lifecycle.
+func New(backend database.Backend, commandLimit int, signer *commandauth.Signer) *Service {
 	return &Service{
 		backend:                   backend,
 		now:                       func() time.Time { return time.Now().UTC() },
@@ -197,10 +197,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Operation,
 		defer cancel()
 		_ = tx.Rollback(cleanup)
 	}()
-	intentStore, err := operationstore.FromTransaction(tx)
-	if err != nil {
-		return Operation{}, false, err
-	}
+	intentStore := operationstore.FromTransaction(tx)
 
 	upgrade, _ := request.Payload.(AgentUpgradePayload)
 	var fromVersion string
@@ -317,11 +314,8 @@ func (s *Service) ListEventsWithState(ctx context.Context, operationID, after uu
 	}
 	var events []Event
 	var state string
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		store := operationstore.FromTransaction(tx)
 		events, err = store.Events(ctx, operationID, after, limit)
 		if err != nil {
 			return err
@@ -346,12 +340,8 @@ func (s *Service) EventSequence(ctx context.Context, operationID, eventID uuid.U
 		return 0, false, nil
 	}
 	var sequence int64
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		sequence, err = store.EventSequence(ctx, operationID, eventID)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		sequence, err = operationstore.FromTransaction(tx).EventSequence(ctx, operationID, eventID)
 		return err
 	})
 	if errors.Is(err, database.ErrNotFound) {
@@ -365,11 +355,7 @@ func (s *Service) EventSequence(ctx context.Context, operationID, eventID uuid.U
 
 func (s *Service) Expire(ctx context.Context) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return store.ExpireQueued(ctx)
+		return operationstore.FromTransaction(tx).ExpireQueued(ctx)
 	})
 }
 

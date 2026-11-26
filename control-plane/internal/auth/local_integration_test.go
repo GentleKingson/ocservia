@@ -18,7 +18,7 @@ import (
 func TestLocalAdminPasswordResetIntegration(t *testing.T) {
 	ctx := context.Background()
 	runtime, owner := testfixture.OpenIsolated(t, t, "local_admin_reset")
-	s, err := NewBackend(postgres.WrapPool(runtime), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	s, err := New(postgres.WrapPool(runtime), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	if _, _, err := s.ResetLocalAdminPassword(ctx); !errors.Is(err, ErrLocalAdminUnavailable) {
 		t.Fatalf("reset before bootstrap: %v", err)
@@ -110,7 +110,7 @@ func TestLocalAdminPasswordResetIntegration(t *testing.T) {
 func TestLocalAuthenticationIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
-	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	s, err := New(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	username := "alice-" + uuid.NewString()
 	if _, err := s.CreateLocalCredential(ctx, username, "x"); !errors.Is(err, ErrPasswordPolicy) {

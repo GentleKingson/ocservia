@@ -85,10 +85,7 @@ func AuthorizeMutationTx(ctx context.Context, tx database.Tx, identityID, sessio
 	if identityID == uuid.Nil || sessionID == uuid.Nil || workspaceID == uuid.Nil {
 		return ErrForbidden
 	}
-	store, err := authstore.From(tx)
-	if err != nil {
-		return err
-	}
+	store := authstore.From(tx)
 	if err := store.LockActiveSession(ctx, identityID, sessionID, false); err != nil {
 		return ErrForbidden
 	}

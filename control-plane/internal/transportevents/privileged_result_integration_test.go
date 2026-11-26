@@ -51,7 +51,7 @@ func TestPrivilegedResultTrustIntegration(t *testing.T) {
 	}()
 
 	signer := integrationCommandSigner()
-	service := NewBackend(postgres.WrapPool(pool), signer)
+	service := New(postgres.WrapPool(pool), signer)
 	// stage seeds a command whose delivery was already recorded: its outbox row
 	// is published, as after a successful send.
 	stage := func(state string, mode agentv1.CommandDeliveryMode) (uuid.UUID, uuid.UUID, uuid.UUID) {

@@ -29,7 +29,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	for _, id := range []uuid.UUID{workspace, other} {
 		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Read API',$2,now(),now())`, id, "read-"+id.String())
 	}
-	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	service, err := auth.New(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	username, password := "read-"+uuid.NewString(), "a long Controller reader test password"
 	identity, err := service.CreateLocalCredential(ctx, username, password)
@@ -38,7 +38,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, workspace, identity, at)
 	config := testHTTPConfig(false)
 	config.LocalSimulator, config.DevAuthToken = true, "read-backend-development-token-32-characters"
-	server := newTestServer(t, config, backend, Modules{TransportEvents: transportevents.NewBackend(backend, nil)}, Authorization{Authentication: service})
+	server := newTestServer(t, config, backend, Modules{TransportEvents: transportevents.New(backend, nil)}, Authorization{Authentication: service})
 	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	login := authHTTPRequest(server, "POST", "login", `{"username":"`+username+`","password":"`+password+`"}`, authTestOrigin)
 	if login.Code != http.StatusNoContent || len(login.Result().Cookies()) != 1 {
@@ -157,7 +157,7 @@ func TestControllerReadsBackendHTTPIntegration(t *testing.T) {
 	node := uuid.Must(uuid.NewV7())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'read node','active',now(),now())`, node, workspace)
 	exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$2,'read-api',$3,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$2)`, node, stamps[0], uuid.Must(uuid.NewV7()))
-	if err := telemetry.NewBackend(backend).Maintain(ctx); err != nil {
+	if err := telemetry.New(backend).Maintain(ctx); err != nil {
 		t.Fatal("offline maintenance", err)
 	}
 	w = get("/api/v1/events", workspace, cookie, http.StatusOK)

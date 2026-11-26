@@ -127,7 +127,7 @@ func TestAuthSourceTrustAndNormalization(t *testing.T) {
 }
 
 func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
-	service, err := auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	service, err := auth.New(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestBreakGlassInvalidTokensLimitedBeforeService(t *testing.T) {
 }
 
 func TestBreakGlassEmptyTokenIsRejected(t *testing.T) {
-	service, err := auth.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	service, err := auth.New(postgres.WrapPool(&pgxpool.Pool{}), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestInstallationRegistrationLimitedBeforeWork(t *testing.T) {
 			t.Fatalf("disabled attempt=%d status=%d", i, response.Code)
 		}
 	}
-	server = newTestServer(t, testHTTPConfig(false), nil, Modules{Enrollment: enrollment.NewBackend(postgres.WrapPool(&pgxpool.Pool{}), "", "test", nil)}, Authorization{})
+	server = newTestServer(t, testHTTPConfig(false), nil, Modules{Enrollment: enrollment.New(postgres.WrapPool(&pgxpool.Pool{}), "", "test", nil)}, Authorization{})
 	for i := 0; i < 31; i++ {
 		response := send()
 		want := http.StatusBadRequest
@@ -213,7 +213,7 @@ func TestBreakGlassValidAndInvalidShareRateLimitZeroOracle(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool.Close()
-	service, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
+	service, err := auth.New(postgres.WrapPool(pool), auth.Config{SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash("correct")})
 	if err != nil {
 		t.Fatal(err)
 	}

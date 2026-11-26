@@ -16,46 +16,34 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-type telemetryStore struct{ tx database.Tx }
+type telemetryStore struct{ tx *transaction }
 
 func (t *transaction) TelemetryStore() telemetrystore.Store { return telemetryStore{t} }
 
 const telemetryNodeSelect = `SELECT n.id,n.name,n.version,n.status,f.active,o.observed_at,o.last_heartbeat_at,COALESCE(o.boot_id,''),COALESCE(o.agent_instance_id::text,''),COALESCE(o.agent_version,''),COALESCE(o.ocserv_version,''),COALESCE(o.os_release,''),COALESCE(o.architecture,''),o.ocserv,o.system,o.path,COALESCE(o.dropped_security,0),COALESCE(o.dropped_health,0),COALESCE(o.dropped_aggregate,0),COALESCE(o.dropped_raw,0),(SELECT count(*) FROM node_sessions ss WHERE ss.node_id=n.id),COALESCE(c.revision,0),(EXISTS(SELECT 1 FROM node_capabilities nc WHERE nc.node_id=n.id AND nc.capability IN ('ocserv.agent.upgrade.v1','ocserv.agent.upgrade.v2') AND nc.approved=true) AND NOT EXISTS(SELECT 1 FROM agent_upgrade_operations auo WHERE auo.node_id=n.id AND auo.completed_at IS NULL AND auo.state IN ('queued','accepted','running','unknown'))) FROM nodes n LEFT JOIN connection_owner_fencing f ON f.node_id=uuid_send(n.id) LEFT JOIN node_observed_snapshots o ON o.node_id=n.id LEFT JOIN node_config_state c ON c.node_id=n.id`
 
-func scanTelemetryNode(row database.Row) (telemetrystore.Node, error) {
+func scanTelemetryNode(row Row) (telemetrystore.Node, error) {
 	var n telemetrystore.Node
 	err := row.Scan(&n.ID, &n.Name, &n.Version, &n.Status, &n.OwnerActive, &n.ObservedAt, &n.Heartbeat, &n.BootID, &n.InstanceID, &n.AgentVersion, &n.OcservVersion, &n.OSRelease, &n.Architecture, &n.Ocserv, &n.System, &n.Path, &n.Security, &n.Health, &n.Aggregate, &n.Raw, &n.Sessions, &n.ConfigRevision, &n.UpgradeEligible)
 	return n, err
 }
 
 func (s telemetryStore) Nodes(ctx context.Context, workspace, after uuid.UUID, limit int) ([]telemetrystore.Node, error) {
-	var (
-		rows database.Rows
-		err  error
-	)
+	var suffix string
+	var args []any
 	switch {
 	case workspace == uuid.Nil && after == uuid.Nil:
-		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` ORDER BY n.id LIMIT $1`, limit)
+		suffix, args = ` ORDER BY n.id LIMIT $1`, []any{limit}
 	case workspace == uuid.Nil:
-		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` WHERE n.id>$1 ORDER BY n.id LIMIT $2`, after, limit)
+		suffix, args = ` WHERE n.id>$1 ORDER BY n.id LIMIT $2`, []any{after, limit}
 	case after == uuid.Nil:
-		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` WHERE n.workspace_id=$1 ORDER BY n.id LIMIT $2`, workspace, limit)
+		suffix, args = ` WHERE n.workspace_id=$1 ORDER BY n.id LIMIT $2`, []any{workspace, limit}
 	default:
-		rows, err = s.tx.Query(ctx, telemetryNodeSelect+` WHERE n.workspace_id=$1 AND n.id>$2 ORDER BY n.id LIMIT $3`, workspace, after, limit)
+		suffix, args = ` WHERE n.workspace_id=$1 AND n.id>$2 ORDER BY n.id LIMIT $3`, []any{workspace, after, limit}
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	nodes := []telemetrystore.Node{}
-	for rows.Next() {
-		n, err := scanTelemetryNode(rows)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, n)
-	}
-	return nodes, rows.Err()
+	return collectRows(ctx, s.tx.store, telemetryNodeSelect+suffix, func(r Rows) (telemetrystore.Node, error) {
+		return scanTelemetryNode(Row{r})
+	}, args...)
 }
 
 func (s telemetryStore) Node(ctx context.Context, id uuid.UUID) (telemetrystore.Node, error) {
@@ -63,37 +51,17 @@ func (s telemetryStore) Node(ctx context.Context, id uuid.UUID) (telemetrystore.
 }
 
 func (s telemetryStore) Sessions(ctx context.Context, id uuid.UUID, after string, limit int) ([]telemetrystore.ReadSession, error) {
-	rows, err := s.tx.Query(ctx, `SELECT session_id,username,host(client_ip),connected_at,bytes_in,bytes_out FROM node_sessions WHERE node_id=$1 AND session_id>$2 ORDER BY session_id LIMIT $3`, id, after, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []telemetrystore.ReadSession{}
-	for rows.Next() {
-		var v telemetrystore.ReadSession
-		if err := rows.Scan(&v.ID, &v.Username, &v.ClientIP, &v.ConnectedAt, &v.BytesIn, &v.BytesOut); err != nil {
-			return nil, err
-		}
-		items = append(items, v)
-	}
-	return items, rows.Err()
+	return collectRows(ctx, s.tx.store, `SELECT session_id,username,host(client_ip),connected_at,bytes_in,bytes_out FROM node_sessions WHERE node_id=$1 AND session_id>$2 ORDER BY session_id LIMIT $3`, func(r Rows) (v telemetrystore.ReadSession, err error) {
+		err = r.Scan(&v.ID, &v.Username, &v.ClientIP, &v.ConnectedAt, &v.BytesIn, &v.BytesOut)
+		return
+	}, id, after, limit)
 }
 
 func (s telemetryStore) IPBans(ctx context.Context, id uuid.UUID, limit int) ([]telemetrystore.IPBan, error) {
-	rows, err := s.tx.Query(ctx, `SELECT host(ip),seconds_remaining FROM node_ip_bans WHERE node_id=$1 ORDER BY ip LIMIT $2`, id, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []telemetrystore.IPBan{}
-	for rows.Next() {
-		var v telemetrystore.IPBan
-		if err := rows.Scan(&v.IP, &v.SecondsRemaining); err != nil {
-			return nil, err
-		}
-		items = append(items, v)
-	}
-	return items, rows.Err()
+	return collectRows(ctx, s.tx.store, `SELECT host(ip),seconds_remaining FROM node_ip_bans WHERE node_id=$1 ORDER BY ip LIMIT $2`, func(r Rows) (v telemetrystore.IPBan, err error) {
+		err = r.Scan(&v.IP, &v.SecondsRemaining)
+		return
+	}, id, limit)
 }
 
 func (s telemetryStore) LockNode(ctx context.Context, node uuid.UUID) error {
@@ -257,7 +225,7 @@ func (s telemetryStore) Activate(ctx context.Context, node uuid.UUID, observed t
 }
 
 func (s telemetryStore) LockOfflineCandidates(ctx context.Context, before time.Time) ([]uuid.UUID, error) {
-	return database.CollectColumn[uuid.UUID](s.tx.Query(ctx, `SELECT n.id FROM nodes n JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.status='active' AND o.last_heartbeat_at < $1 FOR UPDATE OF n SKIP LOCKED`, before))
+	return collectColumn[uuid.UUID](ctx, s.tx.store, `SELECT n.id FROM nodes n JOIN node_observed_snapshots o ON o.node_id=n.id WHERE n.status='active' AND o.last_heartbeat_at < $1 FOR UPDATE OF n SKIP LOCKED`, before)
 }
 
 func (s telemetryStore) MarkOffline(ctx context.Context, node, event uuid.UUID, now time.Time, traceparent string) error {
@@ -340,20 +308,10 @@ func (s telemetryStore) History(ctx context.Context, nodeID uuid.UUID, metric, r
 	default:
 		return nil, database.ErrConstraint
 	}
-	rows, err := s.tx.Query(ctx, query, nodeID, metric, since)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	points := []telemetrystore.Point{}
-	for rows.Next() {
-		var p telemetrystore.Point
-		if err := rows.Scan(&p.At, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average); err != nil {
-			return nil, err
-		}
-		points = append(points, p)
-	}
-	return points, rows.Err()
+	return collectRows(ctx, s.tx.store, query, func(r Rows) (p telemetrystore.Point, err error) {
+		err = r.Scan(&p.At, &p.Metric, &p.Count, &p.Minimum, &p.Maximum, &p.Average)
+		return
+	}, nodeID, metric, since)
 }
 
 func (s telemetryStore) EnsureUpcomingPartitions(ctx context.Context) error {
@@ -474,11 +432,13 @@ func (b *Backend) ValidateTelemetryRuntime(ctx context.Context) error {
 }
 
 // UsageStore borrows a transaction; it cannot open or commit another one.
-type UsageStore struct{ tx database.Tx }
+type UsageStore struct{ tx *transaction }
 
-func NewUsageStore(tx database.Tx) *UsageStore { return &UsageStore{tx: tx} }
+func NewUsageStore(tx database.Tx) *UsageStore {
+	return &UsageStore{tx: database.Must[*transaction](tx)}
+}
 
-func (t *transaction) UsageStore() userstore.UsageStore { return NewUsageStore(t) }
+func (t *transaction) UsageStore() userstore.UsageStore { return &UsageStore{tx: t} }
 
 func (s *UsageStore) LockNode(ctx context.Context, nodeID uuid.UUID) error {
 	var id uuid.UUID
@@ -496,21 +456,20 @@ func (s *UsageStore) LockCursors(ctx context.Context, nodeID uuid.UUID, keys []u
 		sessionIDs[i] = key.SessionID
 		connectedAts[i] = key.Connected
 	}
-	rows, err := s.tx.Query(ctx, `SELECT c.session_id,c.connected_at,c.username,c.rx_bytes,c.tx_bytes,c.observed_at FROM unnest($2::text[],$3::timestamptz[]) AS k(session_id,connected_at) JOIN user_usage_cursors c ON c.node_id=$1 AND c.session_id=k.session_id AND c.connected_at=k.connected_at ORDER BY c.session_id,c.connected_at FOR UPDATE OF c`, nodeID, sessionIDs, connectedAts)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
+	err := walkRows(ctx, s.tx.store, `SELECT c.session_id,c.connected_at,c.username,c.rx_bytes,c.tx_bytes,c.observed_at FROM unnest($2::text[],$3::timestamptz[]) AS k(session_id,connected_at) JOIN user_usage_cursors c ON c.node_id=$1 AND c.session_id=k.session_id AND c.connected_at=k.connected_at ORDER BY c.session_id,c.connected_at FOR UPDATE OF c`, func(r Rows) error {
 		var cursor userstore.UsageCursor
-		if err := rows.Scan(&cursor.SessionID, &cursor.Connected, &cursor.Username, &cursor.RXBytes, &cursor.TXBytes, &cursor.ObservedAt); err != nil {
-			return nil, err
+		if err := r.Scan(&cursor.SessionID, &cursor.Connected, &cursor.Username, &cursor.RXBytes, &cursor.TXBytes, &cursor.ObservedAt); err != nil {
+			return err
 		}
 		cursor.Connected = cursor.Connected.UTC().Truncate(time.Microsecond)
 		cursor.ObservedAt = cursor.ObservedAt.UTC().Truncate(time.Microsecond)
 		cursors[userstore.UsageKey{SessionID: cursor.SessionID, Connected: cursor.Connected}] = cursor
+		return nil
+	}, nodeID, sessionIDs, connectedAts)
+	if err != nil {
+		return nil, err
 	}
-	return cursors, rows.Err()
+	return cursors, nil
 }
 
 func (s *UsageStore) PutCursors(ctx context.Context, nodeID uuid.UUID, cursors []userstore.UsageCursor) error {

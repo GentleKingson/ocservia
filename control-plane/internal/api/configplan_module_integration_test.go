@@ -75,7 +75,7 @@ func testConfigRevisionBackendHTTPIntegration(t *testing.T, f applyHTTPFixture) 
 	if err := f.row(`SELECT id FROM secret_provider_refs WHERE workspace_id=$1 ORDER BY created_at LIMIT 1`, f.workspace).Scan(&secretRef); err != nil {
 		t.Fatal(err)
 	}
-	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlans, Nodes: telemetry.NewBackend(f.b), Certificates: f.s.certificates})
+	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlans, Nodes: telemetry.New(f.b), Certificates: f.s.certificates})
 	path := "/api/v1/nodes/" + plan.NodeID.String()
 	read := func(want int64) int64 {
 		t.Helper()
@@ -197,7 +197,7 @@ func testConfigPlanModuleBackendHTTPIntegration(t *testing.T, f applyHTTPFixture
 			t.Fatal("missing Secret service reached Create")
 		}
 	})
-	certs := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
+	certs := certificates.New(f.b, f.s.operations, nil, nil, nil, f.signer)
 	f.s = f.newServer(Modules{ConfigPlans: plans, Certificates: certs})
 	foreign := uuid.Must(uuid.NewV7())
 	stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)

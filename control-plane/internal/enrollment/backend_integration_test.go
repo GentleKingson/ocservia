@@ -30,7 +30,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func enrollmentBackend(t *testing.T) database.Backend {
+func enrollmentBackend(t *testing.T) *postgres.Backend {
 	t.Helper()
 	runtime, _ := testfixture.OpenIsolated(t, t, "enrollment")
 	return postgres.WrapPool(runtime)
@@ -49,7 +49,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'enrollment',$2,now(),now())`, workspace, workspace.String())
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	s := NewBackend(b, "", "test", signer)
+	s := New(b, "", "test", signer)
 	endpoint := endpointFixture(101)
 	readOnly := []string{"ocserv.config_fingerprint.read", "ocserv.ip_bans.read", "ocserv.sessions.read", "ocserv.status.read", "ocserv.version.read"}
 	capabilities := append(slices.Clone(readOnly), "ocserv.user.manage", "future.feature.read")
@@ -165,7 +165,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		}
 	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager, err := ownersession.NewManagerBackend(b, logger)
+	manager, err := ownersession.NewManager(b, logger)
 	testutil.NoError(t, err)
 	s.ownerSessions = manager
 	handshake := &agentv1.SessionHandshake{ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, AgentVersion: "test", NodeId: node[:], EndpointId: endpoint, Capabilities: capabilities, MaxMessageSize: 1024, Time: timestamppb.Now(), SealingKeys: enrollmentSealingKeys()}
@@ -183,11 +183,11 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 		t.Fatal("fenced session", response, err)
 	}
 	firstEpoch := response.GetSessionGrant().GetSessionEpoch()
-	successor, err := ownersession.NewManagerBackend(b, logger)
+	successor, err := ownersession.NewManager(b, logger)
 	testutil.NoError(t, err)
 	// A restarted Controller must release the term using transportd's identity.
 	testutil.NoError(t, successor.CloseSession(ctx, node, connectionID, firstEpoch))
-	state, err := connectionowner.ReadStateBackend(ctx, b, node)
+	state, err := connectionowner.ReadState(ctx, b, node)
 	testutil.NoError(t, err)
 	if state.ConnectionID != connectionID || uint64(state.Epoch) != firstEpoch || state.Active {
 		t.Fatalf("transportd disconnect did not release its exact owner term: %+v", state)
@@ -242,7 +242,7 @@ func TestEnrollmentBackendIntegration(t *testing.T) {
 	}) {
 		t.Fatal("trust snapshot", bindings, err)
 	}
-	if verified, err := audit.NewBackendManager(b, nil).Verify(ctx, workspace); err != nil || !verified.Valid || verified.Events == 0 {
+	if verified, err := audit.NewManager(b, nil).Verify(ctx, workspace); err != nil || !verified.Valid || verified.Events == 0 {
 		t.Fatal("enrollment audit chain", verified, err)
 	}
 

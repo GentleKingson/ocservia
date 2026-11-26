@@ -76,7 +76,7 @@ func TestCreateNodeBootstrapTokenIntegration(t *testing.T) {
 	})
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	enroll := enrollment.NewBackend(postgres.WrapPool(pool), "", "test", signer)
+	enroll := enrollment.New(postgres.WrapPool(pool), "", "test", signer)
 	testutil.NoError(t, enroll.ConfigureInstallation(enrollment.InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
 	server := &Server{backend: postgres.WrapPool(pool), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), enrollment: enroll}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-bootstrap-tokens", strings.NewReader(fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"bootstrap API test","expected_endpoint_id":"1111111111111111111111111111111111111111111111111111111111111111"}`, workspaceID.String())))
@@ -124,7 +124,7 @@ func TestNodeBootstrapTokenRevalidatesSessionAfterBodyRead(t *testing.T) {
 	if _, err := runtimePool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Bootstrap session race',$2,now(),now())`, workspaceID, "bootstrap-session-race-"+workspaceID.String()); err != nil {
 		t.Fatal(err)
 	}
-	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	const username = "bootstrap-race-admin"
 	const password = "unique bootstrap session race administrator password"
@@ -134,7 +134,7 @@ func TestNodeBootstrapTokenRevalidatesSessionAfterBodyRead(t *testing.T) {
 	testutil.NoError(t, err)
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	enroll := enrollment.NewBackend(backend, "", "test", signer)
+	enroll := enrollment.New(backend, "", "test", signer)
 	testutil.NoError(t, enroll.ConfigureInstallation(enrollment.InstallationTrust{Origin: "https://controller.example", RelayURL: "https://relay.example", RelayToken: strings.Repeat("r", 32)}))
 	server := newTestServer(t, testHTTPConfig(false), backend, Modules{Enrollment: enroll}, Authorization{Authentication: authn})
 	body := fmt.Sprintf(`{"workspace_id":%q,"environment":"production","reason":"session revocation race"}`, workspaceID.String())
@@ -272,7 +272,7 @@ func TestCertificateCreateOptionalDNSNamesIntegration(t *testing.T) {
 	_, err := testfixture.InstallKey(ctx, pool, nodeID)
 	testutil.NoError(t, err)
 
-	authn, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	const username = "certificate-api-admin"
 	const password = "unique certificate API integration administrator password"
@@ -280,7 +280,7 @@ func TestCertificateCreateOptionalDNSNamesIntegration(t *testing.T) {
 	testutil.NoError(t, err)
 	cookie, _, err := authn.AuthenticateLocal(ctx, username, password)
 	testutil.NoError(t, err)
-	certificateService := certificates.NewBackend(backend, apiOperationService(pool), nil, nil, nil, nil)
+	certificateService := certificates.New(backend, apiOperationService(pool), nil, nil, nil, nil)
 	server := newTestServer(t, testHTTPConfig(false), backend, Modules{Certificates: certificateService}, Authorization{Authentication: authn})
 	submit := func(dnsField string) *httptest.ResponseRecorder {
 		body := `{"expected_version":1,"common_name":"node.example.test","key_bits":2048,"reason":"create certificate"` + dnsField + `}`
@@ -349,9 +349,9 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	}()
 	artifactData := []byte("encrypted artifact response")
 	grantSigner := commandauth.NewSignerFromSeed([32]byte{7})
-	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
-	server := &Server{auth: authn, certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
+	server := &Server{auth: authn, certificates: certificates.New(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, certificateArtifactFixture{data: artifactData}, grantSigner)}
 	manager := auth.Principal{IdentityID: managerID, SessionID: managerSession, Issuer: "integration"}
 	outsider := auth.Principal{IdentityID: outsiderID, SessionID: uuid.Must(uuid.NewV7()), Issuer: "integration"}
 	tests := []struct {
@@ -402,7 +402,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
 		t.Fatal(err)
 	}
-	failureServer := &Server{certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData}, grantSigner)}
+	failureServer := &Server{certificates: certificates.New(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, invalidatingArtifactFixture{pool: pool, artifactID: artifactID, data: artifactData}, grantSigner)}
 	failureRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
 	failureRequest.SetPathValue("artifact_id", artifactID.String())
 	failureRequest.Header.Set("X-Artifact-Token", token)
@@ -417,7 +417,7 @@ func TestCertificateRoutesUseNodeScopedAuthorizationIntegration(t *testing.T) {
 			if _, err := pool.Exec(ctx, `UPDATE artifact_operations SET state='ready',consumed_at=NULL,lease_until=NULL,active_grant_id=NULL,active_grant_subject=NULL,active_grant_expires_at=NULL,consume_grant=NULL,consume_sha256=NULL,consume_size=NULL,consume_actor_id=NULL,consume_session_id=NULL,consume_request_id=NULL,content_sha256=$2,content_size=$3 WHERE id=$1`, artifactID, artifactHash[:], len(artifactData)); err != nil {
 				t.Fatal(err)
 			}
-			terminalServer := &Server{certificates: certificates.NewBackend(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, terminalArtifactFixture{pool: pool, artifactID: artifactID, state: terminalState, data: artifactData}, grantSigner)}
+			terminalServer := &Server{certificates: certificates.New(postgres.WrapPool(pool), apiOperationService(pool), nil, nil, terminalArtifactFixture{pool: pool, artifactID: artifactID, state: terminalState, data: artifactData}, grantSigner)}
 			terminalRequest := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+artifactID.String(), nil)
 			terminalRequest.SetPathValue("artifact_id", artifactID.String())
 			terminalRequest.Header.Set("X-Artifact-Token", token)
@@ -469,7 +469,7 @@ func TestSyntheticCommandAuditUsesAuthenticatedOperator(t *testing.T) {
 		}
 	})
 
-	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	server := &Server{auth: authn, operations: apiOperationService(pool)}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/"+nodeID.String()+"/synthetic-commands", strings.NewReader(`{"kind":"noop","expected_version":1}`))
@@ -536,7 +536,7 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 	}()
 
 	breakGlassToken := strings.Repeat("break-glass-boundary-token-", 2)
-	authService, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{
+	authService, err := auth.New(postgres.WrapPool(pool), auth.Config{
 		LocalEnabled:      true,
 		SessionKey:        make([]byte, 32),
 		SessionTTL:        time.Hour,
@@ -655,5 +655,5 @@ func TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations(t *testing.T) {
 func apiOperationService(pool *pgxpool.Pool) *operations.Service {
 	var seed [32]byte
 	seed[0] = 7
-	return operations.NewBackend(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
+	return operations.New(postgres.WrapPool(pool), 50, commandauth.NewSignerFromSeed(seed))
 }

@@ -127,9 +127,6 @@ type Store interface {
 	ReplaceGroups(context.Context, uuid.UUID, []Group) error
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
-	if provider, ok := tx.(interface{ TelemetryStore() Store }); ok {
-		return provider.TelemetryStore(), nil
-	}
-	return nil, database.ErrUnsupported
+func FromTransaction(tx database.Tx) Store {
+	return database.Must[interface{ TelemetryStore() Store }](tx).TelemetryStore()
 }

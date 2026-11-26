@@ -91,9 +91,6 @@ type ResultStore interface {
 	ScheduleRecovery(context.Context, uuid.UUID, []byte, time.Time, time.Time, bool) error
 }
 
-func Results(tx database.Tx) (ResultStore, error) {
-	if p, ok := tx.(interface{ CommandResultStore() ResultStore }); ok {
-		return p.CommandResultStore(), nil
-	}
-	return nil, database.ErrUnsupported
+func Results(tx database.Tx) ResultStore {
+	return database.Must[interface{ CommandResultStore() ResultStore }](tx).CommandResultStore()
 }

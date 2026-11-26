@@ -74,7 +74,7 @@ func TestLocalAccountHTTPSharedLimitsIntegration(t *testing.T) {
 	}
 	// Account saturation must not enter the emergency credential path.
 	token := uuid.NewString()
-	authSvc, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
+	authSvc, err := auth.New(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: auth.TokenHash(token)})
 	testutil.NoError(t, err)
 	servers[0].auth = authSvc
 	if w := authHTTPRequest(servers[0], "POST", "break-glass", fmt.Sprintf(`{"token":%q}`, token), authTestOrigin); w.Code != 204 {

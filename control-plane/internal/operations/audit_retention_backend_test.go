@@ -27,14 +27,16 @@ type historicalAuditTx struct {
 	at time.Time
 }
 
+func (t historicalAuditTx) Unwrap() database.Tx { return t.Tx }
+
 func (t historicalAuditTx) AuditStore() auditstore.Store {
-	return historicalAuditStore{t.Tx.(auditstore.Provider).AuditStore(), t.at}
+	return historicalAuditStore{auditstore.Of(t.Tx), t.at}
 }
 
 func TestAuditRetentionBackendIntegration(t *testing.T) {
 	f := newOutboxFixture(t)
 	ctx := context.Background()
-	manager := audit.NewBackendManager(f.backend, bytes.Repeat([]byte{42}, 32))
+	manager := audit.NewManager(f.backend, bytes.Repeat([]byte{42}, 32))
 	old := time.Now().UTC().Add(-400 * 24 * time.Hour)
 	ids := []uuid.UUID{}
 	for i := 0; i < 36; i++ {

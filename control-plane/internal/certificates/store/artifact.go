@@ -50,10 +50,6 @@ type ArtifactStore interface {
 	ResetConsumption(context.Context, uuid.UUID, uuid.UUID, bool) error
 }
 
-func ArtifactFromTransaction(tx database.Tx) (ArtifactStore, error) {
-	p, ok := tx.(interface{ ArtifactStore() ArtifactStore })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.ArtifactStore(), nil
+func ArtifactFromTransaction(tx database.Tx) ArtifactStore {
+	return database.Must[interface{ ArtifactStore() ArtifactStore }](tx).ArtifactStore()
 }

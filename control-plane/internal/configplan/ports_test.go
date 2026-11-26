@@ -61,7 +61,7 @@ func TestOperationCreatorValidationAndErrors(t *testing.T) {
 	recorder := &recordingOperationCreator{}
 	var typedNil *operations.Service
 	for _, dependency := range []operationCreator{nil, typedNil, recorder} {
-		s := NewBackend(nil, dependency)
+		s := New(nil, dependency)
 		if _, replay, err := s.Create(ctx, CreateRequest{}); !errors.Is(err, ErrInvalid) || replay {
 			t.Fatalf("invalid Create: replay=%v err=%v", replay, err)
 		}

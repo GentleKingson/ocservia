@@ -37,12 +37,8 @@ func (s *Service) PrepareAgentUpgrade(ctx context.Context, workspaceID, nodeID u
 	}
 	var nodeWorkspace uuid.UUID
 	var architecture, osRelease string
-	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		nodeWorkspace, architecture, osRelease, err = store.UpgradeNode(ctx, nodeID)
+	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		nodeWorkspace, architecture, osRelease, err = operationstore.FromTransaction(tx).UpgradeNode(ctx, nodeID)
 		return err
 	}); err != nil {
 		return AgentUpgradeTarget{}, fmt.Errorf("%w: %w", ErrNodeUnavailable, err)

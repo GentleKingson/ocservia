@@ -101,9 +101,34 @@ type UpgradeTransition struct {
 }
 
 type Store interface {
-	DispatchStore
-	RecoveryStore
-	ReapingStore
+	DispatchCandidates(context.Context, int, int, time.Time) ([]Dispatch, error)
+	ClaimDispatch(context.Context, Dispatch, uuid.UUID, time.Time, time.Time) (bool, error)
+	LockDispatchOutbox(context.Context, Dispatch) error
+	DispatchStatus(context.Context, Dispatch) (DispatchStatus, error)
+	CompletedDispatch(context.Context, Dispatch) (DispatchStatus, error)
+	PublishDispatch(context.Context, Dispatch, time.Time) error
+	RecordDispatched(context.Context, Dispatch, bool, time.Time) error
+	CloseDispatch(context.Context, Dispatch, time.Time) error
+	FailDispatch(context.Context, Dispatch, string, time.Time) error
+	QueueMetrics(ctx context.Context, workspaceID uuid.UUID, all bool) (QueueMetrics, error)
+	ReconnectAuthority(context.Context, uuid.UUID, uuid.UUID, int64) error
+	AmbiguousDispatches(context.Context, uuid.UUID, int) ([]uuid.UUID, error)
+	LockAmbiguousDispatch(context.Context, uuid.UUID, uuid.UUID) (AmbiguousDispatch, error)
+	UpgradeSchedulingAcked(context.Context, uuid.UUID) (bool, error)
+	MarkRecoveryProjection(context.Context, RecoveryProjection) error
+	ScheduleReconnectRecovery(context.Context, uuid.UUID, uuid.UUID, []byte, time.Time, time.Time) error
+	RecoveryClock(context.Context) (time.Time, error)
+	ExpiredApplyCommands(context.Context) ([]RecoveryCommand, error)
+	ReconcileExpiredApply(context.Context, RecoveryUpdate) error
+	ExpiredSendingCommands(context.Context, int) ([]uuid.UUID, error)
+	LockExpiredSendingCommand(context.Context, uuid.UUID) (RecoveryCommand, error)
+	ReconcileExpiredSending(context.Context, RecoveryUpdate) (bool, error)
+	StaleSentCommands(context.Context, time.Duration, int) ([]uuid.UUID, error)
+	LockStaleSentCommand(context.Context, uuid.UUID, time.Duration) (RecoveryCommand, error)
+	ReconcileMissingResult(context.Context, RecoveryUpdate) (bool, error)
+	StaleReconciliations(context.Context, int, time.Duration, int) ([]RecoveryCommand, error)
+	ContinueReconciliation(context.Context, RecoveryUpdate) (bool, error)
+	DeleteExpiredLeases(context.Context) error
 	Rollout(context.Context, uuid.UUID, bool) (Rollout, error)
 	Rollouts(context.Context, uuid.UUID, int) ([]Rollout, error)
 	RolloutNodes(context.Context, uuid.UUID) ([]RolloutNode, error)
@@ -154,10 +179,6 @@ type Store interface {
 	EventSequence(context.Context, uuid.UUID, uuid.UUID) (int64, error)
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
-	p, ok := tx.(interface{ OperationStore() Store })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.OperationStore(), nil
+func FromTransaction(tx database.Tx) Store {
+	return database.Must[interface{ OperationStore() Store }](tx).OperationStore()
 }

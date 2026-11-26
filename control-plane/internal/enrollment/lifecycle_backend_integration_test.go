@@ -19,6 +19,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	enrollmentstore "github.com/GentleKingson/ocservia/control-plane/internal/enrollment/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
@@ -28,7 +29,7 @@ import (
 )
 
 type lifecycleFixture struct {
-	b         database.Backend
+	b         *postgres.Backend
 	workspace uuid.UUID
 }
 
@@ -36,11 +37,8 @@ func newLifecycleFixture(t *testing.T) lifecycleFixture {
 	t.Helper()
 	f := lifecycleFixture{enrollmentBackend(t), uuid.Must(uuid.NewV7())}
 	f.within(t, func(tx database.Tx) error {
-		s, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		at, err := database.WallTime(context.Background(), tx)
+		s := eventstore.FromTransaction(tx)
+		at, err := tx.WallTime(context.Background())
 		if err != nil {
 			return err
 		}
@@ -65,11 +63,7 @@ func (f lifecycleFixture) exec(t *testing.T, query string, args ...any) {
 func (f lifecycleFixture) trust(t *testing.T, fn func(enrollmentstore.TrustStore) error) {
 	t.Helper()
 	f.within(t, func(tx database.Tx) error {
-		s, err := enrollmentstore.Trust(tx)
-		if err != nil {
-			return err
-		}
-		return fn(s)
+		return fn(enrollmentstore.Trust(tx))
 	})
 }
 
@@ -78,11 +72,8 @@ func (f lifecycleFixture) job(t *testing.T) enrollmentstore.TrustJob {
 	id := uuid.Must(uuid.NewV7())
 	v := enrollmentstore.TrustJob{NodeID: id, EndpointID: append(bytes.Clone(id[:]), id[:]...), DesiredState: "revoked", Revision: 2, Reason: "test trust revocation"}
 	f.within(t, func(tx database.Tx) error {
-		s, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
-		at, err := database.WallTime(context.Background(), tx)
+		s := enrollmentstore.Enrollment(tx)
+		at, err := tx.WallTime(context.Background())
 		if err != nil {
 			return err
 		}
@@ -162,17 +153,18 @@ func TestTrustLeaseBackendIntegration(t *testing.T) {
 		lock, err := f.b.Begin(ctx, database.ReadCommitted)
 		testutil.NoError(t, err)
 		defer rollback(lock)
-		at, err := database.WallTime(ctx, lock)
+		at, err := lock.WallTime(ctx)
 		testutil.NoError(t, err)
 		until := at.Add(300 * time.Millisecond)
-		if _, err := lock.Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, until, v.NodeID); err != nil {
+		if _, err := lock.(interface {
+			Exec(context.Context, string, ...any) (int64, error)
+		}).Exec(ctx, `UPDATE node_trust_convergence SET locked_until=$1 WHERE node_id=$2`, until, v.NodeID); err != nil {
 			t.Fatal(err)
 		}
 		waiting, err := f.b.Begin(ctx, database.ReadCommitted)
 		testutil.NoError(t, err)
 		defer rollback(waiting)
-		s, err := enrollmentstore.Trust(waiting)
-		testutil.NoError(t, err)
+		s := enrollmentstore.Trust(waiting)
 		done := make(chan error, 1)
 		go func() {
 			changed, err := s.Renew(ctx, v, worker)
@@ -261,11 +253,8 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 					v := f.job(t)
 					// Commit real revoked authority as well as the queue intent.
 					f.within(t, func(tx database.Tx) error {
-						s, err := enrollmentstore.Enrollment(tx)
-						if err != nil {
-							return err
-						}
-						at, err := database.WallTime(ctx, tx)
+						s := enrollmentstore.Enrollment(tx)
+						at, err := tx.WallTime(ctx)
 						if err != nil {
 							return err
 						}
@@ -275,7 +264,7 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 						}
 						return err
 					})
-					bindings, err := NewBackend(f.b, "", "", nil).ListNodeTrust(ctx)
+					bindings, err := New(f.b, "", "", nil).ListNodeTrust(ctx)
 					if err != nil || !slices.ContainsFunc(bindings, func(binding *transportv1.NodeTrustBinding) bool {
 						return bytes.Equal(binding.NodeId, v.NodeID[:]) && binding.Revision == v.Revision && binding.State == transportv1.NodeTrustState_NODE_TRUST_STATE_REVOKED
 					}) {
@@ -298,7 +287,7 @@ func TestTrustUncertainRPCBackendIntegration(t *testing.T) {
 					if operation == "close" {
 						transport.close = inject
 					}
-					worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+					worker, err := NewTrustConvergenceWorker(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 					testutil.NoError(t, err)
 					worked, err := worker.RunOnce(ctx)
 					if !worked || status.Code(err) != code {
@@ -349,7 +338,7 @@ func TestTrustSynchronousWorkerRaceBackendIntegration(t *testing.T) {
 		t.Run(fmt.Sprintf("late-worker-success=%t", success), func(t *testing.T) {
 			f, ctx := newLifecycleFixture(t), context.Background()
 			v := f.job(t)
-			service := NewBackend(f.b, "", "", nil)
+			service := New(f.b, "", "", nil)
 			entered, resume := make(chan struct{}), make(chan struct{})
 			transport := &leasedTransport{update: func(context.Context) error {
 				close(entered)
@@ -359,7 +348,7 @@ func TestTrustSynchronousWorkerRaceBackendIntegration(t *testing.T) {
 				}
 				return nil
 			}}
-			worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			worker, err := NewTrustConvergenceWorker(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			testutil.NoError(t, err)
 			done := make(chan error, 1)
 			go func() { _, err := worker.RunOnce(ctx); done <- err }()
@@ -396,7 +385,7 @@ func TestTrustSupersededResultBackendIntegration(t *testing.T) {
 		})
 		return nil
 	}}
-	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := NewTrustConvergenceWorker(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	testutil.NoError(t, err)
 	if worked, err := worker.RunOnce(ctx); !worked || err == nil {
 		t.Fatal(worked, err)
@@ -405,7 +394,7 @@ func TestTrustSupersededResultBackendIntegration(t *testing.T) {
 	if before.Revision != v.Revision || before.Update || before.Close || transport.closes != 0 {
 		t.Fatal(before)
 	}
-	service := NewBackend(f.b, "", "", nil)
+	service := New(f.b, "", "", nil)
 	if changed, err := service.RecordRevocationSynchronized(ctx, NodeTrust{old.NodeID, old.EndpointID, old.Revision}, old.Reason, true); changed || err != nil {
 		t.Fatal(changed, err)
 	}
@@ -425,7 +414,7 @@ func TestTrustWorkerRenewalBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
 	v := f.job(t)
 	transport := &leasedTransport{}
-	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := NewTrustConvergenceWorker(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	testutil.NoError(t, err)
 	transport.update = func(ctx context.Context) error {
 		before := f.snapshot(t, v.NodeID)
@@ -491,9 +480,9 @@ func (s *ownerLostTransport) CloseNode(context.Context, []byte, string) error {
 // request's own fenced successes for the exact queued intent settle it.
 func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
-	service := NewBackend(f.b, "", "", nil)
+	service := New(f.b, "", "", nil)
 	transport := &ownerLostTransport{}
-	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := NewTrustConvergenceWorker(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	testutil.NoError(t, err)
 	v := f.job(t)
 	if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ownersession.ErrNotOwner) {
@@ -530,10 +519,7 @@ func TestTrustSynchronousRevocationBackendIntegration(t *testing.T) {
 	}
 	writeFailure := errors.New("injected bookkeeping transaction failure")
 	err = database.Within(ctx, f.b, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := enrollmentstore.Trust(tx)
-		if err != nil {
-			return err
-		}
+		store := enrollmentstore.Trust(tx)
 		if changed, err := store.RecordSynchronized(ctx, v, true); err != nil || !changed {
 			return errors.Join(err, errors.New("bookkeeping write not exercised"))
 		}
@@ -567,7 +553,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	s := NewBackend(f.b, "", "test", signer)
+	s := New(f.b, "", "test", signer)
 	t.Run("expiry-before-consumption-rolls-back", func(t *testing.T) {
 		for i, unbound := range []bool{false, true} {
 			endpoint := endpointFixture(byte(211 + i))
@@ -590,10 +576,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 			}
 			s.now = time.Now
 			f.within(t, func(tx database.Tx) error {
-				store, err := enrollmentstore.Enrollment(tx)
-				if err != nil {
-					return err
-				}
+				store := enrollmentstore.Enrollment(tx)
 				if exists, err := store.EndpointExists(ctx, endpoint); err != nil || exists {
 					t.Fatal("partial endpoint", exists, err)
 				}
@@ -631,11 +614,8 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 			t.Fatal("no endpoint bound")
 		}
 		f.within(t, func(tx database.Tx) error {
-			store, err := enrollmentstore.Enrollment(tx)
-			if err != nil {
-				return err
-			}
-			at, err := database.WallTime(ctx, tx)
+			store := enrollmentstore.Enrollment(tx)
+			at, err := tx.WallTime(ctx)
 			if err != nil {
 				return err
 			}
@@ -655,11 +635,8 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 		other := uuid.Must(uuid.NewV7())
 		// Use the same database, creating another workspace through its store.
 		f.within(t, func(tx database.Tx) error {
-			store, err := eventstore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			at, err := database.WallTime(ctx, tx)
+			store := eventstore.FromTransaction(tx)
+			at, err := tx.WallTime(ctx)
 			if err != nil {
 				return err
 			}
@@ -679,7 +656,7 @@ func TestEnrollmentSafetyBackendIntegration(t *testing.T) {
 			t.Fatal("failed enrollment consumed token", err)
 		}
 	})
-	if result, err := audit.NewBackendManager(f.b, nil).Verify(ctx, f.workspace); err != nil || !result.Valid {
+	if result, err := audit.NewManager(f.b, nil).Verify(ctx, f.workspace); err != nil || !result.Valid {
 		t.Fatal("audit chain", result, err)
 	}
 }

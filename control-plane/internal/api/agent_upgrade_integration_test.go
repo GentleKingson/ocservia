@@ -143,7 +143,7 @@ func TestAgentRolloutFleetLifecycleIntegration(t *testing.T) {
 	testutil.NoError(t, os.WriteFile(manifest, []byte(manifestJSON), 0o600))
 	catalog, err := releasecatalog.Load(manifest)
 	testutil.NoError(t, err)
-	authn, err := auth.NewBackend(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(postgres.WrapPool(pool), auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	server := &Server{backend: postgres.WrapPool(pool), auth: authn, operations: apiOperationService(pool), releaseCatalog: catalog, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	server.operations.EnableReleaseCatalog(catalog)

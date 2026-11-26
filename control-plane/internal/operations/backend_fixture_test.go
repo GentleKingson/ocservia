@@ -10,21 +10,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/audit/auditstore"
-	"github.com/GentleKingson/ocservia/control-plane/internal/authstore"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
-	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 )
 
 type outboxFixture struct {
-	backend, owner database.Backend
+	backend, owner *postgres.Backend
 	workspace      uuid.UUID
 	signer         *commandauth.Signer
 }
@@ -120,23 +115,4 @@ func (t *commitFaultTx) Commit(ctx context.Context) error {
 	}
 	return lostCommit
 }
-func (t *commitFaultTx) WallTime(ctx context.Context) (time.Time, error) {
-	return database.WallTime(ctx, t.Tx)
-}
-func (t *commitFaultTx) AuthenticationStore() authstore.Store {
-	return t.Tx.(authstore.Provider).AuthenticationStore()
-}
-func (t *commitFaultTx) OperationStore() operationstore.Store {
-	s, _ := operationstore.FromTransaction(t.Tx)
-	return s
-}
-func (t *commitFaultTx) CommandLimitStore() commandlimit.Store {
-	return t.Tx.(commandlimit.Provider).CommandLimitStore()
-}
-func (t *commitFaultTx) AuditStore() auditstore.Store {
-	return t.Tx.(interface{ AuditStore() auditstore.Store }).AuditStore()
-}
-func (t *commitFaultTx) ConnectionOwnerStore() connectionowner.Store {
-	s, _ := connectionowner.StoreFromTransaction(t.Tx)
-	return s
-}
+func (t *commitFaultTx) Unwrap() database.Tx { return t.Tx }

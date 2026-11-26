@@ -42,9 +42,6 @@ type Store interface {
 	List(context.Context, uuid.UUID) ([]Resource, error)
 }
 
-func From(tx database.Tx) (Store, error) {
-	if p, ok := tx.(interface{ UserStateStore() Store }); ok {
-		return p.UserStateStore(), nil
-	}
-	return nil, database.ErrUnsupported
+func From(tx database.Tx) Store {
+	return database.Must[interface{ UserStateStore() Store }](tx).UserStateStore()
 }

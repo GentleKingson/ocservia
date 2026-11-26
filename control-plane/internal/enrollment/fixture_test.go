@@ -59,8 +59,11 @@ func bootstrapActor(t *testing.T, service *Service, workspaceID uuid.UUID) (uuid
 		{`INSERT INTO workspace_admins(workspace_id,identity_id,created_at) VALUES($1,$2,$3)`, []any{workspaceID, identity, now}},
 		{`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at) VALUES($1,$2,$3,$4)`, []any{session, identity, now.Add(time.Hour), now}},
 	}
+	exec := service.backend.(interface {
+		Exec(context.Context, string, ...any) (int64, error)
+	})
 	for _, statement := range statements {
-		if _, err := service.backend.Exec(context.Background(), statement.query, statement.args...); err != nil {
+		if _, err := exec.Exec(context.Background(), statement.query, statement.args...); err != nil {
 			t.Fatal(err)
 		}
 	}

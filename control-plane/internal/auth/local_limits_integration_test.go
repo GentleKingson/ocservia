@@ -26,7 +26,7 @@ type localLimitFixture struct {
 func localLimitService(t *testing.T) *localLimitFixture {
 	t.Helper()
 	pool := testfixture.OpenRuntimePool(t)
-	s, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	s, err := New(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	return &localLimitFixture{Service: s, pool: pool}
 }

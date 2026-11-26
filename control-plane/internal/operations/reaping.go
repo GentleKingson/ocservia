@@ -24,10 +24,7 @@ func (s *Service) Reap(ctx context.Context, maxAttempts int) error {
 		if err := commandlimit.Lock(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch lease reaping: %w", err)
 		}
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := operationstore.FromTransaction(tx)
 		if err := s.reconcileExpiredSending(ctx, store, maxAttempts); err != nil {
 			return err
 		}

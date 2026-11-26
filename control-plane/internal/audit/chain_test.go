@@ -38,7 +38,7 @@ func TestVerifyAdmissionBeforeDatabase(t *testing.T) {
 	b := &verificationBackend{entered: make(chan struct{}), release: make(chan struct{}), err: errors.New("database begin failure")}
 	first := make(chan error, 1)
 	go func() {
-		_, err := NewBackendManager(b, nil).Verify(ctx, uuid.New())
+		_, err := NewManager(b, nil).Verify(ctx, uuid.New())
 		first <- err
 	}()
 	select {
@@ -47,7 +47,7 @@ func TestVerifyAdmissionBeforeDatabase(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	// Different managers and workspaces must share admission before opening SQL.
-	_, concurrentErr := NewBackendManager(b, nil).Verify(ctx, uuid.New())
+	_, concurrentErr := NewManager(b, nil).Verify(ctx, uuid.New())
 	calls := b.calls.Load()
 	close(b.release)
 	if err := <-first; !errors.Is(err, b.err) {
@@ -56,7 +56,7 @@ func TestVerifyAdmissionBeforeDatabase(t *testing.T) {
 	if concurrentErr == nil || errors.Is(concurrentErr, b.err) || calls != 1 {
 		t.Fatalf("concurrent verification entered database: calls=%d err=%v", calls, concurrentErr)
 	}
-	if _, err := NewBackendManager(b, nil).Verify(ctx, uuid.New()); !errors.Is(err, b.err) || b.calls.Load() != 2 {
+	if _, err := NewManager(b, nil).Verify(ctx, uuid.New()); !errors.Is(err, b.err) || b.calls.Load() != 2 {
 		t.Fatal("failed verification did not release admission", err)
 	}
 }
