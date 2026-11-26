@@ -305,7 +305,7 @@ fn create_secret_file(path: &Path, contents: &[u8]) -> Result<(), io::Error> {
 fn secure_open(path: &Path) -> Result<File, io::Error> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(no_follow())
+        .custom_flags(ocservia_contracts::unix::O_NOFOLLOW)
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file()
@@ -362,11 +362,6 @@ fn read_endpoint(file: &mut File) -> Result<EndpointId, io::Error> {
             "controller endpoint pin is invalid",
         )
     })
-}
-
-#[allow(clippy::cast_possible_wrap)]
-const fn no_follow() -> i32 {
-    rustix::fs::OFlags::NOFOLLOW.bits() as i32
 }
 
 #[cfg(test)]
@@ -466,7 +461,7 @@ mod tests {
     #[test]
     fn no_follow_matches_platform_and_rejects_symlinked_identity() {
         assert_eq!(
-            no_follow(),
+            ocservia_contracts::unix::O_NOFOLLOW,
             i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).expect("NOFOLLOW fits in i32")
         );
         let directory = test_dir().with_extension("symlink");

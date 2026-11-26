@@ -1,20 +1,21 @@
 use crate::ENROLL_ALPN;
 use crate::session::{controller_dial_target, exchange_message, supported_capabilities};
 use iroh::endpoint::{RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointId, RelayMap, RelayUrl};
+use iroh::{Endpoint, EndpointId};
 use ocservia_agent_protocol::{PrivdResponse, privd_response};
 use ocservia_command_authorization::{ControllerCommandKeyring, load_verification_key};
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     EnrollRequest, EnrollResponse, HandshakeResult, SealedSecretPurpose, SealingKeyDescriptorV1,
 };
-use rustls_pki_types::pem::PemObject as _;
+use ocservia_contracts::relay::{
+    load_relay_tls_roots, read_protected_token_file, system_dns_resolver,
+    validate_owner_or_root_group_token_file, with_relay_tls_roots,
+};
 use std::env;
 use std::io;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 pub(super) fn print_version_query() -> bool {
     if std::env::args().nth(1).as_deref() == Some("--binding-version") {
@@ -104,7 +105,7 @@ async fn enroll_agent(
         ocservia_agent_protocol::identity::Identity::provision(&config.identity_dir, controller)?;
     let endpoint = with_relay_tls_roots(
         Endpoint::builder(presets::N0),
-        load_relay_tls_roots(config)?,
+        load_relay_tls_roots(config.relay_ca_file.as_deref())?,
     )
     .secret_key(identity.secret_key().clone())
     .relay_mode(config.relay_mode.clone())
@@ -169,45 +170,6 @@ pub(super) struct Config {
     pub(super) sealing_keys: Vec<SealingKeyDescriptorV1>,
     pub(super) stats_file: Option<PathBuf>,
     pub(super) relay_ca_file: Option<PathBuf>,
-}
-
-/// Loads the PEM relay certificate authority as additional relay TLS roots.
-/// Deployments whose relays chain to public roots leave this unset.
-pub(super) fn load_relay_tls_roots(
-    config: &Config,
-) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>, io::Error> {
-    let Some(path) = config.relay_ca_file.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let roots: Vec<_> = rustls_pki_types::CertificateDer::pem_file_iter(path)
-        .map_err(|error| invalid(&format!("relay CA file is unreadable: {error}")))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| invalid(&format!("relay CA PEM is invalid: {error}")))?;
-    if roots.is_empty() {
-        return Err(invalid("relay CA file contains no certificates"));
-    }
-    Ok(roots)
-}
-
-/// Resolves Relay names through system DNS and hosts only; a lookup failure is
-/// reported instead of falling back to iroh's public resolvers.
-pub(super) fn system_dns_resolver() -> iroh::dns::DnsResolver {
-    iroh::dns::DnsResolver::builder()
-        .with_system_defaults()
-        .disable_fallback()
-        .build()
-}
-
-/// Applies the optional private relay CA to one endpoint builder.
-pub(super) fn with_relay_tls_roots(
-    builder: iroh::endpoint::Builder,
-    roots: Vec<rustls_pki_types::CertificateDer<'static>>,
-) -> iroh::endpoint::Builder {
-    if roots.is_empty() {
-        builder
-    } else {
-        builder.ca_tls_config(iroh::tls::CaTlsConfig::default().with_extra_roots(roots))
-    }
 }
 
 pub(super) fn load_controller_command_keys(
@@ -466,31 +428,16 @@ pub(super) fn validate_enrollment_mode(config: &Config) -> Result<(), io::Error>
 }
 
 pub(super) fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc_o_nofollow())
-        .open(path)?;
-    let metadata = file.metadata()?;
-    let owner_only = metadata.file_type().is_file()
-        && metadata.uid() == rustix::process::geteuid().as_raw()
-        && metadata.mode().trailing_zeros() >= 6;
-    let protected_group = metadata.file_type().is_file()
-        && metadata.uid() == 0
-        && metadata.gid() == rustix::process::getegid().as_raw()
-        && metadata.mode() & 0o027 == 0
-        && metadata.mode() & 0o040 != 0;
-    if !owner_only && !protected_group {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "enrollment token must be process-owned mode 0600 or root:agent mode 0640",
-        ));
-    }
-    let mut raw = Vec::with_capacity(50);
-    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 51), &mut raw)?;
-    let raw = Zeroizing::new(raw);
-    let token = std::str::from_utf8(&raw)
-        .map_err(|_| invalid("enrollment token must be UTF-8"))?
-        .trim_end_matches(['\n', '\r']);
+    let expected_owner = rustix::process::geteuid().as_raw();
+    let expected_group = rustix::process::getegid().as_raw();
+    let token = read_protected_token_file(path, 50, "enrollment token", |file| {
+        validate_owner_or_root_group_token_file(
+            file,
+            expected_owner,
+            expected_group,
+            "enrollment token",
+        )
+    })?;
     // The root installation token is never accepted by the Agent. Only its
     // one-way derived obt2_ child may cross this boundary.
     let Some(encoded) = token.strip_prefix("obt2_") else {
@@ -503,7 +450,7 @@ pub(super) fn read_enrollment_token(path: &Path) -> Result<String, io::Error> {
     {
         return Err(invalid("enrollment token is invalid"));
     }
-    Ok(token.to_owned())
+    Ok(token)
 }
 
 pub(super) fn build_relay_mode(
@@ -511,75 +458,11 @@ pub(super) fn build_relay_mode(
     raw_url: Option<&str>,
     token_file: Option<&Path>,
 ) -> Result<RelayMode, io::Error> {
-    match mode {
-        "disabled" if raw_url.is_none() && token_file.is_none() => Ok(RelayMode::Disabled),
-        "disabled" => Err(invalid(
-            "relay URL and token are accepted only with custom relay mode",
-        )),
-        "custom" => {
-            let raw = raw_url.ok_or_else(|| invalid("custom relay mode requires --relay-url"))?;
-            let token_file = token_file
-                .ok_or_else(|| invalid("custom relay mode requires --relay-token-file"))?;
-            let url: RelayUrl = raw.parse().map_err(|_| invalid("relay URL is invalid"))?;
-            if url.scheme() != "https"
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.host_str().is_none()
-            {
-                return Err(invalid(
-                    "relay URL must be credential-free HTTPS without query or fragment",
-                ));
-            }
-            let token = read_relay_token(token_file)?;
-            Ok(RelayMode::Custom(
-                RelayMap::from_iter([url]).with_auth_token(token),
-            ))
-        }
-        _ => Err(invalid("relay mode must be disabled or custom")),
-    }
-}
-
-#[allow(clippy::verbose_bit_mask)]
-fn read_relay_token(path: &Path) -> Result<String, io::Error> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc_o_nofollow())
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() {
-        return Err(invalid("relay token path must be a regular file"));
-    }
-    let mode = metadata.mode();
-    let owner_only = metadata.uid() == rustix::process::geteuid().as_raw() && mode & 0o077 == 0;
-    let protected_group = metadata.uid() == 0
-        && metadata.gid() == rustix::process::getegid().as_raw()
-        && mode & 0o027 == 0
-        && mode & 0o040 != 0;
-    if !owner_only && !protected_group {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "relay token must be process-owned mode 0600 or root:agent mode 0640",
-        ));
-    }
-    let mut raw = Vec::with_capacity(129);
-    std::io::Read::read_to_end(&mut std::io::Read::take(&mut file, 513), &mut raw)?;
-    let raw = Zeroizing::new(raw);
-    let token = std::str::from_utf8(&raw)
-        .map_err(|_| invalid("relay token must be UTF-8"))?
-        .trim_end_matches(['\n', '\r']);
-    if !(32..=512).contains(&token.len()) || token.chars().any(char::is_whitespace) {
-        return Err(invalid(
-            "relay token must be 32..512 non-whitespace UTF-8 bytes",
-        ));
-    }
-    Ok(token.to_owned())
-}
-
-#[allow(clippy::cast_possible_wrap)]
-const fn libc_o_nofollow() -> i32 {
-    rustix::fs::OFlags::NOFOLLOW.bits() as i32
+    let expected_owner = rustix::process::geteuid().as_raw();
+    let expected_group = rustix::process::getegid().as_raw();
+    ocservia_contracts::relay::build_relay_mode(mode, raw_url, token_file, |file| {
+        validate_owner_or_root_group_token_file(file, expected_owner, expected_group, "relay token")
+    })
 }
 
 fn required(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, io::Error> {

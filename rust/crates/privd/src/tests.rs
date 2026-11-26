@@ -54,6 +54,27 @@ async fn dispatch(
     .await
 }
 
+fn test_context(
+    node_id: [u8; 16],
+    command_keys: ControllerCommandKeyring,
+    attestation_key: Arc<SigningKey>,
+    upgrades: UpgradeScheduler,
+    adapter: Adapter,
+) -> PrivdContext {
+    let attestation_key_id: Arc<str> = Arc::from(key_id(&attestation_key.verifying_key()));
+    PrivdContext {
+        exec_permits: Semaphore::new(MAX_CONCURRENT_CLIENTS),
+        agent_uid: rustix_uid(),
+        node_id,
+        endpoint_id: TEST_ENDPOINT_ID,
+        command_keys,
+        attestation_key,
+        attestation_key_id,
+        upgrades,
+        adapter,
+    }
+}
+
 async fn dispatch_upgrade(
     request: PrivdRequest,
     node_id: &[u8; 16],
@@ -61,19 +82,14 @@ async fn dispatch_upgrade(
     adapter: &Adapter,
     upgrades: &UpgradeScheduler,
 ) -> PrivdResponse {
-    let key = Arc::new(SigningKey::from_bytes(&[41; 32]));
-    let kid: Arc<str> = Arc::from(key_id(&key.verifying_key()));
-    Box::pin(dispatch_attested(
-        &request,
-        node_id,
-        &TEST_ENDPOINT_ID,
-        command_keys,
-        &key,
-        &kid,
-        upgrades,
-        adapter,
-    ))
-    .await
+    let ctx = test_context(
+        *node_id,
+        command_keys.clone(),
+        Arc::new(SigningKey::from_bytes(&[41; 32])),
+        upgrades.clone(),
+        adapter.clone(),
+    );
+    Box::pin(dispatch_attested(&request, &ctx)).await
 }
 
 struct PrivdFixture {
@@ -1421,21 +1437,17 @@ async fn direct_socket_authorization_and_wire_variants_preserve_effects() {
     let cmd = signed_service_reload(&signing, node_id, now, now + 60);
     let send = |bytes: Vec<u8>, peer_uid| {
         let (mut client, server) = UnixStream::pair().expect("pair");
-        let attestation_key = Arc::new(SigningKey::from_bytes(&[41; 32]));
-        let attestation_key_id: Arc<str> =
-            Arc::from(verification_key_id(&attestation_key.verifying_key()));
-        let task = tokio::spawn(handle_client(
-            server,
-            Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS)),
-            peer_uid,
+        let ctx = Arc::new(test_context(
             node_id,
-            TEST_ENDPOINT_ID,
             keys.clone(),
-            attestation_key,
-            attestation_key_id,
+            Arc::new(SigningKey::from_bytes(&[41; 32])),
             UpgradeScheduler::disabled(),
             fx.adapter.clone(),
         ));
+        let task = tokio::spawn(async move {
+            verify_peer_uid(&server, peer_uid)?;
+            handle_client(server, ctx).await
+        });
         async move {
             let written = client.write_all(&bytes).await;
             let finished = client.shutdown().await;
@@ -1595,20 +1607,14 @@ async fn upgrade_result_list_surfaces_durable_outcomes_read_only() {
     let req = unsigned_request(Some(privd_request::Operation::UpgradeResultList(
         ReadRequest {},
     )));
-    let attestation_key = Arc::new(SigningKey::from_bytes(&[41; 32]));
-    let attestation_key_id: Arc<str> =
-        Arc::from(verification_key_id(&attestation_key.verifying_key()));
-    let resp = dispatch_attested(
-        &req,
-        &node_id,
-        &TEST_ENDPOINT_ID,
-        &keys,
-        &attestation_key,
-        &attestation_key_id,
-        &scheduler,
-        &adapter,
-    )
-    .await;
+    let ctx = test_context(
+        node_id,
+        keys,
+        Arc::new(SigningKey::from_bytes(&[41; 32])),
+        scheduler.clone(),
+        adapter.clone(),
+    );
+    let resp = dispatch_attested(&req, &ctx).await;
     let Some(privd_response::Result::UpgradeResultList(list)) = resp.result else {
         panic!("expected upgrade result list, got {:?}", resp.result);
     };

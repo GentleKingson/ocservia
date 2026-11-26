@@ -140,6 +140,49 @@ fn rustix_uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
+pub(crate) struct PrivdContext {
+    pub(crate) exec_permits: Semaphore,
+    pub(crate) agent_uid: u32,
+    pub(crate) node_id: [u8; 16],
+    pub(crate) endpoint_id: [u8; 32],
+    pub(crate) command_keys: ControllerCommandKeyring,
+    pub(crate) attestation_key: Arc<SigningKey>,
+    pub(crate) attestation_key_id: Arc<str>,
+    pub(crate) upgrades: UpgradeScheduler,
+    pub(crate) adapter: Adapter,
+}
+
+impl PrivdContext {
+    fn from_config(config: ServerConfig, adapter: Adapter) -> Arc<Self> {
+        let attestation_key_id = Arc::from(key_id(&config.attestation_key.verifying_key()));
+        Arc::new(Self {
+            exec_permits: Semaphore::new(MAX_CONCURRENT_CLIENTS),
+            agent_uid: config.agent_uid,
+            node_id: config.node_id,
+            endpoint_id: config.endpoint_id,
+            command_keys: config.command_keys,
+            attestation_key: config.attestation_key,
+            attestation_key_id,
+            upgrades: config.upgrades,
+            adapter,
+        })
+    }
+}
+
+fn verify_peer_uid(stream: &UnixStream, expected_uid: u32) -> Result<(), io::Error> {
+    let credentials = stream.peer_cred()?;
+    if credentials.uid() != expected_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "privd peer UID {} refused (expected {expected_uid})",
+                credentials.uid()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Serves requests until shutdown.
 ///
 /// # Errors
@@ -151,55 +194,26 @@ pub async fn serve(
     adapter: Adapter,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), io::Error> {
-    let exec_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let ctx = PrivdContext::from_config(config, adapter);
     let ingress_permits = Arc::new(Semaphore::new(MAX_INGRESS_CONNECTIONS));
-    let attestation_key_id: Arc<str> = Arc::from(key_id(&config.attestation_key.verifying_key()));
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             () = &mut shutdown => return Ok(()),
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                match stream.peer_cred() {
-                    Ok(credentials) if credentials.uid() == config.agent_uid => {}
-                    Ok(credentials) => {
-                        tracing::warn!(uid = credentials.uid(), expected = config.agent_uid, "privd peer UID refused");
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "privd peer credentials unavailable");
-                        continue;
-                    }
+                if let Err(error) = verify_peer_uid(&stream, ctx.agent_uid) {
+                    tracing::warn!(error = %error, "privd peer connection refused");
+                    continue;
                 }
                 let Ok(ingress_permit) = Arc::clone(&ingress_permits).try_acquire_owned() else {
                     tracing::warn!("privd ingress connection limit reached");
                     continue;
                 };
-                let exec_permits = Arc::clone(&exec_permits);
-                let adapter = adapter.clone();
-                let agent_uid = config.agent_uid;
-                let node_id = config.node_id;
-                let endpoint_id = config.endpoint_id;
-                let command_keys = config.command_keys.clone();
-                let attestation_key = Arc::clone(&config.attestation_key);
-                let attestation_key_id = Arc::clone(&attestation_key_id);
-                let upgrades = config.upgrades.clone();
+                let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
                     let _ingress_permit = ingress_permit;
-                    if let Err(error) = handle_client(
-                        stream,
-                        exec_permits,
-                        agent_uid,
-                        node_id,
-                        endpoint_id,
-                        command_keys,
-                        attestation_key,
-                        attestation_key_id,
-                        upgrades,
-                        adapter,
-                    )
-                    .await
-                    {
+                    if let Err(error) = handle_client(stream, ctx).await {
                         tracing::warn!(error = %error, "privd client failed");
                     }
                 });
@@ -208,94 +222,39 @@ pub async fn serve(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_client(
-    mut stream: UnixStream,
-    exec_permits: Arc<Semaphore>,
-    agent_uid: u32,
-    node_id: [u8; 16],
-    endpoint_id: [u8; 32],
-    command_keys: ControllerCommandKeyring,
-    attestation_key: Arc<SigningKey>,
-    attestation_key_id: Arc<str>,
-    upgrades: UpgradeScheduler,
-    adapter: Adapter,
-) -> Result<(), io::Error> {
-    let credentials = stream.peer_cred()?;
-    if credentials.uid() != agent_uid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "privd peer UID refused",
-        ));
-    }
+async fn handle_client(mut stream: UnixStream, ctx: Arc<PrivdContext>) -> Result<(), io::Error> {
     let request: PrivdRequest = tokio::time::timeout(FRAME_READ_TIMEOUT, read_frame(&mut stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd request read timed out"))??;
     // Acquire execution permit only after reading a complete request frame so
     // idle connections cannot starve active Agent snapshot/command work,
     // while queuing valid requests up to the execution cap.
-    let _exec_permit = exec_permits
+    let _exec_permit = ctx
+        .exec_permits
         .acquire()
         .await
         .map_err(|_| io::Error::other("privd concurrency limiter closed"))?;
     let lifetime = request_lifetime(&request);
-    let response = dispatch_attested(
-        &request,
-        &node_id,
-        &endpoint_id,
-        &command_keys,
-        &attestation_key,
-        &attestation_key_id,
-        &upgrades,
-        &adapter,
-    )
-    .await;
+    let response = dispatch_attested(&request, &ctx).await;
     tokio::time::timeout(lifetime, write_frame(&mut stream, &response))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "privd response write timed out"))??;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_attested(
-    request: &PrivdRequest,
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
-    command_keys: &ControllerCommandKeyring,
-    attestation_key: &Arc<SigningKey>,
-    attestation_key_id: &Arc<str>,
-    upgrades: &UpgradeScheduler,
-    adapter: &Adapter,
-) -> PrivdResponse {
+async fn dispatch_attested(request: &PrivdRequest, ctx: &PrivdContext) -> PrivdResponse {
     let request_id = request.request_id.clone();
-    let result = match validate_request(request, node_id, endpoint_id, command_keys) {
-        Ok((deadline, ValidatedRequest::Read)) => tokio::time::timeout(
-            deadline,
-            execute_read(
-                request.operation.clone(),
-                node_id,
-                attestation_key,
-                attestation_key_id,
-                adapter,
-                upgrades,
-            ),
-        )
-        .await
-        .unwrap_or_else(|_| deadline_error()),
+    let result = match validate_request(request, &ctx.node_id, &ctx.endpoint_id, &ctx.command_keys)
+    {
+        Ok((deadline, ValidatedRequest::Read)) => {
+            tokio::time::timeout(deadline, execute_read(request.operation.clone(), ctx))
+                .await
+                .unwrap_or_else(|_| deadline_error())
+        }
         Ok((deadline, ValidatedRequest::Execute(verified, accepted_at, owner_epoch))) => {
             match tokio::time::timeout(
                 deadline,
-                execute_command(
-                    &verified,
-                    &accepted_at,
-                    node_id,
-                    endpoint_id,
-                    owner_epoch,
-                    attestation_key,
-                    attestation_key_id,
-                    upgrades,
-                    adapter,
-                ),
+                execute_command(&verified, &accepted_at, owner_epoch, ctx),
             )
             .await
             {
@@ -307,7 +266,7 @@ async fn dispatch_attested(
             }
         }
         Ok((deadline, ValidatedRequest::Reconcile(verified))) => {
-            match tokio::time::timeout(deadline, reconcile_command(&verified, adapter)).await {
+            match tokio::time::timeout(deadline, reconcile_command(&verified, &ctx.adapter)).await {
                 Ok(mut response) => {
                     response.request_id = request_id;
                     return response;
@@ -317,9 +276,10 @@ async fn dispatch_attested(
         }
         Ok((deadline, ValidatedRequest::ArtifactRead(claims, session_epoch))) => {
             match tokio::time::timeout(deadline, async {
-                let identity = artifact_identity(&claims, node_id, endpoint_id, session_epoch);
-                adapter.accept_owner_fence(identity.owner_fence)?;
-                adapter.artifact_read(identity).await
+                let identity =
+                    artifact_identity(&claims, &ctx.node_id, &ctx.endpoint_id, session_epoch);
+                ctx.adapter.accept_owner_fence(identity.owner_fence)?;
+                ctx.adapter.artifact_read(identity).await
             })
             .await
             {
@@ -335,14 +295,15 @@ async fn dispatch_attested(
             ValidatedRequest::ArtifactConsume(claims, digest, size, confirm_only, owner_epoch),
         )) => {
             match tokio::time::timeout(deadline, async {
-                let identity = artifact_identity(&claims, node_id, endpoint_id, owner_epoch);
-                adapter.accept_owner_fence(identity.owner_fence)?;
+                let identity =
+                    artifact_identity(&claims, &ctx.node_id, &ctx.endpoint_id, owner_epoch);
+                ctx.adapter.accept_owner_fence(identity.owner_fence)?;
                 if confirm_only {
-                    adapter
+                    ctx.adapter
                         .artifact_confirm_consumed(identity, &digest, size)
                         .await
                 } else {
-                    adapter.artifact_consume(identity, &digest, size).await
+                    ctx.adapter.artifact_consume(identity, &digest, size).await
                 }
             })
             .await
@@ -366,11 +327,7 @@ async fn dispatch_attested(
 #[allow(clippy::too_many_lines)]
 async fn execute_read(
     operation: Option<privd_request::Operation>,
-    node_id: &[u8; 16],
-    attestation_key: &Arc<SigningKey>,
-    attestation_key_id: &Arc<str>,
-    adapter: &Adapter,
-    upgrades: &UpgradeScheduler,
+    ctx: &PrivdContext,
 ) -> privd_response::Result {
     let Some(operation) = operation else {
         return privd_response::Result::Error(error(
@@ -381,58 +338,58 @@ async fn execute_read(
     let (operation_name, result) = match operation {
         privd_request::Operation::ServiceStatus(_) => (
             "service_status",
-            adapter
+            ctx.adapter
                 .service_status()
                 .await
                 .map(privd_response::Result::ServiceStatus),
         ),
         privd_request::Operation::OcservVersion(_) => (
             "ocserv_version",
-            adapter
+            ctx.adapter
                 .ocserv_version()
                 .await
                 .map(privd_response::Result::OcservVersion),
         ),
         privd_request::Operation::SessionList(_) => (
             "session_list",
-            adapter
+            ctx.adapter
                 .session_list()
                 .await
                 .map(privd_response::Result::SessionList),
         ),
         privd_request::Operation::IpBanList(_) => (
             "ip_ban_list",
-            adapter
+            ctx.adapter
                 .ip_ban_list()
                 .await
                 .map(privd_response::Result::IpBanList),
         ),
         privd_request::Operation::ConfigFingerprint(_) => (
             "config_fingerprint",
-            adapter
+            ctx.adapter
                 .config_fingerprint()
                 .await
                 .map(privd_response::Result::ConfigFingerprint),
         ),
         privd_request::Operation::UserList(_) => (
             "user_list",
-            adapter
+            ctx.adapter
                 .user_list()
                 .await
                 .map(privd_response::Result::UserList),
         ),
         privd_request::Operation::GroupList(_) => (
             "group_list",
-            adapter
+            ctx.adapter
                 .group_list()
                 .await
                 .map(privd_response::Result::GroupList),
         ),
         privd_request::Operation::UpgradeResultList(_) => {
-            let root = upgrades.operations_root().to_path_buf();
-            let node_id = *node_id;
-            let key = Arc::clone(attestation_key);
-            let key_id_str = Arc::clone(attestation_key_id);
+            let root = ctx.upgrades.operations_root().to_path_buf();
+            let node_id = ctx.node_id;
+            let key = Arc::clone(&ctx.attestation_key);
+            let key_id_str = Arc::clone(&ctx.attestation_key_id);
             let blocking_result = tokio::task::spawn_blocking(move || {
                 read_attested_upgrade_results(&root, &node_id, &key, &key_id_str)
             })
@@ -536,31 +493,25 @@ fn read_attested_upgrade_results(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_command(
     verified: &VerifiedCommand<'_>,
     accepted_at: &prost_types::Timestamp,
-    node_id: &[u8; 16],
-    endpoint_id: &[u8; 32],
     owner_epoch: u64,
-    attestation_key: &SigningKey,
-    attestation_key_id: &str,
-    upgrades: &UpgradeScheduler,
-    adapter: &Adapter,
+    ctx: &PrivdContext,
 ) -> PrivdResponse {
     let command = verified.envelope();
     let claims = verified.claims();
-    let owner_fence = owner_fence(node_id, endpoint_id, owner_epoch);
-    if let Err(failure) = adapter.accept_owner_fence(owner_fence) {
+    let owner_fence = owner_fence(&ctx.node_id, &ctx.endpoint_id, owner_epoch);
+    if let Err(failure) = ctx.adapter.accept_owner_fence(owner_fence) {
         return adapter_error_response(failure);
     }
     let binding = effect_binding(command, claims);
     if let Some(binding) = binding.as_ref() {
         let identity = authorized_effect(command, claims, binding);
         if identity.retry_if_absent && fixed_host_effect(command) {
-            return replay_only_response(adapter, identity, owner_fence);
+            return replay_only_response(&ctx.adapter, identity, owner_fence);
         }
-        match adapter.prepare_authorized_effect(identity, owner_fence) {
+        match ctx.adapter.prepare_authorized_effect(identity, owner_fence) {
             Ok(AuthorizedEffectDecision::Execute) => {}
             Ok(AuthorizedEffectDecision::Replay(encoded)) => {
                 return decode_cached_response(&encoded);
@@ -589,10 +540,10 @@ async fn execute_command(
         if let Some(command_envelope::Payload::AgentUpgrade(payload)) = command.payload.as_ref() {
             (
                 "agent_upgrade_prepare",
-                execute_agent_upgrade(payload, claims, upgrades).await,
+                execute_agent_upgrade(payload, claims, &ctx.upgrades).await,
             )
         } else {
-            execute_signed_payload(verified, adapter).await
+            execute_signed_payload(verified, &ctx.adapter).await
         };
     let result = finish_operation(operation_name, result);
     if matches!(&result, privd_response::Result::Error(error) if terminal_result_error_code(error).is_none())
@@ -606,20 +557,12 @@ async fn execute_command(
     let Some(binding) = binding.as_ref() else {
         return response_error(ErrorKind::Unavailable, "root effect identity unavailable");
     };
-    let effect_sequence = match adapter.next_receipt_sequence() {
+    let effect_sequence = match ctx.adapter.next_receipt_sequence() {
         Ok(sequence) => sequence,
         Err(failure) => return adapter_error_response(failure),
     };
-    let Ok(proof) = build_result_proof(
-        command,
-        claims,
-        accepted_at,
-        node_id,
-        effect_sequence,
-        &result,
-        attestation_key,
-        attestation_key_id,
-    ) else {
+    let Ok(proof) = build_result_proof(ctx, command, claims, accepted_at, effect_sequence, &result)
+    else {
         return response_error(ErrorKind::Unavailable, "result attestation unavailable");
     };
     let response = PrivdResponse {
@@ -628,8 +571,9 @@ async fn execute_command(
         result: Some(result),
     };
     let cached = response.encode_to_vec();
-    if let Err(failure) =
-        adapter.complete_authorized_effect(authorized_effect(command, claims, binding), &cached)
+    if let Err(failure) = ctx
+        .adapter
+        .complete_authorized_effect(authorized_effect(command, claims, binding), &cached)
     {
         // Concurrent duplicate AgentUpgrade requests are permitted past Pending
         // because the immutable intent store is the idempotency authority; if a
@@ -639,8 +583,9 @@ async fn execute_command(
         if matches!(
             command.payload.as_ref(),
             Some(command_envelope::Payload::AgentUpgrade(_))
-        ) && let Ok(Some(replayed)) =
-            adapter.replay_authorized_effect(authorized_effect(command, claims, binding))
+        ) && let Ok(Some(replayed)) = ctx
+            .adapter
+            .replay_authorized_effect(authorized_effect(command, claims, binding))
         {
             return decode_cached_response(&replayed);
         }
