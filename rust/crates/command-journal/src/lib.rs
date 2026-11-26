@@ -198,8 +198,6 @@ impl Journal {
                 PRIMARY KEY(resource_type,resource_key)
              ) STRICT;",
         )?;
-        migrate_command_journal(&connection)?;
-        migrate_applied_resource_revisions(&connection)?;
         let integrity: String =
             connection.pragma_query_value(None, "quick_check", |row| row.get(0))?;
         if integrity != "ok" {
@@ -681,69 +679,6 @@ impl Journal {
             .map(u64::from_be_bytes)
             .map_err(|_| rusqlite::Error::InvalidQuery)
     }
-}
-
-/// Applies idempotent column migrations to `command_journal`.
-///
-/// New databases already include every column via the `CREATE TABLE` statement.
-/// Pre-existing databases are upgraded with `ALTER TABLE … ADD COLUMN` guarded
-/// by a `PRAGMA table_info` presence check.
-fn migrate_command_journal(connection: &Connection) -> Result<(), rusqlite::Error> {
-    if !has_column(connection, "error_code")? {
-        connection.execute(
-            "ALTER TABLE command_journal ADD COLUMN error_code TEXT CHECK (error_code IS NULL OR length(error_code) BETWEEN 1 AND 128)",
-            [],
-        )?;
-    }
-    if !has_column(connection, "payload_hash_version")? {
-        connection.execute(
-            "ALTER TABLE command_journal ADD COLUMN payload_hash_version INTEGER NOT NULL DEFAULT 0 CHECK (payload_hash_version >= 0)",
-            [],
-        )?;
-    }
-    if !has_column(connection, "privileged_result_proof")? {
-        connection.execute(
-            "ALTER TABLE command_journal ADD COLUMN privileged_result_proof BLOB CHECK (privileged_result_proof IS NULL OR length(privileged_result_proof) BETWEEN 1 AND 65536)",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
-fn migrate_applied_resource_revisions(connection: &Connection) -> Result<(), rusqlite::Error> {
-    let schema: String = connection.query_row(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='applied_resource_revisions'",
-        [],
-        |row| row.get(0),
-    )?;
-    if schema.contains("'config'") {
-        return Ok(());
-    }
-    connection.execute_batch(
-        "BEGIN IMMEDIATE;
-         ALTER TABLE applied_resource_revisions RENAME TO applied_resource_revisions_legacy;
-         CREATE TABLE applied_resource_revisions (
-            resource_type TEXT NOT NULL CHECK (resource_type IN ('user','group','config')),
-            resource_key TEXT NOT NULL CHECK (length(resource_key) BETWEEN 1 AND 64),
-            revision INTEGER NOT NULL CHECK (revision > 0),
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(resource_type,resource_key)
-         ) STRICT;
-         INSERT INTO applied_resource_revisions(resource_type,resource_key,revision,updated_at)
-            SELECT resource_type,resource_key,revision,updated_at
-            FROM applied_resource_revisions_legacy;
-         DROP TABLE applied_resource_revisions_legacy;
-         COMMIT;",
-    )
-}
-
-/// Returns `true` when `command_journal` has a column named `column`.
-fn has_column(connection: &Connection, column: &str) -> Result<bool, rusqlite::Error> {
-    let mut statement = connection.prepare("PRAGMA table_info(command_journal)")?;
-    let names = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(names.iter().any(|name| name == column))
 }
 
 fn decode_command_row(row: &rusqlite::Row<'_>) -> Result<CommandRecord, rusqlite::Error> {
