@@ -50,7 +50,7 @@ func (s transportEventStore) Events(ctx context.Context, workspace, after uuid.U
 	case after == uuid.Nil:
 		rows, err = s.Query(ctx, base+` WHERE n.workspace_id=$1 ORDER BY e.ingest_sequence `+order+` LIMIT $2`, workspace, limit)
 	default:
-		rows, err = s.Query(ctx, base+` WHERE e.ingest_sequence `+comparison+` (SELECT ingest_sequence FROM transport_events WHERE event_id=$1) AND n.workspace_id=$2 ORDER BY e.ingest_sequence `+order+` LIMIT $3`, after, workspace, limit)
+		rows, err = s.Query(ctx, base+` WHERE e.ingest_sequence `+comparison+` (SELECT c.ingest_sequence FROM transport_events c JOIN nodes cn ON cn.id=c.node_id WHERE c.event_id=$1 AND cn.workspace_id=$2) AND n.workspace_id=$2 ORDER BY e.ingest_sequence `+order+` LIMIT $3`, after, workspace, limit)
 	}
 	if err != nil {
 		return nil, err

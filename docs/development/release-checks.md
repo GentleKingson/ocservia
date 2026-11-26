@@ -577,9 +577,11 @@ upgrade stage cache while retaining compiler and dependency caches.
 Release Controller jobs cache image-security scanner binaries and overlap a
 fresh uncached Grype vulnerability database download in `$RUNNER_TEMP` with
 parallel image builds: each run fetches fresh advisory data and fails if the
-feed is unavailable or invalid. Image scans inspect the built image archives
-before smoke tests and registry uploads; Business diagnostic runs do not scan
-images.
+feed is unavailable or invalid. Image scans inspect the built Controller image archives together with the pinned
+third-party `postgres` and `otel` runtime images (including PGDG PostgreSQL CPE
+matching for `postgresql-18` and Go module scanning for `otel`, with advisory
+Go module reporting for `gateway` until Caddy `2.11.10+` ships) before smoke
+tests and registry uploads; Business diagnostic runs do not scan images.
 
 ### Manual deep checks and reproduction
 

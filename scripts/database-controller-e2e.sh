@@ -53,9 +53,9 @@ docker network create --internal "${NAME}" >/dev/null
 ENVIRONMENT=(-e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
 MOUNTS=()
 COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platform/app -run '^TestControllerTransportBackendE2E$')
-POSTGRES_IMAGE=postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+POSTGRES_IMAGE=postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35
 if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
-  POSTGRES_IMAGE=postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+  POSTGRES_IMAGE=postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35
   MOUNTS=(-v "$(dirname "${SINGLE_AGENT_DEB}"):/published:ro")
   ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_DEB=/published/$(basename "${SINGLE_AGENT_DEB}")" \
     -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")

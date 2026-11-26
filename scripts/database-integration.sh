@@ -86,7 +86,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   # Keep the selected loopback port stable across the lifecycle restart test.
   port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
   case "${major}" in
-    18) postgres_image='postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af' ;;
+    18) postgres_image='postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35' ;;
   esac
   docker run -d --name "${container}" \
     -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \

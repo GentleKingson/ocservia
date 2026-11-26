@@ -14,7 +14,7 @@ processors:
     timeout: 5s
 
 exporters:
-  otlp:
+  otlp_grpc:
     endpoint: ${env:OCSERV_OTEL_BACKEND_ENDPOINT}
     tls:
       ca_file: /run/secrets/otel_ca_certificate
@@ -29,4 +29,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp]
+      exporters: [otlp_grpc]

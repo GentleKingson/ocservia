@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35}"
 
 if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2

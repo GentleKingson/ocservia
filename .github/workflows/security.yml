@@ -50,15 +50,30 @@ jobs:
               export RUSTUP_AUTO_INSTALL=0
               work="$(mktemp -d)"
               trap 'rm -rf -- "${work}"' EXIT
+              export GRYPE_DB_CACHE_DIR="${work}/grype-db"
+              export GRYPE_DB_AUTO_UPDATE=false
+              mkdir -p "${GRYPE_DB_CACHE_DIR}"
               (cd rust && cargo audit --file ../deploy/production/relay.Cargo.lock) >"${work}/relay.log" 2>&1 &
               relay_pid=$!
               (cd rust && cargo deny --locked check advisories bans licenses sources) >"${work}/deny.log" 2>&1 &
               deny_pid=$!
-              relay_status=0; deny_status=0
+              grype db update >"${work}/grype-db.log" 2>&1 &
+              db_pid=$!
+              relay_status=0; deny_status=0; db_status=0
               wait "${relay_pid}" || relay_status=$?
               wait "${deny_pid}" || deny_status=$?
-              cat "${work}/relay.log" "${work}/deny.log"
-              ((relay_status == 0 && deny_status == 0))
+              wait "${db_pid}" || db_status=$?
+              cat "${work}/relay.log" "${work}/deny.log" "${work}/grype-db.log"
+              ((relay_status == 0 && deny_status == 0 && db_status == 0))
+              for lockfile in rust/Cargo.lock deploy/production/relay.Cargo.lock; do
+                grype "file:${lockfile}" -o json --file "${work}/lock.scan.json" -q
+                findings="$(jq -c '[.matches[]
+                  | select((.vulnerability.severity == "High" or .vulnerability.severity == "Critical")
+                    and ((.vulnerability.fix.versions // []) | length > 0))
+                  | {package:.artifact.name, version:.artifact.version, id:.vulnerability.id, severity:.vulnerability.severity, fix:.vulnerability.fix.versions}]' "${work}/lock.scan.json")"
+                echo "${lockfile} grype fixable high/critical: ${findings}"
+                jq -e 'length == 0' <<<"${findings}" >/dev/null
+              done
           - name: npm vulnerabilities
             profile: npm-security
             command: |

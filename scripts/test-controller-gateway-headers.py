@@ -15,7 +15,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-CADDY = "caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e"
+CADDY = "caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0"
 HOST = "controller.headers.test"
 SUBNET, CLIENT_GATEWAY = "198.18.94.0/24", "198.18.94.1"
 EXPECTED = {

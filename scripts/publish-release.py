@@ -26,8 +26,8 @@ PREFIX = 'ghcr.io/gentlekingson/ocservia'
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = ROOT / 'control-plane/migrations'
 PINNED_IMAGES = {
-    'postgres': 'docker.io/library/postgres@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af',
-    'otel': 'docker.io/otel/opentelemetry-collector@sha256:0c066d4388070dad8dc9961d9f23649e85a226620e6b359334e4a6c7f9d73b23',
+    'postgres': 'docker.io/library/postgres@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35',
+    'otel': 'docker.io/otel/opentelemetry-collector@sha256:5dfb40297a8da893e4e9b6b98d3ddbdd9082f73611170d6381e355e08b235334',
 }
 MANIFEST_ASSETS = ('controller-release.json', 'controller-release-amd64.json',
                    'controller-release-arm64.json')

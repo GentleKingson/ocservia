@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
+image="${POSTGRES_IMAGE:-postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35}"
 # Compose overrides ENTRYPOINT and discards the image CMD unless command is explicit.
 OCSERV_CONTROLLER_ENDPOINT_ID="$(printf '%064d' 1)" \
   docker compose -f "${ROOT}/deploy/compose/compose.yaml" config --format json |
