@@ -476,8 +476,7 @@ mod tests {
 
     #[test]
     fn key_loader_rejects_world_readable_file() {
-        let directory = std::env::temp_dir().join(format!("ocservia-key-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&directory).expect("create test directory");
+        let directory = PrivateTempDir::new("td-key");
         let path = directory.join("controller.key");
         let mut file = std::fs::File::create(&path).expect("create key");
         file.write_all(&[7_u8; 32]).expect("write key");
@@ -487,13 +486,11 @@ mod tests {
             load_key(&path).expect_err("insecure key rejected").kind(),
             io::ErrorKind::PermissionDenied
         );
-        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
     fn key_validator_rejects_a_different_owner() {
-        let directory = std::env::temp_dir().join(format!("ocservia-key-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&directory).expect("create test directory");
+        let directory = PrivateTempDir::new("td-owner");
         let path = directory.join("controller.key");
         let file = std::fs::File::create(&path).expect("create key");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
@@ -505,14 +502,11 @@ mod tests {
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
-        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
     fn custom_relay_requires_single_https_url_and_token() {
-        let directory =
-            std::env::temp_dir().join(format!("relay-contract-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&directory).expect("test directory");
+        let directory = PrivateTempDir::new("td-relay");
         let token = directory.join("token");
         std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
@@ -557,14 +551,11 @@ mod tests {
         std::fs::write(&token, "0123456789abcdef0123456789abcdef").expect("valid token");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).expect("mode");
         assert!(build_relay_mode("custom", Some(url), Some(&token)).is_err());
-        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[test]
     fn relay_token_sharing_does_not_relax_identity_key_permissions() {
-        let directory =
-            std::env::temp_dir().join(format!("ocservia-relay-sharing-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir(&directory).expect("create directory");
+        let directory = PrivateTempDir::new("td-rshare");
         let path = directory.join("token");
         std::fs::write(&path, "0123456789abcdef0123456789abcdef").expect("write token");
         let file = std::fs::File::open(&path).expect("open token");
@@ -588,7 +579,6 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
         std::fs::hard_link(&path, directory.join("alias")).unwrap();
         assert!(validate_owner_or_group_readonly_token_file(&file, uid, gid).is_err());
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
