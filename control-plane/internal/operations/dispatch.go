@@ -8,7 +8,6 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
@@ -21,7 +20,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 	var claimed []Dispatch
 	err := database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		claimed = nil
-		available, err := commandlimit.Available(ctx, tx, s.commandLimit)
+		available, err := operationstore.AvailableCommandSlots(ctx, tx, s.commandLimit)
 		if err != nil {
 			return fmt.Errorf("reserve global dispatch capacity: %w", err)
 		}
@@ -61,7 +60,7 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID, limit int, leas
 		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if confirmed := database.Within(check, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			if err := commandlimit.Lock(check, tx); err != nil {
+			if err := operationstore.LockCommandAdmission(check, tx); err != nil {
 				return err
 			}
 			store := operationstore.FromTransaction(tx)
@@ -110,7 +109,7 @@ func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error
 
 func (s *Service) withinDispatchTx(ctx context.Context, fn func(database.Tx, operationstore.Store) error) error {
 	return database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		if err := commandlimit.Lock(ctx, tx); err != nil {
+		if err := operationstore.LockCommandAdmission(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch completion: %w", err)
 		}
 		return fn(tx, operationstore.FromTransaction(tx))

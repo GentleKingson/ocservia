@@ -14,7 +14,6 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 )
 
 const gapReconciliationConcurrency = 32
@@ -30,22 +29,6 @@ var (
 type Session struct {
 	ConnectionID [16]byte
 	SessionEpoch uint64
-}
-
-// SessionOpener allocates a monotonic session_epoch for a newly accepted
-// mutation-capable Agent session.
-type SessionOpener interface {
-	OpenSession(ctx context.Context, nodeID, connectionID [16]byte, endpointID [32]byte) (Session, error)
-}
-
-// SessionCloser ends the session of exactly one (connectionID, epoch) term.
-type SessionCloser interface {
-	CloseSession(ctx context.Context, nodeID [16]byte, connectionID [16]byte, epoch uint64) error
-}
-
-// EventStream is the transport event source that ends sessions on disconnect.
-type EventStream interface {
-	RunWatch(ctx context.Context, cursors transportclient.CursorStore, handler transportclient.EventHandler) error
 }
 
 type nodeSession struct {

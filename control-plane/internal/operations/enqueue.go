@@ -7,11 +7,10 @@ import (
 	"time"
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -21,7 +20,7 @@ import (
 )
 
 // ReplayTx runs after the caller locks the target and authorizes the mutation.
-func ReplayTx(ctx context.Context, tx database.Tx, store operationstore.Store, workspace uuid.UUID, key string, digest idempotency.Digest) (Operation, error) {
+func ReplayTx(ctx context.Context, tx database.Tx, store operationstore.Store, workspace uuid.UUID, key string, digest canonicalcbor.IntentDigest) (Operation, error) {
 	op, stored, err := store.FindIdempotent(ctx, workspace, key)
 	if err != nil || op.ID == "" {
 		return op, err
@@ -49,7 +48,7 @@ func RequireAttestation(ctx context.Context, store operationstore.Store, nodeID 
 type QueueIntent struct {
 	WorkspaceID, NodeID         uuid.UUID
 	Key, RequestID, Traceparent string
-	Digest                      idempotency.Digest
+	Digest                      canonicalcbor.IntentDigest
 	Now, Expires, Available     time.Time
 	ExpectedVersion             int64
 	ResourceType, ResourceKey   *string
@@ -73,7 +72,7 @@ func (s *Service) EnqueueTx(ctx context.Context, tx database.Tx, store operation
 	if err != nil {
 		return Operation{}, err
 	}
-	if err := commandlimit.ReserveBacklog(ctx, tx, intent.WorkspaceID, intent.NodeID); err != nil {
+	if err := operationstore.ReserveCommandBacklog(ctx, tx, intent.WorkspaceID, intent.NodeID); err != nil {
 		return Operation{}, err
 	}
 	hash := intent.Digest.Current

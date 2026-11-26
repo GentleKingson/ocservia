@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -9,15 +8,7 @@ import (
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
-	"github.com/google/uuid"
 )
-
-type UserOperations interface {
-	GetPolicy(context.Context, uuid.UUID, string) (useroperations.Policy, error)
-	SetPolicy(context.Context, useroperations.PolicyRequest) (useroperations.Policy, bool, error)
-}
-
-var _ UserOperations = (*useroperations.Service)(nil)
 
 type userPolicyRequest struct {
 	QuotaPeriod     string  `json:"quota_period"`

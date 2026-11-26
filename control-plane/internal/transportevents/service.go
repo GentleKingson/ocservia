@@ -2,7 +2,6 @@ package transportevents
 
 import (
 	"bytes"
-	"context"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -18,6 +17,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
+	"github.com/GentleKingson/ocservia/control-plane/internal/ownersession"
 	"github.com/GentleKingson/ocservia/control-plane/internal/telemetry"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
@@ -44,25 +44,10 @@ type Service struct {
 	backend           database.Backend
 	now               func() time.Time
 	signer            *commandauth.Signer
-	commandRecovery   CommandRecoverer
-	recoveryAuthority RecoveryAuthority
+	commandRecovery   *operations.Service
+	recoveryAuthority *ownersession.Manager
 	resultCommitFault
 	localSimulator bool
-}
-
-// CommandRecoverer is the narrow business-layer hook used after transportd
-// reports that a fenced Agent connection is registered and usable. The
-// implementation must recheck database ownership inside the supplied event
-// transaction before it changes command or outbox state.
-type CommandRecoverer interface {
-	RecoverAmbiguousDispatched(context.Context, database.Tx, operations.OwnerReconnect) (int, error)
-}
-
-// RecoveryAuthority binds reconnect scheduling to the process that owns the
-// exact local session term. Database ownership is rechecked by CommandRecoverer
-// inside the state-changing transaction.
-type RecoveryAuthority interface {
-	OwnsTerm(nodeID, connectionID [16]byte, sessionEpoch uint64) bool
 }
 
 const (
@@ -88,7 +73,7 @@ func New(backend database.Backend, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, signer: signer, localSimulator: true, now: func() time.Time { return time.Now().UTC() }}
 }
 
-func NewWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
+func NewWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery *operations.Service, authority *ownersession.Manager) *Service {
 	service := New(backend, signer)
 	service.commandRecovery, service.recoveryAuthority = recovery, authority
 	return service

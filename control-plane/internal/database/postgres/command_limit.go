@@ -3,21 +3,23 @@ package postgres
 import (
 	"context"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
+	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/google/uuid"
 )
 
 type commandLimitStore struct{ tx *transaction }
 
-func (t *transaction) CommandLimitStore() commandlimit.Store { return &commandLimitStore{t} }
+func (t *transaction) CommandLimitStore() operationstore.CommandLimitStore {
+	return &commandLimitStore{t}
+}
 
 func (s *commandLimitStore) LockAdmission(ctx context.Context) error {
-	_, err := s.tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, commandlimit.AdmissionLockID)
+	_, err := s.tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, operationstore.AdmissionLockID)
 	return err
 }
 
 func (s *commandLimitStore) LockBacklog(ctx context.Context) error {
-	_, err := s.tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, commandlimit.BacklogLockID)
+	_, err := s.tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, operationstore.BacklogLockID)
 	return err
 }
 
@@ -42,4 +44,4 @@ func (s *commandLimitStore) WorkspaceBacklog(ctx context.Context, workspace uuid
 	return count, err
 }
 
-var _ commandlimit.Store = (*commandLimitStore)(nil)
+var _ operationstore.CommandLimitStore = (*commandLimitStore)(nil)

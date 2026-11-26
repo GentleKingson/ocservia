@@ -12,8 +12,8 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	tracecontext "github.com/GentleKingson/ocservia/control-plane/internal/platform/telemetry"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
@@ -191,14 +191,14 @@ func nodeIDStrings(ids []uuid.UUID) []string {
 	return values
 }
 
-func agentRolloutRequestDigest(target string, sorted []uuid.UUID, request CreateAgentRolloutRequest) idempotency.Digest {
+func agentRolloutRequestDigest(target string, sorted []uuid.UUID, request CreateAgentRolloutRequest) canonicalcbor.IntentDigest {
 	intent := struct {
 		TargetVersion string      `json:"target_version"`
 		NodeIDs       []uuid.UUID `json:"node_ids"`
 		BatchSize     int         `json:"batch_size"`
 		StopOnFailure bool        `json:"stop_on_failure"`
 	}{target, sorted, request.BatchSize, request.StopOnFailure}
-	return idempotency.New("agent-rollout", struct {
+	return canonicalcbor.NewIntentDigest("agent-rollout", struct {
 		Intent                      any
 		ActorIdentity, ActorSession uuid.UUID
 		Reason                      string

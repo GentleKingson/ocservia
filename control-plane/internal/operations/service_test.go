@@ -14,17 +14,16 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/semanticpayload"
-	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const testTraceparent = testfixture.Traceparent
+const testTraceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
 
 func testCommandSigner(t *testing.T) *commandauth.Signer {
 	t.Helper()
-	return testfixture.CommandSigner(1)
+	return commandauth.NewSignerFromSeed([32]byte{1})
 }
 
 func TestCommandResultResponseTimeoutLeavesCompletionHeadroom(t *testing.T) {

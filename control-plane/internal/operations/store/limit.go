@@ -1,6 +1,4 @@
-// Package commandlimit serializes command admission against the configured
-// environment-wide active command limit.
-package commandlimit
+package store
 
 import (
 	"context"
@@ -19,7 +17,7 @@ const (
 	MaxWorkspaceBacklog       = 5000
 )
 
-type Store interface {
+type CommandLimitStore interface {
 	LockAdmission(context.Context) error
 	LockBacklog(context.Context) error
 	Active(context.Context, int) (int, error)
@@ -27,21 +25,24 @@ type Store interface {
 	WorkspaceBacklog(context.Context, uuid.UUID, int) (int, error)
 }
 
-func storeFor(tx database.Tx) Store {
-	return database.Must[interface{ CommandLimitStore() Store }](tx).CommandLimitStore()
+func commandLimitStoreFor(tx database.Tx) CommandLimitStore {
+	return database.Must[interface {
+		CommandLimitStore() CommandLimitStore
+	}](tx).CommandLimitStore()
 }
 
-func Lock(ctx context.Context, tx database.Tx) error {
-	return storeFor(tx).LockAdmission(ctx)
+func LockCommandAdmission(ctx context.Context, tx database.Tx) error {
+	return commandLimitStoreFor(tx).LockAdmission(ctx)
 }
 
-// Available serializes dispatch reservations and returns the number of slots
-// that may be leased without exceeding the environment-wide limit.
-func Available(ctx context.Context, tx database.Tx, limit int) (int, error) {
+// AvailableCommandSlots serializes dispatch reservations and returns the
+// number of slots that may be leased without exceeding the environment-wide
+// limit.
+func AvailableCommandSlots(ctx context.Context, tx database.Tx, limit int) (int, error) {
 	if limit < 1 {
 		return 0, nil
 	}
-	store := storeFor(tx)
+	store := commandLimitStoreFor(tx)
 	if err := store.LockAdmission(ctx); err != nil {
 		return 0, err
 	}
@@ -55,10 +56,10 @@ func Available(ctx context.Context, tx database.Tx, limit int) (int, error) {
 	return limit - active, nil
 }
 
-// ReserveBacklog bounds durable queued work independently from execution
+// ReserveCommandBacklog bounds durable queued work independently from execution
 // concurrency so offline nodes cannot consume dispatch slots or unbounded DB.
-func ReserveBacklog(ctx context.Context, tx database.Tx, workspaceID, nodeID uuid.UUID) error {
-	store := storeFor(tx)
+func ReserveCommandBacklog(ctx context.Context, tx database.Tx, workspaceID, nodeID uuid.UUID) error {
+	store := commandLimitStoreFor(tx)
 	if err := store.LockBacklog(ctx); err != nil {
 		return err
 	}
