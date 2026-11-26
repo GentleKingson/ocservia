@@ -16,14 +16,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 use ocservia_agent_protocol::{
     AgentUpgradeScheduledResult, ErrorKind, PrivdError, PrivdRequest, PrivdResponse,
-    UpgradeOperationResult, UpgradeResultList, privd_request, privd_response, read_frame,
-    write_frame,
+    UpgradeResultList, privd_request, privd_response, read_frame, write_frame,
 };
 use ocservia_command_authorization::{
     CommandAuthorizationV1, ControllerCommandKeyring, VerifiedCommand,
 };
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, command_envelope,
+    AgentUpgrade, AgentUpgradeOutcomeState, AgentUpgradeResultProof, AgentUpgradeResultReport,
+    command_envelope,
 };
 use ocservia_ocserv_adapter::{Adapter, AdapterError, AuthorizedEffectDecision};
 use ocservia_privd_attestation::{key_id, sign_upgrade_result_with_key_id};
@@ -521,13 +521,12 @@ fn read_attested_upgrade_results(
                 attestation_key_id,
             )
             .map_err(|_| UpgradeStoreError::Unsafe("durable result proof claims are malformed"))?;
-            Ok(UpgradeOperationResult {
+            Ok(AgentUpgradeResultReport {
                 operation_id: result.operation_id.as_bytes().to_vec(),
-                state: result.state.as_str().to_owned(),
+                state: state.into(),
                 target_version: result.target_version,
                 completed_unix_ms,
                 detail: result.detail,
-                package_sha256: result.package_sha256.to_vec(),
                 privileged_result_proof: Some(proof),
             })
         })

@@ -8,8 +8,8 @@ use std::io;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ocservia_agent_protocol::{
-    PrivdRequest, PrivdResponse, PrivilegedRequestMode, ReadRequest, UpgradeOperationResult,
-    UpgradeResultListRequest, privd_request, privd_response, read_frame, write_frame,
+    PrivdRequest, PrivdResponse, PrivilegedRequestMode, ReadRequest, privd_request, privd_response,
+    read_frame, write_frame,
 };
 use ocservia_command_authorization::ControllerCommandKeyring;
 use ocservia_command_journal::{
@@ -19,8 +19,8 @@ pub use ocservia_contracts::agent_upgrade::AGENT_UPGRADE_CAPABILITY;
 #[cfg(test)]
 use ocservia_contracts::generated::ocserv::platform::agent::v1::ConfigApplyResult;
 use ocservia_contracts::generated::ocserv::platform::agent::v1::{
-    CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose, SealedSecretV1,
-    SemanticPayloadHashVersion, SessionGrantV1, command_envelope,
+    AgentUpgradeResultReport, CommandDeliveryMode, CommandEnvelope, SealedSecretPurpose,
+    SealedSecretV1, SemanticPayloadHashVersion, SessionGrantV1, command_envelope,
 };
 use prost::Message;
 use rand::{Rng, RngExt};
@@ -1457,11 +1457,9 @@ impl PrivdClient {
     /// # Errors
     ///
     /// Returns the transport or refusal error.
-    pub async fn upgrade_results(&self) -> Result<Vec<UpgradeOperationResult>, io::Error> {
+    pub async fn upgrade_results(&self) -> Result<Vec<AgentUpgradeResultReport>, io::Error> {
         let response = self
-            .call(privd_request::Operation::UpgradeResultList(
-                UpgradeResultListRequest {},
-            ))
+            .call(privd_request::Operation::UpgradeResultList(ReadRequest {}))
             .await?;
         match response.result {
             Some(privd_response::Result::UpgradeResultList(list)) => Ok(list.results),

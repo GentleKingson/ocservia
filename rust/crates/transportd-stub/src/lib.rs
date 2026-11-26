@@ -14,10 +14,10 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
 };
 use ocservia_contracts::generated::ocserv::platform::transport::v1::{
     CloseNodeRequest, CloseNodeResponse, ConnectionPath, ConsumeArtifactRequest,
-    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, HealthRequest,
-    HealthResponse, HealthStatus, NodeConnection, SendCommandRequest, SendCommandResponse,
-    TransportEvent, TransportEventType, TrustUpdateDisposition, UpdateNodeTrustRequest,
-    UpdateNodeTrustResponse, WatchEventsRequest, transport_service_server::TransportService,
+    ConsumeArtifactResponse, FetchArtifactRequest, GetNodeConnectionRequest, NodeConnection,
+    SendCommandRequest, SendCommandResponse, TransportEvent, TransportEventType,
+    TrustUpdateDisposition, UpdateNodeTrustRequest, UpdateNodeTrustResponse, WatchEventsRequest,
+    transport_service_server::TransportService,
 };
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -460,16 +460,6 @@ impl TransportService for StubService {
         Err(Status::unavailable(
             "artifact consumption requires a connected real agent",
         ))
-    }
-
-    async fn health(
-        &self,
-        _request: Request<HealthRequest>,
-    ) -> Result<Response<HealthResponse>, Status> {
-        Ok(Response::new(HealthResponse {
-            status: HealthStatus::Serving.into(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        }))
     }
 
     async fn get_node_connection(
