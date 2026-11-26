@@ -1,8 +1,7 @@
-package transportevents
+package devsim
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -13,46 +12,16 @@ import (
 )
 
 type Worker struct {
-	service    *Service
-	transport  *transportclient.Client
-	logger     *slog.Logger
-	simulation bool
+	service   *Service
+	transport *transportclient.Client
+	logger    *slog.Logger
 }
 
-func NewWorker(service *Service, transport *transportclient.Client, logger *slog.Logger, simulation bool) *Worker {
-	return &Worker{service: service, transport: transport, logger: logger, simulation: simulation}
+func NewWorker(service *Service, transport *transportclient.Client, logger *slog.Logger) *Worker {
+	return &Worker{service: service, transport: transport, logger: logger}
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	if !w.simulation {
-		return w.transport.RunWatch(ctx, w.service, w.service)
-	}
-	return runWorker(ctx, func(ctx context.Context) error {
-		return w.transport.RunWatch(ctx, w.service, w.service)
-	}, w.dispatch)
-}
-
-func runWorker(ctx context.Context, watch, dispatch func(context.Context) error) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errCh := make(chan error, 2)
-	go func() { errCh <- watch(ctx) }()
-	go func() { errCh <- dispatch(ctx) }()
-	var failures []error
-	for range 2 {
-		err := <-errCh
-		cancel()
-		if err != nil && !errors.Is(err, context.Canceled) {
-			failures = append(failures, err)
-		}
-	}
-	if err := errors.Join(failures...); err != nil {
-		return err
-	}
-	return ctx.Err()
-}
-
-func (w *Worker) dispatch(ctx context.Context) error {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -71,7 +40,7 @@ func (w *Worker) dispatch(ctx context.Context) error {
 			}
 			for _, job := range jobs {
 				jobCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": job.Traceparent})
-				jobCtx, span := otel.Tracer("ocservia.transportevents").Start(jobCtx, "development.simulation.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
+				jobCtx, span := otel.Tracer("ocservia.devsim").Start(jobCtx, "development.simulation.dispatch", trace.WithSpanKind(trace.SpanKindProducer))
 				if err := w.service.MarkSimulationDispatchStarted(ctx, job.OperationID); err != nil {
 					span.RecordError(err)
 					span.End()
