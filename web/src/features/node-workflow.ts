@@ -157,7 +157,7 @@ function expireGrant(key: string): void {
   const cached = certificateGrants.get(key);
   if (!cached) return;
   clearTimeout(cached.timer);
-  delete cached.grant.downloadToken;
+  delete cached.grant.download_token;
   delete cached.grant.password;
   certificateGrants.delete(key);
 }
@@ -169,11 +169,11 @@ export function rememberCertificateGrant(
   certificateId: string,
   grant: ArtifactGrant,
 ): void {
-  const ttl = Math.min(Date.parse(grant.expiresAt) - Date.now(), 10 * 60_000);
+  const ttl = Math.min(Date.parse(grant.expires_at) - Date.now(), 10 * 60_000);
   if (
     !Number.isFinite(ttl) ||
     ttl <= 0 ||
-    grant.operation.nodeId !== context.nodeId
+    grant.operation.node_id !== context.nodeId
   )
     return;
   const key = grantKey(context, certificateId);
@@ -206,8 +206,8 @@ export function consumeCertificateGrant(
   artifactId: string,
 ): void {
   const grant = readCertificateGrant(context, certificateId);
-  if (grant?.artifactId === artifactId) {
-    delete grant.downloadToken;
+  if (grant?.artifact_id === artifactId) {
+    delete grant.download_token;
     // Retain the password until expiry so a download completed after closing
     // the dialog is still usable when the user reopens it.
   }

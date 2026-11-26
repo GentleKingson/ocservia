@@ -57,7 +57,7 @@ test("filters network audit, pages older flows and exports exact counters", asyn
   expect(items).toHaveLength(2);
   expect(items).toEqual(
     expect.arrayContaining([
-      expect.objectContaining({ bytesOut: "9007199254740993" }),
+      expect.objectContaining({ bytes_out: "9007199254740993" }),
     ]),
   );
   await expectNoPageOverflow(page);

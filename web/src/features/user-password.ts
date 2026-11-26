@@ -20,21 +20,21 @@ export async function sealUserPassword(
     if (!subtle) throw new Error("passwordCryptoUnavailable");
     if (
       !workspaceId ||
-      binding.workspaceId !== workspaceId ||
-      binding.nodeId !== nodeId ||
+      binding.workspace_id !== workspaceId ||
+      binding.node_id !== nodeId ||
       binding.purpose !== "user_password" ||
       binding.version !== 1 ||
-      !/^[0-9a-f]{64}$/.test(binding.endpointId) ||
-      !binding.keyId ||
-      binding.keyId.length > 128 ||
-      !binding.publicKeyDer ||
-      binding.publicKeyDer.length > 1368
+      !/^[0-9a-f]{64}$/.test(binding.endpoint_id) ||
+      !binding.key_id ||
+      binding.key_id.length > 128 ||
+      !binding.public_key_der ||
+      binding.public_key_der.length > 1368
     )
       throw new Error("passwordKeyChanged");
     let key: CryptoKey;
     try {
-      const binary = atob(binding.publicKeyDer);
-      if (btoa(binary) !== binding.publicKeyDer) throw new Error();
+      const binary = atob(binding.public_key_der);
+      if (btoa(binary) !== binding.public_key_der) throw new Error();
       der = Uint8Array.from(binary, (value) => value.charCodeAt(0));
       key = await subtle.importKey(
         "spki",
@@ -62,7 +62,7 @@ export async function sealUserPassword(
       await subtle.encrypt({ name: "RSA-OAEP" }, key, plaintext),
     );
     return {
-      keyId: binding.keyId,
+      keyId: binding.key_id,
       ciphertext: btoa(String.fromCharCode(...ciphertext)),
     };
   } finally {

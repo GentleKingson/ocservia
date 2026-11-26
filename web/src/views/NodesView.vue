@@ -104,7 +104,7 @@ const showColumn = (column: NodeListState["columns"][number]) =>
 const formattedHeartbeats = computed(() => {
   const formatted = new Map<string, string>();
   for (const node of visibleNodes.value) {
-    const value = node.lastHeartbeatAt;
+    const value = node.last_heartbeat_at;
     if (value && !formatted.has(value))
       formatted.set(value, formatTimestamp(value));
   }
@@ -141,7 +141,7 @@ const rolloutDialog =
 
 const selectedNodes = computed(() =>
   fleet.nodes.filter(
-    (node) => selectedSet.value.has(node.id) && node.agentUpgradeEligible,
+    (node) => selectedSet.value.has(node.id) && node.agent_upgrade_eligible,
   ),
 );
 
@@ -155,7 +155,7 @@ function toggleSelection(nodeId: string): void {
 // covers visible rows so a filter cannot silently widen the rollout scope.
 const visibleEligibleIds = computed(() =>
   visibleNodes.value
-    .filter((node) => node.agentUpgradeEligible)
+    .filter((node) => node.agent_upgrade_eligible)
     .map((node) => node.id),
 );
 const allVisibleEligibleSelected = computed(
@@ -363,7 +363,7 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                 >
                   <TableCell class="py-3 pl-4">
                     <input
-                      v-if="node.agentUpgradeEligible"
+                      v-if="node.agent_upgrade_eligible"
                       type="checkbox"
                       class="accent-primary size-4 align-middle"
                       :aria-label="`${$t('rollingUpgrade')}: ${node.name}`"
@@ -383,8 +383,8 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                       >
                       <Badge
                         variant="outline"
-                        :class="trustBadge[node.trustStatus]"
-                        >{{ $t(node.trustStatus) }}</Badge
+                        :class="trustBadge[node.trust_status]"
+                        >{{ $t(node.trust_status) }}</Badge
                       >
                     </div>
                     <code
@@ -395,11 +395,12 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                   </TableCell>
                   <TableCell class="py-3">
                     <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span>{{ node.agentVersion ?? $t("unknown") }}</span>
+                      <span>{{ node.agent_version ?? $t("unknown") }}</span>
                       <Badge
                         data-testid="agent-version-state"
                         :variant="
-                          agentBadge[node.agentVersionState ?? ''] ?? 'outline'
+                          agentBadge[node.agent_version_state ?? ''] ??
+                          'outline'
                         "
                         >{{ $t(agentVersionLabel(node)) }}</Badge
                       >
@@ -410,13 +411,13 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                       <span
                         class="size-2 rounded-full"
                         :class="
-                          node.connectionState === 'online'
+                          node.connection_state === 'online'
                             ? 'bg-success'
                             : 'bg-muted-foreground/50'
                         "
                         aria-hidden="true"
                       ></span>
-                      {{ $t(node.connectionState) }}
+                      {{ $t(node.connection_state) }}
                     </span>
                     <span
                       class="block text-xs"
@@ -429,20 +430,20 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                     >
                   </TableCell>
                   <TableCell class="py-3 text-right tabular-nums">{{
-                    node.sessionCount
+                    node.session_count
                   }}</TableCell>
                   <TableCell class="py-3">
-                    <template v-if="node.lastHeartbeatAt">
+                    <template v-if="node.last_heartbeat_at">
                       <span class="block">{{
-                        relativeHeartbeats.get(node.lastHeartbeatAt) ??
-                        formattedHeartbeats.get(node.lastHeartbeatAt)
+                        relativeHeartbeats.get(node.last_heartbeat_at) ??
+                        formattedHeartbeats.get(node.last_heartbeat_at)
                       }}</span>
                       <time
-                        v-if="relativeHeartbeats.get(node.lastHeartbeatAt)"
+                        v-if="relativeHeartbeats.get(node.last_heartbeat_at)"
                         class="text-muted-foreground block text-xs"
-                        :datetime="node.lastHeartbeatAt"
+                        :datetime="node.last_heartbeat_at"
                         >{{
-                          formattedHeartbeats.get(node.lastHeartbeatAt)
+                          formattedHeartbeats.get(node.last_heartbeat_at)
                         }}</time
                       >
                     </template>
@@ -455,12 +456,12 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                     <span
                       v-if="node.path"
                       class="text-muted-foreground block text-xs"
-                      >{{ Math.round(node.path.rttMs) }}
+                      >{{ Math.round(node.path.rtt_ms) }}
                       {{ $t("milliseconds") }}</span
                     >
                   </TableCell>
                   <TableCell v-if="showColumn('ocserv')" class="py-3">{{
-                    node.ocservVersion ?? $t("notAvailable")
+                    node.ocserv_version ?? $t("notAvailable")
                   }}</TableCell>
                   <TableCell
                     v-if="showColumn('platform')"
@@ -468,7 +469,7 @@ async function handleRolloutStarted(rolloutId: string): Promise<void> {
                   >
                     {{ node.architecture || $t("unknown") }}
                     <span class="text-muted-foreground block text-xs">{{
-                      node.osRelease ?? $t("notAvailable")
+                      node.os_release ?? $t("notAvailable")
                     }}</span>
                   </TableCell>
                   <TableCell class="py-3 pr-4 text-right">

@@ -126,7 +126,7 @@ describe("node certificate workflow isolation", () => {
         method === "submitCertificateIssue"
           ? certificate
           : method === "createP12"
-            ? p12Grant({ downloadToken: "secret", password: "secret" })
+            ? p12Grant({ download_token: "secret", password: "secret" })
             : operation,
       );
       await pending;
@@ -178,7 +178,9 @@ describe("node certificate workflow isolation", () => {
         "artifact-a",
         "one-time-token",
       );
-      expect(view.certificates.certificateGrant?.downloadToken).toBeUndefined();
+      expect(
+        view.certificates.certificateGrant?.download_token,
+      ).toBeUndefined();
       if (kind === "close" || kind === "workspace")
         expect(view.certificates.certificateGrant?.password).toBe(
           "one-time-secret",
@@ -200,7 +202,7 @@ describe("node certificate workflow isolation", () => {
     accepted.resolve(
       p12Grant({
         password: "private-password",
-        downloadToken: "private-token",
+        download_token: "private-token",
       }),
     );
     await pending;
@@ -211,7 +213,7 @@ describe("node certificate workflow isolation", () => {
     expect(view.certificates.certificateOperation?.id).toBe(operation.id);
     expect(view.certificates.certificateGrant).toMatchObject({
       password: "private-password",
-      downloadToken: "private-token",
+      download_token: "private-token",
     });
     expect(mocks.createCertificateP12).toHaveBeenCalledTimes(1);
     expect(mocks.fleet.trackOperation).not.toHaveBeenCalled();
@@ -243,7 +245,7 @@ describe("node certificate workflow isolation", () => {
       accepted.resolve(
         method === "createP12"
           ? p12Grant({
-              downloadToken: "private-token",
+              download_token: "private-token",
               password: "private-password",
             })
           : method === "revokeCurrentCertificate"
@@ -292,9 +294,9 @@ describe("node certificate workflow isolation", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(readCertificateGrant(context, certificate.id)).toBeUndefined();
     expect(view.certificates.certificateGrant?.password).toBeUndefined();
-    expect(view.certificates.certificateGrant?.downloadToken).toBeUndefined();
+    expect(view.certificates.certificateGrant?.download_token).toBeUndefined();
     expect(response.password).toBeUndefined();
-    expect(response.downloadToken).toBeUndefined();
+    expect(response.download_token).toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
   });
 });

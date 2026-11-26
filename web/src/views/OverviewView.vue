@@ -48,7 +48,7 @@ const fleetHighlights = computed(() => {
     if (node.freshness === "stale") stale += 1;
     if (
       notable.length < 5 &&
-      (node.connectionState !== "online" || node.freshness === "stale")
+      (node.connection_state !== "online" || node.freshness === "stale")
     ) {
       notable.push(node);
     }
@@ -300,21 +300,21 @@ onBeforeUnmount(() => {
                 :label="$t(operationStatusKey(operation))"
               />
               <RouterLink
-                v-if="operation.nodeId"
+                v-if="operation.node_id"
                 :to="{
                   name: 'node-detail',
-                  params: { nodeId: operation.nodeId },
+                  params: { nodeId: operation.node_id },
                 }"
                 class="text-primary min-w-0 flex-1 truncate underline-offset-4 hover:underline"
-                >{{ nodeReference(operation.nodeId) }}</RouterLink
+                >{{ nodeReference(operation.node_id) }}</RouterLink
               >
               <span v-else class="text-muted-foreground min-w-0 flex-1">{{
                 $t("notAvailable")
               }}</span>
               <time
                 class="text-muted-foreground text-xs tabular-nums"
-                :datetime="operation.updatedAt"
-                >{{ timeLabel(operation.updatedAt) }}</time
+                :datetime="operation.updated_at"
+                >{{ timeLabel(operation.updated_at) }}</time
               >
             </li>
           </ol>
@@ -375,16 +375,16 @@ onBeforeUnmount(() => {
                 $t(eventLabels[event.type] ?? event.type)
               }}</span>
               <RouterLink
-                v-if="event.nodeId"
-                :to="{ name: 'node-detail', params: { nodeId: event.nodeId } }"
+                v-if="event.node_id"
+                :to="{ name: 'node-detail', params: { nodeId: event.node_id } }"
                 class="text-primary min-w-0 flex-1 truncate underline-offset-4 hover:underline"
-                >{{ nodeReference(event.nodeId) }}</RouterLink
+                >{{ nodeReference(event.node_id) }}</RouterLink
               >
               <span v-else class="min-w-0 flex-1" />
               <time
                 class="text-muted-foreground text-xs tabular-nums"
-                :datetime="event.occurredAt"
-                >{{ timeLabel(event.occurredAt) }}</time
+                :datetime="event.occurred_at"
+                >{{ timeLabel(event.occurred_at) }}</time
               >
             </li>
           </ol>
@@ -414,8 +414,8 @@ onBeforeUnmount(() => {
           }}</code>
           <span class="ml-auto flex flex-wrap gap-2">
             <StatusBadge
-              :tone="node.connectionState === 'online' ? 'success' : 'danger'"
-              :label="$t(node.connectionState)"
+              :tone="node.connection_state === 'online' ? 'success' : 'danger'"
+              :label="$t(node.connection_state)"
             />
             <StatusBadge
               :tone="node.freshness === 'stale' ? 'warning' : 'neutral'"

@@ -9,7 +9,7 @@ const beta = { id: "workspace-b", name: "Beta", slug: "beta", version: 2 };
 const node = {
   id: "node/a",
   version: 7,
-  bootId: "boot-a",
+  boot_id: "boot-a",
 } as NodeObservedState;
 const fetchMock = vi.fn<typeof fetch>();
 const assign = vi.fn();
@@ -118,10 +118,10 @@ describe("API transport and session contracts", () => {
     await (
       await loadApi()
     ).setUserPolicy("node-a", "alice", {
-      quotaPeriod: "monthly",
-      quotaDirection: "rxtx",
-      quotaBytes: 4096,
-      expectedVersion: 0,
+      quota_period: "monthly",
+      quota_direction: "rxtx",
+      quota_bytes: 4096,
+      expected_version: 0,
       reason: "quota change",
     });
     expect(request().headers.get("Idempotency-Key")).toBeTruthy();
@@ -445,7 +445,7 @@ describe("domain request contracts", () => {
     const api = await loadApi();
     const signal = new AbortController().signal;
     const withoutBoot = { ...node };
-    delete withoutBoot.bootId;
+    delete withoutBoot.boot_id;
     await expect(
       api.disconnectSession(withoutBoot, "42", "requested", signal),
     ).rejects.toThrow("Node boot identity is unavailable");
@@ -474,9 +474,9 @@ describe("domain request contracts", () => {
     await api.createConfigPlan(
       node.id,
       {
-        expectedRevision: 7,
+        expected_revision: 7,
         template: { name: "test", directives: [] },
-        ttlSeconds: 300,
+        ttl_seconds: 300,
         reason: "requested",
       },
       signal,
@@ -560,13 +560,13 @@ describe("audit and rollout wire decoding", () => {
     );
     const page = await api.listAuditEvents();
     expect(page.items[0]).toMatchObject({
-      actorId: "admin",
-      requestId: "request-a",
-      resourceId: null,
-      previousEventHash: "",
-      eventHash: "abc",
+      actor_id: "admin",
+      request_id: "request-a",
+      resource_id: null,
+      previous_event_hash: "",
+      event_hash: "abc",
       result: "historical-result",
-      occurredAt: "2026-09-10T04:31:00Z",
+      occurred_at: "2026-09-10T04:31:00Z",
     });
   });
 
@@ -589,11 +589,11 @@ describe("audit and rollout wire decoding", () => {
         ),
       );
       expect(await api.verifyAuditChain()).toEqual({
-        workspaceId: alpha.id,
+        workspace_id: alpha.id,
         events: 3,
-        compactedEvents: 1,
+        compacted_events: 1,
         valid: status === 200,
-        checkpointValid: status === 200,
+        checkpoint_valid: status === 200,
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(request().method).toBe("POST");
@@ -662,13 +662,66 @@ describe("audit and rollout wire decoding", () => {
       expect(value).toBeDefined();
       if (!value) throw new Error("Missing rollout");
       expect(value.excluded).toEqual([
-        { nodeId: "node-a", reason: "future_reason", raw: "" },
-        { nodeId: "", reason: "", raw: "null" },
-        { nodeId: "", reason: "", raw: '["legacy"]' },
-        { nodeId: "", reason: "", raw: '{"extra":true}' },
+        { node_id: "node-a", reason: "future_reason", raw: "" },
+        { node_id: "", reason: "", raw: "null" },
+        { node_id: "", reason: "", raw: '["legacy"]' },
+        { node_id: "", reason: "", raw: '{"extra":true}' },
       ]);
-      expect(value.createdAt).toBe("2026-09-10T04:34:00Z");
-      expect(value.updatedAt).toBe("2026-09-10T04:34:56.123456Z");
+      expect(value.created_at).toBe("2026-09-10T04:34:00Z");
+      expect(value.updated_at).toBe("2026-09-10T04:34:56.123456Z");
     }
+  });
+
+  it("passes timestamps, ordered members, and opaque payloads through unmodified", async () => {
+    const api = await loadApi();
+    await api.getWorkspace();
+    const observedAt = "2026-09-10T04:34:56.123456Z";
+    const members = ["omega", "alpha"];
+    const effectiveActions = { config_apply: { allowed: true, reason: "ok" } };
+    const warnings = ["safe", null, { extra_value: [1.25] }];
+    fetchMock.mockResolvedValueOnce(
+      json({
+        items: [
+          {
+            kind: "group",
+            name: "vpn",
+            observed_at: observedAt,
+            desired_members: members,
+            recovery_required: false,
+            convergence: "converged",
+          },
+        ],
+      }),
+    );
+    const groupPage = await api.listNodeUserGroupState("node-a");
+    expect(groupPage.items[0]).toMatchObject({
+      observed_at: observedAt,
+      desired_members: members,
+    });
+    fetchMock.mockResolvedValueOnce(
+      json({
+        id: "node-a",
+        name: "Node A",
+        version: 1,
+        trust_status: "active",
+        connection_state: "online",
+        freshness: "fresh",
+        dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
+        session_count: 0,
+        observed_at: observedAt,
+        effective_actions: effectiveActions,
+      }),
+    );
+    const observedNode = await api.getNode("node-a");
+    expect(observedNode.observed_at).toBe(observedAt);
+    expect(observedNode.effective_actions).toEqual(effectiveActions);
+    fetchMock.mockResolvedValueOnce(
+      json({
+        id: "plan-a",
+        warnings,
+      }),
+    );
+    const plan = await api.getConfigPlan("plan-a");
+    expect(plan.warnings).toEqual(warnings);
   });
 });

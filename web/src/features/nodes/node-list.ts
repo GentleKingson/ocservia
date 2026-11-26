@@ -36,9 +36,9 @@ export function nodeFilterValue(
 ): string {
   switch (group) {
     case "trust":
-      return node.trustStatus;
+      return node.trust_status;
     case "connection":
-      return node.connectionState;
+      return node.connection_state;
     case "freshness":
       return node.freshness;
     case "path":
@@ -46,8 +46,8 @@ export function nodeFilterValue(
         ? node.path.mode
         : "unknown";
     case "agent":
-      return agentFilterValues.has(node.agentVersionState ?? "")
-        ? (node.agentVersionState as string)
+      return agentFilterValues.has(node.agent_version_state ?? "")
+        ? (node.agent_version_state as string)
         : "unknown";
   }
 }
@@ -120,7 +120,7 @@ export function sortNodes(
   if (sort === "heartbeat") {
     const decorated = nodes.map((node) => ({
       node,
-      order: heartbeatOrder(node.lastHeartbeatAt),
+      order: heartbeatOrder(node.last_heartbeat_at),
     }));
     decorated.sort((a, b) => {
       if (a.order !== b.order) {

@@ -38,7 +38,7 @@ export function useNodeConfiguration({
   }>();
   const currentConfigRevision = computed(() => {
     if (!readReady.value) return undefined;
-    const revision = currentNode.value?.configRevision;
+    const revision = currentNode.value?.config_revision;
     return typeof revision === "number" &&
       Number.isSafeInteger(revision) &&
       revision >= 0
@@ -129,15 +129,15 @@ export function useNodeConfiguration({
       const plan = await getConfigPlan(reference.resourceId, context.signal);
       if (!configWorkflow.isCurrent(context)) return;
       if (
-        plan.nodeId !== context.nodeId ||
-        plan.workspaceId !== context.workspaceId
+        plan.node_id !== context.nodeId ||
+        plan.workspace_id !== context.workspaceId
       )
         return;
       await pollConfigPlan(context, plan);
       if (
         !configWorkflow.isCurrent(context) ||
         !reference.operationId ||
-        reference.operationId === plan.operationId
+        reference.operationId === plan.operation_id
       )
         return;
       const operation = await getOperation(
@@ -146,7 +146,7 @@ export function useNodeConfiguration({
       );
       if (
         configWorkflow.isCurrent(context) &&
-        operation.nodeId === context.nodeId
+        operation.node_id === context.nodeId
       )
         configOperation.value = operation;
     } catch (error) {
@@ -192,7 +192,7 @@ export function useNodeConfiguration({
         // Do not abort mutations on UI teardown: retain the server's accepted IDs,
         // then fence all UI updates and subsequent reads by the captured context.
         const plan = await createConfigPlan(source.nodeId, {
-          expectedRevision: source.revision,
+          expected_revision: source.revision,
           template: {
             name: "node-baseline",
             directives: [
@@ -212,14 +212,14 @@ export function useNodeConfiguration({
               { name: "route", value: configRoute.value.trim() },
               {
                 name: "server-cert",
-                secretRef: {
-                  secretRefId: configCertificateSecretRefId.value.trim(),
+                secret_ref: {
+                  secret_ref_id: configCertificateSecretRefId.value.trim(),
                 },
               },
               {
                 name: "server-key",
-                secretRef: {
-                  secretRefId: configPrivateKeySecretRefId.value.trim(),
+                secret_ref: {
+                  secret_ref_id: configPrivateKeySecretRefId.value.trim(),
                 },
               },
               { name: "socket-file", value: "/run/ocserv.socket" },
@@ -227,12 +227,12 @@ export function useNodeConfiguration({
               { name: "udp-port", value: String(configUdpPort.value) },
             ],
           },
-          ttlSeconds: 900,
+          ttl_seconds: 900,
           reason: configReason.value.trim(),
         });
         rememberNodeWorkflowReference(ticket, {
           resourceId: plan.id,
-          operationId: plan.operationId,
+          operationId: plan.operation_id,
         });
         await pollConfigPlan(context, plan);
       },

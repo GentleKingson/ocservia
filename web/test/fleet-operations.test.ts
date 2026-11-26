@@ -56,28 +56,28 @@ const node: NodeObservedState = {
   id: "019fc0a4-6d92-765c-a8a1-4af556614cc3",
   name: "node",
   version: 4,
-  trustStatus: "active",
-  connectionState: "online",
+  trust_status: "active",
+  connection_state: "online",
   freshness: "fresh",
-  bootId: "019fc0a4-6d92-765c-a8a1-4af556614cc4",
+  boot_id: "019fc0a4-6d92-765c-a8a1-4af556614cc4",
   dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-  sessionCount: 1,
+  session_count: 1,
 };
 const session: NodeSession = {
   id: "42",
   username: "alice",
-  clientIp: "192.0.2.10",
-  connectedAt: new Date(0).toISOString(),
-  bytesIn: 0,
-  bytesOut: 0,
+  client_ip: "192.0.2.10",
+  connected_at: new Date(0).toISOString(),
+  bytes_in: 0,
+  bytes_out: 0,
 };
 const operation = (state: Operation["state"], nodeId = node.id): Operation => ({
   id: "019fc0a4-6d92-765c-a8a1-4af556614cc5",
-  nodeId,
+  node_id: nodeId,
   state,
   version: 1,
-  createdAt: new Date(0).toISOString(),
-  updatedAt: new Date(0).toISOString(),
+  created_at: new Date(0).toISOString(),
+  updated_at: new Date(0).toISOString(),
 });
 
 const nodeB: NodeObservedState = {
@@ -88,7 +88,7 @@ const nodeB: NodeObservedState = {
 
 const nodePage = (item: NodeObservedState) => ({
   items: [item],
-  page: { hasMore: false },
+  page: { has_more: false },
 });
 
 describe("controlled fleet operations", () => {
@@ -99,14 +99,14 @@ describe("controlled fleet operations", () => {
 
     vi.mocked(listEvents).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     vi.mocked(getNode).mockResolvedValue(node);
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
     vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
     vi.mocked(listNodeSessions).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
   });
 
@@ -119,8 +119,8 @@ describe("controlled fleet operations", () => {
     vi.mocked(disconnectSession).mockResolvedValue(operation("queued"));
     vi.mocked(getOperation).mockResolvedValue(operation("succeeded"));
     vi.mocked(listNodeSessions)
-      .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
-      .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
+      .mockResolvedValueOnce({ items: [session], page: { has_more: false } })
+      .mockResolvedValueOnce({ items: [], page: { has_more: false } });
     const store = useFleetStore();
     await store.select(node.id);
 
@@ -240,8 +240,8 @@ describe("controlled fleet operations", () => {
         .mockResolvedValueOnce(operation("unknown"))
         .mockResolvedValueOnce(operation(terminalState));
       vi.mocked(listNodeSessions)
-        .mockResolvedValueOnce({ items: [session], page: { hasMore: false } })
-        .mockResolvedValueOnce({ items: [], page: { hasMore: false } });
+        .mockResolvedValueOnce({ items: [session], page: { has_more: false } })
+        .mockResolvedValueOnce({ items: [], page: { has_more: false } });
       const store = useFleetStore();
       await store.select(node.id);
 
@@ -309,7 +309,7 @@ describe("controlled fleet operations", () => {
     expect(pollingSignal?.aborted).toBe(true);
     expect(store.selected?.id).toBe(nodeB.id);
     expect(store.latestOperation?.state).toBe("succeeded");
-    expect(store.latestOperation?.nodeId).toBe(nodeB.id);
+    expect(store.latestOperation?.node_id).toBe(nodeB.id);
     expect(disconnectSession).toHaveBeenCalledTimes(2);
     store.$dispose();
   });
@@ -485,7 +485,7 @@ describe("controlled fleet operations", () => {
   it("fetches sessions, IP bans, and user/group state concurrently after getNode", async () => {
     const sessionsDeferred = Promise.withResolvers<{
       items: NodeSession[];
-      page: { hasMore: boolean };
+      page: { has_more: boolean };
     }>();
     const bansDeferred = Promise.withResolvers<{ items: NodeIpBan[] }>();
     const usersDeferred = Promise.withResolvers<{
@@ -505,7 +505,7 @@ describe("controlled fleet operations", () => {
     expect(listNodeIpBans).toHaveBeenCalledTimes(1);
     expect(listNodeUserGroupState).toHaveBeenCalledTimes(1);
 
-    sessionsDeferred.resolve({ items: [session], page: { hasMore: false } });
+    sessionsDeferred.resolve({ items: [session], page: { has_more: false } });
     bansDeferred.resolve({ items: [] });
     usersDeferred.resolve({ items: [] });
     await vi.waitFor(() => {

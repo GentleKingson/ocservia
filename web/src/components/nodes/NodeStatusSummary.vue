@@ -29,13 +29,13 @@ const value = "text-sm font-semibold wrap-anywhere";
       <span
         :class="[
           value,
-          node.trustStatus === 'active'
+          node.trust_status === 'active'
             ? 'text-success'
-            : node.trustStatus === 'revoked'
+            : node.trust_status === 'revoked'
               ? 'text-destructive'
               : '',
         ]"
-        >{{ $t(node.trustStatus) }}</span
+        >{{ $t(node.trust_status) }}</span
       >
     </div>
     <div :class="tile">
@@ -44,13 +44,13 @@ const value = "text-sm font-semibold wrap-anywhere";
         <span
           class="size-2 rounded-full"
           :class="
-            node.connectionState === 'online'
+            node.connection_state === 'online'
               ? 'bg-success'
               : 'bg-muted-foreground/50'
           "
           aria-hidden="true"
         ></span>
-        {{ $t(node.connectionState) }}
+        {{ $t(node.connection_state) }}
       </span>
       <span
         class="text-xs"
@@ -64,23 +64,23 @@ const value = "text-sm font-semibold wrap-anywhere";
     </div>
     <div :class="tile">
       <span :class="label">{{ $t("lastHeartbeat") }}</span>
-      <template v-if="node.lastHeartbeatAt">
+      <template v-if="node.last_heartbeat_at">
         <span :class="value">{{
-          relative(node.lastHeartbeatAt) ??
-          formatTimestamp(node.lastHeartbeatAt)
+          relative(node.last_heartbeat_at) ??
+          formatTimestamp(node.last_heartbeat_at)
         }}</span>
         <time
-          v-if="relative(node.lastHeartbeatAt)"
+          v-if="relative(node.last_heartbeat_at)"
           class="text-muted-foreground text-xs break-words"
-          :datetime="node.lastHeartbeatAt"
-          >{{ formatTimestamp(node.lastHeartbeatAt) }}</time
+          :datetime="node.last_heartbeat_at"
+          >{{ formatTimestamp(node.last_heartbeat_at) }}</time
         >
       </template>
       <span v-else :class="value">{{ $t("notObserved") }}</span>
     </div>
     <div :class="tile">
       <span :class="label">{{ $t("agent") }}</span>
-      <span :class="value">{{ node.agentVersion ?? $t("unknown") }}</span>
+      <span :class="value">{{ node.agent_version ?? $t("unknown") }}</span>
       <span class="text-muted-foreground text-xs">{{
         $t(agentVersionLabel(node))
       }}</span>

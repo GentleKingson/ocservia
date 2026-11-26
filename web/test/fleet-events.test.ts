@@ -53,11 +53,11 @@ describe("fleet event stream", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.mocked(listNodes).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     vi.mocked(listEvents).mockResolvedValue({
       items: [{ id: latestEvent }],
-      page: { hasMore: true },
+      page: { has_more: true },
     } as never);
     vi.mocked(eventStreamPath).mockImplementation((after) =>
       Promise.resolve(after ? `/stream?after=${after}` : "/stream"),
@@ -123,7 +123,7 @@ describe("fleet event stream", () => {
     vi.mocked(getNode).mockResolvedValue({ id: "node" } as never);
     vi.mocked(listNodeSessions).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
     vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
@@ -163,7 +163,7 @@ describe("fleet event stream", () => {
     );
     vi.mocked(listNodeSessions).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     vi.mocked(listNodeIpBans)
       .mockImplementationOnce(() => previous.promise)
@@ -223,7 +223,7 @@ describe("fleet event stream", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(getNode).toHaveBeenCalledTimes(reads + 1);
     expect(listNodes).not.toHaveBeenCalled();
-    sessions.resolve({ items: [], page: { hasMore: false } });
+    sessions.resolve({ items: [], page: { has_more: false } });
     await vi.advanceTimersByTimeAsync(0);
     expect(store.sessionsState).toBe("ready");
     store.$dispose();
@@ -348,7 +348,7 @@ describe("fleet event stream", () => {
     vi.mocked(getNode).mockResolvedValue({ id: "node" } as never);
     vi.mocked(listNodeSessions).mockResolvedValue({
       items: [],
-      page: { hasMore: false },
+      page: { has_more: false },
     });
     vi.mocked(listNodeIpBans).mockResolvedValue({ items: [] });
     vi.mocked(listNodeUserGroupState).mockResolvedValue({ items: [] });
@@ -384,7 +384,7 @@ describe("fleet event stream", () => {
       signal = requestSignal;
       return new Promise((resolve) => {
         finish = () => {
-          resolve({ items: [], page: { hasMore: false } });
+          resolve({ items: [], page: { has_more: false } });
         };
       });
     });

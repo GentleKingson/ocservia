@@ -103,9 +103,9 @@ defineExpose({ open: openCertificate, close });
           >{{ certificate.state }}</Badge
         >
         <code class="min-w-0 text-xs break-all">{{ certificate.id }}</code>
-        <small v-if="certificate.notAfter" class="text-muted-foreground"
+        <small v-if="certificate.not_after" class="text-muted-foreground"
           >{{ $t("expires") }}
-          {{ formatTimestamp(certificate.notAfter) }}</small
+          {{ formatTimestamp(certificate.not_after) }}</small
         >
       </div>
       <FormField
@@ -134,12 +134,12 @@ defineExpose({ open: openCertificate, close });
       />
     </FormField>
     <p
-      v-if="certificateOperation || certificate?.operationId"
+      v-if="certificateOperation || certificate?.operation_id"
       class="m-0 flex flex-wrap items-center gap-2 text-sm"
     >
       {{ $t("operationId") }}:
       <code class="text-xs break-all">{{
-        certificateOperation?.id ?? certificate?.operationId
+        certificateOperation?.id ?? certificate?.operation_id
       }}</code>
       <span v-if="certificateOperation">{{
         $t(operationStatusKey(certificateOperation))
@@ -183,7 +183,7 @@ defineExpose({ open: openCertificate, close });
           :disabled="
             certificateLoading ||
             !actionAvailable('certificate.private_key.export') ||
-            Boolean(certificateGrant?.downloadToken) ||
+            Boolean(certificateGrant?.download_token) ||
             !certificateReason.trim()
           "
           @click="createP12"
@@ -191,7 +191,7 @@ defineExpose({ open: openCertificate, close });
           <KeyRound aria-hidden="true" />{{ $t("createP12") }}
         </Button>
         <Button
-          v-if="certificateGrant?.downloadToken"
+          v-if="certificateGrant?.download_token"
           type="button"
           :disabled="certificateLoading"
           @click="downloadP12"

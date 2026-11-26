@@ -22,14 +22,14 @@ const unitBytes: Record<QuotaUnit, number> = {
 
 export function policyToForm(policy?: UserPolicy): UserPolicyForm {
   const unit: QuotaUnit =
-    policy && policy.quotaBytes % unitBytes.GiB === 0 ? "GiB" : "MiB";
+    policy && policy.quota_bytes % unitBytes.GiB === 0 ? "GiB" : "MiB";
   return {
-    period: policy?.quotaPeriod ?? "none",
-    direction: policy?.quotaDirection ?? "rxtx",
-    quotaValue: policy ? policy.quotaBytes / unitBytes[unit] : 0,
+    period: policy?.quota_period ?? "none",
+    direction: policy?.quota_direction ?? "rxtx",
+    quotaValue: policy ? policy.quota_bytes / unitBytes[unit] : 0,
     quotaUnit: unit,
     expiresAtUtcInput:
-      policy?.expiresAt?.replace(/:00Z$/, "").replace(/Z$/, "") ?? "",
+      policy?.expires_at?.replace(/:00Z$/, "").replace(/Z$/, "") ?? "",
     version: policy?.version ?? 0,
   };
 }
@@ -65,11 +65,11 @@ export function formToRequest(
   )
     throw new Error("Expiry is invalid");
   return {
-    quotaPeriod: form.period,
-    quotaDirection: form.direction,
-    quotaBytes,
-    ...(expiresAt ? { expiresAt: `${expiry}Z` } : {}),
-    expectedVersion: form.version,
+    quota_period: form.period,
+    quota_direction: form.direction,
+    quota_bytes: quotaBytes,
+    ...(expiresAt ? { expires_at: `${expiry}Z` } : {}),
+    expected_version: form.version,
     reason,
   };
 }

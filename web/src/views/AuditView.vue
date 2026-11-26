@@ -111,10 +111,10 @@ const rows = computed(() => {
         (!query ||
           [
             item.action,
-            item.actorId,
-            item.resourceType,
-            item.resourceId,
-            item.requestId,
+            item.actor_id,
+            item.resource_type,
+            item.resource_id,
+            item.request_id,
           ].some(
             (value) =>
               typeof value === "string" && value.toLowerCase().includes(query),
@@ -133,13 +133,13 @@ function resultLabel(item: AuditItem): string {
     : text(result);
 }
 const detailFields = [
-  ["auditActorType", "actorType"],
-  ["auditTrace", "traceId"],
-  ["auditCommand", "commandId"],
+  ["auditActorType", "actor_type"],
+  ["auditTrace", "trace_id"],
+  ["auditCommand", "command_id"],
   ["reason", "reason"],
-  ["auditErrorType", "errorType"],
-  ["auditEventHash", "eventHash"],
-  ["auditPreviousHash", "previousEventHash"],
+  ["auditErrorType", "error_type"],
+  ["auditEventHash", "event_hash"],
+  ["auditPreviousHash", "previous_event_hash"],
 ] as const;
 onMounted(() => {
   void refresh();
@@ -191,13 +191,13 @@ onBeforeUnmount(() => {
     >
       <StatusBadge
         :tone="
-          verification.valid && verification.checkpointValid
+          verification.valid && verification.checkpoint_valid
             ? 'success'
             : 'danger'
         "
         :label="
           $t(
-            verification.valid && verification.checkpointValid
+            verification.valid && verification.checkpoint_valid
               ? 'auditVerifyValid'
               : 'auditVerifyFailed',
           )
@@ -328,18 +328,18 @@ onBeforeUnmount(() => {
                     </Button>
                   </TableCell>
                   <TableCell class="text-muted-foreground">{{
-                    formatTimestamp(text(item.occurredAt))
+                    formatTimestamp(text(item.occurred_at))
                   }}</TableCell>
                   <TableCell>{{ text(item.action) }}</TableCell>
                   <TableCell class="whitespace-normal">
                     <code class="text-xs break-all">{{
-                      text(item.actorId)
+                      text(item.actor_id)
                     }}</code>
                   </TableCell>
                   <TableCell class="whitespace-normal">
-                    {{ text(item.resourceType) }}<br /><code
+                    {{ text(item.resource_type) }}<br /><code
                       class="text-xs break-all"
-                      >{{ text(item.resourceId) }}</code
+                      >{{ text(item.resource_id) }}</code
                     >
                   </TableCell>
                   <TableCell>
@@ -350,7 +350,7 @@ onBeforeUnmount(() => {
                   </TableCell>
                   <TableCell class="whitespace-normal">
                     <code class="text-xs break-all">{{
-                      text(item.requestId)
+                      text(item.request_id)
                     }}</code>
                   </TableCell>
                 </TableRow>
@@ -364,7 +364,7 @@ onBeforeUnmount(() => {
                     <dl
                       class="sticky left-2 m-0 grid w-[calc(100cqw-1rem)] gap-x-6 gap-y-1 text-sm sm:grid-cols-[max-content_1fr] sm:gap-y-2"
                     >
-                      <template v-if="typeof item.nodeId === 'string'">
+                      <template v-if="typeof item.node_id === 'string'">
                         <dt class="text-muted-foreground">
                           {{ $t("auditNode") }}
                         </dt>
@@ -372,10 +372,10 @@ onBeforeUnmount(() => {
                           <RouterLink
                             :to="{
                               name: 'node-detail',
-                              params: { nodeId: item.nodeId },
+                              params: { nodeId: item.node_id },
                             }"
                             class="text-primary font-mono underline-offset-4 hover:underline"
-                            >{{ item.nodeId }}</RouterLink
+                            >{{ item.node_id }}</RouterLink
                           >
                         </dd>
                       </template>
