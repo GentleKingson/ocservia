@@ -7,6 +7,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
 	"github.com/google/uuid"
 )
@@ -41,11 +42,11 @@ func TestFencingBackendIntegration(t *testing.T) {
 	})
 	t.Run("owner-readback-on-commit-fault", func(t *testing.T) {
 		node := f.node(t)
-		fault := &commitFaultBackend{Backend: f.backend, commit: true}
-		fault.armed.Store(true)
+		fault := &testfixture.CommitFaultBackend{Backend: f.backend, CommitBeforeFail: true, Err: lostCommit}
+		fault.Arm()
 		term, err := connectionowner.Acquire(ctx, fault, node, uuid.Must(uuid.NewV7()))
 		testutil.NoError(t, err)
-		fault.armed.Store(true)
+		fault.Arm()
 		if err := term.Release(ctx, fault); err != nil {
 			t.Fatal("release readback", err)
 		}

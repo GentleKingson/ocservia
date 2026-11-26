@@ -22,6 +22,7 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	telemetry "github.com/GentleKingson/ocservia/control-plane/internal/telemetry/store"
+	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/transportevents"
 	resultstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
@@ -46,7 +47,7 @@ func TestCreateRejectsRevokedBrowserSession(t *testing.T) {
 
 func TestDashboardSummaryCache(t *testing.T) {
 	f := newOutboxFixture(t)
-	fault := &commitFaultBackend{Backend: f.backend}
+	fault := &testfixture.CommitFaultBackend{Backend: f.backend, Err: lostCommit}
 	service := operations.New(fault, 1, f.signer)
 	ctx := t.Context()
 	if _, _, err := service.Create(ctx, outboxRequest(f.node(t))); err != nil {
@@ -60,14 +61,14 @@ func TestDashboardSummaryCache(t *testing.T) {
 		}
 	}
 	check(f.workspace, 1)
-	fault.armed.Store(true)
+	fault.Arm()
 	check(f.workspace, 1) // A hit avoids the failing transaction.
 	other := uuid.Must(uuid.NewV7())
 	if _, err := service.SummaryInWorkspace(ctx, other); !errors.Is(err, lostCommit) {
 		t.Fatalf("expected a fresh read for another workspace, got %v", err)
 	}
 	check(other, 0) // Retry after the failed query.
-	fault.armed.Store(true)
+	fault.Arm()
 	time.Sleep(time.Second)
 	if _, err := service.SummaryInWorkspace(ctx, other); !errors.Is(err, lostCommit) {
 		t.Fatalf("expected a fresh read after expiry, got %v", err)
@@ -78,10 +79,10 @@ func TestOutboxBackendIntegration(t *testing.T) {
 	t.Run("atomic-intent-and-ambiguous-commit", func(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx := context.Background()
-		fault := &commitFaultBackend{Backend: f.backend}
+		fault := &testfixture.CommitFaultBackend{Backend: f.backend, Err: lostCommit}
 		service := operations.New(fault, 1, f.signer)
 		request := outboxRequest(f.node(t))
-		fault.armed.Store(true)
+		fault.Arm()
 		if _, _, err := service.Create(ctx, request); !errors.Is(err, lostCommit) {
 			t.Fatal(err)
 		}
@@ -90,8 +91,8 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				t.Fatal("partial intent", table, n)
 			}
 		}
-		fault.commit = true
-		fault.armed.Store(true)
+		fault.CommitBeforeFail = true
+		fault.Arm()
 		created, replay, err := service.Create(ctx, request)
 		if err != nil || replay {
 			t.Fatal(created, replay, err)
@@ -110,18 +111,18 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A claim whose commit did not happen cannot escape to transport.
-		fault.commit = false
-		fault.armed.Store(true)
+		fault.CommitBeforeFail = false
+		fault.Arm()
 		if jobs, err := service.Claim(ctx, uuid.Must(uuid.NewV7()), 1, time.Minute); err == nil || len(jobs) != 0 {
 			t.Fatal(jobs, err)
 		}
 		if n := f.count(t, "SELECT count(*) FROM command_attempts"); n != 0 {
 			t.Fatal("partial claim", n)
 		}
-		fault.commit = true
-		fault.armed.Store(true)
+		fault.CommitBeforeFail = true
+		fault.Arm()
 		d := claimOutbox(t, service)
-		fault.armed.Store(true)
+		fault.Arm()
 		if err := service.MarkSent(ctx, d); err != nil {
 			t.Fatal("bookkeeping readback", err)
 		}
@@ -136,7 +137,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		fault := &commitFaultBackend{Backend: f.backend, commit: true}
+		fault := &testfixture.CommitFaultBackend{Backend: f.backend, CommitBeforeFail: true, Err: lostCommit}
 		service := operations.New(fault, 1, f.signer)
 		for range 2 {
 			if _, _, err := service.Create(ctx, outboxRequest(f.node(t))); err != nil {
@@ -161,7 +162,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			sent <- err
 			return err
 		})
-		fault.armed.Store(true)
+		fault.Arm()
 		done := make(chan error, 2)
 		for range 2 {
 			worker, err := operations.NewWorker(service, sender, slog.New(slog.NewTextHandler(io.Discard, nil)))
