@@ -42,7 +42,7 @@ func ResetLocalAdminPassword(ctx context.Context, cfg config.Config) (string, st
 	if _, err := newAuditManager(conn.Store, cfg); err != nil {
 		return "", "", err
 	}
-	service, err := auth.NewBackend(conn.Store, auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+	service, err := auth.New(conn.Store, auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 	if err != nil {
 		return "", "", err
 	}
@@ -106,7 +106,7 @@ func initializeDatabase(ctx context.Context, conn *connection.Connection, cfg co
 	}
 
 	if cfg.BootstrapLocalAdmin {
-		service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
+		service, err := auth.New(backend, auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL})
 		if err != nil {
 			return nil, errors.New("configure bootstrap authentication failed")
 		}
@@ -165,9 +165,9 @@ func runTelemetryRetentionSchedule(ctx context.Context, interval, retryInterval 
 
 func newAuditManager(backend database.Backend, cfg config.Config) (*audit.Manager, error) {
 	if len(cfg.AuditEventKey) == 0 {
-		return audit.NewBackendManager(backend, cfg.AuditCheckpointKey), nil
+		return audit.NewManager(backend, cfg.AuditCheckpointKey), nil
 	}
-	manager, err := audit.NewBackendManagerWithEventKey(backend, cfg.AuditCheckpointKey, cfg.AuditEventKeyID, cfg.AuditEventKey)
+	manager, err := audit.NewManagerWithEventKey(backend, cfg.AuditCheckpointKey, cfg.AuditEventKeyID, cfg.AuditEventKey)
 	if err != nil {
 		return nil, fmt.Errorf("configure audit event authentication: %w", err)
 	}

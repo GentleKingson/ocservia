@@ -93,7 +93,7 @@ func TestAgentUpgradePreparation(t *testing.T) {
 			if tc.foreign {
 				store.workspace = uuid.Must(uuid.NewV7())
 			}
-			service := NewBackend(upgradePreparationBackend{store: store}, 50, nil)
+			service := New(upgradePreparationBackend{store: store}, 50, nil)
 			if !tc.noCatalog {
 				service.EnableReleaseCatalog(catalog)
 			}
@@ -129,7 +129,7 @@ func TestAgentUpgradePreparation(t *testing.T) {
 		})
 	}
 	t.Run("unsupported-store", func(t *testing.T) {
-		_, err := NewBackend(nil, 50, nil).PrepareAgentUpgrade(t.Context(), workspace, node, "2.0.0")
+		_, err := New(nil, 50, nil).PrepareAgentUpgrade(t.Context(), workspace, node, "2.0.0")
 		if !errors.Is(err, ErrNodeUnavailable) {
 			t.Fatal(err)
 		}

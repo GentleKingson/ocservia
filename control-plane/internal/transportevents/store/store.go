@@ -51,10 +51,6 @@ type Store interface {
 	MarkSimulationDispatchError(context.Context, uuid.UUID, string) error
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
-	p, ok := tx.(interface{ TransportEventStore() Store })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.TransportEventStore(), nil
+func FromTransaction(tx database.Tx) Store {
+	return database.Must[interface{ TransportEventStore() Store }](tx).TransportEventStore()
 }

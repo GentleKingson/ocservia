@@ -49,7 +49,7 @@ func TestUserMutatorValidationAndConcurrency(t *testing.T) {
 	var typedNil *userstate.Service
 	for _, dependency := range []userMutator{nil, typedNil, recorder} {
 		for _, limit := range []int{-1, 0, 3} {
-			s := NewWithConcurrencyBackend(nil, dependency, limit)
+			s := NewWithConcurrency(nil, dependency, limit)
 			want := DefaultGlobalConcurrency
 			if limit > 0 {
 				want = limit

@@ -39,10 +39,7 @@ func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScena
 	}
 	endpoint := sha256.Sum256(append([]byte("ocservia/development-simulator/"), node[:]...))
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := eventstore.FromTransaction(tx)
 		workspace, err = store.EnsureWorkspace(ctx, workspace, workspaceSlug, now)
 		if err != nil {
 			return fmt.Errorf("ensure simulator workspace: %w", err)
@@ -61,12 +58,8 @@ func (s *Service) CreateSimulation(ctx context.Context, scenario SimulationScena
 
 func (s *Service) ClaimSimulationJobs(ctx context.Context, limit int) ([]SimulationJob, error) {
 	var jobs []SimulationJob
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		jobs, err = store.ClaimSimulationJobs(ctx, limit)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		jobs, err = eventstore.FromTransaction(tx).ClaimSimulationJobs(ctx, limit)
 		return err
 	})
 	if err != nil {
@@ -77,11 +70,7 @@ func (s *Service) ClaimSimulationJobs(ctx context.Context, limit int) ([]Simulat
 
 func (s *Service) ExpireSimulationJobs(ctx context.Context) error {
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return store.ExpireSimulationJobs(ctx)
+		return eventstore.FromTransaction(tx).ExpireSimulationJobs(ctx)
 	})
 	if err != nil {
 		return fmt.Errorf("expire simulator jobs: %w", err)
@@ -91,11 +80,7 @@ func (s *Service) ExpireSimulationJobs(ctx context.Context) error {
 
 func (s *Service) MarkSimulationDispatchStarted(ctx context.Context, id uuid.UUID) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		changed, err := store.MarkSimulationDispatchStarted(ctx, id)
+		changed, err := eventstore.FromTransaction(tx).MarkSimulationDispatchStarted(ctx, id)
 		if err != nil {
 			return fmt.Errorf("mark simulator dispatch started: %w", err)
 		}
@@ -111,11 +96,7 @@ func (s *Service) MarkSimulationDispatchError(ctx context.Context, id uuid.UUID,
 		message = message[:512]
 	}
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return store.MarkSimulationDispatchError(ctx, id, message)
+		return eventstore.FromTransaction(tx).MarkSimulationDispatchError(ctx, id, message)
 	})
 	if err != nil {
 		return fmt.Errorf("record simulator dispatch error: %w", err)

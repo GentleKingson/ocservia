@@ -93,15 +93,15 @@ type Service struct {
 	queue   *operations.Service
 }
 
-func NewBackend(backend database.Backend) *Service {
-	return NewWithOperationsBackend(backend, nil, operations.NewBackend(backend, 0, nil))
+func New(backend database.Backend) *Service {
+	return NewWithOperations(backend, nil, operations.New(backend, 0, nil))
 }
 
-func NewWithSignerBackend(backend database.Backend, signer *commandauth.Signer) *Service {
-	return NewWithOperationsBackend(backend, signer, operations.NewBackend(backend, 0, signer))
+func NewWithSigner(backend database.Backend, signer *commandauth.Signer) *Service {
+	return NewWithOperations(backend, signer, operations.New(backend, 0, signer))
 }
 
-func NewWithOperationsBackend(backend database.Backend, signer *commandauth.Signer, queue *operations.Service) *Service {
+func NewWithOperations(backend database.Backend, signer *commandauth.Signer, queue *operations.Service) *Service {
 	return &Service{backend: backend, signer: signer, queue: queue, now: func() time.Time { return time.Now().UTC() }}
 }
 
@@ -130,14 +130,8 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 		return operations.Operation{}, false, fmt.Errorf("begin desired state transaction: %w", err)
 	}
 	defer rollback(tx)
-	users, err := userstore.From(tx)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
-	operationStore, err := operationdata.FromTransaction(tx)
-	if err != nil {
-		return operations.Operation{}, false, err
-	}
+	users := userstore.From(tx)
+	operationStore := operationdata.FromTransaction(tx)
 	node, err := operationStore.LockNode(ctx, request.NodeID)
 	if errors.Is(err, database.ErrNotFound) {
 		return operations.Operation{}, false, ErrNodeUnavailable
@@ -229,11 +223,7 @@ func (s *Service) mutate(ctx context.Context, request MutationRequest, authorize
 func (s *Service) List(ctx context.Context, nodeID uuid.UUID) ([]ResourceState, error) {
 	result := []ResourceState{}
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		users, err := userstore.From(tx)
-		if err != nil {
-			return err
-		}
-		rows, err := users.List(ctx, nodeID)
+		rows, err := userstore.From(tx).List(ctx, nodeID)
 		if err != nil {
 			return fmt.Errorf("list desired observed state: %w", err)
 		}

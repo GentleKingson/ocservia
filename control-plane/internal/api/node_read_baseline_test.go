@@ -48,7 +48,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	for _, id := range []uuid.UUID{ws, other} {
 		exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'HTTP baseline',$2,$3,$4)`, id, "baseline-"+id.String(), stamp, stamp)
 	}
-	authn, err := auth.NewBackend(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	authn, err := auth.New(b, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	username, password := "baseline-"+uuid.NewString(), "a unique long HTTP baseline password"
 	identity, err := authn.CreateLocalCredential(ctx, username, password)
@@ -113,7 +113,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	// like a missing one, so the status cannot confirm that it exists.
 	foreignPath := "/api/v1/nodes/" + ids[51].String()
 	assertBaselineProblem(t, get(foreignPath, ws, cookie), foreignPath, 404, "not-found", "Resource not found", "the requested resource does not exist")
-	readService := telemetry.NewBackend(b)
+	readService := telemetry.New(b)
 	s = newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: readService}, authorization)
 	assertBaselineJSON(t, get(nodePath, uuid.Nil, cookie), detailJSON(ids[0], 0))
 	// Resource ownership, not a caller-supplied workspace header, selects a node's scope.
@@ -135,10 +135,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 	}
 	// Use the existing store so fixtures retain each backend's IP encoding.
 	if err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := telemetrystore.FromTransaction(tx)
 		if err := store.ReplaceSessions(ctx, ids[0], observed, sessions); err != nil {
 			return err
 		}
@@ -234,7 +231,7 @@ func TestNodeReadsBackendHTTPBaseline(t *testing.T) {
 		now := time.Now().UTC()
 		exec(`INSERT INTO node_observed_snapshots(node_id,observed_at,received_at,boot_id,agent_instance_id,agent_version,ocserv_version,os_release,architecture,ocserv,system,path,last_heartbeat_at) VALUES($1,$2,$3,'module',$4,'1.0.0','1.3.0','debian','amd64','{}','{}','{}',$5)`, ids[0], now, now, uuid.Must(uuid.NewV7()), now)
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved) VALUES($1,'ocserv.agent.upgrade.v2',true)`, ids[0])
-		configured := telemetry.NewWithRecommendedAgentVersionBackend(b, "2.0.0")
+		configured := telemetry.NewWithRecommendedAgentVersion(b, "2.0.0")
 		configured.EnableAgentUpgradeEligibility(catalog)
 		server := newTestServer(t, testHTTPConfig(false), b, Modules{Nodes: configured}, authorization)
 		r := baselineRequest("GET", nodePath, nil)

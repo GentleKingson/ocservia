@@ -42,21 +42,21 @@ func TestConnectionOwnerAcquireAssertReleaseIntegration(t *testing.T) {
 	nodeA, nodeB := testNode(t), testNode(t)
 	connA := testConnection(t)
 
-	term, err := connectionowner.AcquireBackend(ctx, backend, nodeA, connA)
+	term, err := connectionowner.Acquire(ctx, backend, nodeA, connA)
 	if err != nil || term.Epoch() != 1 || term.ConnectionID() != connA {
 		t.Fatalf("first acquire = (%v, %v), want epoch 1", term, err)
 	}
-	if err := term.AssertCurrentBackend(ctx, backend); err != nil {
+	if err := term.AssertCurrent(ctx, backend); err != nil {
 		t.Fatalf("assert current term: %v", err)
 	}
 
 	// Nodes advance independently: a second node starts at epoch 1.
-	other, err := connectionowner.AcquireBackend(ctx, backend, nodeB, testConnection(t))
+	other, err := connectionowner.Acquire(ctx, backend, nodeB, testConnection(t))
 	if err != nil || other.Epoch() != 1 {
 		t.Fatalf("independent node acquire = (%v, %v), want epoch 1", other, err)
 	}
 
-	state, err := connectionowner.ReadStateBackend(ctx, backend, nodeA)
+	state, err := connectionowner.ReadState(ctx, backend, nodeA)
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
@@ -64,10 +64,10 @@ func TestConnectionOwnerAcquireAssertReleaseIntegration(t *testing.T) {
 		t.Fatalf("unexpected owner state: %+v", state)
 	}
 
-	if err := term.ReleaseBackend(ctx, backend); err != nil {
+	if err := term.Release(ctx, backend); err != nil {
 		t.Fatalf("release current term: %v", err)
 	}
-	if err := term.AssertCurrentBackend(ctx, backend); !errors.Is(err, connectionowner.ErrNotOwner) {
+	if err := term.AssertCurrent(ctx, backend); !errors.Is(err, connectionowner.ErrNotOwner) {
 		t.Fatalf("assert after release = %v, want ErrNotOwner", err)
 	}
 }
@@ -78,21 +78,21 @@ func TestConnectionOwnerReconnectIncrementsEpochAndFencesPriorIntegration(t *tes
 	backend := postgres.WrapPool(pool)
 	node := testNode(t)
 
-	first, err := connectionowner.AcquireBackend(ctx, backend, node, testConnection(t))
+	first, err := connectionowner.Acquire(ctx, backend, node, testConnection(t))
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	second, err := connectionowner.AcquireBackend(ctx, backend, node, testConnection(t))
+	second, err := connectionowner.Acquire(ctx, backend, node, testConnection(t))
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
 	if second.Epoch() <= first.Epoch() {
 		t.Fatalf("replacement epoch = %d, want > %d", second.Epoch(), first.Epoch())
 	}
-	if err := first.AssertCurrentBackend(ctx, backend); !errors.Is(err, connectionowner.ErrNotOwner) {
+	if err := first.AssertCurrent(ctx, backend); !errors.Is(err, connectionowner.ErrNotOwner) {
 		t.Fatalf("replaced connection assert = %v, want ErrNotOwner", err)
 	}
-	if err := second.AssertCurrentBackend(ctx, backend); err != nil {
+	if err := second.AssertCurrent(ctx, backend); err != nil {
 		t.Fatalf("current connection assert: %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestConnectionOwnerEpochNeverReusedIntegration(t *testing.T) {
 	previous := int64(0)
 
 	for index := 0; index < 6; index++ {
-		term, err := connectionowner.AcquireBackend(ctx, backend, node, testConnection(t))
+		term, err := connectionowner.Acquire(ctx, backend, node, testConnection(t))
 		if err != nil {
 			t.Fatalf("acquire %d: %v", index, err)
 		}

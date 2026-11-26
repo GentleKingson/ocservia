@@ -31,7 +31,7 @@ import (
 
 func TestCreateRejectsRevokedBrowserSession(t *testing.T) {
 	f := newOutboxFixture(t)
-	service := operations.NewBackend(f.backend, 1, f.signer)
+	service := operations.New(f.backend, 1, f.signer)
 	request := outboxRequest(f.node(t))
 	f.exec(t, `UPDATE auth_sessions SET revoked_at=now() WHERE id=$1`, outboxSessionID)
 	if _, _, err := service.Create(t.Context(), request); !errors.Is(err, auth.ErrForbidden) {
@@ -47,7 +47,7 @@ func TestCreateRejectsRevokedBrowserSession(t *testing.T) {
 func TestDashboardSummaryCache(t *testing.T) {
 	f := newOutboxFixture(t)
 	fault := &commitFaultBackend{Backend: f.backend}
-	service := operations.NewBackend(fault, 1, f.signer)
+	service := operations.New(fault, 1, f.signer)
 	ctx := t.Context()
 	if _, _, err := service.Create(ctx, outboxRequest(f.node(t))); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx := context.Background()
 		fault := &commitFaultBackend{Backend: f.backend}
-		service := operations.NewBackend(fault, 1, f.signer)
+		service := operations.New(fault, 1, f.signer)
 		request := outboxRequest(f.node(t))
 		fault.armed.Store(true)
 		if _, _, err := service.Create(ctx, request); !errors.Is(err, lostCommit) {
@@ -137,7 +137,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		fault := &commitFaultBackend{Backend: f.backend, commit: true}
-		service := operations.NewBackend(fault, 1, f.signer)
+		service := operations.New(fault, 1, f.signer)
 		for range 2 {
 			if _, _, err := service.Create(ctx, outboxRequest(f.node(t))); err != nil {
 				t.Fatal(err)
@@ -201,7 +201,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newOutboxFixture(t)
 			ctx := context.Background()
-			service := operations.NewBackend(f.backend, 1, f.signer)
+			service := operations.New(f.backend, 1, f.signer)
 			created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
 			testutil.NoError(t, err)
 			original := claimOutbox(t, service)
@@ -211,7 +211,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 				testutil.NoError(t, sender.SendCommand(ctx, original.NodeID[:], original.Envelope))
 			}
 			// Abandon all worker memory without MarkSent/MarkFailed, then restart.
-			service = operations.NewBackend(f.backend, 1, f.signer)
+			service = operations.New(f.backend, 1, f.signer)
 			dispatch := original
 			for attempt := 1; attempt <= 4; attempt++ {
 				if attempt == 4 {
@@ -253,7 +253,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 	t.Run("receipt-fuse-bounds-automatic-recovery", func(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx := t.Context()
-		service := operations.NewBackend(f.backend, 1, f.signer)
+		service := operations.New(f.backend, 1, f.signer)
 		created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
 		testutil.NoError(t, err)
 		operationID := uuid.MustParse(created.ID)
@@ -268,11 +268,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 			payload, expires, err := operations.PrepareRecoveryEnvelope(&envelope, agentv1.CommandDeliveryMode_COMMAND_DELIVERY_MODE_RECONCILE_ONLY, now, f.signer)
 			testutil.NoError(t, err)
 			testutil.NoError(t, database.Within(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
-				store, err := resultstore.Results(tx)
-				if err != nil {
-					return err
-				}
-				return store.ScheduleRecovery(ctx, dispatch.CommandID, payload, expires, now, true)
+				return resultstore.Results(tx).ScheduleRecovery(ctx, dispatch.CommandID, payload, expires, now, true)
 			}))
 			var available time.Time
 			var published *time.Time
@@ -300,7 +296,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 	t.Run("early-and-duplicate-result", func(t *testing.T) {
 		f := newOutboxFixture(t)
 		ctx := context.Background()
-		service := operations.NewBackend(f.backend, 1, f.signer)
+		service := operations.New(f.backend, 1, f.signer)
 		created, _, err := service.Create(ctx, outboxRequest(f.node(t)))
 		testutil.NoError(t, err)
 		d := claimOutbox(t, service)
@@ -316,7 +312,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 		endpoint := sha256.Sum256(d.NodeID[:])
 		event := &transportv1.TransportEvent{EventId: id[:], NodeId: d.NodeID[:], EndpointId: endpoint[:],
 			Type: transportv1.TransportEventType_TRANSPORT_EVENT_TYPE_COMMAND_RESULT, OccurredAt: at, Traceparent: d.Traceparent, Payload: payload}
-		ingress := transportevents.NewBackend(f.backend, f.signer)
+		ingress := transportevents.New(f.backend, f.signer)
 		for range 2 {
 			testutil.NoError(t, ingress.Ingest(ctx, event))
 		}
@@ -342,7 +338,7 @@ func TestOutboxBackendIntegration(t *testing.T) {
 	t.Run("unknown-capacity", func(t *testing.T) {
 		newFixture := func(t *testing.T) (*outboxFixture, *operations.Service, func(node uuid.UUID, state string, published bool) uuid.UUID) {
 			f := newOutboxFixture(t)
-			service := operations.NewBackend(f.backend, 2, f.signer)
+			service := operations.New(f.backend, 2, f.signer)
 			// seed creates one operation and moves it to a durable state, either
 			// quiescent (outbox published) or with its recovery outbox pending.
 			seed := func(node uuid.UUID, state string, published bool) uuid.UUID {
@@ -453,7 +449,7 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 		t.Run(source, func(t *testing.T) {
 			f := newOutboxFixture(t)
 			ctx := t.Context()
-			service := operations.NewBackend(f.backend, 1, f.signer)
+			service := operations.New(f.backend, 1, f.signer)
 			node := f.node(t)
 			created, _, err := service.Create(ctx, outboxRequest(node))
 			testutil.NoError(t, err)
@@ -472,21 +468,14 @@ func TestOutboxReleaseBackendIntegration(t *testing.T) {
 			}
 			change := func(tx database.Tx) error {
 				if source == "certificate-release" {
-					store, err := certificatestore.FromTransaction(tx)
-					if err != nil {
-						return err
-					}
+					store := certificatestore.FromTransaction(tx)
 					// Missing operations retain the zero-row no-op behavior.
 					if err := store.ReleaseOperation(ctx, uuid.Must(uuid.NewV7()), uuid.Nil); err != nil {
 						return err
 					}
 					return store.ReleaseOperation(ctx, id, uuid.Nil)
 				}
-				store, err := telemetry.FromTransaction(tx)
-				if err != nil {
-					return err
-				}
-				return store.Activate(ctx, node, time.Now().UTC())
+				return telemetry.FromTransaction(tx).Activate(ctx, node, time.Now().UTC())
 			}
 			assertUnclaimed()
 			rejected := errors.New("rollback release")
@@ -540,7 +529,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 	defer cancel()
 	nodes := []uuid.UUID{f.node(t), f.node(t)}
 	for _, node := range nodes {
-		_, err := connectionowner.AcquireBackend(ctx, f.backend, node, uuid.Must(uuid.NewV7()))
+		_, err := connectionowner.Acquire(ctx, f.backend, node, uuid.Must(uuid.NewV7()))
 		testutil.NoError(t, err)
 	}
 	// Fence rows have independent row locks for a deterministic two-row deadlock rendezvous.
@@ -553,7 +542,10 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 			done <- database.WithinRetry(ctx, f.backend, database.ReadCommitted, func(tx database.Tx) error {
 				local++
 				attempts.Add(1)
-				if n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
+				exec := tx.(interface {
+					Exec(context.Context, string, ...any) (int64, error)
+				})
+				if n, err := exec.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[worker][:]); err != nil {
 					return err
 				} else if n != 1 {
 					return errors.New("missing first deadlock row")
@@ -566,7 +558,7 @@ func TestCoordinationDeadlockBackendIntegration(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				n, err := tx.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
+				n, err := exec.Exec(ctx, `UPDATE connection_owner_fencing SET session_epoch=session_epoch+1 WHERE node_id=$1`, nodes[1-worker][:])
 				if err == nil && n != 1 {
 					return errors.New("missing second deadlock row")
 				}

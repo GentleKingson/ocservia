@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type enrollmentStore struct{ database.Tx }
+type enrollmentStore struct{ *transaction }
 
 func (t *transaction) EnrollmentStore() enrollmentstore.EnrollmentStore { return enrollmentStore{t} }
 
@@ -52,7 +52,7 @@ func enrollmentNodeLock(lock enrollmentstore.Lock) string {
 
 const enrollmentNodeColumns = `SELECT n.id,n.workspace_id,n.name,n.status,k.state,k.endpoint_id,n.authorization_revision,n.version FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id `
 
-func scanEnrollmentNode(row database.Row) (v enrollmentstore.Node, err error) {
+func scanEnrollmentNode(row Row) (v enrollmentstore.Node, err error) {
 	err = row.Scan(&v.ID, &v.WorkspaceID, &v.Name, &v.Status, &v.EndpointState, &v.Endpoint, &v.AuthorizationRevision, &v.Version)
 	return
 }
@@ -90,37 +90,14 @@ func (s enrollmentStore) InsertSealingKey(ctx context.Context, id uuid.UUID, key
 }
 
 func (s enrollmentStore) SealingKeys(ctx context.Context, id uuid.UUID) ([]enrollmentstore.SealingKey, error) {
-	rows, err := s.Query(ctx, `SELECT purpose,version,key_id,public_key_sha256 FROM node_sealing_keys WHERE node_id=$1 ORDER BY purpose`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var keys []enrollmentstore.SealingKey
-	for rows.Next() {
-		var key enrollmentstore.SealingKey
-		if err := rows.Scan(&key.Purpose, &key.Version, &key.ID, &key.Digest); err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	return keys, rows.Err()
+	return collectRows(ctx, s.store, `SELECT purpose,version,key_id,public_key_sha256 FROM node_sealing_keys WHERE node_id=$1 ORDER BY purpose`, func(r Rows) (key enrollmentstore.SealingKey, err error) {
+		err = r.Scan(&key.Purpose, &key.Version, &key.ID, &key.Digest)
+		return
+	}, id)
 }
 
 func (s enrollmentStore) Capabilities(ctx context.Context, id uuid.UUID, approved bool) ([]string, error) {
-	rows, err := s.Query(ctx, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND (NOT $2::boolean OR approved) ORDER BY capability`, id, approved)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var capabilities []string
-	for rows.Next() {
-		var capability string
-		if err := rows.Scan(&capability); err != nil {
-			return nil, err
-		}
-		capabilities = append(capabilities, capability)
-	}
-	return capabilities, rows.Err()
+	return collectColumn[string](ctx, s.store, `SELECT capability FROM node_capabilities WHERE node_id=$1 AND (NOT $2::boolean OR approved) ORDER BY capability`, id, approved)
 }
 
 func (s enrollmentStore) InsertCapabilities(ctx context.Context, id uuid.UUID, capabilities, unapproved []string) error {
@@ -155,28 +132,31 @@ func (s enrollmentStore) EndpointPermitted(ctx context.Context, endpoint []byte,
 }
 
 func (s enrollmentStore) TrustSnapshot(ctx context.Context) ([]enrollmentstore.Node, error) {
-	rows, err := s.Query(ctx, `SELECT n.id,k.endpoint_id,CASE WHEN n.status='revoked' OR k.state='revoked' THEN 'revoked' ELSE 'active' END,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE (n.status IN ('active','offline') AND k.state='active') OR k.state='revoked' ORDER BY n.id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	nodes := make([]enrollmentstore.Node, 0)
-	for rows.Next() {
-		var n enrollmentstore.Node
-		if err := rows.Scan(&n.ID, &n.Endpoint, &n.Status, &n.AuthorizationRevision); err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, n)
-	}
-	return nodes, rows.Err()
+	return collectRows(ctx, s.store, `SELECT n.id,k.endpoint_id,CASE WHEN n.status='revoked' OR k.state='revoked' THEN 'revoked' ELSE 'active' END,n.authorization_revision FROM nodes n JOIN node_endpoint_keys k ON k.node_id=n.id WHERE (n.status IN ('active','offline') AND k.state='active') OR k.state='revoked' ORDER BY n.id`, func(r Rows) (n enrollmentstore.Node, err error) {
+		err = r.Scan(&n.ID, &n.Endpoint, &n.Status, &n.AuthorizationRevision)
+		return
+	})
 }
 
-type privdAttestationStore struct{ tx database.Tx }
+type privdAttestationStore struct{ tx *transaction }
 
 func (t *transaction) PrivdAttestationStore() privdattestation.Store { return privdAttestationStore{t} }
 
-func (s privdAttestationStore) KeyStateCounts(ctx context.Context) (database.Rows, error) {
-	return s.tx.Query(ctx, `SELECT state,count(*) FROM node_privd_attestation_keys GROUP BY state`)
+func (s privdAttestationStore) KeyStateCounts(ctx context.Context) (map[string]int64, error) {
+	counts := make(map[string]int64)
+	err := walkRows(ctx, s.tx.store, `SELECT state,count(*) FROM node_privd_attestation_keys GROUP BY state`, func(r Rows) error {
+		var state string
+		var total int64
+		if err := r.Scan(&state, &total); err != nil {
+			return err
+		}
+		counts[state] = total
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return counts, nil
 }
 
 func (s privdAttestationStore) VerificationKey(ctx context.Context, node uuid.UUID, id string) (privdattestation.VerificationKey, error) {
@@ -208,7 +188,7 @@ func (s privdAttestationStore) FirstKey(ctx context.Context, node uuid.UUID) (st
 	return id, k, err
 }
 
-type trustConvergenceStore struct{ database.Tx }
+type trustConvergenceStore struct{ *transaction }
 
 func (t *transaction) TrustConvergenceStore() enrollmentstore.TrustStore {
 	return trustConvergenceStore{t}
@@ -226,7 +206,7 @@ func (s trustConvergenceStore) Enqueue(ctx context.Context, v enrollmentstore.Tr
 }
 
 func (s trustConvergenceStore) Claim(ctx context.Context, worker uuid.UUID) (v enrollmentstore.TrustJob, err error) {
-	at, err := database.WallTime(ctx, s.Tx)
+	at, err := s.WallTime(ctx)
 	if err != nil {
 		return v, err
 	}
@@ -238,7 +218,7 @@ func (s trustConvergenceStore) Claim(ctx context.Context, worker uuid.UUID) (v e
 	if err != nil {
 		return v, err
 	}
-	at, err = database.WallTime(ctx, s.Tx)
+	at, err = s.WallTime(ctx)
 	if err != nil {
 		return v, err
 	}
@@ -261,7 +241,7 @@ func (s trustConvergenceStore) lockClaim(ctx context.Context, v enrollmentstore.
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	at, err := database.WallTime(ctx, s.Tx)
+	at, err := s.WallTime(ctx)
 	return at, err == nil && until != nil && until.After(at), err
 }
 
@@ -314,7 +294,7 @@ func (s trustConvergenceStore) Release(ctx context.Context, v enrollmentstore.Tr
 }
 
 func (s trustConvergenceStore) RecordSynchronized(ctx context.Context, v enrollmentstore.TrustJob, closed bool) (bool, error) {
-	at, err := database.WallTime(ctx, s.Tx)
+	at, err := s.WallTime(ctx)
 	if err != nil {
 		return false, err
 	}

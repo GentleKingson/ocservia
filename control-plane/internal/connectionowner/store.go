@@ -19,10 +19,6 @@ type Store interface {
 	Read(ctx context.Context, nodeID [16]byte) (OwnerState, error)
 }
 
-func StoreFromTransaction(tx database.Tx) (Store, error) {
-	p, ok := tx.(interface{ ConnectionOwnerStore() Store })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.ConnectionOwnerStore(), nil
+func StoreFromTransaction(tx database.Tx) Store {
+	return database.Must[interface{ ConnectionOwnerStore() Store }](tx).ConnectionOwnerStore()
 }

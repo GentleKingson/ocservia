@@ -18,12 +18,12 @@ import (
 	"github.com/google/uuid"
 )
 
-func userOperationsBackend(t *testing.T) (database.Backend, database.Backend) {
+func userOperationsBackend(t *testing.T) (*postgres.Backend, *postgres.Backend) {
 	t.Helper()
 	return userOperationsBackendWithCleanup(t, t)
 }
 
-func userOperationsBackendWithCleanup(t, cleanupT *testing.T) (database.Backend, database.Backend) {
+func userOperationsBackendWithCleanup(t, cleanupT *testing.T) (*postgres.Backend, *postgres.Backend) {
 	t.Helper()
 	runtime, owner := testfixture.OpenIsolated(t, cleanupT, "policy_cleanup")
 	return postgres.WrapPool(runtime), postgres.WrapPool(owner)
@@ -39,7 +39,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	row := func(query string, args ...any) database.Row {
+	row := func(query string, args ...any) postgres.Row {
 		return b.QueryRow(ctx, query, args...)
 	}
 	workspace, node, requester, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -62,11 +62,11 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 		exec(`INSERT INTO desired_users(node_id,username,enabled,version,revision,created_at,updated_at)VALUES($1,$2,true,1,1,$3,$4)`, node, name, at, at)
 	}
 	seed := [32]byte{3}
-	users := userstate.NewWithSignerBackend(b, commandauth.NewSignerFromSeed(seed))
+	users := userstate.NewWithSigner(b, commandauth.NewSignerFromSeed(seed))
 	mutator := &recordingUserMutator{delegate: users}
-	s := NewBackend(b, mutator)
+	s := New(b, mutator)
 	s.now = func() time.Time { return now }
-	policyErrors := NewBackend(b, mutator)
+	policyErrors := New(b, mutator)
 	policyErrors.now = s.now
 	checkPolicyErrors := func(t *testing.T, run func(context.Context, int) (int, error), want userstate.MutationRequest, cause string) {
 		t.Helper()
@@ -225,7 +225,7 @@ func TestUserOperationsBackendIntegration(t *testing.T) {
 	if err := s.RunOnce(ctx); err != nil {
 		t.Fatal("scheduler", err)
 	}
-	if _, err := audit.NewBackendManager(b, nil).Verify(ctx, workspace); err != nil {
+	if _, err := audit.NewManager(b, nil).Verify(ctx, workspace); err != nil {
 		t.Fatal("audit chain", err)
 	}
 }

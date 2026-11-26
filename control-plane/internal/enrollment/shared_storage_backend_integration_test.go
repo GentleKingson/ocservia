@@ -24,10 +24,7 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 		workspace, node := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 		labels := []string{`{"env":"prod","count":42}`, `["member"]`}[i]
 		err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
-			local, err := eventstore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
+			local := eventstore.FromTransaction(tx)
 			id, err := local.EnsureWorkspace(ctx, workspace, workspace.String(), at)
 			if err != nil || id != workspace {
 				t.Fatal("workspace", id, err)
@@ -36,10 +33,7 @@ func TestEnrollmentSharedStorageBackendIntegration(t *testing.T) {
 			if err != nil || id != workspace {
 				t.Fatal("existing workspace", id, err)
 			}
-			enroll, err := enrollmentstore.Enrollment(tx)
-			if err != nil {
-				return err
-			}
+			enroll := enrollmentstore.Enrollment(tx)
 			if err := enroll.InsertNode(ctx, node, workspace, node.String(), at); err != nil {
 				return err
 			}

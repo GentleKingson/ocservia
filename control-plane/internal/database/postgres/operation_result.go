@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type commandResultStore struct{ database.Tx }
+type commandResultStore struct{ *transaction }
 
 func (t *transaction) CommandResultStore() resultstore.ResultStore { return commandResultStore{t} }
 

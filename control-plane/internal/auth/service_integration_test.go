@@ -20,7 +20,7 @@ func TestBreakGlassAlertsAuditsAndRequiresRotationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := "offline-emergency-credential-with-high-entropy"
-	service, err := NewBackend(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
+	service, err := New(postgres.WrapPool(pool), Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour, BreakGlassEnabled: true, BreakGlassTokenHash: TokenHash(token)})
 	testutil.NoError(t, err)
 	cookie, principal, err := service.BreakGlass(ctx, token, "break-glass-request")
 	testutil.NoError(t, err)

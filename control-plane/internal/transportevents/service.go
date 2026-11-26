@@ -84,12 +84,12 @@ func invalidEvent(reasonCode, detail string) error {
 	return &permanentInvalidEvent{reasonCode: reasonCode, detail: detail}
 }
 
-func NewBackend(backend database.Backend, signer *commandauth.Signer) *Service {
+func New(backend database.Backend, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, signer: signer, localSimulator: true, now: func() time.Time { return time.Now().UTC() }}
 }
 
-func NewBackendWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
-	service := NewBackend(backend, signer)
+func NewWithCommandRecovery(backend database.Backend, signer *commandauth.Signer, recovery CommandRecoverer, authority RecoveryAuthority) *Service {
+	service := New(backend, signer)
 	service.commandRecovery, service.recoveryAuthority = recovery, authority
 	return service
 }

@@ -75,10 +75,6 @@ type Store interface {
 	AdvanceDesiredRevision(context.Context, uuid.UUID, uint64, time.Time) (bool, error)
 }
 
-func FromTransaction(tx database.Tx) (Store, error) {
-	p, ok := tx.(interface{ ConfigurationStore() Store })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.ConfigurationStore(), nil
+func FromTransaction(tx database.Tx) Store {
+	return database.Must[interface{ ConfigurationStore() Store }](tx).ConfigurationStore()
 }

@@ -66,8 +66,8 @@ type sessionEnvelope struct {
 	ExpiresAt             time.Time
 }
 
-// NewBackend constructs a Local authentication and single-admin workspace authorization service.
-func NewBackend(backend database.Backend, cfg Config) (*Service, error) {
+// New constructs a Local authentication and single-admin workspace authorization service.
+func New(backend database.Backend, cfg Config) (*Service, error) {
 	if backend == nil || len(cfg.SessionKey) != 32 || cfg.SessionTTL < time.Minute || cfg.SessionTTL > 24*time.Hour {
 		return nil, errors.New("invalid authentication configuration")
 	}
@@ -238,11 +238,7 @@ func (s *Service) createSession(ctx context.Context, issuer, subject string, loc
 
 func (s *Service) withAuthentication(ctx context.Context, change func(database.Tx, authstore.Store) error) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := authstore.From(tx)
-		if err != nil {
-			return err
-		}
-		return change(tx, store)
+		return change(tx, authstore.From(tx))
 	})
 }
 

@@ -10,9 +10,15 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 )
 
-type connectionOwnerStore struct{ database.Tx }
+type connectionOwnerStore struct{ *transaction }
 
 func (t *transaction) ConnectionOwnerStore() connectionowner.Store { return connectionOwnerStore{t} }
+
+func assertConnectionOwner(ctx context.Context, s store, node, connection []byte, epoch int64) error {
+	var one int
+	return s.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing WHERE node_id=$1 AND connection_id=$2 AND session_epoch=$3 AND active=true FOR SHARE OF connection_owner_fencing`,
+		node, connection, epoch).Scan(&one)
+}
 
 func (s connectionOwnerStore) Acquire(ctx context.Context, nodeID, connectionID [16]byte) (int64, error) {
 	if _, err := s.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "connection-owner:"+hex.EncodeToString(nodeID[:])); err != nil {
@@ -50,9 +56,7 @@ func (s connectionOwnerStore) Release(ctx context.Context, nodeID, connectionID 
 }
 
 func (s connectionOwnerStore) Assert(ctx context.Context, nodeID, connectionID [16]byte, epoch int64) error {
-	var one int
-	return s.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing WHERE node_id=$1 AND connection_id=$2 AND session_epoch=$3 AND active=true FOR SHARE OF connection_owner_fencing`,
-		nodeID[:], connectionID[:], epoch).Scan(&one)
+	return assertConnectionOwner(ctx, s.store, nodeID[:], connectionID[:], epoch)
 }
 
 func (s connectionOwnerStore) Read(ctx context.Context, nodeID [16]byte) (v connectionowner.OwnerState, err error) {

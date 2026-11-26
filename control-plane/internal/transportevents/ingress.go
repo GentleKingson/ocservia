@@ -25,12 +25,8 @@ import (
 
 func (s *Service) LastEventID(ctx context.Context) ([]byte, error) {
 	var id uuid.UUID
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := transportstore.Ingress(tx)
-		if err != nil {
-			return err
-		}
-		id, err = store.LastEventID(ctx)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		id, err = transportstore.Ingress(tx).LastEventID(ctx)
 		return err
 	})
 	if errors.Is(err, database.ErrNotFound) {
@@ -55,10 +51,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 		return errors.New("transport node_id must be UUIDv7")
 	}
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := transportstore.Ingress(tx)
-		if err != nil {
-			return err
-		}
+		store := transportstore.Ingress(tx)
 		if err := store.SaveBusiness(ctx); err != nil {
 			return fmt.Errorf("create transport event savepoint: %w", err)
 		}
@@ -106,10 +99,7 @@ func (s *Service) Ingest(ctx context.Context, event *transportv1.TransportEvent)
 }
 
 func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, eventID, nodeID uuid.UUID, event *transportv1.TransportEvent, observedAt time.Time) (uuid.UUID, bool, error) {
-	store, err := transportstore.Ingress(tx)
-	if err != nil {
-		return uuid.Nil, false, err
-	}
+	store := transportstore.Ingress(tx)
 	trust, err := store.LockTrust(ctx, nodeID, event.GetEndpointId())
 	if errors.Is(err, database.ErrNotFound) {
 		return uuid.Nil, false, invalidEvent("node_endpoint_not_active", "transport event node and EndpointID are not authoritatively active")
@@ -159,7 +149,7 @@ func (s *Service) ingestTransportEventTx(ctx context.Context, tx database.Tx, ev
 		return workspaceID, false, nil
 	}
 	if eventType == "telemetry" {
-		if _, err := telemetry.NewBackend(s.backend).IngestWireTransaction(ctx, tx, nodeID, event.GetPayload()); err != nil {
+		if _, err := telemetry.New(s.backend).IngestWireTransaction(ctx, tx, nodeID, event.GetPayload()); err != nil {
 			if errors.Is(err, telemetry.ErrInvalidTelemetry) {
 				return workspaceID, false, invalidEvent("invalid_telemetry", err.Error())
 			}

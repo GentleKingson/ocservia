@@ -114,7 +114,7 @@ func TestAgentUpgradeBackendHTTPIntegration(t *testing.T) {
 			{name: "http-catalog-without-domain-catalog", httpCatalog: true, httpOperations: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				domain := operations.NewBackend(b, 50, f.signer)
+				domain := operations.New(b, 50, f.signer)
 				if tc.domainCatalog {
 					domain.EnableReleaseCatalog(catalog)
 				}

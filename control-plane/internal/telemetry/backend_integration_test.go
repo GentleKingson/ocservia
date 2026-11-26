@@ -19,7 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func telemetryBackend(t *testing.T) database.Backend {
+func telemetryBackend(t *testing.T) *postgres.Backend {
 	t.Helper()
 	return testfixture.OpenRuntime(t)
 }
@@ -58,7 +58,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 	}
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Ingest',$2,now(),now())`, workspace, "ingest-"+workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at) VALUES($1,$2,'node','offline',now(),now())`, node, workspace)
-	service := NewBackend(backend)
+	service := New(backend)
 	unobserved, err := service.GetNode(ctx, node)
 	if err != nil || unobserved.ObservedAt != nil || unobserved.Freshness != "never" {
 		t.Fatalf("missing snapshot: %+v %v", unobserved, err)
@@ -151,11 +151,8 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		t.Fatalf("session cursor repeated IPv6 session: %+v %v %v", next, more, err)
 	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := telemetrystore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		rows, err := tx.Query(ctx, `SELECT group_name FROM observed_groups WHERE node_id=$1 ORDER BY group_name COLLATE "C"`, node)
+		store := telemetrystore.FromTransaction(tx)
+		rows, err := backend.Query(ctx, `SELECT group_name FROM observed_groups WHERE node_id=$1 ORDER BY group_name COLLATE "C"`, node)
 		if err != nil {
 			return err
 		}
@@ -176,7 +173,7 @@ func TestTelemetryBackendWorkflowIntegration(t *testing.T) {
 		}
 		for _, event := range batch.Security {
 			var detail json.RawMessage
-			if err := tx.QueryRow(ctx, `SELECT detail FROM telemetry_security_events WHERE event_id=$1`, event.ID).Scan(&detail); err != nil {
+			if err := backend.QueryRow(ctx, `SELECT detail FROM telemetry_security_events WHERE event_id=$1`, event.ID).Scan(&detail); err != nil {
 				return err
 			}
 			if len(detail) == 0 {

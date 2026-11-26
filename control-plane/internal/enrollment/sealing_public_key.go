@@ -66,10 +66,7 @@ func (s *Service) UserPasswordSealingKey(ctx context.Context, workspace, nodeID 
 	// Read current descriptors after the remote read, so a rotated/revoked
 	// enrollment cannot be served from a previously verified Signer binding.
 	err = database.Within(ctx, s.backend, database.RepeatableRead, func(tx database.Tx) error {
-		store, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
+		store := enrollmentstore.Enrollment(tx)
 		node, err := store.NodeByID(ctx, nodeID, enrollmentstore.Unlocked)
 		if err != nil {
 			return err

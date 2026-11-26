@@ -25,7 +25,7 @@ func newHTTPServer(life *lifecycle, cfg config.Config, build BuildInfo, backend 
 	var authService *auth.Service
 	if cfg.LocalAuth || cfg.BreakGlassEnabled || len(cfg.SessionKey) == 32 {
 		authConfig := auth.Config{LocalEnabled: cfg.LocalAuth, SessionKey: cfg.SessionKey, SessionTTL: cfg.SessionTTL, BreakGlassEnabled: cfg.BreakGlassEnabled, BreakGlassTokenHash: cfg.BreakGlassTokenHash}
-		authService, err = auth.NewBackend(backend, authConfig)
+		authService, err = auth.New(backend, authConfig)
 		if err != nil {
 			return nil, fmt.Errorf("configure authentication: %w", err)
 		}

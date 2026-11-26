@@ -10,6 +10,7 @@ import (
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	userstore "github.com/GentleKingson/ocservia/control-plane/internal/useroperations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
@@ -18,7 +19,7 @@ import (
 )
 
 type cleanupFixture struct {
-	b, owner  database.Backend
+	b, owner  *postgres.Backend
 	s         *Service
 	workspace uuid.UUID
 	node      uuid.UUID
@@ -33,11 +34,11 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 	return newCleanupFixtureWithBackend(t, b, owner)
 }
 
-func newCleanupFixtureWithBackend(t *testing.T, b, owner database.Backend) *cleanupFixture {
+func newCleanupFixtureWithBackend(t *testing.T, b, owner *postgres.Backend) *cleanupFixture {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	f := &cleanupFixture{b: b, owner: owner, workspace: uuid.New(), node: uuid.New(), op: uuid.New(), now: now, at: now}
-	f.s = NewWithConcurrencyBackend(b, userstate.NewWithSignerBackend(b, commandauth.NewSignerFromSeed([32]byte{3})), 1)
+	f.s = NewWithConcurrency(b, userstate.NewWithSigner(b, commandauth.NewSignerFromSeed([32]byte{3})), 1)
 	f.s.now = func() time.Time { return f.now }
 	workspace := f.workspace
 	f.exec(t, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'cleanup',$2,$3,$4)`, workspace, workspace.String(), f.at, f.at)
@@ -151,7 +152,7 @@ func (f *cleanupFixture) revokeDelete(t *testing.T) func() {
 
 func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 	parent := t
-	var shared, sharedOwner database.Backend
+	var shared, sharedOwner *postgres.Backend
 	for _, name := range []string{"enforce-orphan", "enforce-conflict", "reset-orphan", "reset-conflict"} {
 		if !t.Run(name, func(t *testing.T) {
 			if shared == nil {
@@ -240,7 +241,7 @@ func TestEnforcementCleanupBackendIntegration(t *testing.T) {
 			t.Fatal("canceled cleanup succeeded", err)
 		}
 		failure := errors.New("injected commit failure")
-		broken := NewBackend(cleanupCommitBackend{Backend: f.b, failure: failure}, nil)
+		broken := New(cleanupCommitBackend{Backend: f.b, failure: failure}, nil)
 		if err := broken.cleanupEnforcement(t.Context(), item, false); !errors.Is(err, failure) || f.count(t, item) != 1 {
 			t.Fatal("commit failure lost rollback", err)
 		}
@@ -297,19 +298,15 @@ func (b cleanupCommitBackend) Begin(ctx context.Context, isolation database.Isol
 	if err != nil {
 		return nil, err
 	}
-	store, err := userstore.From(tx)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return nil, err
-	}
-	return cleanupCommitTx{Tx: tx, store: store, failure: b.failure}, nil
+	return cleanupCommitTx{Tx: tx, failure: b.failure}, nil
 }
 
 type cleanupCommitTx struct {
 	database.Tx
-	store   userstore.Store
 	failure error
 }
 
-func (tx cleanupCommitTx) UserOperationsStore() userstore.Store { return tx.store }
-func (tx cleanupCommitTx) Commit(context.Context) error         { return fmt.Errorf("commit: %w", tx.failure) }
+func (tx cleanupCommitTx) Unwrap() database.Tx { return tx.Tx }
+func (tx cleanupCommitTx) Commit(context.Context) error {
+	return fmt.Errorf("commit: %w", tx.failure)
+}

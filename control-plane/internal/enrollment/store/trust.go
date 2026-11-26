@@ -42,10 +42,6 @@ type TrustStore interface {
 	RecordSynchronized(context.Context, TrustJob, bool) (bool, error)
 }
 
-func Trust(tx database.Tx) (TrustStore, error) {
-	p, ok := tx.(interface{ TrustConvergenceStore() TrustStore })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.TrustConvergenceStore(), nil
+func Trust(tx database.Tx) TrustStore {
+	return database.Must[interface{ TrustConvergenceStore() TrustStore }](tx).TrustConvergenceStore()
 }

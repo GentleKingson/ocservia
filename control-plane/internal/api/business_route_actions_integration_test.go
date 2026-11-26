@@ -22,7 +22,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 	// Reuse the restricted-backend, real Local login and HTTP Plan fixture.
 	plan := f.plan(false)
 	plans := &observedConfigPlans{ConfigPlans: f.s.configPlans.(*configplan.Service)}
-	userOperations := useroperations.NewBackend(f.b, nil)
+	userOperations := useroperations.New(f.b, nil)
 	f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations, Certificates: f.s.certificates})
 	other, sibling, foreign := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	stamp := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -136,7 +136,7 @@ func testBusinessRouteActionsBackendHTTPIntegration(t *testing.T, f applyHTTPFix
 		unchanged(t, before)
 	})
 	t.Run("secret-resource-boundaries", func(t *testing.T) {
-		service := certificates.NewBackend(f.b, f.s.operations, nil, nil, nil, f.signer)
+		service := certificates.New(f.b, f.s.operations, nil, nil, nil, f.signer)
 		f.s = f.newServer(Modules{ConfigPlans: plans, UserOperations: userOperations, Certificates: service})
 		for _, scope := range []uuid.UUID{f.workspace, other} {
 			if scope == other {

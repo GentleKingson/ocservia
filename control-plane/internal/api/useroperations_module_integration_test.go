@@ -25,8 +25,8 @@ func newUserOperationsHTTPFixture(t *testing.T) userOperationsHTTPFixture {
 	t.Helper()
 	b, owner := authenticationBackendFixtureWithIsolation(t, true)
 	f := userOperationsHTTPFixture{applyHTTPFixture: newApplyHTTPFixtureWithBackend(t, b, owner)}
-	users := userstate.NewWithSignerBackend(b, f.signer)
-	f.service = useroperations.NewWithConcurrencyBackend(b, users, 1)
+	users := userstate.NewWithSigner(b, f.signer)
+	f.service = useroperations.NewWithConcurrency(b, users, 1)
 	f.s = f.newServer(Modules{ConfigPlans: f.s.configPlans, UserOperations: f.service, Certificates: f.s.certificates})
 	f.node, f.sibling = uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	for _, node := range []uuid.UUID{f.node, f.sibling} {

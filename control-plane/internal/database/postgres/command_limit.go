@@ -4,11 +4,10 @@ import (
 	"context"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
 
-type commandLimitStore struct{ tx database.Tx }
+type commandLimitStore struct{ tx *transaction }
 
 func (t *transaction) CommandLimitStore() commandlimit.Store { return &commandLimitStore{t} }
 

@@ -321,11 +321,10 @@ func VerifyResultTransaction(ctx context.Context, tx database.Tx, nodeID uuid.UU
 
 func transactionKeyLookup(tx database.Tx) keyLookup {
 	return func(ctx context.Context, node uuid.UUID, key string) (attestationKeyRecord, error) {
-		store, err := StoreFrom(tx)
-		if err != nil {
-			return attestationKeyRecord{}, err
+		if tx == nil {
+			return attestationKeyRecord{}, database.ErrUnsupported
 		}
-		return store.VerificationKey(ctx, node, key)
+		return StoreFrom(tx).VerificationKey(ctx, node, key)
 	}
 }
 

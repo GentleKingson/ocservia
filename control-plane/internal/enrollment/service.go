@@ -88,12 +88,12 @@ type Service struct {
 	publicKeys           userPasswordPublicKeySource
 }
 
-func NewBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
+func New(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer) *Service {
 	return &Service{backend: backend, now: time.Now, random: rand.Reader, controllerEndpointID: controllerEndpointID, controllerVersion: controllerVersion, signer: signer}
 }
 
-func NewWithOwnerSessionsBackend(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
-	service := NewBackend(backend, controllerEndpointID, controllerVersion, signer)
+func NewWithOwnerSessions(backend database.Backend, controllerEndpointID, controllerVersion string, signer *commandauth.Signer, ownerSessions ownersession.SessionOpener) *Service {
+	service := New(backend, controllerEndpointID, controllerVersion, signer)
 	service.ownerSessions = ownerSessions
 	return service
 }
@@ -373,10 +373,8 @@ func (s *Service) Revoke(ctx context.Context, revocation Revocation) (NodeTrust,
 func (s *Service) RecordRevocationSynchronized(ctx context.Context, trust NodeTrust, reason string, closed bool) (bool, error) {
 	var recorded bool
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := enrollmentstore.Trust(tx)
-		if err != nil {
-			return err
-		}
+		store := enrollmentstore.Trust(tx)
+		var err error
 		recorded, err = store.RecordSynchronized(ctx, enrollmentstore.TrustJob{NodeID: trust.NodeID, EndpointID: trust.EndpointID, DesiredState: "revoked", Revision: trust.Revision, Reason: reason}, closed)
 		return err
 	})
@@ -622,12 +620,7 @@ func supportedCapabilitiesMatch(ctx context.Context, store enrollmentstore.Enrol
 }
 
 func enqueueTrustConvergence(ctx context.Context, tx database.Tx, nodeID uuid.UUID, endpointID []byte, state string, revision uint64, reason string, now time.Time) error {
-	store, err := enrollmentstore.Trust(tx)
-	if err != nil {
-		return err
-	}
-	err = store.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, now.UTC())
-	if err != nil {
+	if err := enrollmentstore.Trust(tx).Enqueue(ctx, enrollmentstore.TrustJob{NodeID: nodeID, EndpointID: endpointID, DesiredState: state, Revision: revision, Reason: reason}, now.UTC()); err != nil {
 		return fmt.Errorf("enqueue node trust convergence: %w", err)
 	}
 	return nil
@@ -699,10 +692,5 @@ func (s *Service) begin(ctx context.Context, isolation database.Isolation) (data
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := enrollmentstore.Enrollment(tx)
-	if err != nil {
-		rollback(tx)
-		return nil, nil, err
-	}
-	return tx, store, nil
+	return tx, enrollmentstore.Enrollment(tx), nil
 }

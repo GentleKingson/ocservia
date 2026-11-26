@@ -9,14 +9,10 @@ import (
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 )
 
-func AcquireBackend(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte) (*Term, error) {
+func Acquire(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte) (*Term, error) {
 	var epoch int64
-	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := StoreFromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		epoch, err = store.Acquire(ctx, nodeID, connectionID)
+	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		epoch, err = StoreFromTransaction(tx).Acquire(ctx, nodeID, connectionID)
 		return err
 	})
 	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, nodeID, connectionID, epoch, true) == nil {
@@ -28,13 +24,9 @@ func AcquireBackend(ctx context.Context, backend database.Backend, nodeID, conne
 	return &Term{nodeID: nodeID, connectionID: connectionID, epoch: epoch}, nil
 }
 
-func ReleaseTermBackend(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte, epoch int64) error {
+func ReleaseTerm(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte, epoch int64) error {
 	err := database.WithinRetry(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := StoreFromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		return store.Release(ctx, nodeID, connectionID, epoch)
+		return StoreFromTransaction(tx).Release(ctx, nodeID, connectionID, epoch)
 	})
 	if errors.Is(err, database.ErrCommitUnknown) && confirmTerm(ctx, backend, nodeID, connectionID, epoch, false) == nil {
 		err = nil
@@ -45,14 +37,14 @@ func ReleaseTermBackend(ctx context.Context, backend database.Backend, nodeID, c
 	return err
 }
 
-func (t *Term) ReleaseBackend(ctx context.Context, backend database.Backend) error {
-	return ReleaseTermBackend(ctx, backend, t.nodeID, t.connectionID, t.epoch)
+func (t *Term) Release(ctx context.Context, backend database.Backend) error {
+	return ReleaseTerm(ctx, backend, t.nodeID, t.connectionID, t.epoch)
 }
 
 func confirmTerm(ctx context.Context, backend database.Backend, nodeID, connectionID [16]byte, epoch int64, active bool) error {
 	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	state, err := ReadStateBackend(check, backend, nodeID)
+	state, err := ReadState(check, backend, nodeID)
 	if err != nil {
 		return err
 	}
@@ -63,28 +55,20 @@ func confirmTerm(ctx context.Context, backend database.Backend, nodeID, connecti
 }
 
 func (t *Term) AssertTransaction(ctx context.Context, tx database.Tx) error {
-	store, err := StoreFromTransaction(tx)
-	if err != nil {
-		return err
-	}
-	err = store.Assert(ctx, t.nodeID, t.connectionID, t.epoch)
+	err := StoreFromTransaction(tx).Assert(ctx, t.nodeID, t.connectionID, t.epoch)
 	if errors.Is(err, database.ErrNotFound) {
 		return ErrNotOwner
 	}
 	return err
 }
 
-func (t *Term) AssertCurrentBackend(ctx context.Context, backend database.Backend) error {
+func (t *Term) AssertCurrent(ctx context.Context, backend database.Backend) error {
 	return database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error { return t.AssertTransaction(ctx, tx) })
 }
 
-func ReadStateBackend(ctx context.Context, backend database.Backend, nodeID [16]byte) (state OwnerState, err error) {
-	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := StoreFromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		state, err = store.Read(ctx, nodeID)
+func ReadState(ctx context.Context, backend database.Backend, nodeID [16]byte) (state OwnerState, err error) {
+	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		state, err = StoreFromTransaction(tx).Read(ctx, nodeID)
 		return err
 	})
 	if errors.Is(err, database.ErrNotFound) {

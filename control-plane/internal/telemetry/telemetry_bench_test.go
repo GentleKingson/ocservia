@@ -119,7 +119,7 @@ func BenchmarkGetNodeActions(b *testing.B) {
 	if _, err := pool.Exec(ctx, `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Benchmark','benchmark',now(),now())`, workspace); err != nil {
 		b.Fatal(err)
 	}
-	svc := NewBackend(postgres.WrapPool(pool))
+	svc := New(postgres.WrapPool(pool))
 	for _, status := range []string{"active", "revoked"} {
 		b.Run(status, func(b *testing.B) {
 			id := uuid.Must(uuid.NewV7())

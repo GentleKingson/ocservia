@@ -15,36 +15,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type memAuditEvent struct {
-	id              uuid.UUID
-	workspaceID     uuid.UUID
-	at              time.Time
-	actorType       string
-	actorID         string
-	sessionID       *uuid.UUID
-	action          string
-	resourceType    string
-	resourceID      *uuid.UUID
-	nodeID          *uuid.UUID
-	requestID       string
-	traceID         string
-	commandID       *uuid.UUID
-	approvalID      *uuid.UUID
-	result          string
-	reason          string
-	before          []byte
-	after           []byte
-	errorType       string
-	previousHash    []byte
-	eventHash       []byte
-	authVersion     int16
-	eventKeyID      *string
-	eventMAC        []byte
-	compactedAt     *time.Time
-	compactionKeyID *string
-	compactionMAC   []byte
-}
-
 type memAuditCheckpoint struct {
 	eventID   uuid.UUID
 	eventHash []byte
@@ -55,7 +25,7 @@ type memAuditBackend struct {
 	database.Backend
 	mu             sync.Mutex
 	clock          time.Time
-	events         []memAuditEvent
+	events         []auditstore.EventRow
 	checkpoints    []memAuditCheckpoint
 	fullScanCalls  int
 	deltaScanCalls int
@@ -92,73 +62,22 @@ func (s *memAuditStore) Previous(_ context.Context, workspaceID uuid.UUID) ([]by
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	for i := len(s.backend.events) - 1; i >= 0; i-- {
-		if s.backend.events[i].workspaceID == workspaceID {
-			return bytes.Clone(s.backend.events[i].eventHash), nil
+		if s.backend.events[i].WorkspaceID == workspaceID {
+			return bytes.Clone(s.backend.events[i].EventHash), nil
 		}
 	}
 	return nil, database.ErrNotFound
 }
 
-func (s *memAuditStore) Append(_ context.Context, args []any) error {
+func (s *memAuditStore) Append(_ context.Context, row auditstore.EventRow) error {
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
-	ev := memAuditEvent{
-		id:           args[0].(uuid.UUID),
-		workspaceID:  args[1].(uuid.UUID),
-		at:           args[2].(time.Time),
-		actorType:    args[3].(string),
-		actorID:      args[4].(string),
-		action:       args[6].(string),
-		resourceType: args[7].(string),
-		requestID:    args[10].(string),
-		result:       args[14].(string),
-		previousHash: bytes.Clone(args[19].([]byte)),
-		eventHash:    bytes.Clone(args[20].([]byte)),
-		authVersion:  args[21].(int16),
-		eventMAC:     bytes.Clone(args[23].([]byte)),
-	}
-	if v, ok := args[16].([]byte); ok {
-		ev.before = bytes.Clone(v)
-	}
-	if v, ok := args[17].([]byte); ok {
-		ev.after = bytes.Clone(v)
-	}
-	if v, ok := args[5].(*uuid.UUID); ok {
-		ev.sessionID = v
-	}
-	if v, ok := args[8].(uuid.UUID); ok {
-		id := v
-		ev.resourceID = &id
-	} else if v, ok := args[8].(*uuid.UUID); ok {
-		ev.resourceID = v
-	}
-	if v, ok := args[9].(*uuid.UUID); ok {
-		ev.nodeID = v
-	}
-	if v, ok := args[11].(string); ok {
-		ev.traceID = v
-	}
-	if v, ok := args[12].(*uuid.UUID); ok {
-		ev.commandID = v
-	}
-	if v, ok := args[13].(*uuid.UUID); ok {
-		ev.approvalID = v
-	}
-	if v, ok := args[15].(string); ok {
-		ev.reason = v
-	} else if v, ok := args[15].(*string); ok && v != nil {
-		ev.reason = *v
-	}
-	if v, ok := args[18].(string); ok {
-		ev.errorType = v
-	} else if v, ok := args[18].(*string); ok && v != nil {
-		ev.errorType = *v
-	}
-	if v, ok := args[22].(string); ok {
-		keyID := v
-		ev.eventKeyID = &keyID
-	}
-	s.backend.events = append(s.backend.events, ev)
+	row.BeforeSummary = bytes.Clone(row.BeforeSummary)
+	row.AfterSummary = bytes.Clone(row.AfterSummary)
+	row.PreviousHash = bytes.Clone(row.PreviousHash)
+	row.EventHash = bytes.Clone(row.EventHash)
+	row.EventMAC = bytes.Clone(row.EventMAC)
+	s.backend.events = append(s.backend.events, row)
 	return nil
 }
 
@@ -166,9 +85,9 @@ func (s *memAuditStore) LatestEvent(_ context.Context, workspaceID uuid.UUID) (u
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
 	for i := len(s.backend.events) - 1; i >= 0; i-- {
-		if s.backend.events[i].workspaceID == workspaceID {
+		if s.backend.events[i].WorkspaceID == workspaceID {
 			ev := s.backend.events[i]
-			return ev.id, bytes.Clone(ev.eventHash), nil
+			return ev.ID, bytes.Clone(ev.EventHash), nil
 		}
 	}
 	return uuid.Nil, nil, database.ErrNotFound
@@ -182,8 +101,8 @@ func (s *memAuditStore) LatestCheckpoint(_ context.Context, workspaceID uuid.UUI
 	}
 	cp := s.backend.checkpoints[len(s.backend.checkpoints)-1]
 	for _, ev := range s.backend.events {
-		if ev.workspaceID == workspaceID && ev.id == cp.eventID {
-			return cp.eventID, bytes.Clone(cp.eventHash), bytes.Clone(cp.signature), ev.at, ev.authVersion, nil
+		if ev.WorkspaceID == workspaceID && ev.ID == cp.eventID {
+			return cp.eventID, bytes.Clone(cp.eventHash), bytes.Clone(cp.signature), ev.At, ev.AuthVersion, nil
 		}
 	}
 	return uuid.Nil, nil, nil, time.Time{}, 0, database.ErrNotFound
@@ -200,71 +119,42 @@ func (s *memAuditStore) AddCheckpoint(_ context.Context, _, _, eventID uuid.UUID
 	return nil
 }
 
-func (s *memAuditStore) Events(_ context.Context, workspaceID uuid.UUID) (database.Rows, error) {
+func (s *memAuditStore) Events(_ context.Context, workspaceID uuid.UUID, visit func(auditstore.EventRow) error) error {
 	s.backend.mu.Lock()
-	defer s.backend.mu.Unlock()
 	s.backend.fullScanCalls++
-	var matched []memAuditEvent
+	var matched []auditstore.EventRow
 	for _, ev := range s.backend.events {
-		if ev.workspaceID == workspaceID {
+		if ev.WorkspaceID == workspaceID {
 			matched = append(matched, ev)
 		}
 	}
-	return &memEventRows{items: matched, idx: -1}, nil
+	s.backend.mu.Unlock()
+	for _, ev := range matched {
+		if err := visit(ev); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (s *memAuditStore) EventsFrom(_ context.Context, workspaceID uuid.UUID, afterAt time.Time, afterID uuid.UUID) (database.Rows, error) {
+func (s *memAuditStore) EventsFrom(_ context.Context, workspaceID uuid.UUID, afterAt time.Time, afterID uuid.UUID, visit func(auditstore.EventRow) error) error {
 	s.backend.mu.Lock()
-	defer s.backend.mu.Unlock()
 	s.backend.deltaScanCalls++
-	var matched []memAuditEvent
+	var matched []auditstore.EventRow
 	for _, ev := range s.backend.events {
-		if ev.workspaceID != workspaceID {
+		if ev.WorkspaceID != workspaceID {
 			continue
 		}
-		if ev.at.After(afterAt) || (ev.at.Equal(afterAt) && bytes.Compare(ev.id[:], afterID[:]) >= 0) {
+		if ev.At.After(afterAt) || (ev.At.Equal(afterAt) && bytes.Compare(ev.ID[:], afterID[:]) >= 0) {
 			matched = append(matched, ev)
 		}
 	}
-	return &memEventRows{items: matched, idx: -1}, nil
-}
-
-type memEventRows struct {
-	items []memAuditEvent
-	idx   int
-}
-
-func (r *memEventRows) Next() bool { r.idx++; return r.idx < len(r.items) }
-func (r *memEventRows) Err() error { return nil }
-func (r *memEventRows) Close()     {}
-func (r *memEventRows) Scan(dest ...any) error {
-	ev := r.items[r.idx]
-	*(dest[0].(*uuid.UUID)) = ev.id
-	*(dest[1].(*time.Time)) = ev.at
-	*(dest[2].(*string)) = ev.actorType
-	*(dest[3].(*string)) = ev.actorID
-	*(dest[4].(*string)) = ev.action
-	*(dest[5].(*string)) = ev.resourceType
-	*(dest[6].(**uuid.UUID)) = ev.resourceID
-	*(dest[7].(*string)) = ev.requestID
-	*(dest[8].(*string)) = ev.traceID
-	*(dest[9].(*string)) = ev.result
-	*(dest[10].(*string)) = ev.reason
-	*(dest[11].(**uuid.UUID)) = ev.sessionID
-	*(dest[12].(**uuid.UUID)) = ev.nodeID
-	*(dest[13].(**uuid.UUID)) = ev.commandID
-	*(dest[14].(**uuid.UUID)) = ev.approvalID
-	*(dest[15].(*[]byte)) = bytes.Clone(ev.before)
-	*(dest[16].(*[]byte)) = bytes.Clone(ev.after)
-	*(dest[17].(*string)) = ev.errorType
-	*(dest[18].(*[]byte)) = bytes.Clone(ev.previousHash)
-	*(dest[19].(*[]byte)) = bytes.Clone(ev.eventHash)
-	*(dest[20].(*int16)) = ev.authVersion
-	*(dest[21].(**string)) = ev.eventKeyID
-	*(dest[22].(*[]byte)) = bytes.Clone(ev.eventMAC)
-	*(dest[23].(**time.Time)) = ev.compactedAt
-	*(dest[24].(**string)) = ev.compactionKeyID
-	*(dest[25].(*[]byte)) = bytes.Clone(ev.compactionMAC)
+	s.backend.mu.Unlock()
+	for _, ev := range matched {
+		if err := visit(ev); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -273,7 +163,7 @@ func TestCheckpointIncrementalDeltaNoOpAndTamperDetection(t *testing.T) {
 	workspaceID := uuid.Must(uuid.NewV7())
 	checkpointKey := sha256.Sum256([]byte("checkpoint-test-key"))
 	backend := &memAuditBackend{clock: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
-	manager := NewBackendManager(backend, checkpointKey[:])
+	manager := NewManager(backend, checkpointKey[:])
 
 	appendEvents := func(count int) {
 		for range count {
@@ -313,8 +203,8 @@ func TestCheckpointIncrementalDeltaNoOpAndTamperDetection(t *testing.T) {
 	if backend.fullScanCalls != 1 || backend.deltaScanCalls != 2 || len(backend.checkpoints) != 2 {
 		t.Fatalf("delta checkpoint scans full=%d delta=%d checkpoints=%d", backend.fullScanCalls, backend.deltaScanCalls, len(backend.checkpoints))
 	}
-	if backend.checkpoints[1].eventID != backend.events[7].id {
-		t.Fatalf("delta checkpoint anchored %s, want %s", backend.checkpoints[1].eventID, backend.events[7].id)
+	if backend.checkpoints[1].eventID != backend.events[7].ID {
+		t.Fatalf("delta checkpoint anchored %s, want %s", backend.checkpoints[1].eventID, backend.events[7].ID)
 	}
 
 	// Startup verifies the checkpoint and appended suffix without a genesis scan.
@@ -326,7 +216,7 @@ func TestCheckpointIncrementalDeltaNoOpAndTamperDetection(t *testing.T) {
 
 	// 4. Tampering with a newly appended event causes delta verification to reject.
 	appendEvents(1)
-	backend.events[len(backend.events)-1].reason = "tampered reason"
+	backend.events[len(backend.events)-1].Reason = "tampered reason"
 	err := manager.Checkpoint(ctx, workspaceID)
 	if err == nil {
 		t.Fatal("tampered audit delta was checkpointed")

@@ -195,10 +195,7 @@ func (s *Service) InstallationChallenge(ctx context.Context, request Installatio
 	if err != nil {
 		return InstallationChallenge{}, err
 	}
-	keys, err := privdattestation.StoreFrom(tx)
-	if err != nil {
-		return InstallationChallenge{}, err
-	}
+	keys := privdattestation.StoreFrom(tx)
 	_, key, err := keys.FirstKey(ctx, request.NodeID)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return InstallationChallenge{}, err
@@ -246,10 +243,7 @@ func (s *Service) RegisterInstallationKey(ctx context.Context, request Installat
 	if !match {
 		return "", ErrEndpointMismatch
 	}
-	keys, err := privdattestation.StoreFrom(tx)
-	if err != nil {
-		return "", err
-	}
+	keys := privdattestation.StoreFrom(tx)
 	existing, key, err := keys.FirstKey(ctx, request.NodeID)
 	if err == nil {
 		if existing != registration.PrivdAttestationKeyId || !slices.Equal(key.PublicKey, registration.PublicKey) || key.State != "active" || key.ValidUntil != nil {

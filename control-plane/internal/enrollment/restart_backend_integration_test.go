@@ -29,7 +29,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 	f, ctx := newLifecycleFixture(t), context.Background()
 	signer, err := commandauth.NewRandomSigner()
 	testutil.NoError(t, err)
-	s := NewBackend(f.b, "", "test", signer)
+	s := New(f.b, "", "test", signer)
 	endpoint := endpointFixture(216)
 	token := createToken(t, s, f.workspace, endpoint)
 	request := enrollmentRequest(token.Value, endpoint)
@@ -39,15 +39,12 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 	testutil.NoError(t, err)
 	var keys []enrollmentstore.SealingKey
 	f.within(t, func(tx database.Tx) error {
-		enroll, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
+		enroll := enrollmentstore.Enrollment(tx)
 		keys, err = enroll.SealingKeys(ctx, node)
 		if err != nil {
 			return err
 		}
-		at, err := database.WallTime(ctx, tx)
+		at, err := tx.WallTime(ctx)
 		if err != nil {
 			return err
 		}
@@ -55,11 +52,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		trust, err := enrollmentstore.Trust(tx)
-		if err != nil {
-			return err
-		}
-		return trust.Enqueue(ctx, enrollmentstore.TrustJob{NodeID: node, EndpointID: endpoint, DesiredState: "revoked", Revision: revision, Reason: "restart"}, time.Unix(0, 0).UTC())
+		return enrollmentstore.Trust(tx).Enqueue(ctx, enrollmentstore.TrustJob{NodeID: node, EndpointID: endpoint, DesiredState: "revoked", Revision: revision, Reason: "restart"}, time.Unix(0, 0).UTC())
 	})
 	workerID := uuid.New()
 	f.trust(t, func(s enrollmentstore.TrustStore) error {
@@ -109,7 +102,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 	if after := f.snapshot(t, node); !reflect.DeepEqual(before, after) {
 		t.Fatal("restart changed trust state", before, after)
 	}
-	s = NewBackend(f.b, "", "test", signer)
+	s = New(f.b, "", "test", signer)
 	for _, alpn := range []string{"ocserv-platform/enroll/1", "ocserv-platform/agent/1"} {
 		if allowed, err := s.CheckEndpoint(ctx, &transportv1.CheckEndpointRequest{EndpointId: endpoint, Alpn: alpn}); err != nil || allowed {
 			t.Fatal("restart readmitted revoked endpoint", alpn, allowed, err)
@@ -123,10 +116,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		t.Fatal("restart forgot consumed token", err)
 	}
 	f.within(t, func(tx database.Tx) error {
-		store, err := enrollmentstore.Enrollment(tx)
-		if err != nil {
-			return err
-		}
+		store := enrollmentstore.Enrollment(tx)
 		got, err := store.SealingKeys(ctx, node)
 		if err != nil {
 			return err
@@ -144,7 +134,7 @@ func TestNodeLifecycleRestartBackendIntegration(t *testing.T) {
 		return nil
 	})
 	transport := &leasedTransport{update: func(context.Context) error { return errors.New("replayed completed trust update") }}
-	worker, err := NewTrustConvergenceWorkerBackend(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker, err := NewTrustConvergenceWorker(f.b, transport, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	testutil.NoError(t, err)
 	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
 		t.Fatal(worked, err)

@@ -111,7 +111,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		}
 		logger.Warn("using an ephemeral Controller command signing key", "environment", cfg.Environment)
 	}
-	operationService := operations.NewBackend(backend, cfg.UserOperationConcurrency, commandSigner)
+	operationService := operations.New(backend, cfg.UserOperationConcurrency, commandSigner)
 	if err := operationService.SetAgentUpgradeReconcileTimeout(cfg.AgentUpgradeReconcile); err != nil {
 		return fmt.Errorf("configure agent upgrade reconciliation window: %w", err)
 	}
@@ -127,10 +127,10 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	if err != nil {
 		return err
 	}
-	telemetryService := telemetry.NewWithRecommendedAgentVersionBackend(backend, cfg.RecommendedAgentVersion)
+	telemetryService := telemetry.NewWithRecommendedAgentVersion(backend, cfg.RecommendedAgentVersion)
 	telemetryService.EnableAgentUpgradeEligibility(releaseCatalog)
-	userStateService := userstate.NewWithOperationsBackend(backend, commandSigner, operationService)
-	userOperationsService := useroperations.NewWithConcurrencyBackend(backend, userStateService, cfg.UserOperationConcurrency)
+	userStateService := userstate.NewWithOperations(backend, commandSigner, operationService)
+	userOperationsService := useroperations.NewWithConcurrency(backend, userStateService, cfg.UserOperationConcurrency)
 	if cfg.ControllerEndpointID != "" {
 		controlTransport, err = transportclient.New(cfg.TransportSocket, cfg.TransportTimeout, cfg.TransportQueue, cfg.TransportUID, cfg.TransportGID)
 		if err != nil {
@@ -145,9 +145,9 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 			return fmt.Errorf("configure external certificate signer: %w", signerErr)
 		}
 		publicKeySigner = signer
-		certificateService = certificates.NewBackend(backend, operationService, signer, signer, controlTransport, commandSigner)
+		certificateService = certificates.New(backend, operationService, signer, signer, controlTransport, commandSigner)
 	} else {
-		certificateService = certificates.NewBackend(backend, operationService, nil, nil, nil, nil)
+		certificateService = certificates.New(backend, operationService, nil, nil, nil, nil)
 	}
 
 	history, err := historyretention.New(backend, cfg.HistoryRetention)
@@ -175,11 +175,11 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 
 	modules := api.Modules{
 		AccessLogger: accessLogger,
-		Nodes:        telemetryService, ConfigPlans: configplan.NewBackend(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService,
+		Nodes:        telemetryService, ConfigPlans: configplan.New(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService,
 		Operations: operationService, ReleaseCatalog: releaseCatalog, UserState: userStateService, TransportEvents: eventService,
 	}
 	if cfg.ControllerEndpointID != "" {
-		modules.Enrollment = enrollment.NewBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
+		modules.Enrollment = enrollment.New(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
 		if publicKeySigner != nil {
 			modules.Enrollment.EnableUserPasswordPublicKeys(publicKeySigner)
 		}

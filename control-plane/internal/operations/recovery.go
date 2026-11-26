@@ -50,10 +50,7 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 	if err := commandlimit.Lock(ctx, tx); err != nil {
 		return 0, fmt.Errorf("serialize reconnect recovery: %w", err)
 	}
-	store, err := operationstore.FromTransaction(tx)
-	if err != nil {
-		return 0, err
-	}
+	store := operationstore.FromTransaction(tx)
 	err = store.ReconnectAuthority(ctx, reconnect.NodeID, connectionID, int64(reconnect.SessionEpoch))
 	if errors.Is(err, database.ErrNotFound) {
 		return 0, connectionowner.ErrNotOwner

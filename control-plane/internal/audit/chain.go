@@ -73,12 +73,12 @@ type Manager struct {
 	current       eventAuthenticator
 }
 
-func NewBackendManager(backend database.Backend, checkpointKey []byte) *Manager {
+func NewManager(backend database.Backend, checkpointKey []byte) *Manager {
 	auth := currentEventAuthenticator()
 	return newManager(backend, checkpointKey, auth)
 }
 
-func NewBackendManagerWithEventKey(backend database.Backend, checkpointKey []byte, keyID string, key []byte) (*Manager, error) {
+func NewManagerWithEventKey(backend database.Backend, checkpointKey []byte, keyID string, key []byte) (*Manager, error) {
 	auth, err := configureEventAuthenticator(keyID, key)
 	if err != nil {
 		return nil, err
@@ -154,21 +154,14 @@ func signEvent(key [sha256.Size]byte, eventHash []byte) []byte {
 }
 
 func LockChainTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) error {
-	s, err := auditstore.From(tx)
-	if err != nil {
-		return err
-	}
-	if err := s.Lock(ctx, workspaceID); err != nil {
+	if err := auditstore.Of(tx).Lock(ctx, workspaceID); err != nil {
 		return fmt.Errorf("lock audit chain: %w", err)
 	}
 	return nil
 }
 
 func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) error {
-	s, err := auditstore.From(tx)
-	if err != nil {
-		return err
-	}
+	s := auditstore.Of(tx)
 	auth := currentEventAuthenticator()
 	if record.Result == "" {
 		record.Result = chainResultIntent
@@ -179,6 +172,7 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 	if err := LockChainTx(ctx, tx, record.WorkspaceID); err != nil {
 		return err
 	}
+	var err error
 	record.At, err = s.Clock(ctx)
 	if err != nil {
 		return fmt.Errorf("assign audit order: %w", err)
@@ -207,11 +201,32 @@ func AppendChainTx(ctx context.Context, tx database.Tx, record ChainRecord) erro
 		return fmt.Errorf("encode audit payload: %w", err)
 	}
 	digest := sha256.Sum256(payload)
-	var traceID any
-	if record.TraceID != "" {
-		traceID = record.TraceID
-	}
-	err = s.Append(ctx, []any{record.EventID, record.WorkspaceID, at, record.ActorType, record.ActorID, record.SessionID, record.Action, record.ResourceType, nullableID(record.ResourceID), record.NodeID, record.RequestID, traceID, record.CommandID, record.ApprovalID, record.Result, nullableString(record.Reason), nullableJSON(before), nullableJSON(after), nullableString(record.ErrorType), previous, digest[:], eventAuthVersionV1, auth.keyID, signEvent(auth.key, digest[:])})
+	err = s.Append(ctx, auditstore.EventRow{
+		ID:            record.EventID,
+		WorkspaceID:   record.WorkspaceID,
+		At:            at,
+		ActorType:     record.ActorType,
+		ActorID:       record.ActorID,
+		SessionID:     record.SessionID,
+		Action:        record.Action,
+		ResourceType:  record.ResourceType,
+		ResourceID:    record.ResourceID,
+		NodeID:        record.NodeID,
+		RequestID:     record.RequestID,
+		TraceID:       record.TraceID,
+		CommandID:     record.CommandID,
+		ApprovalID:    record.ApprovalID,
+		Result:        record.Result,
+		Reason:        record.Reason,
+		BeforeSummary: before,
+		AfterSummary:  after,
+		ErrorType:     record.ErrorType,
+		PreviousHash:  previous,
+		EventHash:     digest[:],
+		AuthVersion:   eventAuthVersionV1,
+		EventKeyID:    &auth.keyID,
+		EventMAC:      signEvent(auth.key, digest[:]),
+	})
 	if err != nil {
 		return fmt.Errorf("append audit intent: %w", err)
 	}
@@ -292,111 +307,90 @@ func (m *Manager) Verify(ctx context.Context, workspaceID uuid.UUID) (Verificati
 	return verified.Verification, err
 }
 
-type eventRow struct {
-	record                             ChainRecord
-	previous, hash, mac, compactionMAC []byte
-	authVersion                        int16
-	keyID, compactionKeyID             *string
-	compactedAt                        *time.Time
+func recordFromEventRow(ev auditstore.EventRow) ChainRecord {
+	return ChainRecord{
+		EventID:       ev.ID,
+		WorkspaceID:   ev.WorkspaceID,
+		ActorType:     ev.ActorType,
+		ActorID:       ev.ActorID,
+		Action:        ev.Action,
+		ResourceType:  ev.ResourceType,
+		ResourceID:    ev.ResourceID,
+		RequestID:     ev.RequestID,
+		TraceID:       ev.TraceID,
+		Reason:        ev.Reason,
+		Result:        ev.Result,
+		ErrorType:     ev.ErrorType,
+		SessionID:     ev.SessionID,
+		NodeID:        ev.NodeID,
+		CommandID:     ev.CommandID,
+		ApprovalID:    ev.ApprovalID,
+		BeforeSummary: ev.BeforeSummary,
+		AfterSummary:  ev.AfterSummary,
+		At:            ev.At.UTC().Truncate(time.Microsecond),
+	}
 }
 
-func scanEventRow(rows database.Rows, workspace uuid.UUID, includesWorkspace bool) (event eventRow, err error) {
-	record := &event.record
-	record.WorkspaceID = workspace
-	var resourceID *uuid.UUID
-	var before, after []byte
-	fields := []any{
-		&record.EventID, &record.At, &record.ActorType, &record.ActorID, &record.Action,
-		&record.ResourceType, &resourceID, &record.RequestID, &record.TraceID, &record.Result,
-		&record.Reason, &record.SessionID, &record.NodeID, &record.CommandID, &record.ApprovalID,
-		&before, &after, &record.ErrorType, &event.previous, &event.hash, &event.authVersion,
-		&event.keyID, &event.mac, &event.compactedAt, &event.compactionKeyID, &event.compactionMAC,
-	}
-	if includesWorkspace {
-		fields = append([]any{&record.WorkspaceID}, fields...)
-	}
-	if err = rows.Scan(fields...); err != nil {
-		return event, err
-	}
-	record.At = record.At.UTC().Truncate(time.Microsecond)
-	record.BeforeSummary, record.AfterSummary = before, after
-	if resourceID != nil {
-		record.ResourceID = *resourceID
-	}
-	return event, nil
-}
-
-func (m *Manager) validEventHash(event eventRow, previous []byte) (bool, error) {
-	if !bytes.Equal(event.previous, previous) {
+func (m *Manager) validEventHash(event auditstore.EventRow, record ChainRecord, previous []byte) (bool, error) {
+	if !bytes.Equal(event.PreviousHash, previous) {
 		return false, nil
 	}
-	if event.compactedAt != nil {
-		return event.authVersion == eventAuthVersionV1 && m.validCompaction(event.record, event.previous, event.hash, event.mac, *event.compactedAt, event.compactionKeyID, event.compactionMAC), nil
+	if event.CompactedAt != nil {
+		return event.AuthVersion == eventAuthVersionV1 && m.validCompaction(record, event.PreviousHash, event.EventHash, event.EventMAC, *event.CompactedAt, event.CompactionKeyID, event.CompactionMAC), nil
 	}
-	if event.compactionKeyID != nil || len(event.compactionMAC) != 0 {
+	if event.CompactionKeyID != nil || len(event.CompactionMAC) != 0 {
 		return false, nil
 	}
-	payload, err := encodeChainPayload(previous, event.record)
+	payload, err := encodeChainPayload(previous, record)
 	if err != nil {
 		return false, err
 	}
 	digest := sha256.Sum256(payload)
-	return bytes.Equal(event.hash, digest[:]), nil
+	return bytes.Equal(event.EventHash, digest[:]), nil
 }
 
-func (m *Manager) validEventMAC(event eventRow) bool {
-	if event.keyID == nil {
+func (m *Manager) validEventMAC(event auditstore.EventRow) bool {
+	if event.EventKeyID == nil {
 		return false
 	}
-	key, ok := m.eventKeys[*event.keyID]
-	return ok && hmac.Equal(event.mac, signEvent(key, event.hash))
+	key, ok := m.eventKeys[*event.EventKeyID]
+	return ok && hmac.Equal(event.EventMAC, signEvent(key, event.EventHash))
 }
 
 func (m *Manager) verifyTx(ctx context.Context, tx database.Tx, workspaceID uuid.UUID) (chainVerification, error) {
-	s, err := auditstore.From(tx)
-	if err != nil {
-		return chainVerification{}, err
-	}
+	s := auditstore.Of(tx)
 	latestID, latestHash, latestSignature, _, _, err := s.LatestCheckpoint(ctx, workspaceID)
 	if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return chainVerification{}, err
 	}
-	rows, err := s.Events(ctx, workspaceID)
-	if err != nil {
-		return chainVerification{}, err
-	}
-	defer rows.Close()
 	verified := chainVerification{Verification: Verification{WorkspaceID: workspaceID, Valid: true}}
 	var previous []byte
 	var checkpointHash []byte
-	for rows.Next() {
-		event, err := scanEventRow(rows, workspaceID, false)
+	err = s.Events(ctx, workspaceID, func(event auditstore.EventRow) error {
+		event.WorkspaceID = workspaceID
+		record := recordFromEventRow(event)
+		hashValid, err := m.validEventHash(event, record, previous)
 		if err != nil {
-			return chainVerification{}, err
+			return err
 		}
-		record := event.record
-		hashValid, err := m.validEventHash(event, previous)
-		if err != nil {
-			return chainVerification{}, err
-		}
-		if event.compactedAt != nil {
+		if event.CompactedAt != nil {
 			verified.CompactedEvents++
 		}
-		if !hashValid || event.authVersion != eventAuthVersionV1 || !m.validEventMAC(event) {
+		if !hashValid || event.AuthVersion != eventAuthVersionV1 || !m.validEventMAC(event) {
 			verified.Valid = false
 		}
-		previous = append(previous[:0], event.hash...)
+		previous = append(previous[:0], event.EventHash...)
 		verified.lastID = record.EventID
-		verified.lastHash = append(verified.lastHash[:0], event.hash...)
+		verified.lastHash = append(verified.lastHash[:0], event.EventHash...)
 		if record.EventID == latestID {
-			checkpointHash = append([]byte(nil), event.hash...)
+			checkpointHash = append([]byte(nil), event.EventHash...)
 		}
 		verified.Events++
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return chainVerification{}, err
 	}
-	rows.Close()
 	if latestID == uuid.Nil {
 		verified.Checkpoint = verified.Events == 0
 	} else {
@@ -420,10 +414,7 @@ func (m *Manager) Checkpoint(ctx context.Context, workspaceID uuid.UUID) error {
 		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
-		s, err := auditstore.From(tx)
-		if err != nil {
-			return err
-		}
+		s := auditstore.Of(tx)
 		lastID, lastHash, alreadyCheckpointed, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID, true)
 		if err != nil {
 			return err
@@ -459,38 +450,32 @@ func (m *Manager) verifyCheckpointDeltaTx(ctx context.Context, tx database.Tx, s
 		if cpAuthVersion != eventAuthVersionV1 || !m.validCheckpoint(workspaceID, checkpointRecord{eventID: cpEventID, eventHash: cpHash, signature: cpSignature}) {
 			return uuid.Nil, nil, false, errors.New("audit checkpoint is not authenticated")
 		}
-		rows, err := s.EventsFrom(ctx, workspaceID, cpOccurredAt, cpEventID)
-		if err != nil {
-			return uuid.Nil, nil, false, err
-		}
-		defer rows.Close()
 		var previous []byte
 		var lastID uuid.UUID
 		var deltaCount int64
 		valid := true
-		for rows.Next() {
-			event, err := scanEventRow(rows, workspaceID, false)
-			if err != nil {
-				return uuid.Nil, nil, false, err
-			}
+		err = s.EventsFrom(ctx, workspaceID, cpOccurredAt, cpEventID, func(event auditstore.EventRow) error {
+			event.WorkspaceID = workspaceID
+			record := recordFromEventRow(event)
 			if deltaCount == 0 {
-				if event.record.EventID != cpEventID || !bytes.Equal(cpHash, event.hash) {
-					return uuid.Nil, nil, false, errors.New("audit checkpoint anchor is missing")
+				if record.EventID != cpEventID || !bytes.Equal(cpHash, event.EventHash) {
+					return errors.New("audit checkpoint anchor is missing")
 				}
-				previous = bytes.Clone(event.previous)
+				previous = bytes.Clone(event.PreviousHash)
 			}
-			hashValid, err := m.validEventHash(event, previous)
+			hashValid, err := m.validEventHash(event, record, previous)
 			if err != nil {
-				return uuid.Nil, nil, false, err
+				return err
 			}
-			if !hashValid || event.authVersion != eventAuthVersionV1 || !m.validEventMAC(event) {
+			if !hashValid || event.AuthVersion != eventAuthVersionV1 || !m.validEventMAC(event) {
 				valid = false
 			}
-			previous = append(previous[:0], event.hash...)
-			lastID = event.record.EventID
+			previous = append(previous[:0], event.EventHash...)
+			lastID = record.EventID
 			deltaCount++
-		}
-		if err := rows.Err(); err != nil {
+			return nil
+		})
+		if err != nil {
 			return uuid.Nil, nil, false, err
 		}
 		if deltaCount == 0 || !valid || lastID != tailID || !bytes.Equal(previous, tailHash) {
@@ -515,25 +500,8 @@ func (m *Manager) CheckpointAll(ctx context.Context) error {
 	if len(m.checkpointKey) == 0 {
 		return nil
 	}
-	s, err := auditstore.From(m.backend)
+	workspaces, err := auditstore.Of(m.backend).Workspaces(ctx)
 	if err != nil {
-		return err
-	}
-	rows, err := s.Workspaces(ctx)
-	if err != nil {
-		return err
-	}
-	var workspaces []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		workspaces = append(workspaces, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, id := range workspaces {
@@ -545,26 +513,9 @@ func (m *Manager) CheckpointAll(ctx context.Context) error {
 }
 
 func (m *Manager) EnsureAuthenticity(ctx context.Context) error {
-	s, err := auditstore.From(m.backend)
-	if err != nil {
-		return err
-	}
-	rows, err := s.Workspaces(ctx)
+	workspaces, err := auditstore.Of(m.backend).Workspaces(ctx)
 	if err != nil {
 		return fmt.Errorf("list audit workspaces: %w", err)
-	}
-	var workspaces []uuid.UUID
-	for rows.Next() {
-		var workspaceID uuid.UUID
-		if err := rows.Scan(&workspaceID); err != nil {
-			rows.Close()
-			return err
-		}
-		workspaces = append(workspaces, workspaceID)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	for _, workspaceID := range workspaces {
 		if err := m.ensureWorkspaceAuthenticity(ctx, workspaceID); err != nil {
@@ -579,10 +530,7 @@ func (m *Manager) ensureWorkspaceAuthenticity(ctx context.Context, workspaceID u
 		if err := LockChainTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
-		s, err := auditstore.From(tx)
-		if err != nil {
-			return err
-		}
+		s := auditstore.Of(tx)
 		if lastID, _, _, err := m.verifyCheckpointDeltaTx(ctx, tx, s, workspaceID, false); err != nil || lastID != uuid.Nil {
 			return err
 		}
@@ -608,28 +556,9 @@ func signCheckpoint(key []byte, workspaceID, eventID uuid.UUID, hash []byte) []b
 	return mac.Sum(nil)
 }
 
-func nullableID(id uuid.UUID) any {
-	if id == uuid.Nil {
-		return nil
-	}
-	return id
-}
-func nullableString(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
-}
 func summaryValue(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	return canonicalJSON(raw)
-}
-
-func nullableJSON(raw json.RawMessage) any {
-	if len(raw) == 0 {
-		return nil
-	}
-	return []byte(raw)
 }

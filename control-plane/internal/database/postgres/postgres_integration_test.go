@@ -35,7 +35,7 @@ func TestTransactionCancellationRollbackIntegration(t *testing.T) {
 	for isolation, want := range map[database.Isolation]string{database.DefaultIsolation: "", database.ReadCommitted: "read committed", database.RepeatableRead: "repeatable read", database.Serializable: "serializable"} {
 		err := database.Within(ctx, b, isolation, func(tx database.Tx) error {
 			var level string
-			if err := tx.QueryRow(ctx, "SHOW transaction_isolation").Scan(&level); err != nil {
+			if err := tx.(*transaction).QueryRow(ctx, "SHOW transaction_isolation").Scan(&level); err != nil {
 				return err
 			}
 			if want != "" && level != want {
@@ -48,7 +48,7 @@ func TestTransactionCancellationRollbackIntegration(t *testing.T) {
 	err := database.Within(ctx, b, database.ReadCommitted, func(tx database.Tx) error {
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		_, err := tx.Exec(cancelled, "SELECT 1")
+		_, err := tx.(*transaction).Exec(cancelled, "SELECT 1")
 		return err
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -57,7 +57,7 @@ func TestTransactionCancellationRollbackIntegration(t *testing.T) {
 	deadline, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	err = database.Within(deadline, b, database.ReadCommitted, func(tx database.Tx) error {
-		_, err := tx.Exec(deadline, "SELECT pg_sleep(5)")
+		_, err := tx.(*transaction).Exec(deadline, "SELECT pg_sleep(5)")
 		return err
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -109,7 +109,7 @@ func TestUsageCrossStoreTransactionIntegration(t *testing.T) {
 				return err
 			}
 			var total int64
-			if err := tx.QueryRow(ctx, "SELECT sum(rx_bytes) FROM observed_user_usage").Scan(&total); err != nil {
+			if err := tx.(*transaction).QueryRow(ctx, "SELECT sum(rx_bytes) FROM observed_user_usage").Scan(&total); err != nil {
 				return err
 			}
 			if total != 30 {
@@ -145,33 +145,5 @@ func TestServerErrorClassificationIntegration(t *testing.T) {
 	var v int
 	if err := b.QueryRow(ctx, "SELECT 1 WHERE false").Scan(&v); !errors.Is(err, database.ErrNotFound) {
 		t.Fatal(err)
-	}
-}
-
-func TestLegacyTransactionBridgeIntegration(t *testing.T) {
-	b := testBackend(t)
-	ctx := context.Background()
-	if _, err := b.Exec(ctx, "CREATE TEMP TABLE legacy_marker (id int PRIMARY KEY)"); err != nil {
-		t.Fatal(err)
-	}
-	legacy, err := b.pool.Begin(ctx)
-	testutil.NoError(t, err)
-	defer func() { _ = legacy.Rollback(ctx) }()
-	if _, err := legacy.Exec(ctx, "INSERT INTO legacy_marker VALUES (1)"); err != nil {
-		t.Fatal(err)
-	}
-	wrapped := WrapTx(legacy)
-	var count int
-	if err := wrapped.QueryRow(ctx, "SELECT count(*) FROM legacy_marker").Scan(&count); err != nil || count != 1 {
-		t.Fatalf("legacy write not visible: %d %v", count, err)
-	}
-	if _, err := wrapped.Exec(ctx, "INSERT INTO legacy_marker VALUES (2)"); err != nil {
-		t.Fatal(err)
-	}
-	if err := legacy.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.QueryRow(ctx, "SELECT count(*) FROM legacy_marker").Scan(&count); err != nil || count != 0 {
-		t.Fatalf("legacy rollback did not cover both stores: %d %v", count, err)
 	}
 }
