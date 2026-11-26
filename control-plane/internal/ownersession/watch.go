@@ -17,7 +17,7 @@ import (
 // replacement, or revoke-driven close of the exact connection behind a term
 // ends that term immediately instead of renewing a session whose connection
 // is gone.
-func (m *Manager) WatchTransport(ctx context.Context, events EventStream) error {
+func (m *Manager) WatchTransport(ctx context.Context, events *transportclient.Client) error {
 	if events == nil {
 		return errors.New("ownersession: transport event stream is required")
 	}

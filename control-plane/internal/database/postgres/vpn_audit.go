@@ -8,6 +8,11 @@ import (
 	"github.com/google/uuid"
 )
 
+func (t *transaction) LockAuditTrust(ctx context.Context, node uuid.UUID, endpoint []byte) (string, string, error) {
+	trust, err := transportIngressStore{t}.LockTrustShared(ctx, node, endpoint)
+	return trust.EndpointState, trust.NodeStatus, err
+}
+
 func (t *transaction) CheckAuditFence(ctx context.Context, node, connection []byte, epoch int64) error {
 	return assertConnectionOwner(ctx, t.store, node, connection, epoch)
 }

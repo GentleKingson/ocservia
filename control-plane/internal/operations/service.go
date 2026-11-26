@@ -11,11 +11,10 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/configprofile"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	"github.com/GentleKingson/ocservia/control-plane/internal/idempotency"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/releasecatalog"
 	"github.com/google/uuid"
@@ -31,7 +30,7 @@ var (
 	ErrUpgradeActive       = errors.New("an agent upgrade is already active for this node")
 	ErrCapabilityMissing   = errors.New("node capability is unavailable")
 	ErrTargetNotObserved   = errors.New("target is not present in observed state")
-	ErrBacklogExceeded     = commandlimit.ErrBacklogExceeded
+	ErrBacklogExceeded     = operationstore.ErrBacklogExceeded
 )
 
 const (
@@ -359,7 +358,7 @@ func (s *Service) Expire(ctx context.Context) error {
 	})
 }
 
-func requestDigest(r CreateRequest) idempotency.Digest {
+func requestDigest(r CreateRequest) canonicalcbor.IntentDigest {
 	if p, ok := r.Payload.(CertificateP12Payload); ok {
 		return P12Intent(r, p)
 	}
@@ -442,18 +441,18 @@ func requestDigest(r CreateRequest) idempotency.Digest {
 		intent.RolloutID = p.RolloutID
 	}
 
-	return idempotency.New("operation", intent)
+	return canonicalcbor.NewIntentDigest("operation", intent)
 }
 
 // P12Intent binds the request to the certificate version and artifact ID.
 // The generated credentials, ciphertext, and expiry belong to the first successful enqueue.
-func P12Intent(r CreateRequest, p CertificateP12Payload) idempotency.Digest {
+func P12Intent(r CreateRequest, p CertificateP12Payload) canonicalcbor.IntentDigest {
 	intent := map[string]any{
 		"certificate_id": p.CertificateID, "certificate_version": p.CertificateVersion,
 		"artifact_request_id": p.ArtifactID, "node_id": r.NodeID, "expected_version": r.ExpectedVersion,
 		"actor_identity_id": r.ActorIdentityID, "actor_session_id": r.ActorSessionID, "reason": r.Reason,
 	}
-	return idempotency.New("certificate-p12", intent)
+	return canonicalcbor.NewIntentDigest("certificate-p12", intent)
 }
 
 func validSealedP12(secret *agentv1.SealedSecretV1) bool {

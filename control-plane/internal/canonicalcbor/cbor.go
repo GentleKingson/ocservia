@@ -1,6 +1,7 @@
 package canonicalcbor
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 
@@ -35,4 +36,21 @@ func Hash(domain string, value any) ([32]byte, error) {
 		return [32]byte{}, err
 	}
 	return sha256.Sum256(raw), nil
+}
+
+// IntentDigest encodes normalized HTTP mutation intents.
+type IntentDigest struct {
+	Current [32]byte
+}
+
+func NewIntentDigest(domain string, value any) IntentDigest {
+	hash, err := Hash("ocservia/http-intent/"+domain+"/v1\x00", value)
+	if err != nil {
+		panic(err)
+	}
+	return IntentDigest{Current: hash}
+}
+
+func (d IntentDigest) Matches(stored []byte) bool {
+	return bytes.Equal(d.Current[:], stored)
 }

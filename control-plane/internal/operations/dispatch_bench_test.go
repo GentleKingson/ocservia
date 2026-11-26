@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
+	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
 	"github.com/google/uuid"
 )
 
 func BenchmarkValidateSentEnvelope(b *testing.B) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	signer := testfixture.CommandSigner(1)
+	signer := commandauth.NewSignerFromSeed([32]byte{1})
 
 	build := func(payloadSize int) (Dispatch, []byte) {
 		commandID := uuid.Must(uuid.NewV7())
