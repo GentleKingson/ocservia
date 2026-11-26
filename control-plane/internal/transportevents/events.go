@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/transportclient"
 	eventstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
@@ -55,43 +56,21 @@ func (s *Service) EventSequenceInWorkspace(ctx context.Context, workspace, event
 	return sequence, true, nil
 }
 
-func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(context.Context, []byte) (bool, error)) error {
-	var candidates []eventstore.GapNode
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
-		candidates, err = eventstore.FromTransaction(tx).GapNodes(ctx, workspaceSlug)
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("select simulator nodes after transport event gap: %w", err)
-	}
-	var disconnected []eventstore.GapNode
-	// No transaction is held while consulting the external transport registry.
-	for _, node := range candidates {
-		connected, err := nodeConnected(ctx, node.ID[:])
+func (s *Service) ReconcileEventGap(ctx context.Context, readConnection transportclient.NodeConnectionReader) error {
+	var applyGap func(context.Context, database.Tx) error
+	if s.gapHook != nil {
+		var err error
+		applyGap, err = s.gapHook(ctx, readConnection)
 		if err != nil {
-			return fmt.Errorf("reconcile simulator node connection %s: %w", node.ID, err)
-		}
-		if !connected {
-			disconnected = append(disconnected, node)
+			return err
 		}
 	}
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store := eventstore.FromTransaction(tx)
-		if err := store.InvalidateCursor(ctx); err != nil {
+		if err := eventstore.FromTransaction(tx).InvalidateCursor(ctx); err != nil {
 			return fmt.Errorf("invalidate transport cursor after event gap: %w", err)
 		}
-		if err := store.UnknownDispatched(ctx); err != nil {
-			return fmt.Errorf("mark operations unknown after transport event gap: %w", err)
-		}
-		at := s.now().UTC()
-		for _, node := range disconnected {
-			event, err := uuid.NewV7()
-			if err != nil {
-				return err
-			}
-			if err := store.DisconnectNode(ctx, node, event, at); err != nil {
-				return fmt.Errorf("record simulator disconnect after transport event gap: %w", err)
-			}
+		if applyGap != nil {
+			return applyGap(ctx, tx)
 		}
 		return nil
 	})

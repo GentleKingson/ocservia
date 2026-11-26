@@ -67,19 +67,14 @@ type EventHandler interface {
 	Ingest(context.Context, *transportv1.TransportEvent) error
 }
 
-type GapReconciler interface {
-	ReconcileEventGap(context.Context, func(context.Context, []byte) (bool, error)) error
-}
-
 // NodeConnectionReader reads transportd's current connection metadata for one
 // node. A nil connection reports that the node is not connected.
 type NodeConnectionReader func(context.Context, []byte) (*transportv1.NodeConnection, error)
 
-// OwnerGapReconciler is the term-aware event-gap recovery contract used by
-// connection ownership. GapReconciler remains the compatibility contract for
-// consumers that only need connection presence.
-type OwnerGapReconciler interface {
-	ReconcileOwnerEventGap(context.Context, NodeConnectionReader) error
+// GapReconciler is the event-gap recovery contract implemented by event stream
+// handlers that reconcile state against transportd's connection inventory.
+type GapReconciler interface {
+	ReconcileEventGap(context.Context, NodeConnectionReader) error
 }
 
 type Client struct {
@@ -149,14 +144,14 @@ func (c *Client) SendCommand(ctx context.Context, nodeID, envelope []byte) error
 	defer cancel()
 	response, err := transportv1.NewTransportServiceClient(connection).SendCommand(rpcCtx, &transportv1.SendCommandRequest{NodeId: nodeID, CommandEnvelope: envelope})
 	if err != nil {
-		wrapped := fmt.Errorf("send simulator command: %w", err)
+		wrapped := fmt.Errorf("send transport command: %w", err)
 		if isAmbiguousGRPCCode(status.Code(err)) {
 			return &ambiguousDispatchError{err: wrapped}
 		}
 		return wrapped
 	}
 	if !response.GetAccepted() {
-		return errors.New("transport rejected simulator command")
+		return errors.New("transport rejected command")
 	}
 	return nil
 }
@@ -247,15 +242,13 @@ func (c *Client) RunWatch(ctx context.Context, cursors CursorStore, handler Even
 			return err
 		}
 		if status.Code(err) == codes.OutOfRange {
-			switch handler.(type) {
-			case OwnerGapReconciler, GapReconciler:
+			if _, ok := handler.(GapReconciler); ok {
 				// Once retention is lost, every replacement stream is protected by
 				// a fresh inventory pass. Returning to cursor-only recovery would
 				// recreate a blind interval when no post-reconciliation event exists.
 				return c.runProtectedEventGapWatch(ctx, handler)
-			default:
-				return errors.New("transport event gap cannot be reconciled")
 			}
+			return errors.New("transport event gap cannot be reconciled")
 		}
 		if err := waitBackoff(ctx, attempt); err != nil {
 			return err
@@ -381,14 +374,11 @@ func (c *Client) watchProtectedEventGapOnce(ctx context.Context, handler EventHa
 }
 
 func (c *Client) reconcileEventGap(ctx context.Context, handler EventHandler) error {
-	switch reconciler := handler.(type) {
-	case OwnerGapReconciler:
-		return reconciler.ReconcileOwnerEventGap(ctx, c.NodeConnection)
-	case GapReconciler:
-		return reconciler.ReconcileEventGap(ctx, c.NodeConnected)
-	default:
+	reconciler, ok := handler.(GapReconciler)
+	if !ok {
 		return errors.New("transport event gap cannot be reconciled")
 	}
+	return reconciler.ReconcileEventGap(ctx, c.NodeConnection)
 }
 
 func waitBackoff(ctx context.Context, attempt uint) error {
@@ -401,14 +391,6 @@ func waitBackoff(ctx context.Context, attempt uint) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func (c *Client) NodeConnected(ctx context.Context, nodeID []byte) (bool, error) {
-	connection, err := c.NodeConnection(ctx, nodeID)
-	if err != nil {
-		return false, err
-	}
-	return connection != nil, nil
 }
 
 // NodeConnection returns transportd's current connection metadata for one
