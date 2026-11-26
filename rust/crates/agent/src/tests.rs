@@ -27,9 +27,7 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     SealedSecretPurpose, SealedSecretV1, SealingKeyDescriptorV1, SessionGrantV1,
     SessionHandshakeResponse, UserPasswordRotate, command_envelope,
 };
-use ocservia_contracts::session::{
-    ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
-};
+use ocservia_contracts::session::READ_ONLY_SESSION_CAPABILITIES;
 use ocservia_test_support::{keyring, ts};
 use uuid::Uuid;
 
@@ -40,7 +38,6 @@ use crate::commands::{
 use crate::session::{
     activate_session_epoch, negotiate_session_mode, negotiate_session_mode_at_instant,
     refresh_fence_epoch_floor, session_capabilities, supported_capabilities,
-    validate_artifact_frame_kind,
 };
 use crate::startup::{
     Config, build_relay_mode, build_sealing_keys, load_controller_command_keys, prepare_enrollment,
@@ -286,15 +283,6 @@ where
         .expect("write resp");
     });
     (socket, task)
-}
-
-#[test]
-fn artifact_frame_kind_validation_accepts_fetch_and_consume_only() {
-    for frame in [ARTIFACT_FETCH_FRAME | 32, ARTIFACT_CONSUME_FRAME | 32] {
-        validate_artifact_frame_kind(frame).expect("valid artifact frame");
-    }
-    assert!(validate_artifact_frame_kind(32).is_err());
-    assert!(validate_artifact_frame_kind((1 << 30) | 32).is_err());
 }
 
 #[test]

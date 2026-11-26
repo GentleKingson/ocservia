@@ -233,7 +233,10 @@ impl EffectStore {
                    CHECK((state='prepared' AND content_size=0) OR (state IN ('expired','revoked')) OR (state NOT IN ('prepared','expired','revoked') AND content_size>=1))
                  ) STRICT;
                  CREATE INDEX IF NOT EXISTS certificate_artifacts_certificate_idx
-                   ON certificate_artifacts(certificate_id);",
+                   ON certificate_artifacts(certificate_id);
+                 CREATE INDEX IF NOT EXISTS certificate_artifacts_active_idx
+                   ON certificate_artifacts(artifact_id)
+                   WHERE state IN ('prepared','available','leased');",
             )
             .map_err(sqlite_io)
     }

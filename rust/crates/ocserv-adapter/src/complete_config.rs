@@ -533,7 +533,6 @@ impl Adapter {
                 &request.expected_current_hash,
                 request.desired_revision,
                 effect,
-                true,
             )
             .await?;
         result.candidate_hash.clone_from(&request.candidate_hash);

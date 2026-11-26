@@ -2314,17 +2314,14 @@ name = "ocservia-agent"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
- "futures-util",
  "hex",
  "iroh",
- "iroh-relay",
  "ocservia-agent-protocol",
  "ocservia-command-authorization",
  "ocservia-command-journal",
  "ocservia-contracts",
  "ocservia-observability",
  "ocservia-test-support",
- "ocservia-transportd",
  "prost",
  "prost-types",
  "rand",
@@ -2334,8 +2331,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
- "tokio-stream",
- "tonic",
  "tracing",
  "uuid",
  "zeroize",
@@ -2453,7 +2448,6 @@ dependencies = [
  "ocservia-upgrader",
  "prost",
  "prost-types",
- "rand",
  "rusqlite",
  "rustix",
  "serde_json",
@@ -2508,7 +2502,6 @@ name = "ocservia-transportd"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
- "futures-util",
  "hex",
  "hyper-util",
  "iroh",
@@ -2529,7 +2522,6 @@ dependencies = [
  "tonic-health",
  "tower",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "zeroize",
 ]

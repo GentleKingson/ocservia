@@ -66,14 +66,6 @@ pub fn foreign_architecture() -> &'static str {
     }
 }
 
-pub fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    fs::write(&path, body).expect("write executable fixture");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-        .expect("chmod executable fixture");
-    path
-}
-
 pub fn sign_session_grant(
     key: &SigningKey,
     node_id: [u8; 16],

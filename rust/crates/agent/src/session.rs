@@ -1,7 +1,7 @@
 use crate::commands::handle_command_stream;
 use crate::startup::{invalid, system_dns_resolver, with_relay_tls_roots};
 use crate::telemetry::{build_telemetry, send_telemetry};
-use crate::{AGENT_ALPN, ARTIFACT_FRAME_MASK, HANDSHAKE_TIMEOUT};
+use crate::{AGENT_ALPN, HANDSHAKE_TIMEOUT};
 use iroh::endpoint::{QuicTransportConfig, RelayMode, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use ocservia_agent::{CommandExecutor, PrivdClient};
@@ -12,13 +12,10 @@ use ocservia_contracts::generated::ocserv::platform::agent::v1::{
     HandshakeResult, SealingKeyDescriptorV1, SessionGrantV1, SessionHandshake,
     SessionHandshakeResponse,
 };
-use ocservia_contracts::session::{
-    ARTIFACT_CONSUME_FRAME, ARTIFACT_FETCH_FRAME, READ_ONLY_SESSION_CAPABILITIES,
-};
+use ocservia_contracts::session::READ_ONLY_SESSION_CAPABILITIES;
 use prost::Message;
 use std::collections::HashSet;
 use std::future::Future;
-use std::io;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
@@ -74,14 +71,6 @@ pub(super) struct SessionGrantAuthority {
     pub(super) authorization_revision: u64,
     pub(super) session_epoch: u64,
     pub(super) expires_at_unix_seconds: i64,
-}
-
-pub(super) fn validate_artifact_frame_kind(framed_length: u32) -> Result<(), io::Error> {
-    let frame_kind = framed_length & ARTIFACT_FRAME_MASK;
-    if frame_kind != ARTIFACT_FETCH_FRAME && frame_kind != ARTIFACT_CONSUME_FRAME {
-        return Err(invalid("artifact frame kind invalid"));
-    }
-    Ok(())
 }
 
 async fn wait_for_session_expiry(

@@ -649,10 +649,8 @@ impl Adapter {
         if !hardened.is_dir() || hardened.file_type().is_symlink() || hardened.mode() & 0o077 != 0 {
             return Err(AdapterError::InvalidResource);
         }
-        let (terminal, tracked) = self.with_effect_store(true, |store| {
-            let terminal: HashSet<[u8; 16]> = store.reconcile_artifacts()?.into_iter().collect();
-            let tracked: HashSet<[u8; 16]> = store.tracked_artifact_ids()?.into_iter().collect();
-            Ok((terminal, tracked))
+        let active: HashSet<[u8; 16]> = self.with_effect_store(true, |store| {
+            Ok(store.reconcile_artifacts()?.active.into_iter().collect())
         })?;
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
@@ -688,9 +686,7 @@ impl Adapter {
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(AdapterError::InvalidResource);
             }
-            let is_tracked = tracked.contains(id.as_bytes());
-            let should_remove = !is_tracked
-                || terminal.contains(id.as_bytes())
+            let should_remove = !active.contains(id.as_bytes())
                 || (is_staging && metadata.modified().map_err(AdapterError::Io)? < cutoff);
             if should_remove {
                 tokio::fs::remove_file(entry.path())

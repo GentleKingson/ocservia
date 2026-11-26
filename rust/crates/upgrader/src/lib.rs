@@ -543,6 +543,7 @@ pub struct DurableUpgradeResult {
 ///
 /// Returns [`UpgradeStoreError`] when the hierarchy or any present result
 /// record fails its fail-closed validation.
+#[cfg(test)]
 pub fn read_recent_results(
     operations_dir: &Path,
     limit: usize,
@@ -740,12 +741,14 @@ impl UpgradeRunner {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_base_url_override(mut self, base_url: Option<String>) -> Self {
         self.base_url_override = base_url;
         self
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_probe_schedule(mut self, checks: usize, interval: Duration) -> Self {
         self.probe_checks = checks.max(1);
@@ -753,6 +756,7 @@ impl UpgradeRunner {
         self
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_privd_socket(mut self, socket: Option<PathBuf>) -> Self {
         self.privd_socket = socket;

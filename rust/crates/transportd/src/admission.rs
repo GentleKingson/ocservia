@@ -126,7 +126,7 @@ impl EndpointHooks for SecurityHook {
         } else {
             TrustClass::KnownAgentHandshake
         };
-        let _budget = match self.trust.budgets.acquire(class).await {
+        let _budget = match self.trust.budgets.acquire(class) {
             Ok(permit) => permit,
             Err(AttemptRejection::Capacity) => {
                 return reject(0x102, b"connection class capacity reached");
