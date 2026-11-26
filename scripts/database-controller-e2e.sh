@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/postgres-test-common.sh
+source "${ROOT}/scripts/postgres-test-common.sh"
 # Legacy positional arguments are checked only here.
 (($# <= 2)) || { echo 'usage: database-controller-e2e.sh [postgres [all]]' >&2; exit 2; }
 case "${1:-postgres}" in postgres) ;; *) echo 'expected postgres; MySQL is retired' >&2; exit 2 ;; esac
@@ -34,44 +36,19 @@ trap 'exit 143' TERM
 # Keep the production Rust feature partitions and frozen source inputs. The
 # final test image adds real Ocserv/OpenSSL, not a transport or Agent stub.
 WORKFLOW_IMAGE=ocservia-database-e2e-workflow:e2e
-if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
-  : "${SINGLE_AGENT_DEB:?}" "${SINGLE_EXPECTED_AGENT_VERSION:?}"
-  [[ "${RELEASE_WORKFLOW_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]
-  WORKFLOW_IMAGE="${RELEASE_WORKFLOW_IMAGE}"
-else
 docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target agent-runtime -t ocservia-database-e2e-agent:e2e "${ROOT}" >"${ARTIFACT_DIR}/agent-build.log" 2>&1
 docker build -f "${ROOT}/rust/test-runtime.Dockerfile" --target transportd-runtime -t ocservia-database-e2e-transport:e2e "${ROOT}" >"${ARTIFACT_DIR}/transport-build.log" 2>&1
 docker build -f "${ROOT}/deploy/production/relay.Dockerfile" -t ocservia-database-e2e-relay:e2e "${ROOT}" >"${ARTIFACT_DIR}/relay-build.log" 2>&1
 docker build -f "${ROOT}/deploy/database-e2e/Dockerfile" -t ocservia-database-e2e-workflow:e2e "${ROOT}" >"${ARTIFACT_DIR}/workflow-build.log" 2>&1
 docker image inspect ocservia-database-e2e-agent:e2e ocservia-database-e2e-transport:e2e ocservia-database-e2e-relay:e2e ocservia-database-e2e-workflow:e2e --format '{{.Id}} {{json .RepoTags}}' >"${ARTIFACT_DIR}/images.txt"
-fi
 docker image inspect "${WORKFLOW_IMAGE}" >"${ARTIFACT_DIR}/workflow-image.json"
 
 # Nothing is published on the host, and runtime processes cannot use public
 # discovery as an accidental substitute for the one dedicated TLS Relay.
 docker network create --internal "${NAME}" >/dev/null
 ENVIRONMENT=(-e OCSERVIA_DATABASE_TEST_CONTROLLER_E2E=1 -e OCSERV_E2E_ARTIFACT_DIR=/artifacts)
-MOUNTS=()
 COMMAND=(go test -buildvcs=false -count=1 -race -timeout=15m -v ./internal/platform/app -run '^TestControllerTransportBackendE2E$')
-POSTGRES_IMAGE=postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35
-if [[ -n "${RELEASE_WORKFLOW_IMAGE:-}" ]]; then
-  POSTGRES_IMAGE=postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35
-  MOUNTS=(-v "$(dirname "${SINGLE_AGENT_DEB}"):/published:ro")
-  ENVIRONMENT+=(-e GOWORK=off -e "PUBLISHED_AGENT_DEB=/published/$(basename "${SINGLE_AGENT_DEB}")" \
-    -e "PUBLISHED_AGENT_VERSION=${SINGLE_EXPECTED_AGENT_VERSION}")
-  # shellcheck disable=SC2016 # Expanded only inside the disposable container.
-  COMMAND=(bash -euo pipefail -c '
-    package="$(mktemp -d)"
-    dpkg-deb -x "$PUBLISHED_AGENT_DEB" "$package"
-    for binary in ocservia-agent ocservia-privd ocservia-upgrader; do
-      install -o root -g root -m 0755 "$package/usr/libexec/ocservia/$binary" "/usr/local/bin/$binary"
-      "/usr/local/bin/$binary" --version
-    done > /artifacts/published-binaries.txt
-    dpkg-query -W ocserv openssl libc6
-    /usr/local/bin/iroh-relay --version
-    exec "$@"
-  ' -- "${COMMAND[@]}")
-fi
+POSTGRES_IMAGE="${POSTGRES_18_IMAGE}"
 docker run -d --name "${NAME}" --network "${NAME}" \
   -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only -e POSTGRES_DB=ocservia \
   "${POSTGRES_IMAGE}" >/dev/null
@@ -90,7 +67,7 @@ docker run --rm --name "${NAME}-workflow" --network "container:${NAME}" \
   --cap-drop=ALL --cap-add=CHOWN --cap-add=FOWNER --cap-add=SETUID --cap-add=SETGID --cap-add=DAC_OVERRIDE --cap-add=KILL --cap-add=NET_ADMIN \
   -v "${ROOT}:/workspace:ro" -v "${ROOT}/.cache/go-build:/go-cache" -v "${ROOT}/.cache/go-mod:/go-mod:ro" \
   -v "${ARTIFACT_DIR}:/artifacts" -e GOCACHE=/go-cache -e GOMODCACHE=/go-mod -e GOPROXY=off -e GOTOOLCHAIN=local \
-  "${MOUNTS[@]}" "${ENVIRONMENT[@]}" "${WORKFLOW_IMAGE}" "${COMMAND[@]}" \
+  "${ENVIRONMENT[@]}" "${WORKFLOW_IMAGE}" "${COMMAND[@]}" \
   >"${ARTIFACT_DIR}/workflow.log" 2>&1
 grep -q '^--- PASS: TestControllerTransportBackendE2E ' "${ARTIFACT_DIR}/workflow.log"
 printf 'Controller PostgreSQL E2E passed; evidence: %s\n' "${ARTIFACT_DIR}"

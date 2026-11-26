@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
+# shellcheck source=scripts/postgres-test-common.sh
+source "${ROOT}/scripts/postgres-test-common.sh"
 
 RUN_ID="${RUN_ID:-development-simulation-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 PREFIX="$(printf '%s' "${RUN_ID}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
@@ -85,23 +87,11 @@ fi
 
 docker run -d --name "${POSTGRES}" \
   -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-  -p "127.0.0.1::5432" postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35 >/dev/null
-# Probe over TCP: the entrypoint's initdb temporary server listens on the Unix
-# socket only, so a socket probe can report ready before the final server exists.
-postgres_ready=false
-for _ in $(seq 1 60); do
-  if docker exec -e PGPASSWORD=test-owner-only "${POSTGRES}" psql \
-      -h 127.0.0.1 -U ocservia_owner -d ocservia \
-      -Atc "SELECT 1" >/dev/null 2>&1; then
-    postgres_ready=true
-    break
-  fi
-  sleep 1
-done
-if [[ "${postgres_ready}" != true ]]; then
+  -p "127.0.0.1::5432" "${POSTGRES_18_IMAGE}" >/dev/null
+postgres_wait_tcp "${POSTGRES}" ocservia_owner ocservia test-owner-only 60 1 || {
   echo "PostgreSQL did not become ready over TCP" >&2
   exit 1
-fi
+}
 port="$(docker port "${POSTGRES}" 5432/tcp | sed -n 's/.*://p')"
 owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
 runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"

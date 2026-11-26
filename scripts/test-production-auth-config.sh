@@ -6,8 +6,7 @@ if (( EUID != 0 )); then
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d "${HOME}/ocservia-auth-config.XXXXXX")"
-trap '"${owner[@]}" rm -rf -- "${work}"' EXIT
-owner=()
+trap 'rm -rf -- "${work}"' EXIT
 mkdir -m 0700 "${work}/secrets"
 export OCSERV_SECRET_DIR="${work}/secrets" OCSERV_BACKUP_DIR="${work}/backups"
 for name in tls.crt tls.key postgres-owner-password postgres-app-password \
@@ -20,12 +19,11 @@ for name in audit-event-key controller-command-signing-key.pem relay-access-toke
   printf 'test-only-not-a-production-secret\n' >"${OCSERV_SECRET_DIR}/${name}"
   chmod 0400 "${OCSERV_SECRET_DIR}/${name}"
 done
-if (( EUID != 0 )); then owner=(sudo); fi
-"${owner[@]}" install -o 0 -g 65532 -m 440 /dev/null "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
-"${owner[@]}" chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" \
+install -o 0 -g 65532 -m 440 /dev/null "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+chown 65534:65532 "${OCSERV_SECRET_DIR}/audit-event-key" \
   "${OCSERV_SECRET_DIR}/controller-command-signing-key.pem"
-"${owner[@]}" chmod 0440 "${OCSERV_SECRET_DIR}/relay-access-token"
-"${owner[@]}" chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-access-token" \
+chmod 0440 "${OCSERV_SECRET_DIR}/relay-access-token"
+chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-access-token" \
   "${OCSERV_SECRET_DIR}/controller-iroh.key"
 image="example.invalid/test@sha256:$(printf '%064d' 0)"
 export OCSERV_GATEWAY_IMAGE="${image}" OCSERV_CONTROL_IMAGE="${image}"
@@ -89,7 +87,7 @@ fi
 # Controller/transportd credential shared through their private group.
 mkdir -m 700 "${work}/standalone-relay-secrets"
 cp "${OCSERV_SECRET_DIR}/tls.crt" "${OCSERV_SECRET_DIR}/tls.key" "${work}/standalone-relay-secrets/"
-"${owner[@]}" install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${work}/standalone-relay-secrets/relay-access-token"
+install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${work}/standalone-relay-secrets/relay-access-token"
 if OCSERV_RELAY_IMAGE=example.invalid/relay:v1.2.0-rc.1 OCSERV_RELAY_SECRET_DIR="${work}/standalone-relay-secrets" \
   "${ROOT}/deploy/production/relay/compose.sh" config --quiet >"${work}/tagged-relay.log" 2>&1; then
   echo "version-tagged Relay image accepted" >&2; exit 1
@@ -118,9 +116,9 @@ expect_failure() {
   fi
 }
 expect_failure env OCSERV_LOCAL_AUTH_ENABLED=false "${ROOT}/deploy/production/compose.sh" config --quiet
-"${owner[@]}" chmod 0444 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+chmod 0444 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
-"${owner[@]}" chmod 0440 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
+chmod 0440 "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
 mv "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem" "${OCSERV_SECRET_DIR}/verification-saved.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 ln -s verification-saved.pem "${OCSERV_SECRET_DIR}/controller-command-verification-key.pem"
@@ -132,18 +130,18 @@ expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 rm "${OCSERV_SECRET_DIR}/verification-hardlink.pem"
 "${ROOT}/deploy/production/compose.sh" config --format json |
   jq -e '.secrets | has("relay_ca") | not' >/dev/null
-"${owner[@]}" install -o 0 -g 0 -m 444 "${OCSERV_SECRET_DIR}/tls.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
+install -o 0 -g 0 -m 444 "${OCSERV_SECRET_DIR}/tls.crt" "${OCSERV_SECRET_DIR}/relay-ca.pem"
 "${ROOT}/deploy/production/compose.sh" config --format json |
   jq -e --arg dir "${OCSERV_SECRET_DIR}" '
     .secrets.relay_ca.file == ($dir + "/relay-ca.pem") and
     any(.services.transportd.secrets[]; .source == "relay_ca") and
     all(.services | to_entries[] | select(.key != "transportd") | .value.secrets[]?; .source != "relay_ca")' >/dev/null
-"${owner[@]}" chmod 644 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+chmod 644 "${OCSERV_SECRET_DIR}/relay-ca.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
-"${owner[@]}" chmod 444 "${OCSERV_SECRET_DIR}/relay-ca.pem"
-"${owner[@]}" chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+chmod 444 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+chown 65532:65532 "${OCSERV_SECRET_DIR}/relay-ca.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
-"${owner[@]}" chown 0:0 "${OCSERV_SECRET_DIR}/relay-ca.pem"
+chown 0:0 "${OCSERV_SECRET_DIR}/relay-ca.pem"
 mv "${OCSERV_SECRET_DIR}/relay-ca.pem" "${OCSERV_SECRET_DIR}/relay-ca.saved"
 ln -s relay-ca.saved "${OCSERV_SECRET_DIR}/relay-ca.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
@@ -152,7 +150,7 @@ mv "${OCSERV_SECRET_DIR}/relay-ca.saved" "${OCSERV_SECRET_DIR}/relay-ca.pem"
 ln "${OCSERV_SECRET_DIR}/relay-ca.pem" "${OCSERV_SECRET_DIR}/relay-ca.link"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 rm "${OCSERV_SECRET_DIR}/relay-ca.link" "${OCSERV_SECRET_DIR}/relay-ca.pem"
-"${owner[@]}" install -o 0 -g 0 -m 444 /dev/null "${OCSERV_SECRET_DIR}/relay-ca.pem"
+install -o 0 -g 0 -m 444 /dev/null "${OCSERV_SECRET_DIR}/relay-ca.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
 rm "${OCSERV_SECRET_DIR}/relay-ca.pem"
 chmod 0770 "${work}"
@@ -169,7 +167,7 @@ mkdir -m 700 "${OCSERV_RELAY_SECRET_DIR}" "${OCSERV_SIGNER_SECRET_DIR}" "${OCSER
 for name in tls.crt tls.key; do
   cp "${OCSERV_SECRET_DIR}/${name}" "${OCSERV_RELAY_SECRET_DIR}/${name}"
 done
-"${owner[@]}" install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${OCSERV_RELAY_SECRET_DIR}/relay-access-token"
+install -o 65532 -g 65532 -m 400 "${OCSERV_SECRET_DIR}/relay-access-token" "${OCSERV_RELAY_SECRET_DIR}/relay-access-token"
 OCSERV_RELAY_IMAGE="${image}" "${ROOT}/deploy/production/relay/compose.sh" config --quiet
 expect_failure env OCSERV_RELAY_IMAGE=ghcr.io/gentlekingson/ocservia/relay:v0.2.0 "${ROOT}/deploy/production/relay/compose.sh" config --quiet
 expect_failure env OCSERV_RELAY_IMAGE=relay:latest "${ROOT}/deploy/production/relay/compose.sh" config --quiet
@@ -177,11 +175,11 @@ expect_failure env OCSERV_RELAY_IMAGE=relay:latest "${ROOT}/deploy/production/re
 export OCSERV_EDGE_IMAGE="${image}" OCSERV_RELAY_IMAGE="${image}" OCSERV_SIGNER_IMAGE="${image}"
 for name in issuer-chain.pem issuer-key.pem tls-cert.pem tls-key.pem api-token tls-ca.pem; do
   cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SIGNER_SECRET_DIR}/${name}"
-  "${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
+  chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
   chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/${name}"
 done
 chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/tls-ca.pem"
-"${owner[@]}" chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}" "${OCSERV_SIGNER_STATE_DIR}"
+chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}" "${OCSERV_SIGNER_STATE_DIR}"
 cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SECRET_DIR}/database-ca.pem"
 export OCSERV_DATABASE_BACKUP_HOST=database.example.com
 export OCSERV_LOCAL_AUTH_ENABLED=true
@@ -236,9 +234,9 @@ OCSERV_SIGNER_IMAGE="${image}" OCSERV_BACKUP_IMAGE="${image}" \
   "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_SIGNER_IMAGE=signer:latest "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure "${ROOT}/deploy/production/compose.sh" up --build
-"${owner[@]}" chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
+chmod 444 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
 expect_failure "${ROOT}/deploy/production/compose.sh" config --quiet
-"${owner[@]}" chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
+chmod 400 "${OCSERV_SIGNER_SECRET_DIR}/issuer-key.pem"
 # ACME mode needs no host TLS material; Gateway and Relay obtain their own.
 expect_failure env OCSERV_ACME_EMAIL=ops@example.com "${ROOT}/deploy/production/compose.sh" config --quiet
 for name in tls.crt tls.key; do
@@ -312,7 +310,7 @@ done
 # Ordinary partial Compose activation must not stop an unselected Signer.
 # Lifecycle transactions own its exclusive stop/inspect/restart sequence.
 mkdir -m 700 "${work}/bin" "${OCSERV_BACKUP_DIR}"
-"${owner[@]}" chown 999:999 "${OCSERV_BACKUP_DIR}"
+chown 999:999 "${OCSERV_BACKUP_DIR}"
 CONFIG_TEST_DOCKER="$(command -v docker)"
 export CONFIG_TEST_DOCKER CONFIG_TEST_LOG="${work}/commands.log"
 cat >"${work}/bin/docker" <<'EOF'

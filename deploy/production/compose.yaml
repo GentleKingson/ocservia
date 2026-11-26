@@ -36,6 +36,25 @@ x-gateway: &gateway
         memory: 256M
         pids: 256
 
+x-integrated-gateway-env: &integrated-gateway-env
+  GOMEMLIMIT: 200MiB
+  GOMAXPROCS: "1"
+  OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST}
+  OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
+  OCSERV_RELAY_ROUTE_PREFIX: ${OCSERV_RELAY_ROUTE_PREFIX:-disabled}
+
+x-integrated-gateway-networks: &integrated-gateway-networks
+  edge-gateway: {aliases: [gateway]}
+  gateway-relay: {}
+  application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
+
+x-integrated-gateway: &integrated-gateway
+  <<: *gateway
+  tmpfs:
+    - /config:size=1m,mode=0700,uid=65532,gid=65532
+    - /data:size=8m,mode=0700,uid=65532,gid=65532
+    - /tmp:size=8m,mode=0700,uid=65532,gid=65532
+
 x-relay: &relay
   <<: *service-defaults
   image: ${OCSERV_RELAY_IMAGE:-${OCSERV_GATEWAY_IMAGE}}
@@ -90,49 +109,29 @@ services:
       application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
 
   gateway:
-    <<: *gateway
+    <<: *integrated-gateway
     profiles: [manual]
     secrets: [tls_certificate, tls_private_key]
     environment:
-      GOMEMLIMIT: 200MiB
-      GOMAXPROCS: "1"
-      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST}
-      OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
-      OCSERV_RELAY_ROUTE_PREFIX: ${OCSERV_RELAY_ROUTE_PREFIX:-disabled}
-    tmpfs:
-      - /config:size=1m,mode=0700,uid=65532,gid=65532
-      - /data:size=8m,mode=0700,uid=65532,gid=65532
-      - /tmp:size=8m,mode=0700,uid=65532,gid=65532
+      <<: *integrated-gateway-env
     networks:
-      edge-gateway: {aliases: [gateway]}
-      gateway-relay: {}
-      application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
+      <<: *integrated-gateway-networks
     volumes:
       - ./integrated/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./integrated/site.caddy:/etc/caddy/site.caddy:ro
       - ./integrated/relay.caddy:/etc/caddy/relay.caddy:ro
 
   gateway-acme:
-    <<: *gateway
+    <<: *integrated-gateway
     profiles: [acme]
     environment:
-      GOMEMLIMIT: 200MiB
-      GOMAXPROCS: "1"
-      OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST}
-      OCSERV_EDGE_GATEWAY_IP: ${OCSERV_EDGE_GATEWAY_IP:-172.30.241.2}
-      OCSERV_RELAY_ROUTE_PREFIX: ${OCSERV_RELAY_ROUTE_PREFIX:-disabled}
+      <<: *integrated-gateway-env
       OCSERV_ACME_EMAIL: ${OCSERV_ACME_EMAIL:-}
       OCSERV_ACME_DIRECTORY_URL: ${OCSERV_ACME_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
       SSL_CERT_FILE: ${OCSERV_ACME_CA_FILE:+/run/secrets/acme_ca}
     secrets: [acme_ca]
-    tmpfs:
-      - /config:size=1m,mode=0700,uid=65532,gid=65532
-      - /data:size=8m,mode=0700,uid=65532,gid=65532
-      - /tmp:size=8m,mode=0700,uid=65532,gid=65532
     networks:
-      edge-gateway: {aliases: [gateway]}
-      gateway-relay: {}
-      application: {ipv4_address: "${OCSERV_GATEWAY_APPLICATION_IP:-172.30.240.2}"}
+      <<: *integrated-gateway-networks
       acme-egress: {}
     volumes:
       - ./integrated/Caddyfile.acme:/etc/caddy/Caddyfile:ro
@@ -497,17 +496,10 @@ services:
         limits: {cpus: "1.0", memory: 512M, pids: 256}
 
   signer:
+    <<: *service-defaults
     profiles: [manual, acme]
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "3"}
     image: ${OCSERV_SIGNER_IMAGE:-${OCSERV_GATEWAY_IMAGE}}
-    restart: unless-stopped
-    read_only: true
     user: "65532:65532"
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    init: true
     command: [serve]
     environment:
       GOMEMLIMIT: 200MiB
@@ -535,17 +527,10 @@ services:
         limits: {cpus: "1.0", memory: 256M, pids: 64}
 
   edge:
+    <<: *service-defaults
     profiles: [manual, acme]
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "3"}
     image: ${OCSERV_EDGE_IMAGE:-${OCSERV_GATEWAY_IMAGE}}
-    restart: unless-stopped
-    read_only: true
     user: "65532:65532"
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    init: true
     environment:
       OCSERV_PUBLIC_HOST: ${OCSERV_PUBLIC_HOST:?set Controller DNS name}
       OCSERV_RELAY_PUBLIC_HOST: ${OCSERV_RELAY_PUBLIC_HOST:-}

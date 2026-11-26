@@ -414,15 +414,8 @@ def smoke_user():
     node = os.environ['OCSERVIA_BUSINESS_TEST_NODE_ID']
     password = secrets.token_hex(24)
     (environment().work / 'private/smoke-vpn-password').write_text(password)
-    if os.environ.get('PRODUCTION_SIGNER_ACCEPTANCE') == 'true':
-        sealed = signer_seal(password.encode())
-        record('production_signer_password_sealed')
-    else:
-        encrypted = subprocess.run(['openssl', 'pkeyutl', '-encrypt', '-pubin', '-inkey', str(environment().work / 'user.pub.pem'),
-                                    '-pkeyopt', 'rsa_padding_mode:oaep', '-pkeyopt', 'rsa_oaep_md:sha256'],
-                                   input=password.encode(), capture_output=True, check=True).stdout
-        sealed = {'version': 1, 'purpose': 'user_password', 'key_id': 'business-test-user-seal',
-                  'ciphertext': base64.b64encode(encrypted).decode()}
+    sealed = signer_seal(password.encode())
+    record('production_signer_password_sealed')
     operation = api(f'nodes/{node}/users', {'name': 'business-test-smoke-user', 'sealed_password': sealed,
                                             'reason': 'Business test: Release Business Smoke'},
                     headers={'Idempotency-Key': secrets.token_hex(16), 'If-Match': '"revision-0"'}, status=202)

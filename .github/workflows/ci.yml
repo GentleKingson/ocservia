@@ -248,6 +248,7 @@ jobs:
           run_bg bash scripts/test-controller-install.sh
           run_bg bash scripts/test-controller-bootstrap.sh
           run_bg bash scripts/test-controller-host-bootstrap.sh
+          run_bg bash scripts/test-postgres-backup.sh
           run_bg bash scripts/test-controller-lifecycle.sh
           run_bg bash scripts/test-production-auth-config.sh
           run_bg python3 scripts/test-vpn-audit.py

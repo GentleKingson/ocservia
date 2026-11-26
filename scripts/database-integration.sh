@@ -13,6 +13,8 @@ case "${scope}" in
 esac
 # shellcheck source=scripts/go-test-environment.sh
 source "${ROOT}/scripts/go-test-environment.sh"
+# shellcheck source=scripts/postgres-test-common.sh
+source "${ROOT}/scripts/postgres-test-common.sh"
 require_test_commands go jq setsid python3 curl
 require_test_docker
 require_go_race
@@ -29,8 +31,7 @@ export OCSERV_TEST_AUDIT_EVENT_KEY_HEX=11111111111111111111111111111111111111111
 export OCSERV_AUDIT_CHECKPOINT_KEY=2222222222222222222222222222222222222222222222222222222222222222
 PG_MAJOR="${PG_MAJOR:-all}"
 case "${PG_MAJOR}" in
-  all) POSTGRES_MAJORS=(18) ;;
-  18) POSTGRES_MAJORS=("${PG_MAJOR}") ;;
+  all|18) major=18 ;;
   *)
     echo "PG_MAJOR must be all or 18" >&2
     exit 2
@@ -80,18 +81,13 @@ mkdir -p "${TMP_ROOT}"
 export DATABASE_CASE_RESULTS="${TMP_ROOT}/required-case-results.jsonl"
 
 # Start PostgreSQL early so image pull and initdb overlap with migration checks and controller build.
-for major in "${POSTGRES_MAJORS[@]}"; do
-  container="${PREFIX}-pg${major}"
-  CONTAINERS+=("${container}")
-  # Keep the selected loopback port stable across the lifecycle restart test.
-  port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-  case "${major}" in
-    18) postgres_image='postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35' ;;
-  esac
-  docker run -d --name "${container}" \
-    -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
-    -p "127.0.0.1:${port}:5432" "${postgres_image}" >/dev/null
-done
+container="${PREFIX}-pg${major}"
+CONTAINERS+=("${container}")
+# Keep the selected loopback port stable across the lifecycle restart test.
+port="$(postgres_allocate_loopback_port)"
+docker run -d --name "${container}" \
+  -e POSTGRES_DB=ocservia -e POSTGRES_USER=ocservia_owner -e POSTGRES_PASSWORD=test-owner-only \
+  -p "127.0.0.1:${port}:5432" "${POSTGRES_18_IMAGE}" >/dev/null
 
 bash "${ROOT}/scripts/database-artifact-policy.sh" postgres
 
@@ -108,24 +104,9 @@ fi
 
 TEST_CONTROL_PLANE="${ROOT}/control-plane"
 
-expected_migration_version() {
-  (
-    cd "${ROOT}/control-plane/migrations/sql"
-    for file in [0-9]*_*.sql; do
-      if [[ -f "${file}" && ! -L "${file}" ]]; then
-        printf '%s\n' "${file}"
-      fi
-    done
-  ) \
-    | sed -n 's/^\([0-9][0-9]*\)_.*/\1/p' \
-    | awk '{print $1 + 0}' \
-    | sort -n \
-    | tail -n 1
-}
-
 assert_current_checkpoint() {
   local container=$1 database=$2 expected_version
-  expected_version="$(expected_migration_version)"
+  expected_version="$(postgres_expected_migration_version "${ROOT}")"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT COALESCE(MAX(version_id), 0) = ${expected_version} FROM goose_db_version WHERE is_applied = true")" = t
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('schema_migrations','schema_snapshot_origin','schema_revisions','controller_schema_compatibility','scheduler_leadership')")" = 0
 }
@@ -138,17 +119,6 @@ assert_local_bootstrap_schema() {
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','local_auth_bootstrap','SELECT') AND has_table_privilege('ocservia_app','local_auth_bootstrap','INSERT') AND NOT has_table_privilege('ocservia_app','local_auth_bootstrap','UPDATE,DELETE,TRUNCATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT has_table_privilege('ocservia_app','workspace_admins','SELECT') AND has_table_privilege('ocservia_app','workspace_admins','INSERT') AND NOT has_table_privilege('ocservia_app','workspace_admins','TRUNCATE')")" = "t"
   test "$(docker exec "${container}" psql -U ocservia_owner -d "${database}" -Atc "SELECT NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolbypassrls AND NOT pg_has_role('ocservia_app','ocservia_owner','MEMBER') FROM pg_roles WHERE rolname='ocservia_app'")" = "t"
-}
-
-wait_for_postgres() {
-  local container=$1
-  # TCP probe: the entrypoint's initdb temporary server listens on the Unix
-  # socket only, so a socket probe can report ready before the final server.
-  for _ in $(seq 1 240); do
-    if docker exec -e PGPASSWORD=test-owner-only "${container}" psql -h 127.0.0.1 -U ocservia_owner -d ocservia -Atc "SELECT 1" >/dev/null 2>&1; then return 0; fi
-    sleep 0.25
-  done
-  return 1
 }
 
 wait_for_http() {
@@ -268,11 +238,10 @@ run_postgres_business_tests() {
     go test -p 1 ./internal/api -run '^TestBrowserTrustBoundaryBlocksCrossSiteCookieMutations$' -count=1)
 }
 
-for major in "${POSTGRES_MAJORS[@]}"; do
-  : >"${DATABASE_CASE_RESULTS}"
-  container="${PREFIX}-pg${major}"
-  wait_for_postgres "${container}"
-  port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
+: >"${DATABASE_CASE_RESULTS}"
+container="${PREFIX}-pg${major}"
+postgres_wait_tcp "${container}"
+port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   api_port=$((API_PORT_BASE + major - 17))
@@ -458,7 +427,7 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   stop_process "${pid}"
 
   docker start "${container}" >/dev/null
-  wait_for_postgres "${container}"
+  postgres_wait_tcp "${container}"
   port="$(docker port "${container}" 5432/tcp | sed -n 's/.*://p')"
   owner_url="postgres://ocservia_owner:test-owner-only@127.0.0.1:${port}/ocservia?sslmode=disable"
   runtime_url="postgres://ocservia_app:test-runtime-only@127.0.0.1:${port}/ocservia?sslmode=disable"
@@ -467,4 +436,3 @@ for major in "${POSTGRES_MAJORS[@]}"; do
   echo "PostgreSQL ${major} database integration complete"
   echo "Database acceptance required cases: backend=postgres${major} shard=full passed=${required_cases} skipped=0"
   fi
-done

@@ -45,19 +45,11 @@ expected_commit="$(jq -er '.source_commit' "${RELEASE_FILE}")"
 [[ "${expected_commit}" =~ ^[0-9a-f]{40}$ ]] || fail "release source_commit is invalid"
 
 for image in gateway control transport backup postgres otel; do
-  case "${image}" in
-    gateway) variable=OCSERV_GATEWAY_IMAGE ;;
-    control) variable=OCSERV_CONTROL_IMAGE ;;
-    transport) variable=OCSERV_TRANSPORT_IMAGE ;;
-    backup) variable=OCSERV_BACKUP_IMAGE ;;
-    postgres) variable=OCSERV_POSTGRES_IMAGE ;;
-    otel) variable=OCSERV_OTEL_IMAGE ;;
-  esac
   if ! value="$(jq -er --arg image "${image}" '.images[$image]' "${RELEASE_FILE}")" ||
     [[ ! "${value}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
     fail "release image ${image} is invalid"
   fi
-  export "${variable}=${value}"
+  export "OCSERV_${image^^}_IMAGE=${value}"
 done
 if [[ "$(jq -r '.manifest_version' "${RELEASE_FILE}")" == 2 ]]; then
   for image in edge relay signer; do

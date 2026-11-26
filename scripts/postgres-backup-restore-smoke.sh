@@ -2,9 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/postgres-test-common.sh
+source "${ROOT}/scripts/postgres-test-common.sh"
 RUN_ID="${RUN_ID:?RUN_ID is required}"
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR is required}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18.7-bookworm@sha256:e742a2668255221388004f3a42b6150a2103f5054ab3a4a93ae9e4f01e551c35}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-${POSTGRES_18_IMAGE}}"
 
 if [[ "${RUN_ID}" == *[^a-zA-Z0-9._-]* ]]; then
   echo "RUN_ID contains unsafe characters" >&2
@@ -62,19 +64,10 @@ docker run --rm -v "${work}:/work" --entrypoint chown "${POSTGRES_IMAGE}" \
 docker run -d --name "${source_container}" --network "${network}" --network-alias "${source_alias}" \
   -e POSTGRES_PASSWORD="${password}" -e POSTGRES_DB=ocservia \
   "${POSTGRES_IMAGE}" >/dev/null
-source_ready=false
-for _ in $(seq 1 60); do
-  if docker logs "${source_container}" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.' \
-    && docker exec -e PGPASSWORD="${password}" "${source_container}" pg_isready -U postgres -d ocservia >/dev/null 2>&1; then
-    source_ready=true
-    break
-  fi
-  sleep 1
-done
-if [[ "${source_ready}" != true ]]; then
+postgres_wait_initdb_ready "${source_container}" postgres ocservia "${password}" 60 || {
   echo "source PostgreSQL did not become ready" >&2
   exit 1
-fi
+}
 docker exec -u postgres "${source_container}" sh -c \
   "printf '%s\\n' 'host replication postgres all scram-sha-256' >>\"\${PGDATA}/pg_hba.conf\" && pg_ctl reload" \
   >"${ARTIFACT_DIR}/replication-hba.log"

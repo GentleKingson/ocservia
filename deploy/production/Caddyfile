@@ -10,12 +10,7 @@
 	}
 }
 
-:8443 {
-	tls /run/secrets/tls_certificate /run/secrets/tls_private_key
-	@nonStream not path /api/v1/events/stream /api/v1/operations/*/events
-	encode @nonStream zstd gzip {
-		minimum_length 512
-	}
+(security_headers) {
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -24,17 +19,19 @@
 		Content-Security-Policy "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 		-Server
 	}
+}
+
+:8443 {
+	tls /run/secrets/tls_certificate /run/secrets/tls_private_key
+	@nonStream not path /api/v1/events/stream /api/v1/operations/*/events
+	encode @nonStream zstd gzip {
+		minimum_length 512
+	}
+	import security_headers
 	# A handler error (such as an unreachable control plane) is written without
 	# the deferred header block above, so error responses repeat it unchanged.
 	handle_errors {
-		header {
-			Strict-Transport-Security "max-age=31536000; includeSubDomains"
-			X-Content-Type-Options "nosniff"
-			X-Frame-Options "DENY"
-			Referrer-Policy "no-referrer"
-			Content-Security-Policy "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-			-Server
-		}
+		import security_headers
 	}
 	handle /api/* {
 		reverse_proxy control-plane:8080 {
