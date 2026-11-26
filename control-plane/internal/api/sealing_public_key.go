@@ -13,9 +13,8 @@ func (s *Server) getUserPasswordSealingKey(w http.ResponseWriter, r *http.Reques
 		writeProblem(w, r, 503, "https://ocservia.dev/problems/sealing-key-unavailable", "Sealing key unavailable", "configure the verified Signer binding before creating or rotating passwords")
 		return
 	}
-	nodeID, ok := pathUUIDv7(r.PathValue("node_id"))
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
 	if !ok {
-		writeProblem(w, r, 400, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be a UUIDv7")
 		return
 	}
 	key, err := s.enrollment.UserPasswordSealingKey(r.Context(), workspace(r), nodeID)

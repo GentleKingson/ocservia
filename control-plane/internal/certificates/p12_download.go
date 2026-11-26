@@ -21,11 +21,7 @@ import (
 )
 
 func (s *Service) ArtifactResource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withArtifactStore(ctx, func(_ database.Tx, store certificatestore.ArtifactStore) error {
 		workspaceID, nodeID, err = store.Resource(ctx, id)
 		return err
 	})
@@ -40,11 +36,7 @@ func (s *Service) OpenArtifact(ctx context.Context, id uuid.UUID, token string, 
 	grantID := uuid.Must(uuid.NewV7())
 	var eligible certificatestore.Eligible
 	var grant *agentv1.ArtifactGrantV1
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withArtifactStore(ctx, func(tx database.Tx, store certificatestore.ArtifactStore) error {
 		workspaceID, _, err := store.Resource(ctx, id)
 		if errors.Is(err, database.ErrNotFound) {
 			return ErrArtifactDenied
@@ -115,11 +107,7 @@ func (s *Service) CompleteArtifact(ctx context.Context, id, grantID uuid.UUID, g
 	}
 	consumption := certificatestore.Consumption{ID: id, GrantID: grantID, ActorID: actorID, SessionID: sessionID, NodeID: nodeID, CertificateID: certificateID, OperationID: operationID, CertificateVersion: grant.GetCertificateVersion(), Grant: grantBytes, Digest: digest, Size: size, RequestID: requestID}
 	exactReplay := false
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withArtifactStore(ctx, func(tx database.Tx, store certificatestore.ArtifactStore) error {
 		workspaceID, _, err := store.Resource(ctx, id)
 		if errors.Is(err, database.ErrNotFound) {
 			return ErrArtifactDenied
@@ -178,11 +166,7 @@ const (
 
 func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID uuid.UUID) (artifactConsumptionFinalization, error) {
 	result := artifactConsumptionFinalized
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withArtifactStore(ctx, func(tx database.Tx, store certificatestore.ArtifactStore) error {
 		v, err := store.Finalize(ctx, id, grantID)
 		if errors.Is(err, database.ErrNotFound) {
 			state, err := store.State(ctx, id, grantID)
@@ -211,11 +195,8 @@ func (s *Service) finalizeArtifactConsumption(ctx context.Context, id, grantID u
 
 func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 	var records []certificatestore.PendingConsumption
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withArtifactStore(ctx, func(_ database.Tx, store certificatestore.ArtifactStore) error {
+		var err error
 		records, err = store.PendingConsumptions(ctx)
 		return err
 	})
@@ -231,11 +212,7 @@ func (s *Service) reconcileConsumingArtifacts(ctx context.Context) error {
 			!bytes.Equal(item.grant.GetArtifactId(), item.id[:]) || !bytes.Equal(item.grant.GetGrantId(), item.grantID[:]) ||
 			item.grant.GetAuthorizedSubject() != item.actorID.String() || item.grant.GetMaxBytes() != uint64(item.size) {
 			slog.ErrorContext(ctx, "invalid pending artifact consumption", "artifact_id", record.ID)
-			err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-				store, err := certificatestore.ArtifactFromTransaction(tx)
-				if err != nil {
-					return err
-				}
+			err = s.withArtifactStore(ctx, func(_ database.Tx, store certificatestore.ArtifactStore) error {
 				return store.FailConsumption(ctx, record.ID, record.GrantID, record.Grant)
 			})
 		} else {
@@ -284,11 +261,7 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 		}
 	} else {
 		now := s.now().UTC()
-		if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := certificatestore.ArtifactFromTransaction(tx)
-			if err != nil {
-				return err
-			}
+		if err := s.withArtifactStore(ctx, func(_ database.Tx, store certificatestore.ArtifactStore) error {
 			return store.ResetConsumption(ctx, item.id, item.grantID, !item.expiresAt.After(now))
 		}); err != nil {
 			return err
@@ -300,11 +273,7 @@ func (s *Service) reconcileArtifactConsumption(ctx context.Context, item pending
 func (s *Service) AbortArtifact(ctx context.Context, id, grantID uuid.UUID) error {
 	// Preserve the durable lease until its bounded expiry. A transport failure
 	// must not make a second concurrently valid grant immediately issuable.
-	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.ArtifactFromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	return s.withArtifactStore(ctx, func(_ database.Tx, store certificatestore.ArtifactStore) error {
 		return store.Abort(ctx, id, grantID)
 	})
 }

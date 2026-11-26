@@ -60,8 +60,7 @@ func (s *Server) createSimulation(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the simulation request must be a JSON object")
 		return
 	}
-	requestID, _ := r.Context().Value(requestIDKey{}).(string)
-	operation, err := service.CreateSimulation(r.Context(), *scenario, requestID, requestTraceparent(r))
+	operation, err := service.CreateSimulation(r.Context(), *scenario, requestID(r), requestTraceparent(r))
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "create local simulation", "error", err)
 		if errors.Is(err, transportevents.ErrInvalidScenario) {
@@ -105,11 +104,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "events are temporarily unavailable")
 		return
 	}
-	page := map[string]any{"has_more": hasMore}
-	if hasMore && len(events) > 0 {
-		page["next_cursor"] = events[len(events)-1].ID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": events, "page": page})
+	writeCursorPage(w, events, hasMore, func(event transportevents.Event) string { return event.ID })
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {

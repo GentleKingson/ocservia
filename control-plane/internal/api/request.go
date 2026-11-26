@@ -14,6 +14,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -35,6 +38,82 @@ func parseOptionalUUIDv7(value string) (uuid.UUID, bool) {
 	}
 	id, err := uuid.Parse(value)
 	return id, err == nil && id.Version() == 7
+}
+
+func requirePathUUIDv7(w http.ResponseWriter, r *http.Request, param, suffix string) (uuid.UUID, bool) {
+	raw := r.PathValue(param)
+	if suffix != "" {
+		raw = strings.TrimSuffix(raw, suffix)
+	}
+	id, err := parseUUIDv7(raw)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", param+" must be a UUIDv7")
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+func parseExpectedRevision(ifMatch string, explicit *int64, minValue int64) (int64, bool) {
+	var header *int64
+	if ifMatch != "" {
+		if len(ifMatch) < 3 || ifMatch[0] != '"' || ifMatch[len(ifMatch)-1] != '"' {
+			return 0, false
+		}
+		value := ifMatch[1 : len(ifMatch)-1]
+		if strings.ContainsRune(value, '"') || !strings.HasPrefix(value, "revision-") {
+			return 0, false
+		}
+		parsed, err := strconv.ParseInt(strings.TrimPrefix(value, "revision-"), 10, 64)
+		if err != nil || parsed < minValue {
+			return 0, false
+		}
+		header = &parsed
+	}
+	if explicit != nil && *explicit < minValue {
+		return 0, false
+	}
+	if explicit != nil && header != nil && *explicit != *header {
+		return 0, false
+	}
+	if explicit != nil {
+		return *explicit, true
+	}
+	if header != nil {
+		return *header, true
+	}
+	return 0, false
+}
+
+func writeCursorPage[T any](w http.ResponseWriter, items []T, hasMore bool, cursorOf func(T) string) {
+	page := map[string]any{"has_more": hasMore}
+	if hasMore && len(items) > 0 {
+		page["next_cursor"] = cursorOf(items[len(items)-1])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "page": page})
+}
+
+func writeAcceptedOperation(w http.ResponseWriter, op operations.Operation, replayed, withETag bool) {
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	w.Header().Set("Location", "/api/v1/operations/"+op.ID)
+	if withETag {
+		w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", op.Version))
+	}
+	writeJSON(w, http.StatusAccepted, op)
+}
+
+func writeCommonDomainError(w http.ResponseWriter, r *http.Request, err error, notFoundDetail string) bool {
+	switch {
+	case errors.Is(err, auth.ErrForbidden):
+		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
+		return true
+	case errors.Is(err, database.ErrNotFound):
+		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", notFoundDetail)
+		return true
+	default:
+		return false
+	}
 }
 
 // decodeStrictJSON is the single request-body decoder for JSON endpoints.

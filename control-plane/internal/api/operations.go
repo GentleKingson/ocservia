@@ -4,11 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
@@ -70,14 +68,12 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
 	}
-	nodeID, err := uuid.Parse(r.PathValue("node_id"))
-	if err != nil || nodeID.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+	idempotencyKey, ok := requireIdempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	var body *agentUpgradeRequest
@@ -138,12 +134,7 @@ func (s *Server) upgradeAgent(w http.ResponseWriter, r *http.Request) {
 		s.writeOperationError(w, r, err)
 		return
 	}
-	if replayed {
-		w.Header().Set("Idempotency-Replayed", "true")
-	}
-	w.Header().Set("Location", "/api/v1/operations/"+operation.ID)
-	w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
-	writeJSON(w, http.StatusAccepted, operation)
+	writeAcceptedOperation(w, operation, replayed, true)
 }
 
 func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request, kind operations.Kind, action, sessionID, ip string) {
@@ -151,14 +142,12 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
 	}
-	nodeID, err := uuid.Parse(r.PathValue("node_id"))
-	if err != nil || nodeID.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+	idempotencyKey, ok := requireIdempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	var body *controlledCommandRequest
@@ -219,12 +208,7 @@ func (s *Server) createControlledCommand(w http.ResponseWriter, r *http.Request,
 		s.writeOperationError(w, r, err)
 		return
 	}
-	if replayed {
-		w.Header().Set("Idempotency-Replayed", "true")
-	}
-	w.Header().Set("Location", "/api/v1/operations/"+operation.ID)
-	w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
-	writeJSON(w, http.StatusAccepted, operation)
+	writeAcceptedOperation(w, operation, replayed, true)
 }
 
 func actorID(r *http.Request) string {
@@ -240,14 +224,12 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
 	}
-	nodeID, err := uuid.Parse(r.PathValue("node_id"))
-	if err != nil || nodeID.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+	idempotencyKey, ok := requireIdempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	var body *syntheticCommandRequest
@@ -271,7 +253,6 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "ttl_seconds must be between 1 and 86400")
 		return
 	}
-	requestID, _ := r.Context().Value(requestIDKey{}).(string)
 	actor := principal(r)
 	var payload operations.Payload
 	switch body.Kind {
@@ -294,7 +275,7 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 		Payload:          payload,
 		SupersedePending: body.SupersedePending,
 		TTL:              time.Duration(ttl) * time.Second,
-		RequestID:        requestID,
+		RequestID:        requestID(r),
 		Traceparent:      requestTraceparent(r),
 		ActorID:          actorID(r),
 		ActorIdentityID:  actor.IdentityID,
@@ -306,12 +287,7 @@ func (s *Server) createSyntheticCommand(w http.ResponseWriter, r *http.Request) 
 		s.writeOperationError(w, r, err)
 		return
 	}
-	if replayed {
-		w.Header().Set("Idempotency-Replayed", "true")
-	}
-	w.Header().Set("Location", "/api/v1/operations/"+operation.ID)
-	w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
-	writeJSON(w, http.StatusAccepted, operation)
+	writeAcceptedOperation(w, operation, replayed, true)
 }
 
 func (s *Server) streamOperationEvents(w http.ResponseWriter, r *http.Request) {
@@ -319,9 +295,8 @@ func (s *Server) streamOperationEvents(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
 	}
-	operationID, err := uuid.Parse(r.PathValue("operation_id"))
-	if err != nil || operationID.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "operation_id must be a UUIDv7")
+	operationID, ok := requirePathUUIDv7(w, r, "operation_id", "")
+	if !ok {
 		return
 	}
 	after, valid := eventStreamCursor(r)
@@ -359,9 +334,10 @@ func (s *Server) queueMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err error) {
+	if writeCommonDomainError(w, r, err, "the requested node or operation does not exist") {
+		return
+	}
 	switch {
-	case errors.Is(err, auth.ErrForbidden):
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the operation request is invalid")
 	case errors.Is(err, operations.ErrIdempotencyConflict):
@@ -376,7 +352,7 @@ func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/command-backlog-exceeded", "Command backlog is full", "the node or workspace remote command backlog has reached its bound")
 	case errors.Is(err, operations.ErrUpgradeActive):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/upgrade-already-active", "Upgrade is already active", "another agent upgrade is already active for this node")
-	case errors.Is(err, operations.ErrNodeUnavailable), errors.Is(err, database.ErrNotFound):
+	case errors.Is(err, operations.ErrNodeUnavailable):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested node or operation does not exist")
 	default:
 		s.logger.ErrorContext(r.Context(), "operation request failed", "error", err)
@@ -385,34 +361,7 @@ func (s *Server) writeOperationError(w http.ResponseWriter, r *http.Request, err
 }
 
 func expectedRevision(ifMatch string, explicit *int64) (int64, bool) {
-	var header int64
-	if ifMatch != "" {
-		if len(ifMatch) < 3 || ifMatch[0] != '"' || ifMatch[len(ifMatch)-1] != '"' {
-			return 0, false
-		}
-		value := ifMatch[1 : len(ifMatch)-1]
-		if strings.ContainsRune(value, '"') {
-			return 0, false
-		}
-		if !strings.HasPrefix(value, "revision-") {
-			return 0, false
-		}
-		parsed, err := strconv.ParseInt(strings.TrimPrefix(value, "revision-"), 10, 64)
-		if err != nil || parsed < 1 {
-			return 0, false
-		}
-		header = parsed
-	}
-	if explicit != nil && *explicit < 1 {
-		return 0, false
-	}
-	if explicit != nil && header != 0 && *explicit != header {
-		return 0, false
-	}
-	if explicit != nil {
-		return *explicit, true
-	}
-	return header, header > 0
+	return parseExpectedRevision(ifMatch, explicit, 1)
 }
 
 func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
@@ -421,9 +370,8 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested resource does not exist")
 		return
 	}
-	id, err := uuid.Parse(r.PathValue("operation_id"))
-	if err != nil || id.Version() != 7 {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "operation_id must be a UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "operation_id", "")
+	if !ok {
 		return
 	}
 	operation, err := service.Get(r.Context(), id)
@@ -456,17 +404,13 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Page size is invalid", "page_size must be an integer between 1 and 200")
 		return
 	}
-	operations, hasMore, err := service.ListInWorkspace(r.Context(), workspace(r), after, limit)
+	items, hasMore, err := service.ListInWorkspace(r.Context(), workspace(r), after, limit)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list operations", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "operations are temporarily unavailable")
 		return
 	}
-	page := map[string]any{"has_more": hasMore}
-	if hasMore && len(operations) > 0 {
-		page["next_cursor"] = operations[len(operations)-1].ID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": operations, "page": page})
+	writeCursorPage(w, items, hasMore, func(op operations.Operation) string { return op.ID })
 }
 
 func (s *Server) operationSummary(w http.ResponseWriter, r *http.Request) {

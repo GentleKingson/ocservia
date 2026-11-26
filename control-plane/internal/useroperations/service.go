@@ -147,7 +147,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		if policy.Version < receipt.Version {
 			return Policy{}, false, errors.New("replayed policy version is unavailable")
 		}
-		return policy, true, commit(ctx, tx)
+		return policy, true, tx.Commit(ctx)
 	}
 	if !errors.Is(err, database.ErrNotFound) {
 		return Policy{}, false, err
@@ -175,7 +175,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 	if err := audit.AppendChainTx(ctx, tx, audit.ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: request.ActorID, SessionID: optionalUUID(request.ActorSessionID), Action: "user.policy.set", ResourceType: "user_policy", ResourceID: mutationID, NodeID: &request.NodeID, RequestID: request.RequestID, TraceID: tracecontext.TraceID(request.Traceparent), Reason: request.Reason, AfterSummary: after, At: now}); err != nil {
 		return Policy{}, false, err
 	}
-	if err := commit(ctx, tx); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return Policy{}, false, err
 	}
 	policy, err := s.GetPolicy(ctx, request.NodeID, request.Username)
@@ -241,70 +241,28 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	return nil
 }
 
+type policyTransition struct {
+	keyPrefix        string
+	kind             userstate.MutationKind
+	reason           string
+	alreadySatisfied func(userstore.Candidate) bool
+	candidates       func(userstore.Store, context.Context, time.Time, time.Time, int) ([]userstore.Candidate, error)
+	idempotencyKey   func(userstore.Candidate, time.Time) string
+}
+
 func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, error) {
-	if limit <= 0 {
-		return 0, nil
-	}
-	now := s.now().UTC()
-	month := monthStart(now)
-	var candidates []userstore.Candidate
-	err := s.withStore(ctx, func(store userstore.Store) (err error) {
-		candidates, err = store.ResetCandidates(ctx, now, month, limit)
-		return
+	return s.runPolicyTransition(ctx, limit, policyTransition{
+		keyPrefix:        "policy-reset",
+		kind:             userstate.UserEnable,
+		reason:           "monthly quota reset",
+		alreadySatisfied: func(item userstore.Candidate) bool { return item.Enabled },
+		candidates: func(store userstore.Store, ctx context.Context, now, month time.Time, limit int) ([]userstore.Candidate, error) {
+			return store.ResetCandidates(ctx, now, month, limit)
+		},
+		idempotencyKey: func(item userstore.Candidate, month time.Time) string {
+			return operationIdempotencyKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), month.Format(time.RFC3339))
+		},
 	})
-	if err != nil {
-		return 0, err
-	}
-	processed := 0
-	for _, item := range candidates {
-		key := operationIdempotencyKey("policy-reset", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), month.Format(time.RFC3339))
-		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
-			return 0, err
-		}
-		if item.Enabled {
-			operationID, found, findErr := s.findUserOperation(ctx, item.NodeID, item.Username, key, userstate.UserEnable)
-			if findErr != nil {
-				return 0, findErr
-			}
-			if !found {
-				if err := s.cleanupEnforcement(ctx, item, false); err != nil {
-					return 0, err
-				}
-				continue
-			}
-			if err := s.withStore(ctx, func(store userstore.Store) error {
-				return store.CompleteEnforcement(ctx, item, operationID, item.UserVersion)
-			}); err != nil {
-				return 0, err
-			}
-			processed++
-			continue
-		}
-		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserEnable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "monthly quota reset", RequestID: key, Traceparent: tracecontext.NewTraceparent()})
-		if mutateErr != nil {
-			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
-				return processed, nil
-			}
-			if errors.Is(mutateErr, userstate.ErrVersionConflict) || errors.Is(mutateErr, userstate.ErrRevisionPending) || errors.Is(mutateErr, userstate.ErrRevisionRecovery) || errors.Is(mutateErr, userstate.ErrNodeUnavailable) || errors.Is(mutateErr, userstate.ErrCapabilityMissing) {
-				if err := s.cleanupEnforcement(ctx, item, true); err != nil {
-					return 0, err
-				}
-				continue
-			}
-			return 0, mutateErr
-		}
-		operationID, parseErr := uuid.Parse(op.ID)
-		if parseErr != nil {
-			return 0, parseErr
-		}
-		if err := s.withStore(ctx, func(store userstore.Store) error {
-			return store.CompleteEnforcement(ctx, item, operationID, item.UserVersion+1)
-		}); err != nil {
-			return 0, err
-		}
-		processed++
-	}
-	return processed, nil
 }
 
 func (s *Service) withStore(ctx context.Context, change func(userstore.Store) error) error {
@@ -326,11 +284,22 @@ func (s *Service) cleanupEnforcement(ctx context.Context, item userstore.Candida
 	return nil
 }
 
-func commit(ctx context.Context, tx database.Tx) error {
-	return tx.Commit(ctx)
+func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
+	return s.runPolicyTransition(ctx, limit, policyTransition{
+		keyPrefix:        "policy",
+		kind:             userstate.UserDisable,
+		reason:           "quota or expiry policy enforcement",
+		alreadySatisfied: func(item userstore.Candidate) bool { return !item.Enabled },
+		candidates: func(store userstore.Store, ctx context.Context, now, month time.Time, limit int) ([]userstore.Candidate, error) {
+			return store.EnforcementCandidates(ctx, now, month, limit)
+		},
+		idempotencyKey: func(item userstore.Candidate, _ time.Time) string {
+			return operationIdempotencyKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, item.PeriodStart.UTC().Format(time.RFC3339))
+		},
+	})
 }
 
-func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
+func (s *Service) runPolicyTransition(ctx context.Context, limit int, spec policyTransition) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -338,7 +307,7 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	month := monthStart(now)
 	var candidates []userstore.Candidate
 	err := s.withStore(ctx, func(store userstore.Store) (err error) {
-		candidates, err = store.EnforcementCandidates(ctx, now, month, limit)
+		candidates, err = spec.candidates(store, ctx, now, month, limit)
 		return
 	})
 	if err != nil {
@@ -346,13 +315,12 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 	}
 	processed := 0
 	for _, item := range candidates {
-		key := operationIdempotencyKey("policy", item.NodeID.String(), item.Username, fmt.Sprint(item.PolicyVersion), item.Cause, item.PeriodStart.UTC().Format(time.RFC3339))
-		trace := tracecontext.NewTraceparent()
+		key := spec.idempotencyKey(item, month)
 		if err := s.withStore(ctx, func(store userstore.Store) error { return store.EnsureEnforcement(ctx, item, now) }); err != nil {
 			return 0, err
 		}
-		if !item.Enabled {
-			operationID, found, findErr := s.findUserOperation(ctx, item.NodeID, item.Username, key, userstate.UserDisable)
+		if spec.alreadySatisfied(item) {
+			operationID, found, findErr := s.findUserOperation(ctx, item.NodeID, item.Username, key, spec.kind)
 			if findErr != nil {
 				return 0, findErr
 			}
@@ -370,7 +338,11 @@ func (s *Service) enforcePolicies(ctx context.Context, limit int) (int, error) {
 			processed++
 			continue
 		}
-		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{NodeID: item.NodeID, Kind: userstate.UserDisable, Name: item.Username, ExpectedVersion: item.UserVersion, IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: "quota or expiry policy enforcement", RequestID: key, Traceparent: trace})
+		op, _, mutateErr := s.users.MutatePolicyEnforcement(ctx, userstate.MutationRequest{
+			NodeID: item.NodeID, Kind: spec.kind, Name: item.Username, ExpectedVersion: item.UserVersion,
+			IdempotencyKey: key, TTL: 24 * time.Hour, ActorID: "scheduler", Reason: spec.reason,
+			RequestID: key, Traceparent: tracecontext.NewTraceparent(),
+		})
 		if mutateErr != nil {
 			if errors.Is(mutateErr, userstate.ErrBacklogExceeded) {
 				return processed, nil

@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
 )
@@ -39,9 +38,8 @@ func (s *Server) getSecretRef(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(r.PathValue("secret_ref_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "secret_ref_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "secret_ref_id", "")
+	if !ok {
 		return
 	}
 	value, err := s.certificates.GetSecretRef(r.Context(), id)
@@ -55,9 +53,8 @@ func (s *Server) rotateSecretRef(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("secret_ref_id"), ":rotate"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "secret_ref_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "secret_ref_id", ":rotate")
+	if !ok {
 		return
 	}
 	var body secretRotateRequest

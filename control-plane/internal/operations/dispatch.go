@@ -100,7 +100,7 @@ func (s *Service) MarkSent(ctx context.Context, dispatch Dispatch) error {
 	if err != nil {
 		return err
 	}
-	return s.finishDispatch(ctx, dispatch, true, "", envelope)
+	return s.markSent(ctx, dispatch, envelope)
 }
 
 func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error) error {
@@ -111,11 +111,11 @@ func (s *Service) MarkFailed(ctx context.Context, dispatch Dispatch, cause error
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	return s.finishDispatch(ctx, dispatch, false, message, nil)
+	return s.markFailed(ctx, dispatch, message)
 }
 
-func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, message string, envelope *agentv1.CommandEnvelope) error {
-	err := database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+func (s *Service) withinDispatchTx(ctx context.Context, fn func(database.Tx, operationstore.Store) error) error {
+	return database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		if err := commandlimit.Lock(ctx, tx); err != nil {
 			return fmt.Errorf("serialize dispatch completion: %w", err)
 		}
@@ -123,23 +123,32 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		if err != nil {
 			return err
 		}
-		if !sent {
-			if err := store.LockDispatchOutbox(ctx, d); err != nil {
-				return err
-			}
-			status, err := store.DispatchStatus(ctx, d)
-			if err != nil {
-				return err
-			}
-			if !status.LeaseValid || !status.AttemptValid || !status.OwnsOutboxLock || status.ResultAfterAttempt {
-				return database.ErrNotFound
-			}
-			at, err := database.WallTime(ctx, tx)
-			if err != nil {
-				return err
-			}
-			return store.FailDispatch(ctx, d, message, at)
+		return fn(tx, store)
+	})
+}
+
+func (s *Service) markFailed(ctx context.Context, d Dispatch, message string) error {
+	return s.withinDispatchTx(ctx, func(tx database.Tx, store operationstore.Store) error {
+		if err := store.LockDispatchOutbox(ctx, d); err != nil {
+			return err
 		}
+		status, err := store.DispatchStatus(ctx, d)
+		if err != nil {
+			return err
+		}
+		if !status.LeaseValid || !status.AttemptValid || !status.OwnsOutboxLock || status.ResultAfterAttempt {
+			return database.ErrNotFound
+		}
+		at, err := database.WallTime(ctx, tx)
+		if err != nil {
+			return err
+		}
+		return store.FailDispatch(ctx, d, message, at)
+	})
+}
+
+func (s *Service) markSent(ctx context.Context, d Dispatch, envelope *agentv1.CommandEnvelope) error {
+	err := s.withinDispatchTx(ctx, func(tx database.Tx, store operationstore.Store) error {
 		// Take this lock in its own statement, so the following read observes a
 		// result transaction that committed while this statement was waiting.
 		if err := store.LockDispatchOutbox(ctx, d); err != nil {
@@ -193,7 +202,7 @@ func (s *Service) finishDispatch(ctx context.Context, d Dispatch, sent bool, mes
 		}
 		return store.CloseDispatch(ctx, d, at)
 	})
-	if sent && errors.Is(err, database.ErrCommitUnknown) {
+	if errors.Is(err, database.ErrCommitUnknown) {
 		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if confirmed := database.Within(check, s.backend, database.ReadCommitted, func(tx database.Tx) error {

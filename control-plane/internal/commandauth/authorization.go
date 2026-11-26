@@ -12,7 +12,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"slices"
 	"strings"
@@ -21,7 +20,6 @@ import (
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/canonicalcbor"
 	"github.com/GentleKingson/ocservia/control-plane/internal/protectedfile"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -561,28 +559,9 @@ func fixed32(value []byte, name string) ([32]byte, error) {
 }
 
 func readPrivateKeyFile(path string, expectedUID uint32) ([]byte, error) {
-	file, err := protectedfile.Open(path, expectedUID)
-	if err != nil {
-		return nil, fmt.Errorf("open command signing key: %w", err)
-	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return nil, fmt.Errorf("stat command signing key: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != expectedUID || stat.Nlink != 1 {
-		return nil, errors.New("command signing key must be a process-owned regular file with one link")
-	}
-	permissions := stat.Mode & 0o777
-	if permissions != 0o400 && permissions != 0o600 {
-		return nil, errors.New("command signing key mode must be 0400 or 0600")
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, 4097))
+	raw, err := protectedfile.ReadPrivate(path, expectedUID, false, 4096)
 	if err != nil {
 		return nil, fmt.Errorf("read command signing key: %w", err)
-	}
-	if len(raw) == 0 || len(raw) > 4096 {
-		return nil, errors.New("command signing key must contain 1..4096 bytes")
 	}
 	return raw, nil
 }

@@ -176,22 +176,34 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Certificat
 	return certificate, false, err
 }
 
-func (s *Service) releaseOperation(ctx context.Context, operationID, certificateID uuid.UUID) error {
+func (s *Service) withStore(ctx context.Context, fn func(database.Tx, certificatestore.Store) error) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		store, err := certificatestore.FromTransaction(tx)
 		if err != nil {
 			return err
 		}
+		return fn(tx, store)
+	})
+}
+
+func (s *Service) withArtifactStore(ctx context.Context, fn func(database.Tx, certificatestore.ArtifactStore) error) error {
+	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
+		store, err := certificatestore.ArtifactFromTransaction(tx)
+		if err != nil {
+			return err
+		}
+		return fn(tx, store)
+	})
+}
+
+func (s *Service) releaseOperation(ctx context.Context, operationID, certificateID uuid.UUID) error {
+	return s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 		return store.ReleaseOperation(ctx, operationID, certificateID)
 	})
 }
 
 func (s *Service) operationExists(ctx context.Context, workspace uuid.UUID, key string) (exists bool, err error) {
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 		exists, err = store.OperationExists(ctx, workspace, key)
 		return err
 	})
@@ -205,22 +217,15 @@ func (s *Service) Maintain(ctx context.Context) error {
 	if err := s.reconcileConsumingArtifacts(ctx); err != nil {
 		return err
 	}
-	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	return s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 		return store.Maintain(ctx, s.now())
 	})
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Certificate, error) {
 	var result certificatestore.Certificate
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		result, err = store.Get(ctx, id)
 		return err
 	})
@@ -229,11 +234,7 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Certificate, error) {
 
 func (s *Service) ListNode(ctx context.Context, nodeID uuid.UUID) ([]Certificate, error) {
 	values := make([]Certificate, 0)
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 		rows, err := store.ListNode(ctx, nodeID)
 		if err != nil {
 			return err
@@ -248,11 +249,8 @@ func (s *Service) ListNode(ctx context.Context, nodeID uuid.UUID) ([]Certificate
 
 func (s *Service) GetByOperation(ctx context.Context, operationID uuid.UUID, replay bool) (Certificate, bool, error) {
 	var result certificatestore.Certificate
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err := s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
+		var err error
 		result, err = store.GetByOperation(ctx, operationID)
 		return err
 	})
@@ -260,11 +258,7 @@ func (s *Service) GetByOperation(ctx context.Context, operationID uuid.UUID, rep
 }
 
 func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
-	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := certificatestore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+	err = s.withStore(ctx, func(_ database.Tx, store certificatestore.Store) error {
 		workspaceID, nodeID, err = store.Resource(ctx, id)
 		return err
 	})
