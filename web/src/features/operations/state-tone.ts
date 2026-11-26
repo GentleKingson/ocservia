@@ -15,7 +15,7 @@ const operationTones: Record<string, StateTone> = {
 };
 
 export function operationTone(operation: Operation): StateTone {
-  if (operation.agentUpgradeState && operation.state === "unknown")
+  if (operation.agent_upgrade_state && operation.state === "unknown")
     return "danger";
   return operationTones[operation.state] ?? "neutral";
 }

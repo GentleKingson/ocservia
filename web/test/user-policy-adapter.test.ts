@@ -18,15 +18,15 @@ import {
 
 function makePolicy(overrides: Partial<UserPolicy> = {}): UserPolicy {
   return {
-    nodeId: "019fdc5b-b939-72a1-ae67-8efd197e5688",
+    node_id: "019fdc5b-b939-72a1-ae67-8efd197e5688",
     username: "alice",
-    quotaPeriod: "none",
-    quotaDirection: "rxtx",
-    quotaBytes: 0,
+    quota_period: "none",
+    quota_direction: "rxtx",
+    quota_bytes: 0,
     version: 1,
-    periodStart: "1970-01-01T00:00:00Z",
-    observedRxBytes: 0,
-    observedTxBytes: 0,
+    period_start: "1970-01-01T00:00:00Z",
+    observed_rx_bytes: 0,
+    observed_tx_bytes: 0,
     exceeded: false,
     expired: false,
     convergence: "converged",
@@ -63,9 +63,9 @@ describe("user policy feature", () => {
       },
       "ticket",
     );
-    expect(request.quotaBytes).toBe(2_684_354_560);
-    expect(request.expiresAt).toBe("2026-09-01T00:00:00Z");
-    expect(request.expectedVersion).toBe(3);
+    expect(request.quota_bytes).toBe(2_684_354_560);
+    expect(request.expires_at).toBe("2026-09-01T00:00:00Z");
+    expect(request.expected_version).toBe(3);
   });
 
   it("forces no-quota policies to zero bytes", () => {
@@ -80,16 +80,16 @@ describe("user policy feature", () => {
       },
       "ticket",
     );
-    expect(request.quotaBytes).toBe(0);
-    expect(request.expiresAt).toBeUndefined();
+    expect(request.quota_bytes).toBe(0);
+    expect(request.expires_at).toBeUndefined();
   });
 
   it("chooses a lossless display unit", () => {
     const form = policyToForm(
       makePolicy({
-        quotaPeriod: "lifetime",
-        quotaDirection: "tx",
-        quotaBytes: 3 * 1024 * 1024,
+        quota_period: "lifetime",
+        quota_direction: "tx",
+        quota_bytes: 3 * 1024 * 1024,
       }),
     );
     expect(form.quotaUnit).toBe("MiB");
@@ -99,8 +99,8 @@ describe("user policy feature", () => {
   it("renders expiry as an exact UTC wall-clock value", () => {
     const form = policyToForm(
       makePolicy({
-        expiresAt: "2026-12-31T23:59:00Z",
-        periodStart: "2026-12-01T00:00:00Z",
+        expires_at: "2026-12-31T23:59:00Z",
+        period_start: "2026-12-01T00:00:00Z",
       }),
     );
     expect(form.expiresAtUtcInput).toBe("2026-12-31T23:59");
@@ -113,16 +113,16 @@ describe("user policy feature", () => {
       "+294276-12-31T23:59:59.999999Z",
       "2026-12-31T23:59:59.123456Z",
     ]) {
-      const form = policyToForm(makePolicy({ expiresAt: expiry }));
+      const form = policyToForm(makePolicy({ expires_at: expiry }));
       expect(form.expiresAtUtcInput).toBe(expiry.replace(/Z$/, ""));
       expect(expiryInputType(form.expiresAtUtcInput)).toBe("text");
       expect(() => formToRequest(form, "ticket")).toThrow("whole seconds");
       form.expiresAtUtcInput = "2026-12-31T23:59:59";
-      expect(formToRequest(form, "ticket").expiresAt).toBe(
+      expect(formToRequest(form, "ticket").expires_at).toBe(
         "2026-12-31T23:59:59Z",
       );
       form.expiresAtUtcInput = "";
-      expect(formToRequest(form, "ticket").expiresAt).toBeUndefined();
+      expect(formToRequest(form, "ticket").expires_at).toBeUndefined();
     }
   });
 });

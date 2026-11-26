@@ -1,6 +1,5 @@
 import createClient from "openapi-fetch";
 import type { paths } from "./generated/schema";
-import { fromWire } from "./models";
 import { redirectToLogin } from "../shared/session";
 
 export const devAuthToken = import.meta.env.DEV
@@ -82,18 +81,12 @@ client.use({
   },
 });
 
-export async function unwrap<T>(
+export async function read<T>(
   request: Promise<{ data?: T; response: Response }>,
 ): Promise<T> {
   const { data, response } = await request;
   if (data === undefined) throw new ResponseError(response);
   return data;
-}
-
-export async function read<T>(
-  request: Promise<{ data?: T; response: Response }>,
-) {
-  return fromWire(await unwrap(request));
 }
 
 export function fencedHeaders(version: number) {

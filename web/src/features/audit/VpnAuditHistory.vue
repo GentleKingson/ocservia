@@ -72,7 +72,7 @@ async function search(more = false) {
     if (read.current()) {
       items.value = more ? [...(items.value ?? []), ...page.items] : page.items;
       displayed.value = submitted.kind ?? "sessions";
-      nextCursor.value = page.nextCursor;
+      nextCursor.value = page.next_cursor;
     }
   } catch {
     if (read.current()) error.value = t("vpnAuditLoadFailed");
@@ -82,9 +82,9 @@ async function search(more = false) {
 }
 
 function duration(row: VpnAuditRecord) {
-  const start = row.flowStartedAt ?? row.connectedAt;
+  const start = row.flow_started_at ?? row.connected_at;
   if (!start) return "—";
-  const seconds = (Date.parse(row.lastSeenAt) - Date.parse(start)) / 1000;
+  const seconds = (Date.parse(row.last_seen_at) - Date.parse(start)) / 1000;
   return Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : "—";
 }
 
@@ -171,30 +171,30 @@ function download() {
         <TableRow
           v-for="row in items"
           :key="
-            row.eventId ??
-            [row.nodeId, row.sessionId, row.connectedAt].join('/')
+            row.event_id ??
+            [row.node_id, row.session_id, row.connected_at].join('/')
           "
         >
-          <TableCell>{{ row.eventType }}</TableCell>
+          <TableCell>{{ row.event_type }}</TableCell>
           <TableCell>{{ row.username }}</TableCell>
-          <TableCell>{{ row.nodeId }} / {{ row.sessionId }}</TableCell>
-          <TableCell>{{ row.clientIp }}</TableCell>
-          <TableCell>{{ row.vpnIp || "—" }}</TableCell>
-          <TableCell>{{ formatTimestamp(row.connectedAt) }}</TableCell>
-          <TableCell>{{ formatTimestamp(row.lastSeenAt) }}</TableCell>
+          <TableCell>{{ row.node_id }} / {{ row.session_id }}</TableCell>
+          <TableCell>{{ row.client_ip }}</TableCell>
+          <TableCell>{{ row.vpn_ip || "—" }}</TableCell>
+          <TableCell>{{ formatTimestamp(row.connected_at) }}</TableCell>
+          <TableCell>{{ formatTimestamp(row.last_seen_at) }}</TableCell>
           <TableCell v-if="displayed === 'observations'">
-            {{ formatTimestamp(row.absentAt) }}
+            {{ formatTimestamp(row.absent_at) }}
           </TableCell>
           <TableCell v-if="displayed === 'network'">
-            {{ row.destinationIp }} {{ row.destinationPort ?? "" }} /
+            {{ row.destination_ip }} {{ row.destination_port ?? "" }} /
             {{ row.protocol }}
           </TableCell>
           <TableCell v-if="displayed === 'network'">
-            {{ formatTimestamp(row.flowStartedAt) }}
+            {{ formatTimestamp(row.flow_started_at) }}
           </TableCell>
           <TableCell>{{ duration(row) }}</TableCell>
-          <TableCell>{{ row.bytesIn ?? "—" }}</TableCell>
-          <TableCell>{{ row.bytesOut ?? "—" }}</TableCell>
+          <TableCell>{{ row.bytes_in ?? "—" }}</TableCell>
+          <TableCell>{{ row.bytes_out ?? "—" }}</TableCell>
         </TableRow>
       </TableBody>
     </Table>

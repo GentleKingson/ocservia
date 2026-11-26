@@ -4,13 +4,7 @@ import type {
   CertificateP12Request,
   CertificateRevokeRequest,
 } from "./models";
-import {
-  client,
-  formatUuid,
-  newIdempotencyKey,
-  read,
-  unwrap,
-} from "./transport";
+import { client, formatUuid, newIdempotencyKey, read } from "./transport";
 
 export function createCertificate(
   nodeId: string,
@@ -23,13 +17,7 @@ export function createCertificate(
         path: { node_id: nodeId },
         header: { "Idempotency-Key": newIdempotencyKey() },
       },
-      body: {
-        expected_version: request.expectedVersion,
-        common_name: request.commonName,
-        key_bits: request.keyBits,
-        reason: request.reason,
-        ...(request.dnsNames ? { dns_names: request.dnsNames } : {}),
-      },
+      body: request,
       signal: signal ?? null,
     }),
   );
@@ -93,14 +81,9 @@ export function createCertificateP12(
     client.POST("/certificates/{certificate_id}:p12", {
       params: {
         path: { certificate_id: certificateId },
-        header: { "Idempotency-Key": request.artifactRequestId },
+        header: { "Idempotency-Key": request.artifact_request_id },
       },
-      body: {
-        expected_version: request.expectedVersion,
-        certificate_version: request.certificateVersion,
-        artifact_request_id: request.artifactRequestId,
-        reason: request.reason,
-      },
+      body: request,
       signal: signal ?? null,
     }),
   );
@@ -117,11 +100,7 @@ export function revokeCertificate(
         path: { certificate_id: certificateId },
         header: { "Idempotency-Key": newIdempotencyKey() },
       },
-      body: {
-        expected_version: request.expectedVersion,
-        certificate_version: request.certificateVersion,
-        reason: request.reason,
-      },
+      body: request,
       signal: signal ?? null,
     }),
   );
@@ -131,7 +110,7 @@ export async function downloadCertificateArtifact(
   artifactId: string,
   token: string,
 ): Promise<Blob> {
-  return unwrap(
+  return read(
     client.GET("/artifacts/{artifact_id}", {
       params: {
         path: { artifact_id: artifactId },

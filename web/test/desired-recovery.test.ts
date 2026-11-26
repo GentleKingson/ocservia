@@ -7,14 +7,16 @@ import {
 } from "../src/shared/desired-recovery";
 
 function resource(
-  recoveryMutationKind?: UserGroupResourceState["recoveryMutationKind"],
+  recoveryMutationKind?: UserGroupResourceState["recovery_mutation_kind"],
 ): UserGroupResourceState {
   return {
     kind: recoveryMutationKind === "group_apply" ? "group" : "user",
     name: "alice",
     convergence: "drifted",
-    recoveryRequired: true,
-    ...(recoveryMutationKind ? { recoveryMutationKind } : {}),
+    recovery_required: true,
+    ...(recoveryMutationKind
+      ? { recovery_mutation_kind: recoveryMutationKind }
+      : {}),
   };
 }
 
@@ -39,19 +41,19 @@ describe("resource management status", () => {
     expect(
       resourceStatusKey({
         ...resource(),
-        observedRevision: 1,
-        observedAt: "2026-09-30T00:00:00Z",
+        observed_revision: 1,
+        observed_at: "2026-09-30T00:00:00Z",
       }),
     ).toBe("resourceUnmanaged");
-    expect(resourceStatusKey({ ...resource(), desiredVersion: 1 })).toBe(
+    expect(resourceStatusKey({ ...resource(), desired_version: 1 })).toBe(
       "resourceNotObserved",
     );
     expect(
       resourceStatusKey({
         ...resource(),
-        desiredVersion: 1,
-        observedRevision: 0,
-        observedAt: "2026-09-30T00:00:00Z",
+        desired_version: 1,
+        observed_revision: 0,
+        observed_at: "2026-09-30T00:00:00Z",
       }),
     ).toBe("convergence_drifted");
   });
@@ -59,7 +61,7 @@ describe("resource management status", () => {
     "retains %s without an initial observation",
     (convergence) => {
       expect(
-        resourceStatusKey({ ...resource(), desiredVersion: 1, convergence }),
+        resourceStatusKey({ ...resource(), desired_version: 1, convergence }),
       ).toBe("convergence_" + convergence);
     },
   );

@@ -23,16 +23,16 @@ vi.mock("../src/api/operations", () => ({ getOperation: vi.fn() }));
 const scopes: EffectScope[] = [];
 const certificate = {
   id: "certificate-a",
-  nodeId: "node-a",
-  workspaceId: "workspace-a",
-  operationId: "csr-operation",
+  node_id: "node-a",
+  workspace_id: "workspace-a",
+  operation_id: "csr-operation",
   version: 3,
   state: "csr_ready",
 } as Certificate;
 const otherCertificate = {
   ...certificate,
   id: "certificate-b",
-  operationId: "other-csr-operation",
+  operation_id: "other-csr-operation",
 };
 
 function setup() {
@@ -87,14 +87,14 @@ describe("certificate feature without a page or store", () => {
     expect(api.createCertificateP12).toHaveBeenCalledTimes(1);
     const original = api.createCertificateP12.mock.calls[0];
     api.createCertificateP12.mockResolvedValueOnce({
-      artifactId: "artifact-a",
-      operation: { id: "export-operation", nodeId: "node-a", state: "queued" },
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      artifact_id: "artifact-a",
+      operation: { id: "export-operation", node_id: "node-a", state: "queued" },
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
     });
     await feature.createP12();
     expect(api.createCertificateP12.mock.calls[1]).toEqual(original);
     expect(feature.certificateError.value).toBe("p12GrantUnavailable");
-    expect(feature.certificateGrant.value?.downloadToken).toBeUndefined();
+    expect(feature.certificateGrant.value?.download_token).toBeUndefined();
     expect(trackOperation).toHaveBeenCalledExactlyOnceWith("export-operation");
   });
 
@@ -114,8 +114,10 @@ describe("certificate feature without a page or store", () => {
       const revised: unknown = api.createCertificateP12.mock.calls[1]?.[1];
       expect(revised).toMatchObject({ reason: "corrected reason" });
       expect(
-        (revised as { artifactRequestId: string }).artifactRequestId,
-      ).not.toBe((original as { artifactRequestId: string }).artifactRequestId);
+        (revised as { artifact_request_id: string }).artifact_request_id,
+      ).not.toBe(
+        (original as { artifact_request_id: string }).artifact_request_id,
+      );
     },
   );
 
@@ -130,10 +132,10 @@ describe("certificate feature without a page or store", () => {
     expect(other.certificateDialog.value).toBe(false);
     expect(other.certificate.value).toBeUndefined();
     expect(api.createCertificate).toHaveBeenCalledExactlyOnceWith("node-a", {
-      expectedVersion: 31,
-      commonName: "Node A",
-      dnsNames: ["node.example", "alternate.example"],
-      keyBits: 3072,
+      expected_version: 31,
+      common_name: "Node A",
+      dns_names: ["node.example", "alternate.example"],
+      key_bits: 3072,
       reason: "certificate",
     });
     await feature.submitCertificateIssue();
@@ -144,19 +146,19 @@ describe("certificate feature without a page or store", () => {
       },
     );
     api.createCertificateP12.mockResolvedValue({
-      artifactId: "artifact-a",
-      operation: { id: "p12-operation", nodeId: "node-a", state: "queued" },
-      downloadToken: "one-time-token",
+      artifact_id: "artifact-a",
+      operation: { id: "p12-operation", node_id: "node-a", state: "queued" },
+      download_token: "one-time-token",
       password: "one-time-password",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
     });
     await feature.createP12();
     expect(api.createCertificateP12).toHaveBeenCalledExactlyOnceWith(
       "certificate-a",
       {
-        expectedVersion: 31,
-        certificateVersion: 3,
-        artifactRequestId: expect.stringMatching(
+        expected_version: 31,
+        certificate_version: 3,
+        artifact_request_id: expect.stringMatching(
           /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
         ) as string,
         reason: "certificate",
@@ -164,7 +166,7 @@ describe("certificate feature without a page or store", () => {
     );
     expect(trackOperation).toHaveBeenCalledExactlyOnceWith("p12-operation");
     expect(feature.certificateDialog.value).toBe(true);
-    expect(feature.certificateGrant.value?.downloadToken).toBe(
+    expect(feature.certificateGrant.value?.download_token).toBe(
       "one-time-token",
     );
   });
@@ -213,7 +215,7 @@ describe("certificate feature without a page or store", () => {
 
       const operation = {
         id: "csr-operation",
-        nodeId: "node-a",
+        node_id: "node-a",
         state: "succeeded",
       } as Operation;
       api.listNodeCertificates.mockResolvedValueOnce(records);

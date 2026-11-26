@@ -43,11 +43,11 @@ async function sessionAction(
   reason: string,
   signal?: AbortSignal,
 ) {
-  if (!node.bootId) throw new Error("Node boot identity is unavailable");
+  if (!node.boot_id) throw new Error("Node boot identity is unavailable");
   const { header, body } = fencedRequest(node.version, reason, 60);
   const options = {
     params: { path: { node_id: node.id, session_id: sessionId }, header },
-    body: { ...body, boot_id: node.bootId },
+    body: { ...body, boot_id: node.boot_id },
     signal: signal ?? null,
   };
   return read(

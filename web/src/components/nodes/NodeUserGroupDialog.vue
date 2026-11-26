@@ -47,7 +47,7 @@ function openDesired(kind: DesiredDialogKind, name = "", version = 0): void {
       ? (
           fleet.userGroupState.find(
             (item) => item.kind === "group" && item.name === name,
-          )?.desiredMembers ?? []
+          )?.desired_members ?? []
         ).join(", ")
       : "";
   desiredReason.value = "";

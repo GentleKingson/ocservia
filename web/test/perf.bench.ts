@@ -12,14 +12,16 @@ function makeNodes(count: number): NodeObservedState[] {
     out.push({
       id: `01900001-0000-7000-8000-${String(i).padStart(12, "0")}`,
       name: `edge-node-${String(i).padStart(4, "0")}`,
-      trustStatus: i % 20 === 0 ? "pending" : "active",
-      connectionState: i % 10 === 0 ? "offline" : "online",
+      trust_status: i % 20 === 0 ? "pending" : "active",
+      connection_state: i % 10 === 0 ? "offline" : "online",
       freshness: freshness[i % freshness.length] ?? "fresh",
-      lastHeartbeatAt: new Date(base - ((i * 7919) % 3_600_000)).toISOString(),
-      path: { mode: modes[i % 2] ?? "direct", rttMs: 12 },
-      agentVersionState: i % 5 === 0 ? "upgrade_available" : "current",
+      last_heartbeat_at: new Date(
+        base - ((i * 7919) % 3_600_000),
+      ).toISOString(),
+      path: { mode: modes[i % 2] ?? "direct", rtt_ms: 12 },
+      agent_version_state: i % 5 === 0 ? "upgrade_available" : "current",
       dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-      sessionCount: i % 120,
+      session_count: i % 120,
       version: 1,
     });
   }
@@ -39,7 +41,7 @@ const filterState = {
 };
 const nowMs = Date.UTC(2026, 10, 19, 12, 5, 0);
 const timestamps = fleet1000.map(
-  (n) => n.lastHeartbeatAt ?? "2026-11-19T12:00:00.000Z",
+  (n) => n.last_heartbeat_at ?? "2026-11-19T12:00:00.000Z",
 );
 
 describe("Web fleet & timestamp hot paths", () => {
