@@ -57,9 +57,6 @@ if [[ "$(jq -r '.manifest_version' "${RELEASE_FILE}")" == 2 ]]; then
     [[ "${value}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || fail "invalid ${image} reference"
     export "OCSERV_${image^^}_IMAGE=${value}"
   done
-  if [[ "${OCSERV_DATABASE_BACKEND:-postgres}" != postgres ]]; then
-    fail "OCSERV_DATABASE_BACKEND must be postgres; MySQL is retired"
-  fi
 fi
 
 if [[ -z "${PUBLIC_URL}" ]]; then
@@ -71,7 +68,7 @@ PUBLIC_URL="${PUBLIC_URL%/}"
   fail "public Controller URL must use HTTPS"
 
 services=(control-plane transportd)
-if [[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]]; then
+if [[ "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == bundled ]]; then
   services=(postgres "${services[@]}")
 fi
 if [[ "${3:-}" != --skip-backup ]]; then

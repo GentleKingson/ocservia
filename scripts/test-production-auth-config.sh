@@ -183,13 +183,13 @@ chown 65532:65532 "${OCSERV_SIGNER_SECRET_DIR}" "${OCSERV_SIGNER_STATE_DIR}"
 cp "${OCSERV_SECRET_DIR}/certificate-signer-token" "${OCSERV_SECRET_DIR}/database-ca.pem"
 export OCSERV_DATABASE_BACKUP_HOST=database.example.com
 export OCSERV_LOCAL_AUTH_ENABLED=true
-for backend in postgres:bundled postgres:external; do
-  export OCSERV_DATABASE_BACKEND="${backend%:*}" OCSERV_DATABASE_DEPLOYMENT="${backend#*:}"
+for deployment in bundled external; do
+  export OCSERV_DATABASE_DEPLOYMENT="${deployment}"
   "${ROOT}/deploy/production/compose.sh" config --format json >"${work}/integrated.json"
-  jq -e --arg backend "${backend}" '
+  jq -e --arg deployment "${deployment}" '
     (.services["control-plane"].networks | has("application") and has("signer") and
-      has(if $backend == "postgres:bundled" then "database" else "database-egress" end)) and
-    (.services | has("postgres") == ($backend == "postgres:bundled")) and
+      has(if $deployment == "bundled" then "database" else "database-egress" end)) and
+    (.services | has("postgres") == ($deployment == "bundled")) and
     ([.services | to_entries[] | .key as $service | .value.ports[]? |
        [$service, .target, (.published | tostring), .protocol]] | sort) ==
       [["edge", 8443, "443", "tcp"], ["relay", 7842, "7842", "udp"]] and
@@ -203,7 +203,7 @@ for backend in postgres:bundled postgres:external; do
     (.services.signer.ports // [] | length == 0) and .networks.signer.internal
   ' "${work}/integrated.json" >/dev/null
 done
-expect_failure env OCSERV_DATABASE_BACKEND=mysql OCSERV_DATABASE_DEPLOYMENT=external "${ROOT}/deploy/production/compose.sh" config --quiet
+expect_failure env OCSERV_DATABASE_DEPLOYMENT=invalid "${ROOT}/deploy/production/compose.sh" config --quiet
 expect_failure env OCSERV_RELAY_URL_A=https://other.example.com "${ROOT}/deploy/production/compose.sh" config --quiet
 # Integrated allows Controller and Relay to share one DNS name, proxying Relay
 # paths through Gateway and reusing the Controller certificate for UDP 7842.

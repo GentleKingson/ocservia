@@ -39,8 +39,6 @@ arrays). Sealed secrets (`sealed_password`) encode as a nested map with keys
 | `100` | `SessionDisconnect` | `session_id`, `boot_id` |
 | `101` | `UserCreate` | `username`, `desired_revision`, `sealed_password` |
 | `102` | `UserDisable` | `username`, `desired_revision` |
-| `103` | `ConfigPlan` | `candidate_hash` (32B), `expected_revision` (`uint64`) |
-| `104` | `ConfigApply` | `candidate_hash` (32B), `expected_current_hash` (32B), `desired_revision` (`uint64`) |
 | `105` | `ServiceReload` | `{}` (empty map) |
 | `107` | `SyntheticNoop` | `{}` (empty map) |
 | `108` | `SyntheticEcho` | `message` |

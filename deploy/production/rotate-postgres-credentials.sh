@@ -255,7 +255,7 @@ recover() {
 [[ "${terminate_sessions}" == "true" || "${terminate_sessions}" == "false" ]] || fail "OCSERV_TERMINATE_OLD_POSTGRES_SESSIONS must be true or false"
 [[ "${wait_timeout}" =~ ^[1-9][0-9]*$ ]] || fail "OCSERV_ROTATION_WAIT_TIMEOUT_SECONDS must be a positive integer"
 [[ "${lock_timeout}" =~ ^[1-9][0-9]*$ ]] || fail "OCSERV_ROTATION_LOCK_TIMEOUT_SECONDS must be a positive integer"
-[[ "${OCSERV_DATABASE_BACKEND:-postgres}:${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == postgres:bundled ]] ||
+[[ "${OCSERV_DATABASE_DEPLOYMENT:-bundled}" == bundled ]] ||
   fail "credential rotation requires bundled PostgreSQL"
 [[ -z "${COMPOSE_FILE}" || ( -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ) ]] ||
   fail "rotation compose file must be a regular file"

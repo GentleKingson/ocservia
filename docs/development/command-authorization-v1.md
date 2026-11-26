@@ -1,6 +1,6 @@
 # Controller command authorization v1
 
-Under command protocols `1.1` and `1.2`, every command accepted by an Agent must carry an
+Under command protocol `1.2`, every command accepted by an Agent must carry an
 Ed25519 authorization signed by the Controller. When forwarding a command,
 `transportd` checks the bounded Protobuf wire schema, the negotiated session
 mode, capability, revision, and expiry, and uses its pinned Controller public
@@ -51,7 +51,7 @@ fields below (map keys sorted by RFC 8949 Core Deterministic CBOR rules):
 |---|---|
 | `version` | unsigned integer (`uint32`); v1 is `1` |
 | `key_id` | UTF-8 text string (`ed25519-sha256:...`) |
-| `protocol_version` | UTF-8 text string; current `1.2`, historical `1.1` |
+| `protocol_version` | UTF-8 text string; `1.2` |
 | `command_id` | 16-byte UUID byte string in network order |
 | `idempotency_key` | 16-byte UUID byte string in network order |
 | `node_id` | 16-byte UUID byte string in network order |
