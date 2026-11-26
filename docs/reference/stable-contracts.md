@@ -1269,7 +1269,7 @@ authenticity, and checks telemetry objects and runtime privileges. The
 The v2.0.0 Goose migration baseline initializes a fresh database. The
 v1.2.0 checkpoint belongs to the legacy migration history and cannot be
 the baseline for the v2.0.0 migrator. See
-[Database checkpoint release boundary](../development/release-checks.md#database-checkpoint-release-boundary)
+[Validation and release](../development/release-checks.md#choose-the-validation-scope)
 for release checks.
 
 ### Transactions and stores
@@ -1288,8 +1288,8 @@ Authoritative database requirements live in [Database support](../operations/pro
 
 | Version and deployment | Existing verification entry | Recovery and uncovered scope |
 | --- | --- | --- |
-| PostgreSQL 18.x bundled | `PG_MAJOR=18 DATABASE_TEST_SCOPE=smoke scripts/database-integration.sh`; `scripts/postgres-backup-restore-smoke.sh` | Base backup, isolated restore verification, and single-instance restart recovery. Does not cover clustered HA, automatic failover, or PITR. |
-| PostgreSQL 18.x external | Same backend checks plus `scripts/external-postgres-backup-restore-smoke.sh` | TLS-verified owner/runtime/backup connections and isolated base restore. Does not manage external HA or PITR. |
+| PostgreSQL 18.x bundled | `PG_MAJOR=18 scripts/database-postgres-smoke.sh` | Base backup, isolated restore verification, and single-instance restart recovery. Does not cover clustered HA, automatic failover, or PITR. |
+| PostgreSQL 18.x external | Same smoke checks plus external TLS validation | TLS-verified owner/runtime/backup connections and isolated base restore. Does not manage external HA or PITR. |
 | Retired backends (PostgreSQL 17, MySQL, MariaDB) | Rejected fail-closed by startup, Compose, and lifecycle entrypoints | Unsupported; no silent backend switching, data purge, or cross-engine automatic migration. |
 
 Adopting a new database patch release requires reviewing migrations, role permissions, SQL artifacts, and backup/restore behavior before updating the pinned digests, with runtime evidence captured in Business Smoke. Never wipe node SQLite journals to work around a database or package upgrade check.
@@ -1386,7 +1386,7 @@ fields; they locate server state and are never execution receipts or authority.
 
 Buf lints with `STANDARD` (one documented exception in [`proto/buf.yaml`](../../proto/buf.yaml)) and checks compatibility with the `FILE` policy on external [`proto/ocserv/platform/agent/v1`](../../proto/ocserv/platform/agent/v1). Private single-release IPC [`proto/ocserv/platform/transport/v1`](../../proto/ocserv/platform/transport/v1) is excluded from cross-version `buf breaking` checks so Controller and `transportd` can evolve their paired local RPC cleanly within a release. In `agent/v1`, removed published field numbers and names must be reserved, field numbers must never be reused, and every enum starts with an `UNSPECIFIED` zero value.
 
-Toolchain setup and the choice of checks are in [Choose the validation scope](../development/release-checks.md#choose-the-validation-scope). Contract breaking checks (`scripts/check-breaking.sh [base-ref]`, which normalizes retired pre-v2 baseline contracts and recognizes the exact v2.0.0 Agent schema transition) and generated-code cleanliness checks (`scripts/generated-clean.sh`) run in Basic CI when contract inputs or outputs change and on manual checks. CI supplies the PR merge-base or push before SHA; manual workflows require a non-self `contract_base_ref`. Standalone breaking checks default to `origin/main`. Regeneration requires a clean committed candidate and compares both staged and unstaged outputs with HEAD. For CI job routing, see [Path routing](../development/release-checks.md#path-routing). Passing a schema diff check does not replace release-level behavioral testing.
+Toolchain setup and the choice of checks are in [Choose the validation scope](../development/release-checks.md#choose-the-validation-scope). Contract breaking checks (`scripts/check-breaking.sh [base-ref]`, which normalizes retired pre-v2 baseline contracts and recognizes the exact v2.0.0 Agent schema transition) and generated-code cleanliness checks (`scripts/generated-clean.sh`) run in Basic CI when contract inputs or outputs change and on manual checks. CI supplies the PR merge-base or push before SHA; manual workflows require a non-self `contract_base_ref`. Standalone breaking checks default to `origin/main`. Regeneration requires a clean committed candidate and compares both staged and unstaged outputs with HEAD. For CI job routing, see [Basic CI](../development/release-checks.md#basic-ci). Passing a schema diff check does not replace release-level behavioral testing.
 
 HTTP timestamps use RFC 3339, and group membership responses expose ordered member names. Web TypeScript types are generated from `openapi/openapi.yaml` into `web/src/api/generated/schema.d.ts` by `openapi-typescript` via `scripts/generate.sh` and consumed with `openapi-fetch`; do not edit generated files by hand.
 

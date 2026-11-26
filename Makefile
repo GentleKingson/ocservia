@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := test
 
-.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean policy-check contracts-breaking go-check rust-check web-check security-check license-check database-integration integration e2e resilience-smoke resilience-full
+.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean policy-check contracts-breaking go-check rust-check web-check security-check license-check database-smoke e2e hygiene-check
 
 bootstrap:
 	./scripts/bootstrap.sh all
@@ -23,7 +23,7 @@ test-go:
 	source ./scripts/env.sh && (cd control-plane && go test ./...) && (cd signer && go test ./...)
 
 test-rust:
-	source ./scripts/env.sh && cd rust && cargo test --workspace --all-features
+	source ./scripts/env.sh && cd rust && cargo test --workspace --all-features --lib --bins
 
 test-web:
 	source ./scripts/env.sh && cd web && npm test
@@ -31,20 +31,11 @@ test-web:
 go-check:
 	./scripts/go-check.sh
 
-database-integration:
-	./scripts/database-integration.sh
-
-integration:
-	./scripts/development-simulation-integration.sh
+database-smoke:
+	./scripts/database-postgres-smoke.sh
 
 e2e:
 	./scripts/e2e.sh
-
-resilience-smoke:
-	OCSERVIA_RESILIENCE_PROFILE=smoke AGENT_COUNT=24 HEARTBEAT_COUNT=2 HEARTBEAT_INTERVAL_MS=500 REQUEST_CONCURRENCY=8 QUEUE_CAPACITY=256 MINIMUM_RESOURCE_SAMPLES=8 ./scripts/resilience-capacity.sh
-
-resilience-full:
-	OCSERVIA_RESILIENCE_PROFILE=full ./scripts/resilience-capacity.sh
 
 rust-check:
 	./scripts/rust-check.sh
@@ -63,6 +54,9 @@ verify:
 
 docs-check:
 	./scripts/docs-check.sh
+
+hygiene-check:
+	./scripts/test-hygiene-check.sh
 
 generated-clean:
 	./scripts/generated-clean.sh

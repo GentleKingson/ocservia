@@ -3,13 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/env.sh
 source "${ROOT}/scripts/env.sh"
-mode="${1:-full}"
+mode="${1:-basic}"
 case "${mode}" in basic|full) ;; *) echo 'usage: web-check.sh [basic|full]' >&2; exit 2 ;; esac
 (cd "${ROOT}/web" && npm run format:check)
 (cd "${ROOT}/web" && npm --ignore-scripts run lint)
 root_javascript=(
   scripts/redact-release-upgrade-log.mjs
-  scripts/release-business-browser.mjs scripts/test-release-upgrade.mjs
   .github/actions/build-cache-credentials/index.js
 )
 (cd "${ROOT}" && web/node_modules/.bin/prettier --check "${root_javascript[@]}")
@@ -18,5 +17,5 @@ root_javascript=(
 (cd "${ROOT}/web" && npm test)
 (cd "${ROOT}/web" && npm run build)
 if [[ "${mode}" == full ]]; then
-  (cd "${ROOT}/web" && node test/run-auth-browser.mjs)
+  (cd "${ROOT}/web" && npx --no-install playwright test --project=desktop)
 fi

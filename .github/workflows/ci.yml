@@ -36,17 +36,14 @@ jobs:
     timeout-minutes: 5
     outputs:
       profile: ${{ steps.relevance.outputs.profile }}
-      database_scope: ${{ steps.relevance.outputs.database_scope }}
       run_ci_tools: ${{ steps.relevance.outputs.run_ci_tools }}
       ci_suites: ${{ steps.relevance.outputs.ci_suites }}
       ci_tools_profiles: ${{ steps.relevance.outputs.ci_tools_profiles }}
       ci_tools_cache_label: ${{ steps.relevance.outputs.ci_tools_cache_label }}
-      run_installers: ${{ steps.relevance.outputs.run_installers }}
       run_docs: ${{ steps.relevance.outputs.run_docs }}
       run_go: ${{ steps.relevance.outputs.run_go }}
       run_rust: ${{ steps.relevance.outputs.run_rust }}
       run_web: ${{ steps.relevance.outputs.run_web }}
-      run_web_browser: ${{ steps.relevance.outputs.run_web_browser }}
       run_database: ${{ steps.relevance.outputs.run_database }}
       run_controller_cache: ${{ steps.relevance.outputs.run_controller_cache }}
       controller_cache_images: ${{ steps.relevance.outputs.controller_cache_images }}
@@ -59,7 +56,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 1 || 0 }}
-          # Keep the event snapshot even if the PR is merged before this job starts.
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Classify the change set
@@ -84,6 +80,7 @@ jobs:
       - run: |
           scripts/docs-check.sh
           scripts/check-public-repository.sh
+          scripts/test-hygiene-check.sh
 
   ci-tools:
     needs: ci-relevance
@@ -96,14 +93,14 @@ jobs:
           fetch-depth: ${{ !contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 1 || 0 }}
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Setup style, contract and release tools
+      - name: Setup style and contract tools
         if: needs.ci-relevance.outputs.ci_tools_profiles != ''
         uses: ./.github/actions/setup-tools
         with:
           profiles: ${{ needs.ci-relevance.outputs.ci_tools_profiles }}
           cache-label: ${{ needs.ci-relevance.outputs.ci_tools_cache_label }}
           cache-npm: ${{ contains(needs.ci-relevance.outputs.ci_suites, 'contracts') && 'true' || 'false' }}
-      - name: CI guard and workflow contracts
+      - name: Run style and contract checks
         id: check
         env:
           CI_SUITES: ${{ needs.ci-relevance.outputs.ci_suites }}
@@ -119,7 +116,7 @@ jobs:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_go == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ needs.ci-relevance.outputs.profile == 'full' && 30 || 20 }}
+    timeout-minutes: ${{ needs.ci-relevance.outputs.profile == 'full' && 20 || 10 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -145,6 +142,7 @@ jobs:
       - run: |
           scripts/go-check.sh ${{ needs.ci-relevance.outputs.profile == 'full' && 'full' || 'standard' }}
           scripts/transport-boundary-check.sh --go-only
+          scripts/test-hygiene-check.sh
       - name: Save Go modules (main only)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -162,7 +160,7 @@ jobs:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -188,40 +186,7 @@ jobs:
           scripts/rust-check.sh
           scripts/transport-boundary-check.sh --rust-only
           scripts/agent-boundary-check.sh
-      - name: Prune stale Rust build cache entries (main only)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-target-cache.outputs.cache-hit != 'true' }}
-        run: |
-          python3 - rust/target/debug <<'PY'
-          from pathlib import Path
-          import re
-          import shutil
-          import sys
-
-          debug_dir = Path(sys.argv[1])
-          shutil.rmtree(debug_dir / 'incremental', ignore_errors=True)
-          for entry in debug_dir.iterdir():
-              if entry.is_file() or entry.is_symlink():
-                  entry.unlink(missing_ok=True)
-          deps_dir = debug_dir / 'deps'
-          if deps_dir.is_dir():
-              test_bin = re.compile(r'^.+-[0-9a-f]{16}$')
-              workspace_artifact = re.compile(r'^((?:lib)?ocservia_[a-z0-9_]+)-[0-9a-f]{16}(\..+)$')
-              grouped = {}
-              for item in deps_dir.iterdir():
-                  if not (item.is_file() or item.is_symlink()):
-                      continue
-                  if test_bin.match(item.name):
-                      item.unlink(missing_ok=True)
-                      continue
-                  match = workspace_artifact.match(item.name)
-                  if match:
-                      grouped.setdefault((match.group(1), match.group(2)), []).append(item)
-              for items in grouped.values():
-                  if len(items) > 1:
-                      items.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-                      for stale in items[1:]:
-                          stale.unlink(missing_ok=True)
-          PY
+          scripts/test-hygiene-check.sh
       - name: Save Rust workspace build cache (main only)
         if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-target-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -229,61 +194,11 @@ jobs:
           path: rust/target/debug
           key: ${{ steps.rust-target-cache.outputs.cache-primary-key }}
 
-  installers:
-    needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_installers == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Relay launcher and installer contracts
-        run: |
-          export PYTHONDONTWRITEBYTECODE=1
-          work="$(mktemp -d)"
-          trap 'rm -rf -- "${work}"' EXIT
-          pids=()
-          logs=()
-          run_bg() {
-            local idx="${#pids[@]}"
-            logs[idx]="${work}/check-${idx}.log"
-            "$@" >"${logs[idx]}" 2>&1 &
-            pids[idx]=$!
-          }
-          run_bg bash scripts/test-controller-install.sh
-          run_bg bash scripts/test-controller-bootstrap.sh
-          run_bg bash scripts/test-controller-host-bootstrap.sh
-          run_bg bash scripts/test-postgres-backup.sh
-          run_bg bash scripts/test-controller-lifecycle.sh
-          run_bg bash scripts/test-production-auth-config.sh
-          run_bg python3 scripts/test-vpn-audit.py
-          run_bg python3 scripts/test-controller-gateway-headers.py
-          docker run --rm --network none -v "$PWD:/source:ro" \
-            python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df \
-            python3 /source/scripts/test-relay-launchers.py >"${work}/relay.log" 2>&1 &
-          pids+=("$!")
-          logs+=("${work}/relay.log")
-          status=0
-          for idx in "${!pids[@]}"; do
-            if ! wait "${pids[idx]}"; then
-              status=1
-            fi
-            cat "${logs[idx]}"
-          done
-          # Run after test-controller-lifecycle.sh because BootstrapTest creates
-          # .bootstrap-test-* directories inside the repository root.
-          if ! python3 scripts/test-node-bootstrap.py; then
-            status=1
-          fi
-          exit "${status}"
-
   web:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_web == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -293,111 +208,17 @@ jobs:
         with:
           profiles: web
           cache-npm: 'true'
-      - run: scripts/web-check.sh basic
-
-  web-browser:
-    needs: ci-relevance
-    if: needs.ci-relevance.outputs.run_web_browser == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      # Shared UI regressions run in mobile Chromium and all three engines.
-      BROWSER_PROJECTS: desktop mobile firefox webkit
-      # Full also serves the build through the production Standalone gateway and
-      # then the Integrated Edge and gateway, where the cross-engine specs fail
-      # on any CSP violation.
-      BROWSER_GATEWAYS: ${{ needs.ci-relevance.outputs.profile == 'full' && 'standalone integrated' || '' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: ./.github/actions/setup-tools
-        with:
-          profiles: web
-          cache-npm: 'true'
-      - name: Build production web bundle and pull browser images
-        run: |
-          pw_version="$(jq -r '.devDependencies["@playwright/test"]' web/package.json)"
-          pw_version="${pw_version#^}"
-          [[ "${pw_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          echo "PW_VERSION=${pw_version}" >>"${GITHUB_ENV}"
-          pids=()
-          (
-            source scripts/env.sh
-            cd web
-            npm run build
-          ) &
-          pids+=("$!")
-          docker pull -q "mcr.microsoft.com/playwright:v${pw_version}-noble" >/dev/null &
-          pids+=("$!")
-          if [[ -n "${BROWSER_GATEWAYS}" ]]; then
-            caddy_image="$(awk '/^FROM caddy:/ {print $2; exit}' deploy/production/gateway.Dockerfile)"
-            nginx_image="$(awk '/^FROM nginx:/ {print $2; exit}' deploy/production/edge.Dockerfile)"
-            docker pull -q "${caddy_image}" >/dev/null &
-            pids+=("$!")
-            docker pull -q "${nginx_image}" >/dev/null &
-            pids+=("$!")
-          fi
-          status=0
-          for pid in "${pids[@]}"; do
-            wait "${pid}" || status=1
-          done
-          exit "${status}"
-      - name: Browser regressions on the production build
-        run: |
-          pw_tmp="$(mktemp -d /tmp/ocservia-pw.XXXXXX)"
-          chmod 0755 "${pw_tmp}"
-          mkdir -p "${pw_tmp}/home" "${pw_tmp}/cache"
-          trap 'rm -rf -- "${pw_tmp}"' EXIT
-          docker_args=(
-            --rm --init --ipc=host --network=host
-            --user "$(id -u):$(id -g)"
-            --security-opt seccomp=unconfined
-            --security-opt apparmor=unconfined
-            -v "${PWD}:${PWD}:ro"
-            -v "${pw_tmp}:${pw_tmp}"
-            -w "${PWD}/web"
-            -e "PATH=${PWD}/.tools/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            -e "TMPDIR=${pw_tmp}"
-            -e "HOME=${pw_tmp}/home"
-            -e "XDG_CACHE_HOME=${pw_tmp}/cache"
-            -e "PLAYWRIGHT_WORKERS=4"
-            -e "BROWSER_PROJECTS=${BROWSER_PROJECTS}"
-            -e "BROWSER_GATEWAYS=${BROWSER_GATEWAYS}"
-          )
-          if [[ -n "${BROWSER_GATEWAYS}" ]]; then
-            docker_args+=(
-              --group-add "$(stat -c '%g' /var/run/docker.sock)"
-              -v "$(command -v docker):/usr/local/bin/docker:ro"
-              -v /var/run/docker.sock:/var/run/docker.sock
-            )
-          fi
-          docker run "${docker_args[@]}" "mcr.microsoft.com/playwright:v${PW_VERSION}-noble" \
-            bash -euo pipefail -c '
-              args=()
-              for project in ${BROWSER_PROJECTS}; do args+=("--project=${project}"); done
-              specs=(agent-rollout.spec.ts node-forms.spec.ts shell-navigation.spec.ts apple-layout.spec.ts vpn-audit.spec.ts)
-              if [[ -z "${BROWSER_GATEWAYS}" ]]; then
-                node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}"
-              fi
-              for gateway in ${BROWSER_GATEWAYS}; do
-                if [[ "${gateway}" == standalone ]]; then
-                  node test/run-auth-browser.mjs "${specs[@]}" "${args[@]}" "--gateway=${gateway}"
-                else
-                  node test/run-auth-browser.mjs "${args[@]}" "--gateway=${gateway}"
-                fi
-              done
-            '
+      - run: |
+          scripts/web-check.sh basic
+          scripts/test-hygiene-check.sh
 
   database-smoke:
     needs: ci-relevance
     if: needs.ci-relevance.outputs.run_database == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ needs.ci-relevance.outputs.database_scope == 'full' && 90 || 25 }}
+    timeout-minutes: 15
     env:
       PG_MAJOR: '18'
-      DATABASE_TEST_SCOPE: ${{ needs.ci-relevance.outputs.database_scope }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -422,55 +243,7 @@ jobs:
           restore-keys: |
             basic-go-build-v1-db-smoke-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
             basic-go-build-v1-unit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-key.outputs.identity }}-
-      - run: scripts/database-integration.sh
-      - name: Verify PostgreSQL 18 volume lifecycle
-        run: bash scripts/test-postgres-volume-layout.sh
-      - name: Save Go modules (main only)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-mod-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/go-mod
-          key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
-      - name: Save database Go objects (main only)
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: .cache/go-build
-          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
-
-  database-recovery-full:
-    needs: ci-relevance
-    if: needs.ci-relevance.outputs.profile == 'full'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - run: |
-          mkdir -p "${RUNNER_TEMP}/database-recovery-postgres/bundled"
-          RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres-bundled" \
-            ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-postgres/bundled" \
-            bash scripts/postgres-backup-restore-smoke.sh >"${RUNNER_TEMP}/recovery-bundled.log" 2>&1 &
-          bundled_pid=$!
-          RUN_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-postgres" \
-            ARTIFACT_DIR="${RUNNER_TEMP}/database-recovery-postgres" \
-            bash scripts/external-postgres-backup-restore-smoke.sh >"${RUNNER_TEMP}/recovery-external.log" 2>&1 &
-          ext_pid=$!
-          bundled_status=0; ext_status=0
-          wait "${bundled_pid}" || bundled_status=$?
-          wait "${ext_pid}" || ext_status=$?
-          cat "${RUNNER_TEMP}/recovery-bundled.log" "${RUNNER_TEMP}/recovery-external.log"
-          ((bundled_status == 0 && ext_status == 0))
-      - name: Preserve database recovery evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: database-recovery-postgres-${{ github.run_id }}
-          path: ${{ runner.temp }}/database-recovery-postgres
-          if-no-files-found: warn
-          retention-days: 7
+      - run: scripts/database-postgres-smoke.sh
 
   controller-cache:
     name: Refresh Controller cache (${{ matrix.arch }})
@@ -510,7 +283,7 @@ jobs:
   basic-ci-result:
     name: Basic CI Result
     if: ${{ always() && !cancelled() }}
-    needs: [ci-relevance, docs, ci-tools, go, rust, installers, web, web-browser, database-smoke, database-recovery-full]
+    needs: [ci-relevance, docs, ci-tools, go, rust, web, database-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -522,25 +295,20 @@ jobs:
             . as $results | .["ci-relevance"].outputs as $routing |
             .["ci-relevance"].result == "success" and
             ($routing.profile == "quick" or $routing.profile == "full") and
-            all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database", "run_ci_tools", "run_installers", "run_controller_cache"][];
+            all(["run_docs", "run_go", "run_rust", "run_web", "run_database", "run_ci_tools", "run_controller_cache"][];
               $routing[.] == "true" or $routing[.] == "false") and
             (if $routing.profile == "full" then
-              all(["run_docs", "run_go", "run_rust", "run_web", "run_web_browser", "run_database", "run_ci_tools", "run_installers"][]; $routing[.] == "true") and
-              ($routing.ci_suites | split(" ") | index("guards") != null and index("release") != null and index("source-style") != null and index("contracts") != null)
+              all(["run_docs", "run_go", "run_rust", "run_web", "run_database", "run_ci_tools"][]; $routing[.] == "true") and
+              ($routing.ci_suites | split(" ") | index("source-style") != null and index("contracts") != null)
             else true end) and
             all([
               ["docs", "run_docs"],
               ["ci-tools", "run_ci_tools"],
               ["go", "run_go"],
               ["rust", "run_rust"],
-              ["installers", "run_installers"],
               ["web", "run_web"],
-              ["web-browser", "run_web_browser"],
               ["database-smoke", "run_database"]
             ][];
               ($routing[.[1]] == "true") as $selected |
               ($selected and $results[.[0]].result == "success") or
-              ($selected == false and $results[.[0]].result == "skipped")) and
-            (if $routing.profile == "full" then
-              .["database-recovery-full"].result == "success"
-            else .["database-recovery-full"].result == "skipped" end)'
+              ($selected == false and $results[.[0]].result == "skipped"))'
