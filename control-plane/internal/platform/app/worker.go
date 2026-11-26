@@ -32,13 +32,13 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		}
 	}
 	if cfg.ControllerEndpointID != "" {
-		ownerSessions, err = ownersession.NewManagerBackend(backend, logger)
+		ownerSessions, err = ownersession.NewManager(backend, logger)
 		if err != nil {
 
 			return nil, cleanup, fmt.Errorf("configure connection owner sessions: %w", err)
 		}
 		life.start("watch owner transport", func(ctx context.Context) error { return ownerSessions.WatchTransport(ctx, workerTransport) })
-		trust, err := trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessionsBackend(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions), backend), cfg.TransportUID)
+		trust, err := trustserver.New(cfg.TrustSocket, trustserver.NewHandler(enrollment.NewWithOwnerSessions(backend, cfg.ControllerEndpointID, build.Version, commandSigner, ownerSessions), backend), cfg.TransportUID)
 		if err != nil {
 
 			return nil, cleanup, fmt.Errorf("configure trust server: %w", err)
@@ -46,9 +46,9 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 		life.trust = trust
 		life.start("serve trust UDS", func(context.Context) error { return trust.Serve() })
 	}
-	eventService := transportevents.NewBackend(backend, commandSigner)
+	eventService := transportevents.New(backend, commandSigner)
 	if ownerSessions != nil {
-		eventService = transportevents.NewBackendWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
+		eventService = transportevents.NewWithCommandRecovery(backend, commandSigner, operationService, ownerSessions)
 	}
 	eventService.SetLocalSimulator(cfg.LocalSimulator)
 	if workerTransport != nil {
@@ -61,7 +61,7 @@ func startWorker(life *lifecycle, cfg config.Config, build BuildInfo, backend da
 			return nil, cleanup, fmt.Errorf("configure outbox worker: %w", err)
 		}
 		life.start("run outbox worker", operationWorker.Run)
-		trustWorker, err := enrollment.NewTrustConvergenceWorkerBackend(backend, transport, logger)
+		trustWorker, err := enrollment.NewTrustConvergenceWorker(backend, transport, logger)
 		if err != nil {
 
 			return nil, cleanup, fmt.Errorf("configure trust convergence worker: %w", err)

@@ -60,10 +60,7 @@ func IngestCommandResult(ctx context.Context, tx database.Tx, eventID, nodeID uu
 	default:
 		return invalidCommandResult("command result state is invalid")
 	}
-	store, err := resultstore.Results(tx)
-	if err != nil {
-		return err
-	}
+	store := resultstore.Results(tx)
 	at := observedAt.UTC()
 	completed := completedTime.UTC()
 	stored, err := store.LoadCommand(ctx, commandID, nodeID)

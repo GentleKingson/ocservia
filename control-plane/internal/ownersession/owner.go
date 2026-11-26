@@ -71,7 +71,7 @@ type Manager struct {
 	nodeLocks map[[16]byte]*nodeLock
 }
 
-func NewManagerBackend(backend database.Backend, logger *slog.Logger) (*Manager, error) {
+func NewManager(backend database.Backend, logger *slog.Logger) (*Manager, error) {
 	if backend == nil {
 		return nil, errors.New("ownersession: backend is required")
 	}
@@ -116,7 +116,7 @@ func (m *Manager) lockNode(nodeID [16]byte) func() {
 func (m *Manager) OpenSession(ctx context.Context, nodeID, connectionID [16]byte, endpointID [32]byte) (Session, error) {
 	unlock := m.lockNode(nodeID)
 	defer unlock()
-	term, err := connectionowner.AcquireBackend(ctx, m.backend, nodeID, connectionID)
+	term, err := connectionowner.Acquire(ctx, m.backend, nodeID, connectionID)
 	if err != nil {
 		return Session{}, fmt.Errorf("ownersession: acquire session epoch: %w", err)
 	}
@@ -152,9 +152,9 @@ func (m *Manager) CloseSession(ctx context.Context, nodeID [16]byte, connectionI
 	}
 	m.mu.Unlock()
 	// Controller restarts clear m.sessions while pre-restart transportd
-	// sessions remain active in PostgreSQL; ReleaseTermBackend atomically
+	// sessions remain active in PostgreSQL; ReleaseTerm atomically
 	// deactivates only the exact matching (nodeID, connectionID, epoch).
-	if err := connectionowner.ReleaseTermBackend(ctx, m.backend, nodeID, connectionID, int64(epoch)); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
+	if err := connectionowner.ReleaseTerm(ctx, m.backend, nodeID, connectionID, int64(epoch)); err != nil && !errors.Is(err, connectionowner.ErrNotOwner) {
 		return fmt.Errorf("ownersession: release node session: %w", err)
 	}
 	return nil

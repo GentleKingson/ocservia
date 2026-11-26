@@ -32,19 +32,13 @@ type VerificationKey struct {
 
 type Store interface {
 	FirstKey(context.Context, uuid.UUID) (string, VerificationKey, error)
-	KeyStateCounts(context.Context) (database.Rows, error)
+	KeyStateCounts(context.Context) (map[string]int64, error)
 	VerificationKey(context.Context, uuid.UUID, string) (VerificationKey, error)
 	InsertKey(context.Context, Key) error
 	ApproveCapability(context.Context, uuid.UUID, string) error
 	BumpNodeRevision(context.Context, uuid.UUID, time.Time) error
 }
 
-type Provider interface{ PrivdAttestationStore() Store }
-
-func StoreFrom(tx database.Tx) (Store, error) {
-	p, ok := tx.(Provider)
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.PrivdAttestationStore(), nil
+func StoreFrom(tx database.Tx) Store {
+	return database.Must[interface{ PrivdAttestationStore() Store }](tx).PrivdAttestationStore()
 }

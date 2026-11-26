@@ -23,12 +23,8 @@ func (s *Service) ListEventsInWorkspace(ctx context.Context, workspace, after uu
 		return nil, false, errors.New("event order must be asc or desc")
 	}
 	var events []Event
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		events, err = store.Events(ctx, workspace, after, limit+1, order == ListEventsDescending)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		events, err = eventstore.FromTransaction(tx).Events(ctx, workspace, after, limit+1, order == ListEventsDescending)
 		return err
 	})
 	if err != nil {
@@ -46,12 +42,8 @@ func (s *Service) EventSequenceInWorkspace(ctx context.Context, workspace, event
 		return 0, false, nil
 	}
 	var sequence int64
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		sequence, err = store.EventSequence(ctx, workspace, event)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		sequence, err = eventstore.FromTransaction(tx).EventSequence(ctx, workspace, event)
 		return err
 	})
 	if errors.Is(err, database.ErrNotFound) {
@@ -65,12 +57,8 @@ func (s *Service) EventSequenceInWorkspace(ctx context.Context, workspace, event
 
 func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(context.Context, []byte) (bool, error)) error {
 	var candidates []eventstore.GapNode
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		candidates, err = store.GapNodes(ctx, workspaceSlug)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		candidates, err = eventstore.FromTransaction(tx).GapNodes(ctx, workspaceSlug)
 		return err
 	})
 	if err != nil {
@@ -88,10 +76,7 @@ func (s *Service) ReconcileEventGap(ctx context.Context, nodeConnected func(cont
 		}
 	}
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := eventstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
+		store := eventstore.FromTransaction(tx)
 		if err := store.InvalidateCursor(ctx); err != nil {
 			return fmt.Errorf("invalidate transport cursor after event gap: %w", err)
 		}

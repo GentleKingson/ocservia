@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
+	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/google/uuid"
 )
 
-func checkSmokeTransactions(t *testing.T, ctx context.Context, store database.Backend, workspace uuid.UUID) {
+func checkSmokeTransactions(t *testing.T, ctx context.Context, store *postgres.Backend, workspace uuid.UUID) {
 	t.Helper()
 	update, read := `UPDATE workspaces SET name=$1 WHERE id=$2`, `SELECT name FROM workspaces WHERE id=$1`
 	rollback := errors.New("rollback smoke transaction")
@@ -19,11 +20,15 @@ func checkSmokeTransactions(t *testing.T, ctx context.Context, store database.Ba
 			name = "rolled back workspace"
 		}
 		err := database.Within(ctx, store, database.ReadCommitted, func(tx database.Tx) error {
-			if _, err := tx.Exec(ctx, update, name, workspace); err != nil {
+			q := tx.(interface {
+				Exec(context.Context, string, ...any) (int64, error)
+				QueryRow(context.Context, string, ...any) postgres.Row
+			})
+			if _, err := q.Exec(ctx, update, name, workspace); err != nil {
 				return err
 			}
 			var got string
-			if err := tx.QueryRow(ctx, read, workspace).Scan(&got); err != nil {
+			if err := q.QueryRow(ctx, read, workspace).Scan(&got); err != nil {
 				return err
 			}
 			if got != name {

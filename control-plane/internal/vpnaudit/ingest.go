@@ -74,21 +74,14 @@ func Ingest(ctx context.Context, backend database.Backend, req *wire.StoreVpnAud
 		receipt.EventIds = append(receipt.EventIds, r.EventId)
 	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		trustStore, e := ingress.Ingress(tx)
-		if e != nil {
-			return e
-		}
-		trust, e := trustStore.LockTrustShared(ctx, node, req.EndpointId)
+		trust, e := ingress.Ingress(tx).LockTrustShared(ctx, node, req.EndpointId)
 		if e != nil {
 			return e
 		}
 		if trust.EndpointState != "active" || (trust.NodeStatus != "active" && trust.NodeStatus != "offline") {
 			return ErrInactive
 		}
-		store, ok := tx.(Store)
-		if !ok {
-			return database.ErrUnsupported
-		}
+		store := database.Must[Store](tx)
 		if e = store.CheckAuditFence(ctx, req.NodeId, req.ConnectionId, int64(req.SessionEpoch)); e != nil {
 			return e
 		}

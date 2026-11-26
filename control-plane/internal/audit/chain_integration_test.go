@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testfixture"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -18,14 +19,14 @@ func TestHashChainCheckpointAndTamperDetectionIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
 	owner := testfixture.OpenOwnerPool(t)
+	backend := postgres.WrapPool(pool)
 	workspaceID := uuid.Must(uuid.NewV7())
 	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'audit tamper',$2,now(),now())`, workspaceID, "audit-"+workspaceID.String())
-	tx, err := pool.Begin(ctx)
-	testutil.NoError(t, err)
 	eventID := uuid.Must(uuid.NewV7())
-	testutil.NoError(t, AppendChainTx(ctx, postgres.WrapTx(tx), ChainRecord{EventID: eventID, WorkspaceID: workspaceID, ActorType: "user", ActorID: "auditor", Action: "test", ResourceType: "workspace", ResourceID: workspaceID, RequestID: "audit-test", Reason: "original"}))
-	testutil.NoError(t, tx.Commit(ctx))
-	manager := NewBackendManager(postgres.WrapPool(pool), integrationCheckpointKey(t))
+	testutil.NoError(t, database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+		return AppendChainTx(ctx, tx, ChainRecord{EventID: eventID, WorkspaceID: workspaceID, ActorType: "user", ActorID: "auditor", Action: "test", ResourceType: "workspace", ResourceID: workspaceID, RequestID: "audit-test", Reason: "original"})
+	}))
+	manager := NewManager(backend, integrationCheckpointKey(t))
 	testutil.NoError(t, manager.Checkpoint(ctx, workspaceID))
 	verified, err := manager.Verify(ctx, workspaceID)
 	if err != nil || !verified.Valid || !verified.Checkpoint {
@@ -73,13 +74,13 @@ func TestForgedDatabaseTailCannotVerifyOrCheckpointIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool := testfixture.OpenRuntimePool(t)
 	owner := testfixture.OpenOwnerPool(t)
+	backend := postgres.WrapPool(pool)
 	workspaceID := uuid.Must(uuid.NewV7())
 	testutil.Exec(t, ctx, pool, `INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'audit forged tail',$2,now(),now())`, workspaceID, "audit-forged-"+workspaceID.String())
-	tx, err := pool.Begin(ctx)
-	testutil.NoError(t, err)
-	testutil.NoError(t, AppendChainTx(ctx, postgres.WrapTx(tx), ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: "auditor", Action: "test", ResourceType: "workspace", ResourceID: workspaceID, RequestID: "audit-authenticated", Reason: "authenticated"}))
-	testutil.NoError(t, tx.Commit(ctx))
-	manager := NewBackendManager(postgres.WrapPool(pool), integrationCheckpointKey(t))
+	testutil.NoError(t, database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
+		return AppendChainTx(ctx, tx, ChainRecord{WorkspaceID: workspaceID, ActorType: "user", ActorID: "auditor", Action: "test", ResourceType: "workspace", ResourceID: workspaceID, RequestID: "audit-authenticated", Reason: "authenticated"})
+	}))
+	manager := NewManager(backend, integrationCheckpointKey(t))
 	testutil.NoError(t, manager.Checkpoint(ctx, workspaceID))
 	var previous []byte
 	testutil.NoError(t, owner.QueryRow(ctx, `SELECT event_hash FROM audit_events WHERE workspace_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, workspaceID).Scan(&previous))

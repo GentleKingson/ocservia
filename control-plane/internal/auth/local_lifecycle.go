@@ -87,10 +87,7 @@ func (s *Service) ResetLocalAdminPassword(ctx context.Context) (string, string, 
 
 	var username string
 	err = database.WithinRetry(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := authstore.From(tx)
-		if err != nil {
-			return err
-		}
+		store := authstore.From(tx)
 		if err := store.LockManagement(ctx); err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -32,51 +33,42 @@ var (
 	ErrUnavailable = errors.New("database: connection unavailable")
 )
 
-type Row interface{ Scan(...any) error }
-type Rows interface {
-	Next() bool
-	Scan(...any) error
-	Err() error
-	Close()
-}
-
-// CollectColumn scans every row of a single-column result into a slice and
-// closes rows. Pass a Query call directly so its error is returned first.
-func CollectColumn[T any](rows Rows, err error) ([]T, error) {
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []T
-	for rows.Next() {
-		var value T
-		if err := rows.Scan(&value); err != nil {
-			return nil, err
-		}
-		values = append(values, value)
-	}
-	return values, rows.Err()
-}
-
-// Store executes backend-owned SQL. Business modules use domain-specific
-// stores instead; SQL dialects are not translated by this interface.
-type Store interface {
-	Exec(context.Context, string, ...any) (int64, error)
-	QueryRow(context.Context, string, ...any) Row
-	Query(context.Context, string, ...any) (Rows, error)
+type PoolStats struct {
+	Acquired, Idle, Total int64
 }
 
 // Tx is shared by every store participating in one business operation.
 // Only the transaction owner commits or rolls back; stores never begin a Tx.
 type Tx interface {
-	Store
 	Commit(context.Context) error
 	Rollback(context.Context) error
+	// WallTime must be read after acquiring authority locks. TransactionTime can
+	// predate a lock wait and must not authorize an expired lease's renewal.
+	WallTime(context.Context) (time.Time, error)
 }
 
 type Backend interface {
-	Store
 	Begin(context.Context, Isolation) (Tx, error)
+	CheckReadiness(context.Context) error
+	PoolStats() PoolStats
+}
+
+// Must resolves a domain store provider implemented by v (or any wrapped
+// transaction exposed via Unwrap() Tx). Production transactions always
+// implement every domain store.
+func Must[T any](v any) T {
+	for cur := v; cur != nil; {
+		if s, ok := cur.(T); ok {
+			return s
+		}
+		u, ok := cur.(interface{ Unwrap() Tx })
+		if !ok {
+			break
+		}
+		cur = u.Unwrap()
+	}
+	var zero T
+	panic(fmt.Sprintf("database: %T does not implement %T", v, zero))
 }
 
 // Within never retries a business callback. Cleanup must work even after the

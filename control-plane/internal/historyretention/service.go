@@ -43,11 +43,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	now := s.now().UTC().Truncate(time.Microsecond)
 	cutoff := now.Add(-time.Duration(s.policy.CommandDays) * 24 * time.Hour)
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		provider, ok := tx.(Provider)
-		if !ok {
-			return database.ErrUnsupported
-		}
-		store := provider.HistoryRetentionStore()
+		store := database.Must[interface{ HistoryRetentionStore() Store }](tx).HistoryRetentionStore()
 		ids, err := store.Candidates(ctx, cutoff)
 		if err != nil {
 			return err
@@ -75,11 +71,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	}
 	retiredCutoff := now.Add(-time.Duration(s.policy.RetiredNodeDays) * 24 * time.Hour)
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		provider, ok := tx.(Provider)
-		if !ok {
-			return database.ErrUnsupported
-		}
-		return provider.HistoryRetentionStore().CompactRetired(ctx, retiredCutoff)
+		return database.Must[interface{ HistoryRetentionStore() Store }](tx).HistoryRetentionStore().CompactRetired(ctx, retiredCutoff)
 	})
 }
 func compactEnvelope(command Command, now time.Time) ([]byte, error) {

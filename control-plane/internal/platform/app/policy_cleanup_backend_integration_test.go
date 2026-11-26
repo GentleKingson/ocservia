@@ -45,10 +45,7 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 		}
 	}
 	if err := database.Within(ctx, runtime.Store, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := userstore.From(tx)
-		if err != nil {
-			return err
-		}
+		store := userstore.From(tx)
 		exp := at
 		if err := store.PutPolicy(ctx, userstore.Policy{NodeID: node, Username: state.item.Username, QuotaPeriod: "none", QuotaDirection: "rxtx", Version: 1, ExpiresAt: &exp, CreatedAt: at, UpdatedAt: at}); err != nil {
 			return err
@@ -58,7 +55,7 @@ func seedPolicyCleanup(t *testing.T, ctx context.Context, owner, runtime *connec
 		t.Fatal(err)
 	}
 	// A disabled orphan must be cleaned without reaching the mutation port.
-	state.service = useroperations.NewWithConcurrencyBackend(runtime.Store, nil, 1)
+	state.service = useroperations.NewWithConcurrency(runtime.Store, nil, 1)
 	return state
 }
 
@@ -82,11 +79,7 @@ func (s *policyCleanupState) revoke(t *testing.T, ctx context.Context) {
 
 func (s *policyCleanupState) delete(ctx context.Context) error {
 	return database.Within(ctx, s.runtime.Store, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := userstore.From(tx)
-		if err != nil {
-			return err
-		}
-		return store.DeleteEnforcement(ctx, s.item, true)
+		return userstore.From(tx).DeleteEnforcement(ctx, s.item, true)
 	})
 }
 
@@ -152,11 +145,7 @@ func checkCleanupCLIRecovery(t *testing.T, ctx context.Context, owner, runtime *
 		t.Fatal("new runtime cleanup", err)
 	}
 	if err := database.Within(ctx, runtime.Store, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := userstore.From(tx)
-		if err != nil {
-			return err
-		}
-		return store.EnsureEnforcement(ctx, state.item, time.Now().UTC())
+		return userstore.From(tx).EnsureEnforcement(ctx, state.item, time.Now().UTC())
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 func (s operationStore) DispatchCandidates(ctx context.Context, limit, available int, at time.Time) ([]operationstore.Dispatch, error) {
-	rows, err := s.Query(ctx, `WITH ranked AS (
+	return collectRows(ctx, s.store, `WITH ranked AS (
 		SELECT outbox.id AS outbox_id,command.id AS command_id,command.state,outbox.available_at,
 		row_number() OVER(PARTITION BY command.node_id ORDER BY CASE WHEN command.state='unknown' THEN 0 ELSE 1 END,outbox.available_at,outbox.id) AS node_rank
 		FROM outbox_events AS outbox JOIN commands AS command ON command.id=outbox.command_id
@@ -34,20 +34,10 @@ func (s operationStore) DispatchCandidates(ctx context.Context, limit, available
 	SELECT outbox.id,command.id,command.operation_id,command.node_id,outbox.payload,command.traceparent
 	FROM selected JOIN outbox_events AS outbox ON outbox.id=selected.outbox_id JOIN commands AS command ON command.id=selected.command_id
 	ORDER BY CASE WHEN selected.state='unknown' THEN 0 ELSE 1 END,selected.available_at,selected.outbox_id
-	FOR UPDATE OF outbox SKIP LOCKED`, limit, available, at, operationstore.ReconciliationAttemptLimit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []operationstore.Dispatch
-	for rows.Next() {
-		var d operationstore.Dispatch
-		if err := rows.Scan(&d.OutboxID, &d.CommandID, &d.OperationID, &d.NodeID, &d.Envelope, &d.Traceparent); err != nil {
-			return nil, err
-		}
-		result = append(result, d)
-	}
-	return result, rows.Err()
+	FOR UPDATE OF outbox SKIP LOCKED`, func(r Rows) (d operationstore.Dispatch, err error) {
+		err = r.Scan(&d.OutboxID, &d.CommandID, &d.OperationID, &d.NodeID, &d.Envelope, &d.Traceparent)
+		return
+	}, limit, available, at, operationstore.ReconciliationAttemptLimit)
 }
 
 func (s operationStore) ClaimDispatch(ctx context.Context, d operationstore.Dispatch, worker uuid.UUID, until, at time.Time) (bool, error) {
@@ -167,16 +157,15 @@ func (s operationStore) FailDispatch(ctx context.Context, d operationstore.Dispa
 	return err
 }
 
-func (s operationStore) RecoveryClock(ctx context.Context) (at time.Time, err error) {
-	err = s.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at)
-	return at.UTC(), err
+func (s operationStore) RecoveryClock(ctx context.Context) (time.Time, error) {
+	return wallTime(ctx, s.store)
 }
 
 func (s operationStore) ExpiredApplyCommands(ctx context.Context) ([]operationstore.RecoveryCommand, error) {
-	ids, err := database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id FROM outbox_events o JOIN commands c ON c.id=o.command_id
+	ids, err := collectColumn[uuid.UUID](ctx, s.store, `SELECT c.id FROM outbox_events o JOIN commands c ON c.id=o.command_id
 		JOIN config_apply_operations a ON a.operation_id=c.operation_id
 		WHERE c.state IN ('dispatched','accepted','running') AND a.state IN ('dispatched','accepted','running') AND c.expires_at<=now()
-		ORDER BY c.id FOR UPDATE OF o SKIP LOCKED`))
+		ORDER BY c.id FOR UPDATE OF o SKIP LOCKED`)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +196,7 @@ const reapingSendingFrom = ` FROM commands c JOIN operations p ON p.id=c.operati
 	AND o.published_at IS NULL AND o.locked_by=l.worker_id`
 
 func (s operationStore) ExpiredSendingCommands(ctx context.Context, limit int) ([]uuid.UUID, error) {
-	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id`+reapingSendingFrom+` ORDER BY l.leased_until,c.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED`, limit))
+	return collectColumn[uuid.UUID](ctx, s.store, `SELECT c.id`+reapingSendingFrom+` ORDER BY l.leased_until,c.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED`, limit)
 }
 
 func (s operationStore) LockExpiredSendingCommand(ctx context.Context, id uuid.UUID) (v operationstore.RecoveryCommand, err error) {
@@ -226,7 +215,7 @@ const reapingSentFrom = ` FROM commands c JOIN operations p ON p.id=c.operation_
 	AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)`
 
 func (s operationStore) StaleSentCommands(ctx context.Context, timeout time.Duration, limit int) ([]uuid.UUID, error) {
-	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT c.id`+reapingSentFrom+` AND a.finished_at<=clock_timestamp()-$1::interval ORDER BY a.finished_at,c.id LIMIT $2 FOR UPDATE OF o SKIP LOCKED`, timeout.String(), limit))
+	return collectColumn[uuid.UUID](ctx, s.store, `SELECT c.id`+reapingSentFrom+` AND a.finished_at<=clock_timestamp()-$1::interval ORDER BY a.finished_at,c.id LIMIT $2 FOR UPDATE OF o SKIP LOCKED`, timeout.String(), limit)
 }
 
 func (s operationStore) LockStaleSentCommand(ctx context.Context, id uuid.UUID, timeout time.Duration) (v operationstore.RecoveryCommand, err error) {
@@ -238,27 +227,17 @@ func (s operationStore) LockStaleSentCommand(ctx context.Context, id uuid.UUID, 
 }
 
 func (s operationStore) StaleReconciliations(ctx context.Context, maxAttempts int, timeout time.Duration, limit int) ([]operationstore.RecoveryCommand, error) {
-	rows, err := s.Query(ctx, `SELECT c.id,c.operation_id,c.node_id,c.envelope,o.id FROM commands c
+	return collectRows(ctx, s.store, `SELECT c.id,c.operation_id,c.node_id,c.envelope,o.id FROM commands c
 		JOIN operations p ON p.id=c.operation_id JOIN outbox_events o ON o.command_id=c.id
 		JOIN LATERAL(SELECT state,started_at,finished_at FROM command_attempts WHERE command_id=c.id ORDER BY attempt_number DESC LIMIT 1) a ON true
 		WHERE c.state='unknown' AND p.state='unknown' AND o.published_at IS NOT NULL AND o.locked_by IS NULL
 		AND o.attempts<LEAST($1,COALESCE(o.receipt_recovery_attempt_limit,$1)) AND a.state='sent' AND a.finished_at<=clock_timestamp()-$2::interval AND c.expires_at>clock_timestamp()
 		AND NOT EXISTS(SELECT 1 FROM agent_command_results r WHERE r.command_id=c.id AND r.created_at>=a.started_at)
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases l WHERE l.command_id=c.id)
-		ORDER BY a.finished_at,c.id LIMIT $3 FOR UPDATE OF o SKIP LOCKED`, maxAttempts, timeout.String(), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []operationstore.RecoveryCommand
-	for rows.Next() {
-		var v operationstore.RecoveryCommand
-		if err := rows.Scan(&v.CommandID, &v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID); err != nil {
-			return nil, err
-		}
-		result = append(result, v)
-	}
-	return result, rows.Err()
+		ORDER BY a.finished_at,c.id LIMIT $3 FOR UPDATE OF o SKIP LOCKED`, func(r Rows) (v operationstore.RecoveryCommand, err error) {
+		err = r.Scan(&v.CommandID, &v.OperationID, &v.NodeID, &v.Envelope, &v.OutboxID)
+		return
+	}, maxAttempts, timeout.String(), limit)
 }
 
 func (s operationStore) DeleteExpiredLeases(ctx context.Context) error {
@@ -384,14 +363,11 @@ func (s operationStore) ContinueReconciliation(ctx context.Context, v operations
 }
 
 func (s operationStore) ReconnectAuthority(ctx context.Context, node, connection uuid.UUID, epoch int64) error {
-	var one int
-	return s.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing
-		WHERE node_id=$1 AND connection_id=$2 AND session_epoch=$3 AND active=true
-		FOR SHARE OF connection_owner_fencing`, node[:], connection[:], epoch).Scan(&one)
+	return assertConnectionOwner(ctx, s.store, node[:], connection[:], epoch)
 }
 
 func (s operationStore) AmbiguousDispatches(ctx context.Context, node uuid.UUID, limit int) ([]uuid.UUID, error) {
-	return database.CollectColumn[uuid.UUID](s.Query(ctx, `SELECT command.id FROM commands AS command JOIN operations AS operation ON operation.id=command.operation_id
+	return collectColumn[uuid.UUID](ctx, s.store, `SELECT command.id FROM commands AS command JOIN operations AS operation ON operation.id=command.operation_id
 		JOIN outbox_events AS outbox ON outbox.command_id=command.id
 		WHERE command.node_id=$1 AND command.state IN ('dispatched','accepted','running','unknown')
 		AND operation.state IN ('dispatched','accepted','running','unknown')
@@ -399,7 +375,7 @@ func (s operationStore) AmbiguousDispatches(ctx context.Context, node uuid.UUID,
 		AND outbox.published_at IS NOT NULL AND outbox.locked_by IS NULL
 		AND outbox.attempts<LEAST($3,COALESCE(outbox.receipt_recovery_attempt_limit,$3))
 		AND NOT EXISTS(SELECT 1 FROM node_command_leases AS lease WHERE lease.command_id=command.id)
-		ORDER BY command.created_at,command.id LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`, node, limit, operationstore.ReconciliationAttemptLimit))
+		ORDER BY command.created_at,command.id LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`, node, limit, operationstore.ReconciliationAttemptLimit)
 }
 
 func (s operationStore) LockAmbiguousDispatch(ctx context.Context, command, node uuid.UUID) (v operationstore.AmbiguousDispatch, err error) {

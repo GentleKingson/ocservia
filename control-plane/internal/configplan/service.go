@@ -83,7 +83,7 @@ type Service struct {
 	now        func() time.Time
 }
 
-func NewBackend(backend database.Backend, operationService operationCreator) *Service {
+func New(backend database.Backend, operationService operationCreator) *Service {
 	return &Service{backend: backend, operations: operationService, now: func() time.Time { return time.Now().UTC() }}
 }
 
@@ -96,11 +96,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
 		hydrated = request.Template
 		hydrated.Directives = slices.Clone(request.Template.Directives)
-		store, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		node, err = store.Node(ctx, request.NodeID)
+		var err error
+		node, err = configurationstore.FromTransaction(tx).Node(ctx, request.NodeID)
 		if err != nil {
 			return err
 		}
@@ -112,11 +109,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 			if ref.ID == uuid.Nil || ref.Provider != "" || ref.Key != "" || ref.Version != "" {
 				return ErrInvalid
 			}
-			secrets, err := certificatestore.FromTransaction(tx)
-			if err != nil {
-				return err
-			}
-			stored, err := secrets.GetSecretReference(ctx, ref.ID)
+			stored, err := certificatestore.FromTransaction(tx).GetSecretReference(ctx, ref.ID)
 			if errors.Is(err, database.ErrNotFound) {
 				return ErrInvalid
 			}
@@ -173,12 +166,8 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Plan, bool
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Plan, error) {
 	var stored configurationstore.Plan
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		stored, err = store.Get(ctx, id)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		stored, err = configurationstore.FromTransaction(tx).Get(ctx, id)
 		return err
 	})
 	if err != nil {
@@ -242,12 +231,8 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 		return operations.Operation{}, false, ErrStaleRevision
 	}
 	var input configurationstore.ApplyInput
-	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		input, err = store.ApplyInput(ctx, request.PlanID, request.IdempotencyKey)
+	if err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		input, err = configurationstore.FromTransaction(tx).ApplyInput(ctx, request.PlanID, request.IdempotencyKey)
 		return err
 	}); err != nil {
 		return operations.Operation{}, false, err
@@ -298,11 +283,7 @@ func (s *Service) Apply(ctx context.Context, request ApplyRequest) (operations.O
 
 func (s *Service) Resource(ctx context.Context, id uuid.UUID) (workspaceID, nodeID uuid.UUID, err error) {
 	err = database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := configurationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		workspaceID, nodeID, err = store.Resource(ctx, id)
+		workspaceID, nodeID, err = configurationstore.FromTransaction(tx).Resource(ctx, id)
 		return err
 	})
 	return

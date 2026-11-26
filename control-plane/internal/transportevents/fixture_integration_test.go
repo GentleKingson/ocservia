@@ -74,7 +74,7 @@ func newCommandResultFixture(t *testing.T) commandResultFixture {
 			_, _ = pool.Exec(context.Background(), statement, operationID, commandID, nodeID, workspaceID)
 		}
 	})
-	return commandResultFixture{pool: pool, service: NewBackend(postgres.WrapPool(pool), signer), signer: signer, workspaceID: workspaceID, nodeID: nodeID, endpointID: endpointID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
+	return commandResultFixture{pool: pool, service: New(postgres.WrapPool(pool), signer), signer: signer, workspaceID: workspaceID, nodeID: nodeID, endpointID: endpointID, operationID: operationID, commandID: commandID, envelope: &envelope, payloadHash: payloadHash, traceparent: traceparent, issuedAt: now, originalTime: now}
 }
 
 func integrationCommandSigner() *commandauth.Signer {

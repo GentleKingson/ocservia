@@ -18,4 +18,3 @@ type Store interface {
 	Compact(context.Context, Command, []byte, time.Time) error
 	CompactRetired(context.Context, time.Time) error
 }
-type Provider interface{ HistoryRetentionStore() Store }

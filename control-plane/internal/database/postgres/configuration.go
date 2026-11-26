@@ -5,11 +5,10 @@ import (
 	"time"
 
 	configurationstore "github.com/GentleKingson/ocservia/control-plane/internal/configplan/store"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/google/uuid"
 )
 
-type configurationStore struct{ database.Tx }
+type configurationStore struct{ *transaction }
 
 func (t *transaction) ConfigurationStore() configurationstore.Store { return configurationStore{t} }
 

@@ -98,12 +98,12 @@ type Service struct {
 	batchSize int
 }
 
-func NewBackend(backend database.Backend, users userMutator) *Service {
+func New(backend database.Backend, users userMutator) *Service {
 	return &Service{backend: backend, users: users, now: func() time.Time { return time.Now().UTC() }, newID: func() uuid.UUID { return uuid.Must(uuid.NewV7()) }, batchSize: DefaultGlobalConcurrency}
 }
 
-func NewWithConcurrencyBackend(backend database.Backend, users userMutator, concurrency int) *Service {
-	service := NewBackend(backend, users)
+func NewWithConcurrency(backend database.Backend, users userMutator, concurrency int) *Service {
+	service := New(backend, users)
 	if concurrency > 0 {
 		service.batchSize = concurrency
 	}
@@ -121,10 +121,7 @@ func (s *Service) SetPolicy(ctx context.Context, request PolicyRequest) (Policy,
 		return Policy{}, false, err
 	}
 	defer rollback(tx)
-	store, err := userstore.From(tx)
-	if err != nil {
-		return Policy{}, false, err
-	}
+	store := userstore.From(tx)
 	workspaceID, err := store.LockUser(ctx, request.NodeID, request.Username)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -267,11 +264,7 @@ func (s *Service) resetMonthlyPolicies(ctx context.Context, limit int) (int, err
 
 func (s *Service) withStore(ctx context.Context, change func(userstore.Store) error) error {
 	return database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := userstore.From(tx)
-		if err != nil {
-			return err
-		}
-		return change(store)
+		return change(userstore.From(tx))
 	})
 }
 

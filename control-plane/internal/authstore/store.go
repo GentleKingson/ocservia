@@ -71,35 +71,18 @@ type Store interface {
 	DeleteIdentityAttempts(context.Context, uuid.UUID) error
 }
 
-// CredentialReader preserves a completed credential read independently of
-// later request cancellation. Session issuance still rechecks under a Tx lock.
-type CredentialReader interface {
-	ReadLocalCredential(context.Context, string) (Credential, error)
-	HasLocalCredential(context.Context, uuid.UUID) (bool, error)
-}
-
 func HasLocalCredential(ctx context.Context, backend database.Backend, id uuid.UUID) (bool, error) {
-	reader, ok := backend.(CredentialReader)
-	if !ok {
-		return false, database.ErrUnsupported
-	}
-	return reader.HasLocalCredential(ctx, id)
+	return database.Must[interface {
+		HasLocalCredential(context.Context, uuid.UUID) (bool, error)
+	}](backend).HasLocalCredential(ctx, id)
 }
 
 func ReadCredential(ctx context.Context, backend database.Backend, username string) (Credential, error) {
-	reader, ok := backend.(CredentialReader)
-	if !ok {
-		return Credential{}, database.ErrUnsupported
-	}
-	return reader.ReadLocalCredential(ctx, username)
+	return database.Must[interface {
+		ReadLocalCredential(context.Context, string) (Credential, error)
+	}](backend).ReadLocalCredential(ctx, username)
 }
 
-type Provider interface{ AuthenticationStore() Store }
-
-func From(tx database.Tx) (Store, error) {
-	p, ok := tx.(Provider)
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.AuthenticationStore(), nil
+func From(tx database.Tx) Store {
+	return database.Must[interface{ AuthenticationStore() Store }](tx).AuthenticationStore()
 }

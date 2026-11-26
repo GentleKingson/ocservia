@@ -17,16 +17,16 @@ import (
 	"github.com/google/uuid"
 )
 
-func authenticationBackend(t *testing.T) database.Backend {
+func authenticationBackend(t *testing.T) *postgres.Backend {
 	backend, _ := authenticationBackendFixture(t)
 	return backend
 }
 
-func authenticationBackendFixture(t *testing.T) (database.Backend, database.Backend) {
+func authenticationBackendFixture(t *testing.T) (*postgres.Backend, *postgres.Backend) {
 	return authenticationBackendFixtureWithIsolation(t, false)
 }
 
-func authenticationBackendFixtureWithIsolation(t *testing.T, isolated bool) (database.Backend, database.Backend) {
+func authenticationBackendFixtureWithIsolation(t *testing.T, isolated bool) (*postgres.Backend, *postgres.Backend) {
 	t.Helper()
 	if isolated {
 		runtime, owner := testfixture.OpenIsolated(t, t, "r203_http")
@@ -40,7 +40,7 @@ func authenticationBackendFixtureWithIsolation(t *testing.T, isolated bool) (dat
 func TestAuthenticationBackendHTTPIntegration(t *testing.T) {
 	backend, owner := authenticationBackendFixtureWithIsolation(t, true)
 	ctx := context.Background()
-	service, err := auth.NewBackend(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
+	service, err := auth.New(backend, auth.Config{LocalEnabled: true, SessionKey: make([]byte, 32), SessionTTL: time.Hour})
 	testutil.NoError(t, err)
 	name := "http-" + uuid.NewString()
 	password := "a long unique authentication test password"

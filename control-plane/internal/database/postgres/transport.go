@@ -4,12 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	transportstore "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
 
-type transportEventStore struct{ database.Tx }
+type transportEventStore struct{ *transaction }
 
 func (t *transaction) TransportEventStore() transportstore.Store { return transportEventStore{t} }
 
@@ -38,33 +37,22 @@ func (s transportEventStore) Events(ctx context.Context, workspace, after uuid.U
 		comparison, order = "<", "DESC"
 	}
 	const base = `SELECT e.event_id::text,e.node_id::text,e.event_type,e.traceparent,e.occurred_at,e.ingest_sequence FROM transport_events e JOIN nodes n ON n.id=e.node_id`
-	var (
-		rows database.Rows
-		err  error
-	)
+	var suffix string
+	var args []any
 	switch {
 	case workspace == uuid.Nil && after == uuid.Nil:
-		rows, err = s.Query(ctx, base+` ORDER BY e.ingest_sequence `+order+` LIMIT $1`, limit)
+		suffix, args = ` ORDER BY e.ingest_sequence `+order+` LIMIT $1`, []any{limit}
 	case workspace == uuid.Nil:
-		rows, err = s.Query(ctx, base+` WHERE e.ingest_sequence `+comparison+` (SELECT ingest_sequence FROM transport_events WHERE event_id=$1) ORDER BY e.ingest_sequence `+order+` LIMIT $2`, after, limit)
+		suffix, args = ` WHERE e.ingest_sequence `+comparison+` (SELECT ingest_sequence FROM transport_events WHERE event_id=$1) ORDER BY e.ingest_sequence `+order+` LIMIT $2`, []any{after, limit}
 	case after == uuid.Nil:
-		rows, err = s.Query(ctx, base+` WHERE n.workspace_id=$1 ORDER BY e.ingest_sequence `+order+` LIMIT $2`, workspace, limit)
+		suffix, args = ` WHERE n.workspace_id=$1 ORDER BY e.ingest_sequence `+order+` LIMIT $2`, []any{workspace, limit}
 	default:
-		rows, err = s.Query(ctx, base+` WHERE e.ingest_sequence `+comparison+` (SELECT c.ingest_sequence FROM transport_events c JOIN nodes cn ON cn.id=c.node_id WHERE c.event_id=$1 AND cn.workspace_id=$2) AND n.workspace_id=$2 ORDER BY e.ingest_sequence `+order+` LIMIT $3`, after, workspace, limit)
+		suffix, args = ` WHERE e.ingest_sequence `+comparison+` (SELECT c.ingest_sequence FROM transport_events c JOIN nodes cn ON cn.id=c.node_id WHERE c.event_id=$1 AND cn.workspace_id=$2) AND n.workspace_id=$2 ORDER BY e.ingest_sequence `+order+` LIMIT $3`, []any{after, workspace, limit}
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := make([]transportstore.Event, 0, limit)
-	for rows.Next() {
-		var v transportstore.Event
-		if err := rows.Scan(&v.ID, &v.NodeID, &v.Type, &v.Traceparent, &v.OccurredAt, &v.Sequence); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, base+suffix, func(r Rows) (v transportstore.Event, err error) {
+		err = r.Scan(&v.ID, &v.NodeID, &v.Type, &v.Traceparent, &v.OccurredAt, &v.Sequence)
+		return
+	}, args...)
 }
 
 func (s transportEventStore) EventSequence(ctx context.Context, workspace, event uuid.UUID) (v int64, err error) {
@@ -73,20 +61,10 @@ func (s transportEventStore) EventSequence(ctx context.Context, workspace, event
 }
 
 func (s transportEventStore) GapNodes(ctx context.Context, slug string) ([]transportstore.GapNode, error) {
-	rows, err := s.Query(ctx, `SELECT n.id,e.traceparent FROM nodes n JOIN workspaces w ON w.id=n.workspace_id JOIN LATERAL (SELECT traceparent FROM transport_events WHERE node_id=n.id ORDER BY ingest_sequence DESC LIMIT 1) e ON true WHERE w.slug=$1 AND n.status='active'`, slug)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []transportstore.GapNode
-	for rows.Next() {
-		var v transportstore.GapNode
-		if err := rows.Scan(&v.ID, &v.Traceparent); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, `SELECT n.id,e.traceparent FROM nodes n JOIN workspaces w ON w.id=n.workspace_id JOIN LATERAL (SELECT traceparent FROM transport_events WHERE node_id=n.id ORDER BY ingest_sequence DESC LIMIT 1) e ON true WHERE w.slug=$1 AND n.status='active'`, func(r Rows) (v transportstore.GapNode, err error) {
+		err = r.Scan(&v.ID, &v.Traceparent)
+		return
+	}, slug)
 }
 
 func (s transportEventStore) InvalidateCursor(ctx context.Context) error {
@@ -116,20 +94,10 @@ func (s transportEventStore) DisconnectNode(ctx context.Context, node transports
 }
 
 func (s transportEventStore) ClaimSimulationJobs(ctx context.Context, limit int) ([]transportstore.SimulationJob, error) {
-	rows, err := s.Query(ctx, `WITH candidates AS (SELECT j.operation_id FROM local_slice_jobs j JOIN operations o ON o.id=j.operation_id WHERE j.available_at<=now() AND j.expires_at>now() AND j.dispatched_at IS NULL AND o.state='queued' ORDER BY j.available_at,j.operation_id FOR UPDATE OF j SKIP LOCKED LIMIT $1) UPDATE local_slice_jobs j SET available_at=now()+interval '10 seconds' FROM candidates c WHERE j.operation_id=c.operation_id RETURNING j.operation_id,(SELECT node_id FROM operations WHERE id=j.operation_id),j.command_envelope,j.traceparent`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := make([]transportstore.SimulationJob, 0, limit)
-	for rows.Next() {
-		var v transportstore.SimulationJob
-		if err := rows.Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.Traceparent); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, `WITH candidates AS (SELECT j.operation_id FROM local_slice_jobs j JOIN operations o ON o.id=j.operation_id WHERE j.available_at<=now() AND j.expires_at>now() AND j.dispatched_at IS NULL AND o.state='queued' ORDER BY j.available_at,j.operation_id FOR UPDATE OF j SKIP LOCKED LIMIT $1) UPDATE local_slice_jobs j SET available_at=now()+interval '10 seconds' FROM candidates c WHERE j.operation_id=c.operation_id RETURNING j.operation_id,(SELECT node_id FROM operations WHERE id=j.operation_id),j.command_envelope,j.traceparent`, func(r Rows) (v transportstore.SimulationJob, err error) {
+		err = r.Scan(&v.OperationID, &v.NodeID, &v.Envelope, &v.Traceparent)
+		return
+	}, limit)
 }
 
 func (s transportEventStore) ExpireSimulationJobs(ctx context.Context) error {
@@ -147,7 +115,7 @@ func (s transportEventStore) MarkSimulationDispatchError(ctx context.Context, id
 	return err
 }
 
-type transportIngressStore struct{ database.Tx }
+type transportIngressStore struct{ *transaction }
 
 func (t *transaction) TransportIngressStore() transportstore.IngressStore {
 	return transportIngressStore{t}

@@ -32,10 +32,7 @@ type transaction struct {
 
 func WrapPool(pool *pgxpool.Pool) *Backend { return &Backend{store{pool}, pool} }
 
-// WrapTx adapts owner migration transactions and explicit test fixtures. It
-// borrows the exact pgx transaction, not its pool, so domain stores cannot
-// accidentally commit separately.
-func WrapTx(tx pgx.Tx) database.Tx { return &transaction{store{tx}, tx} }
+func (b *Backend) Pool() *pgxpool.Pool { return b.pool }
 
 func (b *Backend) Begin(ctx context.Context, isolation database.Isolation) (database.Tx, error) {
 	var level pgx.TxIsoLevel
@@ -54,31 +51,76 @@ func (b *Backend) Begin(ctx context.Context, isolation database.Isolation) (data
 	if err != nil {
 		return nil, classify(err)
 	}
-	return WrapTx(tx), nil
+	return &transaction{store{tx}, tx}, nil
 }
+
 func (s store) Exec(ctx context.Context, sql string, args ...any) (int64, error) {
 	tag, err := s.executor.Exec(ctx, sql, args...)
 	return tag.RowsAffected(), classify(err)
 }
 
-type row struct{ pgx.Row }
+type Row struct{ pgx.Row }
 
-func (r row) Scan(dest ...any) error { return classify(r.Row.Scan(dest...)) }
-func (s store) QueryRow(ctx context.Context, sql string, args ...any) database.Row {
-	return row{s.executor.QueryRow(ctx, sql, args...)}
+func (r Row) Scan(dest ...any) error { return classify(r.Row.Scan(dest...)) }
+func (s store) QueryRow(ctx context.Context, sql string, args ...any) Row {
+	return Row{s.executor.QueryRow(ctx, sql, args...)}
 }
 
-type rows struct{ pgx.Rows }
+type Rows struct{ pgx.Rows }
 
-func (r rows) Scan(dest ...any) error { return classify(r.Rows.Scan(dest...)) }
-func (r rows) Err() error             { return classify(r.Rows.Err()) }
-func (s store) Query(ctx context.Context, sql string, args ...any) (database.Rows, error) {
+func (r Rows) Scan(dest ...any) error { return classify(r.Rows.Scan(dest...)) }
+func (r Rows) Err() error             { return classify(r.Rows.Err()) }
+func (s store) Query(ctx context.Context, sql string, args ...any) (Rows, error) {
 	r, err := s.executor.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, classify(err)
+		return Rows{}, classify(err)
 	}
-	return rows{r}, nil
+	return Rows{r}, nil
 }
+
+func walkRows(ctx context.Context, s store, query string, visit func(Rows) error, args ...any) error {
+	r, err := s.Query(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for r.Next() {
+		if err := visit(r); err != nil {
+			return err
+		}
+	}
+	return r.Err()
+}
+
+func collectRows[T any](ctx context.Context, s store, query string, scan func(Rows) (T, error), args ...any) ([]T, error) {
+	out := make([]T, 0)
+	err := walkRows(ctx, s, query, func(r Rows) error {
+		v, err := scan(r)
+		if err != nil {
+			return err
+		}
+		out = append(out, v)
+		return nil
+	}, args...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func collectColumn[T any](ctx context.Context, s store, query string, args ...any) ([]T, error) {
+	return collectRows(ctx, s, query, func(r Rows) (T, error) {
+		var v T
+		err := r.Scan(&v)
+		return v, err
+	}, args...)
+}
+
+func wallTime(ctx context.Context, s store) (at time.Time, err error) {
+	err = s.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at)
+	return at.UTC(), err
+}
+
 func (t *transaction) Commit(ctx context.Context) error   { return classify(t.tx.Commit(ctx)) }
 func (t *transaction) Rollback(ctx context.Context) error { return classify(t.tx.Rollback(ctx)) }
 
@@ -135,9 +177,8 @@ func classify(err error) error {
 var _ database.Backend = (*Backend)(nil)
 var _ database.Tx = (*transaction)(nil)
 
-func (t *transaction) WallTime(ctx context.Context) (at time.Time, err error) {
-	err = t.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at)
-	return at.UTC(), err
+func (t *transaction) WallTime(ctx context.Context) (time.Time, error) {
+	return wallTime(ctx, t.store)
 }
 
 func (b *Backend) CheckReadiness(ctx context.Context) error {
@@ -150,5 +191,3 @@ func (b *Backend) PoolStats() database.PoolStats {
 	s := b.pool.Stat()
 	return database.PoolStats{Acquired: int64(s.AcquiredConns()), Idle: int64(s.IdleConns()), Total: int64(s.TotalConns())}
 }
-
-var _ database.Diagnostics = (*Backend)(nil)

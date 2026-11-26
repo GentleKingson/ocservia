@@ -9,8 +9,7 @@ import (
 )
 
 func (t *transaction) CheckAuditFence(ctx context.Context, node, connection []byte, epoch int64) error {
-	var one int
-	return t.QueryRow(ctx, `SELECT 1 FROM connection_owner_fencing WHERE node_id=$1 AND connection_id=$2 AND session_epoch=$3 AND active=true FOR SHARE`, node, connection, epoch).Scan(&one)
+	return assertConnectionOwner(ctx, t.store, node, connection, epoch)
 }
 
 func (t *transaction) SaveAuditRecord(ctx context.Context, node uuid.UUID, r *agent.VpnAuditRecord) error {

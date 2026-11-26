@@ -163,12 +163,8 @@ func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Workspaces unavailable", "authorized workspaces could not be read")
 			return
 		}
-		err := database.Within(r.Context(), s.backend, database.ReadCommitted, func(tx database.Tx) error {
-			store, err := authstore.From(tx)
-			if err != nil {
-				return err
-			}
-			items, err = store.AuthorizedWorkspaces(r.Context(), uuid.Nil, true)
+		err := database.Within(r.Context(), s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+			items, err = authstore.From(tx).AuthorizedWorkspaces(r.Context(), uuid.Nil, true)
 			return err
 		})
 		if err != nil {

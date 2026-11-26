@@ -13,11 +13,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type certificateStore struct{ database.Tx }
+type certificateStore struct{ *transaction }
 
 func (t *transaction) CertificateStore() certificatestore.Store { return certificateStore{t} }
 
 func (s certificateStore) Maintain(ctx context.Context, at time.Time) error {
+	type alert struct{ id, workspace, node uuid.UUID }
 	for _, state := range []string{"expired", "expiring"} {
 		predicate := `state IN ('issued','expiring') AND not_after<=now()`
 		versionUpdate := ",version=version+1"
@@ -28,24 +29,12 @@ func (s certificateStore) Maintain(ctx context.Context, at time.Time) error {
 				ELSE (not_after-not_before)*0.25 END`
 			versionUpdate = ""
 		}
-		rows, err := s.Query(ctx, `WITH due AS (
+		alerts, err := collectRows(ctx, s.store, `WITH due AS (
 			SELECT id FROM certificates WHERE `+predicate+` ORDER BY not_after,id LIMIT 100 FOR UPDATE SKIP LOCKED
-		) UPDATE certificates c SET state=$1,updated_at=now()`+versionUpdate+` FROM due WHERE c.id=due.id RETURNING c.id,c.workspace_id,c.node_id`, state)
-		if err != nil {
-			return err
-		}
-		type alert struct{ id, workspace, node uuid.UUID }
-		var alerts []alert
-		for rows.Next() {
-			var a alert
-			if err := rows.Scan(&a.id, &a.workspace, &a.node); err != nil {
-				rows.Close()
-				return err
-			}
-			alerts = append(alerts, a)
-		}
-		err = rows.Err()
-		rows.Close()
+		) UPDATE certificates c SET state=$1,updated_at=now()`+versionUpdate+` FROM due WHERE c.id=due.id RETURNING c.id,c.workspace_id,c.node_id`, func(r Rows) (a alert, err error) {
+			err = r.Scan(&a.id, &a.workspace, &a.node)
+			return
+		}, state)
 		if err != nil {
 			return err
 		}
@@ -118,7 +107,7 @@ func (s certificateStore) CompleteIssue(ctx context.Context, v certificatestore.
 
 const certificateColumns = `id,workspace_id,node_id,operation_id,common_name,dns_names,key_bits,state,version,public_key_sha256,COALESCE(serial_number,''),not_before,not_after,revoked_at,created_at,updated_at`
 
-func scanCertificate(row database.Row) (v certificatestore.Certificate, err error) {
+func scanCertificate(row Row) (v certificatestore.Certificate, err error) {
 	err = row.Scan(&v.ID, &v.WorkspaceID, &v.NodeID, &v.OperationID, &v.CommonName, &v.DNSNames, &v.KeyBits, &v.State, &v.Version, &v.PublicKeySHA256, &v.SerialNumber, &v.NotBefore, &v.NotAfter, &v.RevokedAt, &v.CreatedAt, &v.UpdatedAt)
 	return
 }
@@ -132,20 +121,9 @@ func (s certificateStore) GetByOperation(ctx context.Context, id uuid.UUID) (cer
 }
 
 func (s certificateStore) ListNode(ctx context.Context, id uuid.UUID) ([]certificatestore.Certificate, error) {
-	rows, err := s.Query(ctx, `SELECT `+certificateColumns+` FROM certificates WHERE node_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := make([]certificatestore.Certificate, 0)
-	for rows.Next() {
-		v, err := scanCertificate(rows)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, `SELECT `+certificateColumns+` FROM certificates WHERE node_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100`, func(r Rows) (certificatestore.Certificate, error) {
+		return scanCertificate(Row{r})
+	}, id)
 }
 
 func (s certificateStore) Resource(ctx context.Context, id uuid.UUID) (workspace, node uuid.UUID, err error) {
@@ -155,7 +133,7 @@ func (s certificateStore) Resource(ctx context.Context, id uuid.UUID) (workspace
 
 const secretReferenceColumns = `id,workspace_id,provider,key_path,version,state,rotated_at,created_at,updated_at`
 
-func scanSecretReference(row database.Row) (v certificatestore.SecretReference, err error) {
+func scanSecretReference(row Row) (v certificatestore.SecretReference, err error) {
 	err = row.Scan(&v.ID, &v.WorkspaceID, &v.Provider, &v.KeyPath, &v.Version, &v.State, &v.RotatedAt, &v.CreatedAt, &v.UpdatedAt)
 	return
 }
@@ -198,9 +176,9 @@ func (s certificateStore) ReserveRevocation(ctx context.Context, id, workspace, 
 		return false, nil
 	}
 	// An uncertain or in-flight cleanup must keep its original command ID.
-	envelopes, err := database.CollectColumn[[]byte](s.Query(ctx, `SELECT envelope FROM commands
+	envelopes, err := collectColumn[[]byte](ctx, s.store, `SELECT envelope FROM commands
 		WHERE node_id=$1 AND payload_type='certificate_revoke'
-		  AND (state IN ('dispatched','accepted','running','unknown') OR (state='queued' AND expires_at>now()))`, node))
+		  AND (state IN ('dispatched','accepted','running','unknown') OR (state='queued' AND expires_at>now()))`, node)
 	if err != nil {
 		return false, err
 	}
@@ -237,32 +215,23 @@ const expiredHeldRevocation = `c.payload_type='certificate_revoke' AND c.state='
 	AND o.last_error='command expired before dispatch'`
 
 func (s certificateStore) PendingRevocations(ctx context.Context, operationID *uuid.UUID) ([]certificatestore.PendingRevocation, error) {
-	return collectPendingRevocations(s.Query(ctx, `SELECT c.operation_id,c.id,c.workspace_id,c.node_id,c.envelope
+	return s.collectPendingRevocations(ctx, `SELECT c.operation_id,c.id,c.workspace_id,c.node_id,c.envelope
 		FROM commands c JOIN outbox_events o ON o.command_id=c.id
 		WHERE `+heldRevocation+` AND ($1::uuid IS NULL OR c.operation_id=$1)
-		ORDER BY c.expires_at,c.id LIMIT 20`, operationID))
+		ORDER BY c.expires_at,c.id LIMIT 20`, operationID)
 }
 
 func (s certificateStore) ExpiredRevocations(ctx context.Context) ([]certificatestore.PendingRevocation, error) {
-	return collectPendingRevocations(s.Query(ctx, `SELECT c.operation_id,c.id,c.workspace_id,c.node_id,c.envelope
+	return s.collectPendingRevocations(ctx, `SELECT c.operation_id,c.id,c.workspace_id,c.node_id,c.envelope
 		FROM commands c JOIN outbox_events o ON o.command_id=c.id
-		WHERE `+expiredHeldRevocation+` ORDER BY o.published_at,o.id LIMIT 20`))
+		WHERE `+expiredHeldRevocation+` ORDER BY o.published_at,o.id LIMIT 20`)
 }
 
-func collectPendingRevocations(rows database.Rows, err error) ([]certificatestore.PendingRevocation, error) {
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var pending []certificatestore.PendingRevocation
-	for rows.Next() {
-		var v certificatestore.PendingRevocation
-		if err := rows.Scan(&v.OperationID, &v.CommandID, &v.WorkspaceID, &v.NodeID, &v.Envelope); err != nil {
-			return nil, err
-		}
-		pending = append(pending, v)
-	}
-	return pending, rows.Err()
+func (s certificateStore) collectPendingRevocations(ctx context.Context, query string, args ...any) ([]certificatestore.PendingRevocation, error) {
+	return collectRows(ctx, s.store, query, func(r Rows) (v certificatestore.PendingRevocation, err error) {
+		err = r.Scan(&v.OperationID, &v.CommandID, &v.WorkspaceID, &v.NodeID, &v.Envelope)
+		return
+	}, args...)
 }
 
 func (s certificateStore) ExpireRevocation(ctx context.Context, commandID, certificateID uuid.UUID, version uint64, envelope []byte, at time.Time) error {
@@ -339,7 +308,7 @@ func (s certificateStore) SealingKeyExists(ctx context.Context, node uuid.UUID, 
 	return
 }
 
-type artifactStore struct{ database.Tx }
+type artifactStore struct{ *transaction }
 
 func (s artifactStore) Resource(ctx context.Context, id uuid.UUID) (workspace, node uuid.UUID, err error) {
 	err = s.QueryRow(ctx, `SELECT workspace_id,node_id FROM artifact_operations WHERE id=$1`, id).Scan(&workspace, &node)
@@ -385,20 +354,10 @@ func (s artifactStore) Abort(ctx context.Context, id, grant uuid.UUID) error {
 }
 
 func (s artifactStore) PendingConsumptions(ctx context.Context) ([]certificatestore.PendingConsumption, error) {
-	rows, err := s.Query(ctx, `SELECT id,COALESCE(active_grant_id,'00000000-0000-0000-0000-000000000000'::uuid),consume_grant,consume_sha256,COALESCE(consume_size,0),consume_actor_id,expires_at FROM artifact_operations WHERE state='consuming' ORDER BY updated_at,id LIMIT 20`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	values := make([]certificatestore.PendingConsumption, 0, 20)
-	for rows.Next() {
-		var v certificatestore.PendingConsumption
-		if err := rows.Scan(&v.ID, &v.GrantID, &v.Grant, &v.Digest, &v.Size, &v.ActorID, &v.ExpiresAt); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+	return collectRows(ctx, s.store, `SELECT id,COALESCE(active_grant_id,'00000000-0000-0000-0000-000000000000'::uuid),consume_grant,consume_sha256,COALESCE(consume_size,0),consume_actor_id,expires_at FROM artifact_operations WHERE state='consuming' ORDER BY updated_at,id LIMIT 20`, func(r Rows) (v certificatestore.PendingConsumption, err error) {
+		err = r.Scan(&v.ID, &v.GrantID, &v.Grant, &v.Digest, &v.Size, &v.ActorID, &v.ExpiresAt)
+		return
+	})
 }
 
 func (s artifactStore) FailConsumption(ctx context.Context, id, grant uuid.UUID, evidence []byte) error {

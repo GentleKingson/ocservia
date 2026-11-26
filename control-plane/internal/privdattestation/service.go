@@ -13,34 +13,20 @@ type KeyStateMetric struct {
 	Total int64  `json:"total"`
 }
 
-func KeyStateMetricsBackend(ctx context.Context, backend database.Backend) ([]KeyStateMetric, error) {
+func KeyStateMetrics(ctx context.Context, backend database.Backend) ([]KeyStateMetric, error) {
 	metrics := []KeyStateMetric{{State: "pending"}, {State: "active"}, {State: "revoked"}}
 	if backend == nil {
 		return metrics, nil
 	}
 	err := database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := StoreFrom(tx)
+		counts, err := StoreFrom(tx).KeyStateCounts(ctx)
 		if err != nil {
 			return err
 		}
-		rows, err := store.KeyStateCounts(ctx)
-		if err != nil {
-			return err
+		for index := range metrics {
+			metrics[index].Total = counts[metrics[index].State]
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var state string
-			var total int64
-			if err := rows.Scan(&state, &total); err != nil {
-				return err
-			}
-			for index := range metrics {
-				if metrics[index].State == state {
-					metrics[index].Total = total
-				}
-			}
-		}
-		return rows.Err()
+		return nil
 	})
 	if err != nil {
 		return nil, err

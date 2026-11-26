@@ -29,12 +29,8 @@ func (s *Service) AdvanceAgentRollouts(ctx context.Context) error {
 		return nil
 	}
 	rolloutIDs := []uuid.UUID{}
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		rolloutIDs, err = store.ActiveRollouts(ctx, rolloutAdvanceLimit)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		rolloutIDs, err = operationstore.FromTransaction(tx).ActiveRollouts(ctx, rolloutAdvanceLimit)
 		return err
 	})
 	if err != nil {
@@ -516,12 +512,7 @@ func (s *Service) beginRollout(ctx context.Context) (database.Tx, operationstore
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := operationstore.FromTransaction(tx)
-	if err != nil {
-		rollbackRollout(tx)
-		return nil, nil, err
-	}
-	return tx, store, nil
+	return tx, operationstore.FromTransaction(tx), nil
 }
 
 func rollbackRollout(tx database.Tx) {

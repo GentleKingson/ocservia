@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database/postgres"
 	"github.com/GentleKingson/ocservia/control-plane/migrations"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,13 +33,8 @@ type Options struct {
 // bundledPostgresHost is the fixed Compose service name of bundled PostgreSQL.
 const bundledPostgresHost = "postgres"
 
-type Store interface {
-	database.Backend
-	database.Diagnostics
-}
-
 type Connection struct {
-	Store Store
+	Store *postgres.Backend
 	pg    *pgxpool.Pool
 }
 
@@ -138,30 +133,41 @@ func (c *Connection) GrantRuntimePrivileges(ctx context.Context, account string)
 // concurrent run fails instead of creating a second workspace.
 func (c *Connection) ProvisionManagementWorkspace(ctx context.Context) (id uuid.UUID, created bool, err error) {
 	const insert = `INSERT INTO workspaces(id,name,slug,created_at,updated_at) VALUES($1,'Administration','administration',$2,$2)`
-	err = database.Within(ctx, c.Store, database.DefaultIsolation, func(tx database.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE slug='administration'`).Scan(&id)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, database.ErrNotFound) {
-			return err
-		}
-		var existing int64
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM workspaces`).Scan(&existing); err != nil {
-			return err
-		}
-		if existing != 0 {
-			return ErrUnmanagedWorkspaces
-		}
-		at, err := database.WallTime(ctx, tx)
-		if err != nil {
-			return err
-		}
-		id, created = uuid.Must(uuid.NewV7()), true
-		_, err = tx.Exec(ctx, insert, id, at)
-		return err
-	})
-	return id, created, err
+	tx, err := c.pg.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	err = tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE slug='administration'`).Scan(&id)
+	if err == nil {
+		return id, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, err
+	}
+	var existing int64
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM workspaces`).Scan(&existing); err != nil {
+		return uuid.Nil, false, err
+	}
+	if existing != 0 {
+		return uuid.Nil, false, ErrUnmanagedWorkspaces
+	}
+	var at time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at); err != nil {
+		return uuid.Nil, false, err
+	}
+	id, created = uuid.Must(uuid.NewV7()), true
+	if _, err = tx.Exec(ctx, insert, id, at.UTC()); err != nil {
+		return uuid.Nil, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, created, nil
 }
 
 // ValidateRuntime runs before starting listeners or background work.

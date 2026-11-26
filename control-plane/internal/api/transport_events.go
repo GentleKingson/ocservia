@@ -136,19 +136,19 @@ func (s *Server) developmentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var pool database.PoolStats
-	if diagnostics, ok := s.backend.(database.Diagnostics); ok {
-		pool = diagnostics.PoolStats()
+	if s.backend != nil {
+		pool = s.backend.PoolStats()
 	}
 	admission, platformHub, operationHub := s.eventStreamSnapshots()
 	metricsContext, cancelMetrics := context.WithTimeout(r.Context(), time.Second)
 	defer cancelMetrics()
-	keyStates, err := privdattestation.KeyStateMetricsBackend(metricsContext, s.backend)
+	keyStates, err := privdattestation.KeyStateMetrics(metricsContext, s.backend)
 	keyStatesAvailable := s.backend != nil && err == nil
 	if err != nil {
 		// Keep process and SSE diagnostics available while the database is down.
 		// The availability bit prevents the bounded zero-value series from being
 		// mistaken for a successful database observation.
-		keyStates, _ = privdattestation.KeyStateMetricsBackend(r.Context(), nil)
+		keyStates, _ = privdattestation.KeyStateMetrics(r.Context(), nil)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"goroutines":                             runtime.NumGoroutine(),

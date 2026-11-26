@@ -48,24 +48,14 @@ func (s operationStore) InsertUpgrade(ctx context.Context, v operationstore.Pend
 }
 
 func (s operationStore) PendingUpgrades(ctx context.Context, limit int) ([]operationstore.ScheduledUpgrade, error) {
-	rows, err := s.Query(ctx, `SELECT u.operation_id,u.workspace_id,u.node_id,op.command_id,u.target_version,u.from_version,u.state,COALESCE(u.scheduled_at,u.created_at),u.created_at,
+	return collectRows(ctx, s.store, `SELECT u.operation_id,u.workspace_id,u.node_id,op.command_id,u.target_version,u.from_version,u.state,COALESCE(u.scheduled_at,u.created_at),u.created_at,
 		op.state,n.status,COALESCE(snap.agent_version,''),snap.observed_at,snap.last_heartbeat_at,COALESCE(r.state,''),COALESCE(r.detail,'')
 		FROM agent_upgrade_operations u JOIN operations op ON op.id=u.operation_id JOIN nodes n ON n.id=u.node_id
 		LEFT JOIN node_observed_snapshots snap ON snap.node_id=u.node_id LEFT JOIN node_agent_upgrade_results r ON r.operation_id=u.operation_id
-		WHERE u.completed_at IS NULL AND u.state IN ('queued','accepted','running','unknown') LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var values []operationstore.ScheduledUpgrade
-	for rows.Next() {
-		var v operationstore.ScheduledUpgrade
-		if err := rows.Scan(&v.OperationID, &v.WorkspaceID, &v.NodeID, &v.CommandID, &v.TargetVersion, &v.FromVersion, &v.State, &v.ScheduledAt, &v.CreatedAt, &v.OperationState, &v.NodeStatus, &v.ObservedVersion, &v.ObservedAt, &v.LastHeartbeatAt, &v.DurableState, &v.DurableDetail); err != nil {
-			return nil, err
-		}
-		values = append(values, v)
-	}
-	return values, rows.Err()
+		WHERE u.completed_at IS NULL AND u.state IN ('queued','accepted','running','unknown') LIMIT $1`, func(r Rows) (v operationstore.ScheduledUpgrade, err error) {
+		err = r.Scan(&v.OperationID, &v.WorkspaceID, &v.NodeID, &v.CommandID, &v.TargetVersion, &v.FromVersion, &v.State, &v.ScheduledAt, &v.CreatedAt, &v.OperationState, &v.NodeStatus, &v.ObservedVersion, &v.ObservedAt, &v.LastHeartbeatAt, &v.DurableState, &v.DurableDetail)
+		return
+	}, limit)
 }
 
 // A lost conditional update aborts the caller's transaction, including any

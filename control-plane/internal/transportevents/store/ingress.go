@@ -41,9 +41,6 @@ type IngressStore interface {
 	LastEventID(context.Context) (uuid.UUID, error)
 }
 
-func Ingress(tx database.Tx) (IngressStore, error) {
-	if p, ok := tx.(interface{ TransportIngressStore() IngressStore }); ok {
-		return p.TransportIngressStore(), nil
-	}
-	return nil, database.ErrUnsupported
+func Ingress(tx database.Tx) IngressStore {
+	return database.Must[interface{ TransportIngressStore() IngressStore }](tx).TransportIngressStore()
 }

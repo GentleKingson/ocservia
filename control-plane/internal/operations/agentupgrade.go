@@ -33,12 +33,8 @@ type agentUpgradeDecision struct {
 // outcome and a fresh observation of the target version.
 func (s *Service) ReconcileAgentUpgrades(ctx context.Context) error {
 	var pending []pendingUpgrade
-	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		pending, err = store.PendingUpgrades(ctx, reconciliationBatchLimit)
+	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) (err error) {
+		pending, err = operationstore.FromTransaction(tx).PendingUpgrades(ctx, reconciliationBatchLimit)
 		return err
 	})
 	if err != nil {
@@ -115,11 +111,7 @@ func (s *Service) applyAgentUpgradeTerminal(ctx context.Context, upgrade pending
 	genericTerminal := upgrade.OperationState == "expired" || upgrade.OperationState == "superseded"
 	unchanged := false
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		if err := store.UpgradeTerminal(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, CommandID: upgrade.CommandID, State: decision.State, OperationState: upgrade.OperationState, CommandState: commandState, GenericTerminal: genericTerminal, At: now}); err != nil {
+		if err := operationstore.FromTransaction(tx).UpgradeTerminal(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, CommandID: upgrade.CommandID, State: decision.State, OperationState: upgrade.OperationState, CommandState: commandState, GenericTerminal: genericTerminal, At: now}); err != nil {
 			unchanged = errors.Is(err, database.ErrNotFound)
 			return err
 		}
@@ -159,11 +151,7 @@ func (s *Service) applyAgentUpgradeProgress(ctx context.Context, upgrade pending
 	now := s.now().UTC()
 	unchanged := false
 	err := database.Within(ctx, s.backend, database.ReadCommitted, func(tx database.Tx) error {
-		store, err := operationstore.FromTransaction(tx)
-		if err != nil {
-			return err
-		}
-		err = store.UpgradeProgress(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, State: decision.State, At: now})
+		err := operationstore.FromTransaction(tx).UpgradeProgress(ctx, operationstore.UpgradeTransition{OperationID: upgrade.OperationID, State: decision.State, At: now})
 		unchanged = errors.Is(err, database.ErrNotFound)
 		return err
 	})

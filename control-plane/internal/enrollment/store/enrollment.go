@@ -62,10 +62,6 @@ type EnrollmentStore interface {
 	TrustSnapshot(context.Context) ([]Node, error)
 }
 
-func Enrollment(tx database.Tx) (EnrollmentStore, error) {
-	p, ok := tx.(interface{ EnrollmentStore() EnrollmentStore })
-	if !ok {
-		return nil, database.ErrUnsupported
-	}
-	return p.EnrollmentStore(), nil
+func Enrollment(tx database.Tx) EnrollmentStore {
+	return database.Must[interface{ EnrollmentStore() EnrollmentStore }](tx).EnrollmentStore()
 }

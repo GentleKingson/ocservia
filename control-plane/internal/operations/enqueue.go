@@ -108,11 +108,7 @@ func (s *Service) EnqueueTx(ctx context.Context, tx database.Tx, store operation
 		check, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		confirmed := database.Within(check, s.backend, database.ReadCommitted, func(read database.Tx) error {
-			store, err := operationstore.FromTransaction(read)
-			if err != nil {
-				return err
-			}
-			existing, stored, err := store.FindIdempotent(check, intent.WorkspaceID, intent.Key)
+			existing, stored, err := operationstore.FromTransaction(read).FindIdempotent(check, intent.WorkspaceID, intent.Key)
 			if err != nil {
 				return err
 			}
