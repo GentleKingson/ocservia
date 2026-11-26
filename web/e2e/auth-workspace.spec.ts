@@ -1,64 +1,15 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./csp";
+import { installEventSourceStub } from "./fixtures";
 
 const alphaId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
-
-async function installEventSourceProbe(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const sources: Array<{
-      url: string;
-      closed: boolean;
-      emitError: () => void;
-    }> = [];
-    class EventSourceProbe {
-      static readonly CONNECTING = 0;
-      static readonly OPEN = 1;
-      static readonly CLOSED = 2;
-      readonly CONNECTING = 0;
-      readonly OPEN = 1;
-      readonly CLOSED = 2;
-      readonly withCredentials = false;
-      readonly readyState = 1;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      onopen: ((event: Event) => void) | null = null;
-      readonly url: string;
-      private readonly record: {
-        url: string;
-        closed: boolean;
-        emitError: () => void;
-      };
-
-      constructor(url: string | URL) {
-        this.url = String(url);
-        this.record = {
-          url: this.url,
-          closed: false,
-          emitError: () => this.onerror?.(new Event("error")),
-        };
-        sources.push(this.record);
-      }
-
-      addEventListener(): void {}
-      removeEventListener(): void {}
-      dispatchEvent(): boolean {
-        return true;
-      }
-      close(): void {
-        this.record.closed = true;
-      }
-    }
-    Object.defineProperty(window, "EventSource", { value: EventSourceProbe });
-    Object.defineProperty(window, "__eventSources", { value: sources });
-  });
-}
 
 async function mockAuthRoutes(
   page: Page,
   initialAuthenticated: boolean,
   assertWorkspaceHeader = false,
 ) {
-  await installEventSourceProbe(page);
+  await installEventSourceStub(page, { record: true });
   await page.route("**/api/v1/readyz", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: "{}" }),
   );

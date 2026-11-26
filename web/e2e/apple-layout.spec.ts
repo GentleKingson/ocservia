@@ -1,7 +1,7 @@
 import type { Page, TestInfo } from "@playwright/test";
 import { join } from "node:path";
 import { expect, test } from "./csp";
-import { installEventSourceStub } from "./fixtures";
+import { installEventSourceStub, wireNode } from "./fixtures";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614cc1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614cc3";
@@ -23,29 +23,17 @@ async function mockOverview(page: Page, state: "normal" | "empty" | "error") {
   await page.clock.setFixedTime(fixedTime);
   await installEventSourceStub(page);
   const nodes = [
-    {
-      id: nodeId,
-      name: `${longName}-online`,
-      version: 1,
-      trust_status: "active",
-      connection_state: "online",
-      freshness: "fresh",
+    wireNode(nodeId, `${longName}-online`, {
       session_count: 7,
       agent_version_state: "current",
-      dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
       path: { mode: "relay", rtt_ms: 42 },
-    },
-    {
-      id: offlineNodeId,
-      name: `${longName}-offline`,
-      version: 1,
-      trust_status: "active",
+    }),
+    wireNode(offlineNodeId, `${longName}-offline`, {
       connection_state: "offline",
       freshness: "stale",
       session_count: 3,
-      dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
       path: { mode: "direct", rtt_ms: 12 },
-    },
+    }),
   ];
   const operations = ["queued", "failed"].map((operationState, index) => ({
     id: `019fc0a4-6d92-765c-a8a1-4af556614cd${String(index)}`,

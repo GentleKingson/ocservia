@@ -1,6 +1,6 @@
 import type { Page, Request, Route } from "@playwright/test";
 import { expect, test } from "./csp";
-import { installConsoleMocks } from "./fixtures";
+import { installConsoleMocks, wireNode } from "./fixtures";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ea1";
 const nodeId = "019fc0a4-6d92-765c-a8a1-4af556614ea2";
@@ -37,17 +37,10 @@ async function openNode(
   readSessions = (route: Route) =>
     route.fulfill({ json: { items: [], page: { has_more: false } } }),
 ): Promise<Request[]> {
-  const node = {
-    id: nodeId,
-    name: "Forms node",
+  const node = wireNode(nodeId, "Forms node", {
     version: 7,
     effective_actions: effectiveActions,
-    trust_status: "active",
-    connection_state: "online",
-    freshness: "fresh",
-    dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-    session_count: 0,
-  };
+  });
   const writes: Request[] = [];
   page.on("request", (request) => {
     if (request.method() !== "GET") writes.push(request);

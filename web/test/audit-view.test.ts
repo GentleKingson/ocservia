@@ -1,7 +1,6 @@
 import { mountSetup } from "./renderer";
-import { nextTick } from "vue";
-import { ResponseError } from "@/api/transport";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { flushTicks, responseError } from "./helpers";
 const mocks = vi.hoisted(() => ({
   listAuditEvents: vi.fn(),
   verifyAuditChain: vi.fn(),
@@ -37,13 +36,10 @@ interface View {
   refresh(): Promise<void>;
   verifyChain(): Promise<void>;
 }
-async function flush() {
-  for (let i = 0; i < 8; i++) await nextTick();
-}
 async function mount(): Promise<View> {
   const mounted = mountSetup(AuditView);
   unmount = mounted.unmount;
-  await flush();
+  await flushTicks();
   return mounted.view as View;
 }
 beforeEach(() => {
@@ -72,9 +68,7 @@ it("shows a confirmed empty result", async () => {
 it.each([403, 500])(
   "distinguishes HTTP %s from an empty result and retries",
   async (status) => {
-    mocks.listAuditEvents.mockRejectedValueOnce(
-      new ResponseError(new Response(null, { status })),
-    );
+    mocks.listAuditEvents.mockRejectedValueOnce(responseError(status));
     const view = await mount();
     expect(view.initialized).toBe(false);
     expect(view.error).toBe(
@@ -104,14 +98,14 @@ it("filters only the loaded slice", async () => {
   });
   const view = await mount();
   view.resultFilter = "failed";
-  await flush();
+  await flushTicks();
   expect(view.rows.map((row) => row.item)).toEqual([failed]);
   view.resultFilter = "";
   view.search = "NODE.APP";
-  await flush();
+  await flushTicks();
   expect(view.rows).toHaveLength(1);
   view.search = "missing";
-  await flush();
+  await flushTicks();
   expect(view.rows).toEqual([]);
   expect(mocks.listAuditEvents).toHaveBeenCalledTimes(1);
   view.toggle("id:audit-a");
@@ -147,9 +141,7 @@ it("renders valid and invalid audit evidence decoded by the API", async () => {
   });
   expect(view.verifyError).toBe("");
 
-  mocks.verifyAuditChain.mockRejectedValueOnce(
-    new ResponseError(new Response(null, { status: 403 })),
-  );
+  mocks.verifyAuditChain.mockRejectedValueOnce(responseError(403));
   await view.verifyChain();
   expect(view.verification).toBeUndefined();
   expect(view.verifyError).toBe("auditForbidden");
@@ -163,7 +155,7 @@ it("keeps expansion on the same event across refreshes and keeps unkeyed rows", 
     items: [newer, record, { action: "no.id" }, { ...record, action: "dup" }],
   });
   await view.refresh();
-  await flush();
+  await flushTicks();
   expect(view.rows.map((row) => row.key)).toEqual([
     "id:audit-new",
     "id:audit-a",

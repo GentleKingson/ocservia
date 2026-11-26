@@ -2,6 +2,7 @@ import { effectScope, nextTick, ref, type EffectScope } from "vue";
 import type { ConfigPlan, NodeObservedState } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useNodeConfiguration } from "../src/features/configuration/useNodeConfiguration";
+import { stubSessionStorage } from "./helpers";
 
 const api = vi.hoisted(() => ({
   createConfigPlan: vi.fn(),
@@ -47,11 +48,7 @@ function setup(revision: unknown = 7) {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.resetAllMocks();
-  const storage = new Map<string, string>();
-  vi.stubGlobal("sessionStorage", {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => storage.set(key, value),
-  });
+  stubSessionStorage();
   api.createConfigPlan.mockResolvedValue(plan);
   api.applyConfigPlan.mockResolvedValue({ id: "apply-operation" });
 });

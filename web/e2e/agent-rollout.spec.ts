@@ -1,6 +1,6 @@
 import type { Route } from "@playwright/test";
 import { expect, test } from "./csp";
-import { installConsoleMocks } from "./fixtures";
+import { installConsoleMocks, wireNode } from "./fixtures";
 
 const workspaceId = "019fc0a4-6d92-765c-a8a1-4af556614ee1";
 const canaryNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ee2";
@@ -9,21 +9,14 @@ const otherNodeId = "019fc0a4-6d92-765c-a8a1-4af556614ee4";
 const rolloutId = "019fc0a4-6d92-765c-a8a1-4af556614ee5";
 const recommended = "0.2.0";
 
-const nodeRow = (id: string, name: string) => ({
-  id,
-  name,
-  version: 1,
-  trust_status: "active",
-  connection_state: "online",
-  freshness: "fresh",
-  dropped: { security: 0, health: 0, aggregate: 0, raw: 0 },
-  session_count: 0,
-  recommended_agent_version: recommended,
-  agent_version: "0.1.1",
-  agent_version_state: "upgrade_available",
-  architecture: "amd64",
-  agent_upgrade_eligible: true,
-});
+const nodeRow = (id: string, name: string) =>
+  wireNode(id, name, {
+    recommended_agent_version: recommended,
+    agent_version: "0.1.1",
+    agent_version_state: "upgrade_available",
+    architecture: "amd64",
+    agent_upgrade_eligible: true,
+  });
 
 const rollout = (state: string, nodes: Record<string, unknown>[]) => ({
   id: rolloutId,

@@ -1,6 +1,7 @@
 import type { NodeObservedState } from "@/api/models";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { stubSessionStorage } from "./helpers";
 import { requestOrigin, stubRequestOrigin } from "./request-origin";
 
 const alpha = { id: "workspace-a", name: "Alpha", slug: "alpha", version: 1 };
@@ -76,7 +77,6 @@ beforeEach(() => {
   vi.stubEnv("VITE_DEV_AUTH_TOKEN", undefined);
   fetchMock.mockReset();
   assign.mockReset();
-  storage = new Map();
   browser = Object.assign(new EventTarget(), {
     location: {
       pathname: "/nodes",
@@ -86,11 +86,7 @@ beforeEach(() => {
     },
   });
   vi.stubGlobal("window", browser);
-  vi.stubGlobal("sessionStorage", {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => storage.set(key, value),
-    removeItem: (key: string) => storage.delete(key),
-  });
+  storage = stubSessionStorage();
   stubRequestOrigin();
   vi.stubGlobal("fetch", async (input: Request) =>
     fetchMock(input.url.slice(requestOrigin.length), {

@@ -1,4 +1,3 @@
-import { ResponseError } from "@/api/transport";
 import type {
   NodeIpBan,
   NodeObservedState,
@@ -8,6 +7,7 @@ import type {
 } from "@/api/models";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { responseError } from "./helpers";
 
 import { createUser } from "../src/api/users";
 import { disconnectSession, getOperation } from "../src/api/operations";
@@ -393,9 +393,7 @@ describe("controlled fleet operations", () => {
   });
 
   it("does not mark the fleet unavailable when a node selection returns 404", async () => {
-    vi.mocked(getNode).mockRejectedValueOnce(
-      new ResponseError(new Response(null, { status: 404 })),
-    );
+    vi.mocked(getNode).mockRejectedValueOnce(responseError(404));
     const store = useFleetStore();
 
     await store.select("missing-node");
