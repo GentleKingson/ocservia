@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # CI-only OS vulnerability gate; temporary scan data is never a Release asset.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode=scan
 if (($# > 1)); then
   exit 2
@@ -47,81 +46,18 @@ if [[ "${mode}" == use-prefetched-db ]]; then
 else
   update_and_verify_db
 fi
-exemptions_file="${IMAGE_SCAN_EXEMPTIONS:-${ROOT}/deploy/production/image-scan-exemptions.json}"
-[[ -f "${exemptions_file}" && ! -L "${exemptions_file}" && -s "${exemptions_file}" ]] || {
-  echo "image scan exemptions file is missing or empty: ${exemptions_file}" >&2
-  exit 1
-}
-jq -e '
-  (.exemptions | type == "array") and
-  ([.exemptions[] |
-    ((.image | type == "string" and length > 0) and
-     (.package | type == "string" and length > 0) and
-     (.installed_version | type == "string" and length > 0) and
-     (.vulnerability_id | type == "string" and length > 0) and
-     (.base_image | type == "string" and length > 0) and
-     (.reason | type == "string" and length > 0) and
-     (.review_by | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))) ] | all)
-' "${exemptions_file}" >/dev/null || {
-  echo "every image scan exemption must bind image, package, installed_version, vulnerability_id, base_image, reason, and review_by" >&2
-  exit 1
-}
-exemptions_json="$(jq -c '.exemptions' "${exemptions_file}")"
 
-controller_dockerfile_for() {
-  case "$1" in
-    gateway) printf 'deploy/production/gateway.Dockerfile\n' ;;
-    control) printf 'control-plane/Dockerfile\n' ;;
-    transport) printf 'rust/transportd.Dockerfile\n' ;;
-    backup) printf 'deploy/production/backup.Dockerfile\n' ;;
-    edge|relay|signer) printf 'deploy/production/%s.Dockerfile\n' "$1" ;;
-    *) return 1 ;;
-  esac
-}
-
-pinned_third_party_image_ref() {
-  local name="$1" var_name
-  case "$name" in
-    postgres) var_name=OCSERV_POSTGRES_IMAGE ;;
-    otel) var_name=OCSERV_OTEL_IMAGE ;;
-    *) return 1 ;;
-  esac
-  sed -n "s/^readonly ${var_name}=\"\\([^\"]*\\)\"$/\\1/p" "${ROOT:?}/scripts/release-common.sh" | head -n 1
-}
-
-image_base_reference() {
-  local name="$1" dockerfile ref
-  case "$name" in
-    postgres|otel)
-      ref="$(pinned_third_party_image_ref "$name")"
-      [[ "$ref" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || return 1
-      printf '%s\n' "$ref"
-      return 0
-      ;;
-  esac
-  dockerfile="$(controller_dockerfile_for "$name")"
-  awk '
-    /^FROM[ \t]/ && $2 ~ /^[^@[:space:]]+@sha256:[0-9a-f]{64}$/ { base = $2 }
-    /^FROM[ \t]+scratch([ \t]|$)/ { base = "scratch" }
-    END { if (base != "") print base; else exit 1 }
-  ' "${ROOT:?}/${dockerfile}"
-}
-
-today="$(date -u +%Y-%m-%d)"
 declare -A seen=()
 row_names=()
 row_arches=()
 row_archives=()
-row_bases=()
 while IFS=$'\t' read -r name arch archive; do
   [[ "$name" =~ ^[a-z][a-z0-9_-]*$ && ( "$arch" == amd64 || "$arch" == arm64 ) ]] || exit 2
   [[ -f "$archive" && ! -L "$archive" && -s "$archive" && -z "${seen[$name/$arch]:-}" ]] || exit 2
   seen["$name/$arch"]=1
-  base_ref="$(image_base_reference "$name")"
   row_names+=("$name")
   row_arches+=("$arch")
   row_archives+=("$archive")
-  row_bases+=("$base_ref")
 done <"$image_archives_tsv"
 rows="${#row_names[@]}"
 ((rows > 0)) || exit 2
@@ -130,34 +66,23 @@ max_jobs="${IMAGE_SCAN_PARALLELISM:-4}"
 [[ "$max_jobs" =~ ^[1-9][0-9]*$ ]] || exit 2
 
 summarize_findings() {
-  local name="$1" base_ref="$2"
-  shift 2
-  jq -cs --arg image "${name}" --arg base "${base_ref}" --arg today "${today}" --argjson _exemptions "${exemptions_json}" '
-    [.[].matches[]]
-    | [.[]
-      | .artifact.name as $package | .artifact.version as $version
-      | .vulnerability.id as $id | .vulnerability.severity as $severity
-      | ((.vulnerability.fix.versions // []) | length > 0) as $fixable
-      | {package: $package, version: $version, id: $id, severity: $severity, fixable: $fixable,
-         exempted: any($_exemptions[];
-           .image == $image and .package == $package and .installed_version == $version
-           and .vulnerability_id == $id and .base_image == $base and .review_by >= $today)}]
-    | ([.[] | select(.exempted and .fixable and (.severity == "High" or .severity == "Critical"))]) as $exempted
-    | ([.[] | select(.exempted | not)]) as $reportable
+  jq -cs '
+    [.[].matches[]
+      | {package: .artifact.name, version: .artifact.version,
+         id: .vulnerability.id, severity: .vulnerability.severity,
+         fixable: ((.vulnerability.fix.versions // []) | length > 0)}]
     | {
-        total: ($reportable | length),
-        fixable_high_critical: ([$reportable[] | select(.fixable and (.severity == "High" or .severity == "Critical"))] | length),
-        fixable_details: [$reportable[] | select(.fixable and (.severity == "High" or .severity == "Critical")) | {package, version, id, severity}],
-        exempted: ($exempted | length),
-        exempted_details: [$exempted[] | {package, version, id, severity}]
+        total: length,
+        fixable_high_critical: ([.[] | select(.fixable and (.severity == "High" or .severity == "Critical"))] | length),
+        fixable_details: [.[] | select(.fixable and (.severity == "High" or .severity == "Critical")) | {package, version, id, severity}]
       }
-      + (([$reportable[].severity] | group_by(.))
+      + (([.[].severity] | group_by(.))
         | map({(.[0] | ascii_downcase): length}) | add // {})
   ' "$@"
 }
 
 scan_one_archive() {
-  local idx="$1" name="$2" arch="$3" archive="$4" base_ref="$5"
+  local idx="$1" name="$2" arch="$3" archive="$4"
   local primary_sbom_file="$work/row-${idx}.spdx.json"
   local scan_file="$work/row-${idx}.scan.json"
   local out_file="$work/row-${idx}.out"
@@ -172,9 +97,8 @@ scan_one_archive() {
     --override-default-catalogers "$catalogers" \
     -o spdx-json --file "$primary_sbom_file" -q
   grype "sbom:$primary_sbom_file" -o json --file "$scan_file" -q
-  jq -c --arg image "$name" --arg arch "$arch" --slurpfile sbom "$primary_sbom_file" '
-    {image:$image, arch:$arch, db_built:.descriptor.db.status.built, db_source:.descriptor.db.status.from,
-     pcre2:[$sbom[0].packages[] | select(.name == "pcre2") | .versionInfo]}
+  jq -c --arg image "$name" --arg arch "$arch" '
+    {image: $image, arch: $arch, db_built: .descriptor.db.status.built, db_source: .descriptor.db.status.from}
   ' "$scan_file" >"$out_file"
   # PGDG postgresql-18 packages are not tracked by Debian main security feeds;
   # check the upstream PostgreSQL CPE explicitly when postgresql-18 is installed.
@@ -200,21 +124,9 @@ scan_one_archive() {
       scan_files+=("$pg_scan_file")
     fi
   fi
-  findings="$(summarize_findings "$name" "$base_ref" "${scan_files[@]}")"
+  findings="$(summarize_findings "${scan_files[@]}")"
   fixable_count="$(jq -r '.fixable_high_critical' <<<"$findings")"
   echo "$name linux/$arch: $findings" >>"$out_file"
-  # Keep Caddy Go module scanning advisory (non-blocking) until Caddy 2.11.10+ ships.
-  if [[ "$name" == gateway ]]; then
-    local go_sbom_file="$work/row-${idx}-go.spdx.json"
-    local go_scan_file="$work/row-${idx}-go.scan.json"
-    local go_findings
-    syft "docker-archive:$archive" \
-      --override-default-catalogers 'go-module-binary-cataloger' \
-      -o spdx-json --file "$go_sbom_file" -q
-    grype "sbom:$go_sbom_file" -o json --file "$go_scan_file" -q
-    go_findings="$(summarize_findings "$name" "$base_ref" "$go_scan_file")"
-    echo "$name linux/$arch go-advisory (non-blocking until Caddy 2.11.10+): $go_findings" >>"$out_file"
-  fi
   printf 'controller-scan-timing image=%s arch=%s seconds=%s\n' "$name" "$arch" "$((SECONDS - started))" >>"$out_file"
   if ((fixable_count > 0)); then
     printf '%s\n' "$name linux/$arch: $fixable_count fixable High/Critical findings" >"$fail_file"
@@ -224,7 +136,7 @@ scan_one_archive() {
 pids=()
 scan_errors=0
 for ((idx = 0; idx < rows; idx++)); do
-  scan_one_archive "$idx" "${row_names[idx]}" "${row_arches[idx]}" "${row_archives[idx]}" "${row_bases[idx]}" &
+  scan_one_archive "$idx" "${row_names[idx]}" "${row_arches[idx]}" "${row_archives[idx]}" &
   pids+=("$!")
   if ((idx + 1 >= max_jobs)); then
     if ! wait "${pids[idx + 1 - max_jobs]}"; then

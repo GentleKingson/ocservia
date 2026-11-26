@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := test
 
-.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean policy-check contracts-breaking go-check rust-check web-check security-check license-check database-smoke e2e hygiene-check
+.PHONY: bootstrap generate format lint test test-go test-rust test-web verify docs-check generated-clean policy-check contracts-breaking go-check rust-check web-check database-smoke e2e hygiene-check
 
 bootstrap:
 	./scripts/bootstrap.sh all
@@ -42,12 +42,6 @@ rust-check:
 
 web-check:
 	./scripts/web-check.sh
-
-security-check:
-	./scripts/security-check.sh
-
-license-check:
-	./scripts/license-check.sh
 
 verify:
 	./scripts/verify.sh

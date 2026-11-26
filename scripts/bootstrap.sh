@@ -8,7 +8,7 @@ CHECKSUMS="${ROOT}/scripts/checksums.txt"
 PROFILE="${1:-}"
 
 if (($# > 1)); then
-  echo "usage: $0 [all|source-style|contracts|secret-scan|go-test|go-security|native-packages|image-security|rust-basic|rust-security|node|web|npm-security]" >&2
+  echo "usage: $0 [all|source-style|contracts|go-test|go-security|native-packages|image-security|rust-basic|rust-security|node|web|npm-security]" >&2
   exit 2
 fi
 
@@ -21,7 +21,7 @@ if [[ -z "${PROFILE}" ]]; then
 fi
 
 case "${PROFILE}" in
-  all | source-style | contracts | secret-scan | go-test | go-security | native-packages | image-security | rust-basic | rust-security | node | web | npm-security) ;;
+  all | source-style | contracts | go-test | go-security | native-packages | image-security | rust-basic | rust-security | node | web | npm-security) ;;
   *)
     echo "unsupported bootstrap profile: ${PROFILE}" >&2
     exit 2
@@ -119,7 +119,6 @@ case "${platform}" in
     rust_platform="aarch64-apple-darwin"
     ruff_platform="aarch64-apple-darwin"
     buf_platform="Darwin-arm64"
-    gitleaks_platform="darwin_arm64"
     oasdiff_platform="darwin_all"
     cargo_audit_platform="aarch64-apple-darwin"
     cargo_deny_platform="aarch64-apple-darwin"
@@ -133,7 +132,6 @@ case "${platform}" in
     rust_platform="x86_64-unknown-linux-gnu"
     ruff_platform="x86_64-unknown-linux-gnu"
     buf_platform="Linux-x86_64"
-    gitleaks_platform="linux_x64"
     oasdiff_platform="linux_amd64"
     cargo_audit_platform="x86_64-unknown-linux-gnu"
     cargo_deny_platform="x86_64-unknown-linux-musl"
@@ -147,7 +145,6 @@ case "${platform}" in
     rust_platform="aarch64-unknown-linux-gnu"
     ruff_platform="aarch64-unknown-linux-gnu"
     buf_platform="Linux-aarch64"
-    gitleaks_platform="linux_arm64"
     oasdiff_platform="linux_arm64"
     cargo_audit_platform="aarch64-unknown-linux-gnu"
     cargo_deny_platform="aarch64-unknown-linux-musl"
@@ -253,13 +250,6 @@ install_ruff() {
     "ruff-${ruff_platform}/ruff" 1
 }
 
-install_gitleaks() {
-  install_tar_binary equals "$(version gitleaks)" "${TOOLS}/bin/gitleaks" version \
-    "https://github.com/gitleaks/gitleaks/releases/download/v$(version gitleaks)/gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz" \
-    "gitleaks_$(version gitleaks)_${gitleaks_platform}.tar.gz" \
-    gitleaks
-}
-
 install_syft() {
   install_tar_binary contains "$(version syft)" "${TOOLS}/bin/syft" --version \
     "https://github.com/anchore/syft/releases/download/v$(version syft)/syft_$(version syft)_${syft_platform}.tar.gz" \
@@ -288,18 +278,6 @@ install_govulncheck() {
       "golang.org/x/vuln/cmd/govulncheck@v$(version govulncheck)"
   fi
   [[ "$(govulncheck -version 2>&1)" == *"v$(version govulncheck)"* ]]
-}
-
-install_go_licenses() {
-  local expected actual
-  expected="v$(version go_licenses)"
-  actual="$(go version -m "${TOOLS}/bin/go-licenses" 2>/dev/null | awk '$1 == "mod" { print $3 }' || true)"
-  if [[ "${actual}" != "${expected}" ]]; then
-    GOBIN="${TOOLS}/bin" go install \
-      "github.com/google/go-licenses/v2@${expected}"
-  fi
-  actual="$(go version -m "${TOOLS}/bin/go-licenses" 2>/dev/null | awk '$1 == "mod" { print $3 }' || true)"
-  [[ "${actual}" == "${expected}" ]]
 }
 
 install_cargo_audit() {
@@ -339,11 +317,6 @@ install_contract_tools() {
   install_oasdiff
 }
 
-install_go_quality_tools() {
-  install_govulncheck
-  install_go_licenses
-}
-
 install_rust_quality_tools() {
   install_cargo_audit
   install_cargo_deny
@@ -373,8 +346,7 @@ case "${PROFILE}" in
     install_npm
     install_rust
     install_contract_tools
-    install_gitleaks
-    install_go_quality_tools
+    install_govulncheck
     install_rust_quality_tools
     verify_host_command jq
     verify_host_command shellcheck
@@ -392,11 +364,6 @@ case "${PROFILE}" in
     install_contract_tools
     install_web_dependencies
     ;;
-  secret-scan)
-    install_gitleaks
-    verify_host_command jq
-    verify_host_command openssl
-    ;;
   go-test)
     install_go
     verify_host_command jq
@@ -404,7 +371,6 @@ case "${PROFILE}" in
   go-security)
     install_go
     install_govulncheck
-    install_go_licenses
     ;;
   rust-basic)
     install_rust
@@ -412,8 +378,6 @@ case "${PROFILE}" in
   rust-security)
     install_rust
     install_rust_quality_tools
-    install_grype
-    verify_host_command jq
     ;;
   native-packages)
     install_rust

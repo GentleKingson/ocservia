@@ -196,31 +196,24 @@ application URL and CA certificate.
 
 ### Security review posture
 
-- Source dependency advisories (`govulncheck` for Go, `cargo audit`,
-  `cargo deny`, and `grype` global GHSA/OSV lockfile scanning for Rust
-  including the relay lockfile, and `npm audit` for Web) along with repository
-  secret scanning run in the scheduled Security Checks workflow and must pass on
-  the release candidate. Repository-only upstream GitHub advisories not yet
-  mirrored to RustSec or the global GHSA database still require release
-  monitoring.
+- Source dependency advisories (`govulncheck` for Go, `cargo audit` for the
+  relay lockfile plus `cargo deny check advisories` for Rust, and
+  `npm audit --omit=dev --audit-level=high` for production Web dependencies) run
+  both on schedule and directly inside `Release Check` via
+  [`security.yml`](../../.github/workflows/security.yml). Repository secrets are
+  guarded by GitHub Secret Scanning with Push Protection.
   [SECURITY.md](../../SECURITY.md) covers vulnerability reporting and supported
   versions.
-- In Release Check and in release builds, `build-controller-images` scans all 9
-  manifest images (the 7 built Controller images plus the pinned third-party
-  `postgres` and `otel` images) on both native architectures (`amd64` and
-  `arm64`) using pinned Syft and Grype versions against a freshly updated
-  vulnerability database before running image smoke tests or uploading release
-  assets (temporary scan databases are discarded after the job). Any High or
-  Critical OS finding with an upstream fix fails the build, including explicit
-  PostgreSQL CPE matching for PGDG `postgresql-18` packages in `postgres` and
-  `backup`, as well as Go module findings in `otel`, unless an unexpired entry
-  in
-  [`deploy/production/image-scan-exemptions.json`](../../deploy/production/image-scan-exemptions.json)
-  matches the exact image, package name, installed version, CVE ID,
-  digest-pinned base image, and documented rationale. `gateway` also logs
-  embedded Caddy Go module findings in advisory (non-blocking) mode until Caddy
-  `2.11.10+` ships. Unfixed findings remain visible in the CI logs. A blocking
-  failure on either architecture blocks release publication.
+- In Release Check, `build-controller-images` scans all 9 manifest images (the
+  7 built Controller images plus the pinned third-party `postgres` and `otel`
+  images) on `amd64` using pinned Syft and Grype versions against a freshly
+  updated vulnerability database before running native image smoke tests or
+  uploading release assets (temporary scan databases are discarded after the
+  job). Any High or Critical finding with an upstream fix fails the build,
+  including explicit PostgreSQL CPE matching for PGDG `postgresql-18` packages
+  in `postgres` and `backup`, as well as Go module findings in `otel`. Both
+  `amd64` and `arm64` still run native container smoke checks before uploading
+  archives. Unfixed findings remain visible in the CI logs.
 - Updating pinned database images or patch levels requires migration,
   role-permission, SQL-artifact, and backup/restore verification under
   [stable contracts](../reference/stable-contracts.md#database-and-recovery-matrix)

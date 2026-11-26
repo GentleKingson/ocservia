@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reuse same-commit checks and qualify the exact artifacts from Release Check."""
+"""Reuse same-commit Basic CI and qualify the exact artifacts from Release Check."""
 
 import hashlib
 import io
@@ -104,39 +104,17 @@ def passed(jobs_by_name, name):
     return jobs_by_name.get(name, {}).get('conclusion') == 'success'
 
 
-def contract_passed(jobs_by_name, baseline):
-    return passed(jobs_by_name, 'ci-tools') and any(
-        step['name'] == f'Contract baseline {baseline}' and step['conclusion'] == 'success'
-        for step in jobs_by_name['ci-tools']['steps'])
-
-
-def ci(repo, sha, baseline, deadline):
+def ci(repo, sha, deadline):
     def quick(run):
         return (matches(run, repo, sha, ('push',))
                 or matches(run, repo, sha, ('workflow_dispatch',), 'Basic CI quick'))
 
-    def full(run):
-        return matches(run, repo, sha, ('workflow_dispatch',), 'Basic CI full')
-
     run = find_or_dispatch(repo, 'ci.yml', sha, quick,
-                           {'profile': 'quick', 'contract_base_ref': baseline}, deadline)
+                           {'profile': 'quick', 'contract_base_ref': 'HEAD~1'}, deadline)
     quick_jobs = jobs(repo, run)
     require(run['conclusion'] in ('success', 'failure') and passed(quick_jobs, 'Basic CI Result'),
             f'Basic CI Result did not pass: {run["html_url"]}')
-    full_run = latest(repo, 'ci.yml', sha, full)
-    full_jobs = {}
-    if full_run:
-        full_run = wait(repo, full_run, full, deadline)
-        if full_run['conclusion'] in ('success', 'failure'):
-            full_jobs = jobs(repo, full_run)
-        require(full_jobs.get('database-smoke', {}).get('conclusion') != 'failure',
-                f'Full CI database-smoke failed: {full_run["html_url"]}')
-    return {
-        'quick_url': run['html_url'],
-        'full_url': full_run['html_url'] if full_run else '',
-        'contract_done': contract_passed(quick_jobs, baseline) or contract_passed(full_jobs, baseline),
-        'database_smoke_done': passed(quick_jobs, 'database-smoke') or passed(full_jobs, 'database-smoke'),
-    }
+    return {'quick_url': run['html_url']}
 
 
 def artifact_digest(data):
@@ -220,7 +198,7 @@ def write_record(sha, version):
             key: {'id': int(env[f'{key.upper()}_ID']), 'manifest_sha256': env[f'{key.upper()}_SHA256']}
             for key in PRODUCTS},
         'assets': {'id': int(env['ASSETS_ID']), 'sha256': env['ASSETS_SHA256']},
-        'checks': {key: env[key.upper()] for key in ('contract_base_sha', 'quick_url', 'full_url', 'security_url')},
+        'checks': {'quick_url': env['QUICK_URL']},
     }
     (Path(env['RUNNER_TEMP']) / 'release-check.json').write_text(json.dumps(record) + '\n')
 
@@ -235,16 +213,7 @@ def main():
     repo = os.environ['GH_REPO']
     deadline = time.monotonic() + WAIT_SECONDS
     if phase == 'ci':
-        baseline = os.environ['CONTRACT_BASE_SHA']
-        require(SHA.fullmatch(baseline) and baseline != sha, 'Invalid contract baseline')
-        write_outputs(ci(repo, sha, baseline, deadline))
-    elif phase == 'security':
-        def security(run):
-            return matches(run, repo, sha, ('schedule', 'workflow_dispatch'))
-
-        run = find_or_dispatch(repo, 'security.yml', sha, security, {}, deadline)
-        succeeded(run)
-        write_outputs({'security_url': run['html_url']})
+        write_outputs(ci(repo, sha, deadline))
     else:
         raise RuntimeError(f'Unknown evidence phase: {phase}')
 

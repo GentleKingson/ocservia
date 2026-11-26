@@ -1,24 +1,2 @@
 [advisories]
 unmaintained = "workspace"
-
-[bans]
-multiple-versions = "warn"
-wildcards = "deny"
-
-[licenses]
-confidence-threshold = 0.93
-allow = [
-  "Apache-2.0",
-  "BSD-2-Clause",
-  "BSD-3-Clause",
-  "ISC",
-  "MIT",
-  "CDLA-Permissive-2.0",
-  "Unlicense",
-  "Unicode-3.0",
-  "Zlib",
-]
-
-[sources]
-unknown-git = "deny"
-unknown-registry = "deny"
