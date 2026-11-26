@@ -45,7 +45,6 @@ func prodBaseEnv(t *testing.T) map[string]string {
 	testutil.NoError(t, os.WriteFile(caPath, []byte("test"), 0o600))
 	return map[string]string{
 		"OCSERV_ENVIRONMENT":              "production",
-		"OCSERV_DATABASE_BACKEND":         "postgres",
 		"OCSERV_DATABASE_URL":             "postgres://app:secret@database.example.test:5432/ocservia?sslmode=verify-full",
 		"OCSERV_DATABASE_TLS_CA_FILE":     caPath,
 		"OCSERV_LOCAL_AUTH_ENABLED":       "true",
@@ -81,10 +80,9 @@ func TestConfigValidationGuards(t *testing.T) {
 		{"dev auth token short rejected", nil, baseEnv(map[string]string{"OCSERV_DEV_AUTH_TOKEN": "short"}), false},
 		{"dev auth token production rejected", nil, baseEnv(map[string]string{"OCSERV_ENVIRONMENT": "production", "OCSERV_DEV_AUTH_TOKEN": "local-development-token-32-characters"}), false},
 		{"audit event and checkpoint distinct", nil, baseEnv(map[string]string{"OCSERV_ENVIRONMENT": "test", "OCSERV_AUDIT_EVENT_KEY_ID": "k", "OCSERV_TEST_AUDIT_EVENT_KEY_HEX": strings.Repeat("11", 32), "OCSERV_AUDIT_CHECKPOINT_KEY": strings.Repeat("11", 32)}), false},
-		{"legacy role rejected", []string{"--role=api"}, baseEnv(nil), false},
-		{"legacy role all ok", []string{"--role=all"}, baseEnv(map[string]string{"OCSERV_DATABASE_BACKEND": "postgres"}), true},
-		{"non-postgres backend rejected", nil, baseEnv(map[string]string{"OCSERV_DATABASE_BACKEND": "mysql"}), false},
-		{"mismatched dsn rejected", nil, baseEnv(map[string]string{"OCSERV_DATABASE_BACKEND": "postgres", "OCSERV_DATABASE_URL": "mysql://db/test"}), false},
+		{"legacy role api rejected", []string{"--role=api"}, baseEnv(nil), false},
+		{"legacy role all rejected", []string{"--role=all"}, baseEnv(nil), false},
+		{"mismatched dsn rejected", nil, baseEnv(map[string]string{"OCSERV_DATABASE_URL": "mysql://db/test"}), false},
 		{"local auth strict bool rejected", nil, baseEnv(map[string]string{"OCSERV_LOCAL_AUTH_ENABLED": "yes"}), false},
 		{"local auth requires session key", nil, baseEnv(map[string]string{"OCSERV_LOCAL_AUTH_ENABLED": "true"}), false},
 		{"local auth with session key ok", nil, baseEnv(map[string]string{"OCSERV_LOCAL_AUTH_ENABLED": "true", "OCSERV_SESSION_KEY": strings.Repeat("11", 32)}), true},
