@@ -43,12 +43,10 @@ func TestUserStateBackendIntegration(t *testing.T) {
 	row := func(query string, args ...any) postgres.Row {
 		return b.QueryRow(ctx, query, args...)
 	}
-	workspace, node, identity, session := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	workspace, node := uuid.New(), uuid.New()
 	exec(`INSERT INTO workspaces(id,name,slug,created_at,updated_at)VALUES($1,'desired',$2,now(),now())`, workspace, workspace.String())
 	exec(`INSERT INTO nodes(id,workspace_id,name,status,created_at,updated_at)VALUES($1,$2,'desired','offline',now(),now())`, node, workspace)
-	exec(`INSERT INTO identities(id,issuer,subject,created_at,updated_at)VALUES($1,'userstate-test',$2,now(),now())`, identity, identity.String())
-	exec(`INSERT INTO workspace_admins(workspace_id,identity_id,created_at)VALUES($1,$2,now())`, workspace, identity)
-	exec(`INSERT INTO auth_sessions(id,identity_id,expires_at,created_at)VALUES($1,$2,now()+interval '1 hour',now())`, session, identity)
+	identity, session := testfixture.InsertWorkspaceAdminSession(t, ctx, b.Pool(), workspace, "userstate-test")
 	for _, capability := range []string{"ocserv.users.write", "ocserv.groups.write"} {
 		exec(`INSERT INTO node_capabilities(node_id,capability,approved)VALUES($1,$2,true)`, node, capability)
 	}

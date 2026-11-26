@@ -330,7 +330,7 @@ func transactionKeyLookup(tx database.Tx) keyLookup {
 
 func verifyResult(ctx context.Context, lookup keyLookup, nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) (verification Verification) {
 	defer func() { recordVerificationMetric(verification) }()
-	if commandKind(envelope) == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED {
+	if CommandKind(envelope) == agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_UNSPECIFIED {
 		return Verification{Status: "not_required"}
 	}
 	switch result.GetState() {
@@ -574,7 +574,7 @@ func PublicKeyID(publicKey []byte) string {
 }
 
 func receiptClaimsMatch(nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult, receipt *agentv1.PrivdResultReceiptV1) bool {
-	expectedResultKind := resultKind(envelope, result)
+	expectedResultKind := ResultKind(envelope, result)
 	resultDigest, err := ResultPayloadCBORHash(expectedResultKind, result.GetResult())
 	if err != nil {
 		return false
@@ -585,7 +585,7 @@ func receiptClaimsMatch(nodeID uuid.UUID, envelope *agentv1.CommandEnvelope, res
 		!bytes.Equal(receipt.GetIdempotencyKey(), result.GetIdempotencyKey()) || !bytes.Equal(receipt.GetIdempotencyKey(), envelope.GetIdempotencyKey()) ||
 		receipt.GetSemanticPayloadHashVersion() != result.GetSemanticPayloadHashVersion() || receipt.GetSemanticPayloadHashVersion() != envelope.GetSemanticPayloadHashVersion() ||
 		!bytes.Equal(receipt.GetSemanticPayloadSha256(), result.GetPayloadSha256()) || !bytes.Equal(receipt.GetSemanticPayloadSha256(), envelope.GetSemanticPayloadSha256()) ||
-		receipt.GetCommandKind() != commandKind(envelope) || receipt.GetResultKind() != expectedResultKind ||
+		receipt.GetCommandKind() != CommandKind(envelope) || receipt.GetResultKind() != expectedResultKind ||
 		receipt.GetTerminalState() != result.GetState() || !bytes.Equal(receipt.GetResultCborSha256(), resultDigest[:]) || receipt.GetErrorCode() != result.GetErrorCode() ||
 		!proto.Equal(receipt.GetAcceptedAt(), result.GetAcceptedAt()) || !proto.Equal(receipt.GetCompletedAt(), result.GetCompletedAt()) || receipt.GetReplayed() != result.GetReplayed() ||
 		!receiptWithinCommandWindow(envelope, receipt) {
@@ -659,7 +659,8 @@ func validReceipt(receipt *agentv1.PrivdResultReceiptV1) bool {
 	return len(certificate.GetCsrDerSha256()) == 0 && len(certificate.GetPublicKeySha256()) == 0
 }
 
-func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKind {
+// CommandKind maps a CommandEnvelope payload to its attested PrivilegedCommandKind.
+func CommandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKind {
 	switch envelope.GetPayload().(type) {
 	case *agentv1.CommandEnvelope_SessionDisconnect:
 		return agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_SESSION_DISCONNECT
@@ -696,11 +697,12 @@ func commandKind(envelope *agentv1.CommandEnvelope) agentv1.PrivilegedCommandKin
 	}
 }
 
-func resultKind(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) agentv1.PrivilegedResultKind {
+// ResultKind maps a CommandEnvelope and CommandResult state to its expected PrivilegedResultKind.
+func ResultKind(envelope *agentv1.CommandEnvelope, result *agentv1.CommandResult) agentv1.PrivilegedResultKind {
 	if result.GetState() == agentv1.CommandResultState_COMMAND_RESULT_STATE_FAILED {
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_ERROR
 	}
-	switch commandKind(envelope) {
+	switch CommandKind(envelope) {
 	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_PLAN:
 		return agentv1.PrivilegedResultKind_PRIVILEGED_RESULT_KIND_CONFIG_PLAN
 	case agentv1.PrivilegedCommandKind_PRIVILEGED_COMMAND_KIND_CONFIG_APPLY:
