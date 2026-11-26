@@ -10,7 +10,6 @@ import (
 
 	agentv1 "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/commandauth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/connectionowner"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
@@ -47,7 +46,7 @@ func (s *Service) RecoverAmbiguousDispatched(ctx context.Context, tx database.Tx
 	if err != nil || connectionID.Version() != 7 {
 		return 0, ErrInvalidRequest
 	}
-	if err := commandlimit.Lock(ctx, tx); err != nil {
+	if err := operationstore.LockCommandAdmission(ctx, tx); err != nil {
 		return 0, fmt.Errorf("serialize reconnect recovery: %w", err)
 	}
 	store := operationstore.FromTransaction(tx)

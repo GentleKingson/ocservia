@@ -13,7 +13,6 @@ import (
 	agent "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/agent/v1"
 	wire "github.com/GentleKingson/ocservia/control-plane/gen/proto/ocserv/platform/transport/v1"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
-	ingress "github.com/GentleKingson/ocservia/control-plane/internal/transportevents/store"
 	"github.com/google/uuid"
 )
 
@@ -55,6 +54,7 @@ func valid(r *agent.VpnAuditRecord, now time.Time) bool {
 }
 
 type Store interface {
+	LockAuditTrust(context.Context, uuid.UUID, []byte) (string, string, error)
 	CheckAuditFence(context.Context, []byte, []byte, int64) error
 	SaveAuditRecord(context.Context, uuid.UUID, *agent.VpnAuditRecord) error
 }
@@ -74,14 +74,14 @@ func Ingest(ctx context.Context, backend database.Backend, req *wire.StoreVpnAud
 		receipt.EventIds = append(receipt.EventIds, r.EventId)
 	}
 	err = database.Within(ctx, backend, database.ReadCommitted, func(tx database.Tx) error {
-		trust, e := ingress.Ingress(tx).LockTrustShared(ctx, node, req.EndpointId)
+		store := database.Must[Store](tx)
+		endpointState, nodeStatus, e := store.LockAuditTrust(ctx, node, req.EndpointId)
 		if e != nil {
 			return e
 		}
-		if trust.EndpointState != "active" || (trust.NodeStatus != "active" && trust.NodeStatus != "offline") {
+		if endpointState != "active" || (nodeStatus != "active" && nodeStatus != "offline") {
 			return ErrInactive
 		}
-		store := database.Must[Store](tx)
 		if e = store.CheckAuditFence(ctx, req.NodeId, req.ConnectionId, int64(req.SessionEpoch)); e != nil {
 			return e
 		}

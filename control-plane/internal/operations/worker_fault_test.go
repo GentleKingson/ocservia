@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/commandlimit"
 	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	operationstore "github.com/GentleKingson/ocservia/control-plane/internal/operations/store"
 	"github.com/GentleKingson/ocservia/control-plane/internal/testutil"
@@ -63,7 +62,9 @@ func (t *faultDispatchTx) Rollback(context.Context) error { return nil }
 func (t *faultDispatchTx) WallTime(context.Context) (time.Time, error) {
 	return t.backend.now, nil
 }
-func (t *faultDispatchTx) CommandLimitStore() commandlimit.Store { return &faultCommandLimitStore{} }
+func (t *faultDispatchTx) CommandLimitStore() operationstore.CommandLimitStore {
+	return &faultCommandLimitStore{}
+}
 func (t *faultDispatchTx) OperationStore() operationstore.Store {
 	return &faultOperationStore{backend: t.backend}
 }
