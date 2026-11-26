@@ -123,7 +123,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 		}
 	}
 	operationService.EnableReleaseCatalog(releaseCatalog)
-	eventService, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
+	eventService, simService, closeWorkerTransport, err := startWorker(life, cfg, build, backend, commandSigner, operationService, logger)
 	if err != nil {
 		return err
 	}
@@ -176,7 +176,7 @@ func runController(ctx context.Context, cfg config.Config, build BuildInfo, back
 	modules := api.Modules{
 		AccessLogger: accessLogger,
 		Nodes:        telemetryService, ConfigPlans: configplan.New(backend, operationService), UserOperations: userOperationsService, Certificates: certificateService,
-		Operations: operationService, ReleaseCatalog: releaseCatalog, UserState: userStateService, TransportEvents: eventService,
+		Operations: operationService, ReleaseCatalog: releaseCatalog, UserState: userStateService, TransportEvents: eventService, DevSim: simService,
 	}
 	if cfg.ControllerEndpointID != "" {
 		modules.Enrollment = enrollment.New(backend, cfg.ControllerEndpointID, build.Version, commandSigner)
