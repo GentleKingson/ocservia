@@ -469,6 +469,28 @@ func (w *watcher) fetchPage(cursor uuid.UUID) ([]Event, error) {
 	return events, nil
 }
 
+func (s *subscriber) finishCatchup() {
+	s.catchingUp = false
+	s.catchupCursor = uuid.Nil
+}
+
+func nonAdvancingCursor(event Event, afterSequence uint64) bool {
+	return event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= afterSequence)
+}
+
+func (w *watcher) sendOrDisconnect(id uint64, sub *subscriber, event Event) bool {
+	select {
+	case sub.events <- event:
+		sub.sequence = event.Sequence
+		return true
+	default:
+		delete(w.subscribers, id)
+		w.hub.metrics.slowConsumers.Add(1)
+		sub.finish(ErrSlowConsumer)
+		return false
+	}
+}
+
 func (w *watcher) poll() (bool, error) {
 	if !w.hasCursor {
 		return false, nil
@@ -479,7 +501,7 @@ func (w *watcher) poll() (bool, error) {
 			return false, err
 		}
 		for _, event := range events {
-			if event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= w.cursorSequence) {
+			if nonAdvancingCursor(event, w.cursorSequence) {
 				return false, errors.New("event source returned a non-advancing durable cursor")
 			}
 			if event.ID != uuid.Nil {
@@ -497,14 +519,7 @@ func (w *watcher) poll() (bool, error) {
 				if subscriber.catchingUp || event.Sequence <= subscriber.sequence {
 					continue
 				}
-				select {
-				case subscriber.events <- event:
-					subscriber.sequence = event.Sequence
-				default:
-					delete(w.subscribers, id)
-					w.hub.metrics.slowConsumers.Add(1)
-					subscriber.finish(ErrSlowConsumer)
-				}
+				w.sendOrDisconnect(id, subscriber, event)
 			}
 		}
 	}
@@ -539,52 +554,39 @@ func (w *watcher) pollCatchup(id uint64, subscriber *subscriber) error {
 		return err
 	}
 	if len(events) == 0 {
-		subscriber.catchingUp = false
-		subscriber.catchupCursor = uuid.Nil
+		subscriber.finishCatchup()
 		return nil
 	}
 	for _, event := range events {
-		if event.Name != "" && (event.ID == uuid.Nil || event.Sequence == 0 || event.Sequence <= subscriber.sequence) {
+		if nonAdvancingCursor(event, subscriber.sequence) {
 			return errors.New("event source returned a non-advancing durable cursor")
 		}
 		// Never advance past the live watcher cursor during catch-up; once the
 		// subscriber reaches w.cursorSequence, hand it off to shared live fanout
 		// so all peers observe newer events together.
 		if event.Name != "" && event.Sequence > w.cursorSequence && !w.liveTerminal {
-			subscriber.catchingUp = false
-			subscriber.catchupCursor = uuid.Nil
+			subscriber.finishCatchup()
 			return nil
 		}
 		if event.ID != uuid.Nil {
 			subscriber.catchupCursor = event.ID
 			w.remember(event.ID, event.Sequence)
 		}
-		if event.Name != "" && event.Sequence > subscriber.sequence {
-			select {
-			case subscriber.events <- event:
-				subscriber.sequence = event.Sequence
-			default:
-				delete(w.subscribers, id)
-				w.hub.metrics.slowConsumers.Add(1)
-				subscriber.finish(ErrSlowConsumer)
-				return nil
-			}
+		if event.Name != "" && event.Sequence > subscriber.sequence && !w.sendOrDisconnect(id, subscriber, event) {
+			return nil
 		}
 		if event.Terminal {
 			w.liveTerminal = true
-			subscriber.catchingUp = false
-			subscriber.catchupCursor = uuid.Nil
+			subscriber.finishCatchup()
 			return nil
 		}
 		if subscriber.sequence >= w.cursorSequence {
-			subscriber.catchingUp = false
-			subscriber.catchupCursor = uuid.Nil
+			subscriber.finishCatchup()
 			return nil
 		}
 	}
 	if subscriber.sequence >= w.cursorSequence || len(events) < watcherPageSize {
-		subscriber.catchingUp = false
-		subscriber.catchupCursor = uuid.Nil
+		subscriber.finishCatchup()
 	}
 	return nil
 }

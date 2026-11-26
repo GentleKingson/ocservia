@@ -99,6 +99,20 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		HistoryRetention:      historyretention.DefaultPolicy(),
 		TransportUID:          uint32(os.Geteuid()), TransportGID: uint32(os.Getegid()),
 	}
+	if err := loadEnvSettings(lookup, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := loadFlags(args, lookup, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	cfg.PublicOrigin = cfg.BrowserOrigin()
+	return cfg, nil
+}
+
+func loadEnvSettings(lookup LookupEnv, cfg *Config) error {
 	setString(lookup, "OCSERV_ENVIRONMENT", &cfg.Environment)
 	_, cfg.EnvironmentSet = lookup("OCSERV_ENVIRONMENT")
 	setString(lookup, "OCSERV_HTTP_ADDRESS", &cfg.HTTPAddress)
@@ -106,193 +120,150 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		for _, value := range strings.Split(raw, ",") {
 			prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
 			if err != nil || prefix.Bits() == 0 || prefix.Addr().Is4In6() {
-				return Config{}, errors.New("OCSERV_AUTH_TRUSTED_PROXY_CIDRS must contain explicit IPv4/IPv6 CIDRs, not /0 or mapped IPv4")
+				return errors.New("OCSERV_AUTH_TRUSTED_PROXY_CIDRS must contain explicit IPv4/IPv6 CIDRs, not /0 or mapped IPv4")
 			}
 			cfg.AuthTrustedProxyCIDRs = append(cfg.AuthTrustedProxyCIDRs, prefix.Masked())
 		}
 	}
 	if err := setStringOrFile(lookup, "OCSERV_DATABASE_URL", &cfg.DatabaseURL); err != nil {
-		return Config{}, err
+		return err
 	}
-	if backend, ok := lookup("OCSERV_DATABASE_BACKEND"); ok {
-		if backend != "postgres" {
-			return Config{}, errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
-		}
+	if backend, ok := lookup("OCSERV_DATABASE_BACKEND"); ok && backend != "postgres" {
+		return errors.New("OCSERV_DATABASE_BACKEND must be postgres; MySQL and cross-engine migration are unsupported")
 	}
-	setString(lookup, "OCSERV_DATABASE_TLS_CA_FILE", &cfg.DatabaseTLSCAFile)
-	setString(lookup, "OCSERV_RUNTIME_DATABASE_ROLE", &cfg.RuntimeDBRole)
-	setString(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT", &cfg.OTLPEndpoint)
-	setString(lookup, "OCSERV_LOG_LEVEL", &cfg.LogLevelName)
-	setString(lookup, "OCSERV_TRANSPORT_SOCKET", &cfg.TransportSocket)
-	setString(lookup, "OCSERV_TRUST_SOCKET", &cfg.TrustSocket)
-	setString(lookup, "OCSERV_CONTROLLER_ENDPOINT_ID", &cfg.ControllerEndpointID)
+	for name, target := range map[string]*string{
+		"OCSERV_DATABASE_TLS_CA_FILE":       &cfg.DatabaseTLSCAFile,
+		"OCSERV_RUNTIME_DATABASE_ROLE":      &cfg.RuntimeDBRole,
+		"OTEL_EXPORTER_OTLP_ENDPOINT":       &cfg.OTLPEndpoint,
+		"OCSERV_LOG_LEVEL":                  &cfg.LogLevelName,
+		"OCSERV_TRANSPORT_SOCKET":           &cfg.TransportSocket,
+		"OCSERV_TRUST_SOCKET":               &cfg.TrustSocket,
+		"OCSERV_CONTROLLER_ENDPOINT_ID":     &cfg.ControllerEndpointID,
+		"OCSERV_DEV_AUTH_TOKEN":             &cfg.DevAuthToken,
+		"OCSERV_PUBLIC_ORIGIN":              &cfg.PublicOrigin,
+		"OCSERV_CERTIFICATE_SIGNER_URL":     &cfg.CertificateSignerURL,
+		"OCSERV_CERTIFICATE_SIGNER_CA_FILE": &cfg.CertificateSignerCAFile,
+		"OCSERV_RECOMMENDED_AGENT_VERSION":  &cfg.RecommendedAgentVersion,
+		"OCSERV_AGENT_RELEASE_MANIFEST":     &cfg.AgentReleaseManifest,
+		"OCSERV_AUDIT_EVENT_KEY_ID":         &cfg.AuditEventKeyID,
+		"OCSERV_COMMAND_SIGNING_KEY_FILE":   &cfg.CommandSigningKeyFile,
+		"OCSERV_RELAY_URL_A":                &cfg.InstallationRelayURL,
+		"OCSERV_PPROF_ADDRESS":              &cfg.PprofAddress,
+	} {
+		setString(lookup, name, target)
+	}
 	transportUID, hasTransportUID := lookup("OCSERV_TRANSPORT_UID")
 	transportGID, hasTransportGID := lookup("OCSERV_TRANSPORT_GID")
 	if hasTransportUID != hasTransportGID {
-		return Config{}, errors.New("OCSERV_TRANSPORT_UID and OCSERV_TRANSPORT_GID must be set together")
+		return errors.New("OCSERV_TRANSPORT_UID and OCSERV_TRANSPORT_GID must be set together")
 	}
 	if hasTransportUID {
 		uid, err := strconv.ParseUint(transportUID, 10, 32)
 		if err != nil {
-			return Config{}, errors.New("OCSERV_TRANSPORT_UID must be uint32")
+			return errors.New("OCSERV_TRANSPORT_UID must be uint32")
 		}
 		gid, err := strconv.ParseUint(transportGID, 10, 32)
 		if err != nil {
-			return Config{}, errors.New("OCSERV_TRANSPORT_GID must be uint32")
+			return errors.New("OCSERV_TRANSPORT_GID must be uint32")
 		}
 		cfg.TransportUID, cfg.TransportGID, cfg.TransportIdentitySet = uint32(uid), uint32(gid), true
 	}
-	setString(lookup, "OCSERV_DEV_AUTH_TOKEN", &cfg.DevAuthToken)
-	setString(lookup, "OCSERV_PUBLIC_ORIGIN", &cfg.PublicOrigin)
-	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_URL", &cfg.CertificateSignerURL)
-	setString(lookup, "OCSERV_CERTIFICATE_SIGNER_CA_FILE", &cfg.CertificateSignerCAFile)
-	setString(lookup, "OCSERV_RECOMMENDED_AGENT_VERSION", &cfg.RecommendedAgentVersion)
-	setString(lookup, "OCSERV_AGENT_RELEASE_MANIFEST", &cfg.AgentReleaseManifest)
 	if err := setStringOrFile(lookup, "OCSERV_CERTIFICATE_SIGNER_TOKEN", &cfg.CertificateSignerToken); err != nil {
-		return Config{}, err
+		return err
 	}
-	if err := setHexOrFile(lookup, "OCSERV_SESSION_KEY", &cfg.SessionKey); err != nil {
-		return Config{}, err
+	for name, target := range map[string]*[]byte{
+		"OCSERV_SESSION_KEY":              &cfg.SessionKey,
+		"OCSERV_AUDIT_CHECKPOINT_KEY":     &cfg.AuditCheckpointKey,
+		"OCSERV_BREAK_GLASS_TOKEN_SHA256": &cfg.BreakGlassTokenHash,
+	} {
+		if err := setHexOrFile(lookup, name, target); err != nil {
+			return err
+		}
 	}
-	if err := setHexOrFile(lookup, "OCSERV_AUDIT_CHECKPOINT_KEY", &cfg.AuditCheckpointKey); err != nil {
-		return Config{}, err
-	}
-	setString(lookup, "OCSERV_AUDIT_EVENT_KEY_ID", &cfg.AuditEventKeyID)
 	if path, ok := lookup("OCSERV_AUDIT_EVENT_KEY_FILE"); ok {
 		key, err := readStrictHexKeyFile(path, uint32(os.Geteuid()))
 		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_AUDIT_EVENT_KEY_FILE: %w", err)
+			return fmt.Errorf("OCSERV_AUDIT_EVENT_KEY_FILE: %w", err)
 		}
 		cfg.AuditEventKey = key
 	}
 	if testKey, ok := lookup("OCSERV_TEST_AUDIT_EVENT_KEY_HEX"); ok {
 		if cfg.Environment == "production" || len(cfg.AuditEventKey) != 0 {
-			return Config{}, errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX is test-only and cannot override a key file")
+			return errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX is test-only and cannot override a key file")
 		}
 		key, err := decode32ByteKey(testKey)
 		if err != nil {
-			return Config{}, errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX must contain exactly 32 bytes as lowercase hex")
+			return errors.New("OCSERV_TEST_AUDIT_EVENT_KEY_HEX must contain exactly 32 bytes as lowercase hex")
 		}
 		cfg.AuditEventKey = key
 		if cfg.AuditEventKeyID == "" {
 			cfg.AuditEventKeyID = "test-audit-event-v1"
 		}
 	}
-	setString(lookup, "OCSERV_COMMAND_SIGNING_KEY_FILE", &cfg.CommandSigningKeyFile)
-	setString(lookup, "OCSERV_RELAY_URL_A", &cfg.InstallationRelayURL)
 	if path, ok := lookup("OCSERV_RELAY_ACCESS_TOKEN_FILE"); ok {
 		var err error
 		cfg.InstallationRelayToken, err = readSecretFile(path)
 		if err != nil {
-			return Config{}, errors.New("OCSERV_RELAY_ACCESS_TOKEN_FILE must be a valid secret file")
+			return errors.New("OCSERV_RELAY_ACCESS_TOKEN_FILE must be a valid secret file")
 		}
 	}
-	setString(lookup, "OCSERV_PPROF_ADDRESS", &cfg.PprofAddress)
-	if err := setHexOrFile(lookup, "OCSERV_BREAK_GLASS_TOKEN_SHA256", &cfg.BreakGlassTokenHash); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_SESSION_TTL", &cfg.SessionTTL); err != nil {
-		return Config{}, err
-	}
 	if err := setInt64(lookup, "OCSERV_BODY_LIMIT_BYTES", &cfg.BodyLimit); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_REQUEST_TIMEOUT", &cfg.RequestTimeout); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_TRANSPORT_TIMEOUT", &cfg.TransportTimeout); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_CERTIFICATE_SIGNER_TIMEOUT", &cfg.CertificateSignerTimeout); err != nil {
-		return Config{}, err
-	}
-	if err := setInt(lookup, "OCSERV_TRANSPORT_QUEUE_CAPACITY", &cfg.TransportQueue); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT", &cfg.AgentUpgradeReconcile); err != nil {
-		return Config{}, err
-	}
-	if err := setDuration(lookup, "OCSERV_TELEMETRY_RETENTION_INTERVAL", &cfg.TelemetryRetentionInterval); err != nil {
-		return Config{}, err
-	}
-	if err := setInt(lookup, "OCSERV_USER_OPERATION_CONCURRENCY", &cfg.UserOperationConcurrency); err != nil {
-		return Config{}, err
+		return err
 	}
 	for name, target := range map[string]*int{
+		"OCSERV_TRANSPORT_QUEUE_CAPACITY":      &cfg.TransportQueue,
+		"OCSERV_USER_OPERATION_CONCURRENCY":    &cfg.UserOperationConcurrency,
 		"OCSERV_RETIRED_NODE_RETENTION_DAYS":   &cfg.HistoryRetention.RetiredNodeDays,
 		"OCSERV_COMMAND_DETAIL_RETENTION_DAYS": &cfg.HistoryRetention.CommandDays,
 		"OCSERV_AUDIT_RETENTION_DAYS":          &cfg.HistoryRetention.AuditDays,
+		"OCSERV_SSE_GLOBAL_LIMIT":              &cfg.EventStreams.GlobalStreams,
+		"OCSERV_SSE_IDENTITY_LIMIT":            &cfg.EventStreams.IdentityStreams,
+		"OCSERV_SSE_SESSION_LIMIT":             &cfg.EventStreams.SessionStreams,
+		"OCSERV_SSE_WORKSPACE_LIMIT":           &cfg.EventStreams.WorkspaceStreams,
+		"OCSERV_SSE_RESOURCE_LIMIT":            &cfg.EventStreams.ResourceStreams,
+		"OCSERV_SSE_WATCHER_LIMIT":             &cfg.EventStreams.Watchers,
+		"OCSERV_SSE_QUEUE_CAPACITY":            &cfg.EventStreams.SubscriberQueue,
 	} {
 		if err := setInt(lookup, name, target); err != nil {
-			return Config{}, err
+			return err
 		}
 	}
 	if err := cfg.HistoryRetention.Validate(); err != nil {
-		return Config{}, err
-	}
-	for name, target := range map[string]*int{
-		"OCSERV_SSE_GLOBAL_LIMIT":    &cfg.EventStreams.GlobalStreams,
-		"OCSERV_SSE_IDENTITY_LIMIT":  &cfg.EventStreams.IdentityStreams,
-		"OCSERV_SSE_SESSION_LIMIT":   &cfg.EventStreams.SessionStreams,
-		"OCSERV_SSE_WORKSPACE_LIMIT": &cfg.EventStreams.WorkspaceStreams,
-		"OCSERV_SSE_RESOURCE_LIMIT":  &cfg.EventStreams.ResourceStreams,
-		"OCSERV_SSE_WATCHER_LIMIT":   &cfg.EventStreams.Watchers,
-		"OCSERV_SSE_QUEUE_CAPACITY":  &cfg.EventStreams.SubscriberQueue,
-	} {
-		if err := setInt(lookup, name, target); err != nil {
-			return Config{}, err
-		}
+		return err
 	}
 	for name, target := range map[string]*time.Duration{
-		"OCSERV_SSE_POLL_INTERVAL":        &cfg.EventStreams.PollInterval,
-		"OCSERV_SSE_DATABASE_MAX_BACKOFF": &cfg.EventStreams.DatabaseMaxBackoff,
-		"OCSERV_SSE_MAX_LIFETIME":         &cfg.EventStreams.MaxLifetime,
-		"OCSERV_SSE_REVALIDATE_INTERVAL":  &cfg.EventStreams.RevalidateInterval,
-		"OCSERV_SSE_RETRY_AFTER":          &cfg.EventStreams.RetryAfter,
+		"OCSERV_SESSION_TTL":                     &cfg.SessionTTL,
+		"OCSERV_REQUEST_TIMEOUT":                 &cfg.RequestTimeout,
+		"OCSERV_SHUTDOWN_TIMEOUT":                &cfg.ShutdownTimeout,
+		"OCSERV_TRANSPORT_TIMEOUT":               &cfg.TransportTimeout,
+		"OCSERV_CERTIFICATE_SIGNER_TIMEOUT":      &cfg.CertificateSignerTimeout,
+		"OCSERV_AGENT_UPGRADE_RECONCILE_TIMEOUT": &cfg.AgentUpgradeReconcile,
+		"OCSERV_TELEMETRY_RETENTION_INTERVAL":    &cfg.TelemetryRetentionInterval,
+		"OCSERV_SSE_POLL_INTERVAL":               &cfg.EventStreams.PollInterval,
+		"OCSERV_SSE_DATABASE_MAX_BACKOFF":        &cfg.EventStreams.DatabaseMaxBackoff,
+		"OCSERV_SSE_MAX_LIFETIME":                &cfg.EventStreams.MaxLifetime,
+		"OCSERV_SSE_REVALIDATE_INTERVAL":         &cfg.EventStreams.RevalidateInterval,
+		"OCSERV_SSE_RETRY_AFTER":                 &cfg.EventStreams.RetryAfter,
 	} {
 		if err := setDuration(lookup, name, target); err != nil {
-			return Config{}, err
+			return err
 		}
 	}
-	if value, ok := lookup("OCSERV_LOCAL_AUTH_ENABLED"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_LOCAL_AUTH_ENABLED: %w", err)
+	for name, target := range map[string]*bool{
+		"OCSERV_LOCAL_AUTH_ENABLED":        &cfg.LocalAuth,
+		"OCSERV_DATABASE_BUNDLED_POSTGRES": &cfg.DatabaseBundledPostgres,
+		"OCSERV_DEV_AUTH":                  &cfg.DevAuth,
+		"OCSERV_LOCAL_SIMULATOR":           &cfg.LocalSimulator,
+		"OCSERV_BREAK_GLASS_ENABLED":       &cfg.BreakGlassEnabled,
+	} {
+		if err := setBool(lookup, name, target); err != nil {
+			return err
 		}
-		cfg.LocalAuth = parsed
 	}
-	if value, ok := lookup("OCSERV_DATABASE_BUNDLED_POSTGRES"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_DATABASE_BUNDLED_POSTGRES: %w", err)
-		}
-		cfg.DatabaseBundledPostgres = parsed
-	}
-	if value, ok := lookup("OCSERV_DEV_AUTH"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_DEV_AUTH: %w", err)
-		}
-		cfg.DevAuth = parsed
-	}
-	if value, ok := lookup("OCSERV_LOCAL_SIMULATOR"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_LOCAL_SIMULATOR: %w", err)
-		}
-		cfg.LocalSimulator = parsed
-	}
-	if value, ok := lookup("OCSERV_BREAK_GLASS_ENABLED"); ok {
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("OCSERV_BREAK_GLASS_ENABLED: %w", err)
-		}
-		cfg.BreakGlassEnabled = parsed
-	}
+	return nil
+}
 
+func loadFlags(args []string, lookup LookupEnv, cfg *Config) error {
 	fs := flag.NewFlagSet("ocserv-control", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	bootstrap := fs.Bool("bootstrap-local-admin", false, "create the initial Local administrator, then exit")
@@ -303,15 +274,15 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 	telemetryRetentionInterval := fs.Duration("telemetry-retention-interval", cfg.TelemetryRetentionInterval, "periodic telemetry partition retention interval (1h to 168h)")
 	provisionWorkspace := fs.Bool("provision-management-workspace", false, "create the administration workspace on a database without workspaces, then exit")
 	if err := fs.Parse(args); err != nil {
-		return Config{}, errors.New("invalid command-line flags")
+		return errors.New("invalid command-line flags")
 	}
 	if fs.NArg() != 0 {
-		return Config{}, errors.New("unexpected command-line arguments")
+		return errors.New("unexpected command-line arguments")
 	}
 	cfg.BootstrapLocalAdmin = *bootstrap
 	cfg.ResetLocalAdmin = *resetLocalAdmin
 	if _, ok := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD"); ok {
-		return Config{}, errors.New("plaintext bootstrap password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
+		return errors.New("plaintext bootstrap password environment variable is forbidden; use OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
 	}
 	if cfg.BootstrapLocalAdmin {
 		setString(lookup, "OCSERV_LOCAL_BOOTSTRAP_USERNAME", &cfg.LocalBootstrapUsername)
@@ -319,22 +290,18 @@ func Load(args []string, lookup LookupEnv) (Config, error) {
 		path, _ := lookup("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE")
 		password, err := readBootstrapSecret(path)
 		if err != nil {
-			return Config{}, errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
+			return errors.New("OCSERV_LOCAL_BOOTSTRAP_PASSWORD_FILE must be a valid secret file")
 		}
 		cfg.LocalBootstrapPassword = password
 	}
 	if *role != "all" {
-		return Config{}, fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", *role)
+		return fmt.Errorf("invalid role %q (only single-process \"all\" is supported)", *role)
 	}
 	cfg.MigrateOnly = *migrateOnly
 	cfg.TelemetryRetentionOnly = *telemetryRetentionOnly
 	cfg.TelemetryRetentionInterval = *telemetryRetentionInterval
 	cfg.ProvisionWorkspace = *provisionWorkspace
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
-	cfg.PublicOrigin = cfg.BrowserOrigin()
-	return cfg, nil
+	return nil
 }
 
 func (c Config) Validate() error {
@@ -373,21 +340,15 @@ func (c Config) Validate() error {
 	// The development default is only implicit on a loopback listener, so a
 	// reachable Controller never runs as development by omission.
 	if !c.EnvironmentSet {
-		host, _, err := net.SplitHostPort(c.HTTPAddress)
-		if err != nil {
-			return fmt.Errorf("invalid HTTP address: %w", err)
-		}
-		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-			return errors.New("OCSERV_ENVIRONMENT must be set explicitly when the HTTP address is not loopback")
+		if err := requireLoopbackHTTPAddress(c.HTTPAddress, "OCSERV_ENVIRONMENT must be set explicitly when the HTTP address is not loopback"); err != nil {
+			return err
 		}
 	}
 	if c.DevAuth {
-		host, _, err := net.SplitHostPort(c.HTTPAddress)
-		if err != nil {
-			return fmt.Errorf("invalid HTTP address: %w", err)
+		if err := requireLoopbackHTTPAddress(c.HTTPAddress, "development auth requires environment=development and a loopback HTTP address"); err != nil {
+			return err
 		}
-		ip := net.ParseIP(host)
-		if c.Environment != "development" || ip == nil || !ip.IsLoopback() {
+		if c.Environment != "development" {
 			return errors.New("development auth requires environment=development and a loopback HTTP address")
 		}
 	}
@@ -591,11 +552,7 @@ func readBootstrapSecret(path string) (string, error) {
 	return readSecretValue(file, 4096)
 }
 
-func readSecretValue(file *os.File, max int64) (string, error) {
-	raw, err := io.ReadAll(io.LimitReader(file, max+1))
-	if err != nil {
-		return "", err
-	}
+func parseSecretBytes(raw []byte, max int64) (string, error) {
 	if len(raw) == 0 || int64(len(raw)) > max {
 		return "", fmt.Errorf("secret file must contain 1..%d bytes", max)
 	}
@@ -606,39 +563,53 @@ func readSecretValue(file *os.File, max int64) (string, error) {
 	return value, nil
 }
 
+func readSecretValue(file *os.File, max int64) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(file, max+1))
+	if err != nil {
+		return "", err
+	}
+	return parseSecretBytes(raw, max)
+}
+
 func readStrictHexKeyFile(path string, expectedUID uint32) ([]byte, error) {
-	file, err := protectedfile.Open(path, expectedUID)
+	raw, err := protectedfile.ReadPrivate(path, expectedUID, false, 66)
 	if err != nil {
 		return nil, fmt.Errorf("open key file: %w", err)
 	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return nil, fmt.Errorf("stat key file: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != expectedUID || stat.Nlink != 1 {
-		return nil, errors.New("key must be a process-owned regular file with one link")
-	}
-	mode := stat.Mode & 0o777
-	if mode != 0o400 && mode != 0o600 {
-		return nil, errors.New("key mode must be 0400 or 0600")
-	}
-	value, err := readSecretValue(file, 66)
+	value, err := parseSecretBytes(raw, 66)
 	if err != nil {
 		return nil, err
 	}
 	return decode32ByteKey(value)
 }
 
+func decodeLowercaseHex(value string) ([]byte, error) {
+	if strings.ToLower(value) != value {
+		return nil, errors.New("value must be lowercase hex")
+	}
+	return hex.DecodeString(value)
+}
+
 func decode32ByteKey(value string) ([]byte, error) {
-	if len(value) != 64 || strings.ToLower(value) != value {
+	if len(value) != 64 {
 		return nil, errors.New("key must contain exactly 32 bytes as lowercase hex")
 	}
-	decoded, err := hex.DecodeString(value)
+	decoded, err := decodeLowercaseHex(value)
 	if err != nil {
 		return nil, errors.New("key must contain exactly 32 bytes as lowercase hex")
 	}
 	return decoded, nil
+}
+
+func requireLoopbackHTTPAddress(addr, errMsg string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid HTTP address: %w", err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return errors.New(errMsg)
+	}
+	return nil
 }
 
 func validKeyID(value string) bool {
@@ -664,6 +635,19 @@ func validRecommendedAgentVersion(value string) bool {
 		value = "v" + value
 	}
 	return semver.IsValid(value)
+}
+
+func setBool(lookup LookupEnv, name string, target *bool) error {
+	value, ok := lookup(name)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	*target = parsed
+	return nil
 }
 
 func setInt64(lookup LookupEnv, name string, target *int64) error {
@@ -710,12 +694,9 @@ func setHexOrFile(lookup LookupEnv, name string, target *[]byte) error {
 	if err != nil || !configured || value == "" {
 		return err
 	}
-	decoded, err := hex.DecodeString(value)
+	decoded, err := decodeLowercaseHex(value)
 	if err != nil {
 		return fmt.Errorf("%s must be lowercase hex: %w", name, err)
-	}
-	if strings.ToLower(value) != value {
-		return fmt.Errorf("%s must be lowercase hex", name)
 	}
 	*target = decoded
 	return nil

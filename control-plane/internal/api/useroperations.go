@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/useroperations"
 	"github.com/google/uuid"
 )
@@ -35,9 +33,8 @@ func (s *Server) getUserPolicy(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user operations service is unavailable")
 		return
 	}
-	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
 	policy, err := s.userOperations.GetPolicy(r.Context(), nodeID, r.PathValue("username"))
@@ -53,9 +50,8 @@ func (s *Server) setUserPolicy(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user operations service is unavailable")
 		return
 	}
-	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
 	idempotencyKey, ok := requireIdempotencyKey(w, r)
@@ -96,6 +92,9 @@ func (s *Server) setUserPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeUserOperationsError(w http.ResponseWriter, r *http.Request, err error) {
+	if writeCommonDomainError(w, r, err, "the requested user policy does not exist") {
+		return
+	}
 	switch {
 	case errors.Is(err, useroperations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the quota or expiry request failed validation")
@@ -103,10 +102,8 @@ func (s *Server) writeUserOperationsError(w http.ResponseWriter, r *http.Request
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/stale-revision", "Resource revision is stale", "the user policy changed after this request was prepared")
 	case errors.Is(err, useroperations.ErrIdempotencyConflict):
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/idempotency-conflict", "Idempotency conflict", "the Idempotency-Key was already used with different input")
-	case errors.Is(err, useroperations.ErrNotFound), errors.Is(err, database.ErrNotFound):
+	case errors.Is(err, useroperations.ErrNotFound):
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested user policy does not exist")
-	case errors.Is(err, auth.ErrForbidden):
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the principal is not authorized for this operation")
 	default:
 		s.logger.ErrorContext(r.Context(), "user operations request failed", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "user operations state is temporarily unavailable")

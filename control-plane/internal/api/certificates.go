@@ -10,9 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/certificates"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 )
 
@@ -53,17 +51,16 @@ func (s *Server) createCertificate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	key, ok := requireIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	var body createCertificateRequest
-	if key == "" || !decodeStrictJSON(w, r, &body) {
-		if key == "" {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
-		}
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -83,9 +80,8 @@ func (s *Server) listNodeCertificates(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	nodeID, err := parseUUIDv7(r.PathValue("node_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "node_id must be UUIDv7")
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
+	if !ok {
 		return
 	}
 	values, err := s.certificates.ListNode(r.Context(), nodeID)
@@ -100,9 +96,8 @@ func (s *Server) issueCertificate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_id"), ":issue"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "certificate_id", ":issue")
+	if !ok {
 		return
 	}
 	var body issueCertificateRequest
@@ -122,17 +117,16 @@ func (s *Server) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_id"), ":revoke"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "certificate_id", ":revoke")
+	if !ok {
 		return
 	}
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	key, ok := requireIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	var body revokeCertificateRequest
-	if key == "" || !decodeStrictJSON(w, r, &body) {
-		if key == "" {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
-		}
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -151,17 +145,16 @@ func (s *Server) createCertificateP12(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(strings.TrimSuffix(r.PathValue("certificate_id"), ":p12"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "certificate_id", ":p12")
+	if !ok {
 		return
 	}
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	key, ok := requireIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
 	var body createP12Request
-	if key == "" || !decodeStrictJSON(w, r, &body) {
-		if key == "" {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
-		}
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	actor := principal(r)
@@ -186,9 +179,8 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(r.PathValue("artifact_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "artifact_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "artifact_id", "")
+	if !ok {
 		return
 	}
 	token := strings.TrimSpace(r.Header.Get("X-Artifact-Token"))
@@ -225,9 +217,8 @@ func (s *Server) getCertificate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCertificates(w, r) {
 		return
 	}
-	id, err := parseUUIDv7(r.PathValue("certificate_id"))
-	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Invalid identifier", "certificate_id must be UUIDv7")
+	id, ok := requirePathUUIDv7(w, r, "certificate_id", "")
+	if !ok {
 		return
 	}
 	value, err := s.certificates.Get(r.Context(), id)
@@ -239,9 +230,10 @@ func (s *Server) getCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
+	if writeCommonDomainError(w, r, err, "the certificate or node does not exist") {
+		return
+	}
 	switch {
-	case errors.Is(err, auth.ErrForbidden):
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, certificates.ErrInvalid), errors.Is(err, operations.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/certificate-invalid", "Certificate request is invalid", "certificate subject, lifetime, or key parameters are invalid")
 	case errors.Is(err, operations.ErrIdempotencyConflict):
@@ -256,8 +248,6 @@ func writeCertificateError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/artifact-denied", "Artifact unavailable", "the artifact token is invalid, expired, consumed, or already in use")
 	case errors.Is(err, certificates.ErrArtifactCapacity):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/artifact-capacity", "Artifact capacity is busy", "retry after another bounded artifact stream completes")
-	case errors.Is(err, database.ErrNotFound):
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the certificate or node does not exist")
 	default:
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/certificate-unavailable", "Certificate service unavailable", "certificate processing is temporarily unavailable")
 	}

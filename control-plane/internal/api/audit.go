@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
-	"strconv"
 	"time"
 
 	"github.com/GentleKingson/ocservia/control-plane/internal/audit"
@@ -17,14 +16,10 @@ import (
 )
 
 func (s *Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
-	limit := 100
-	if raw := r.URL.Query().Get("page_size"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > 200 {
-			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Invalid page size", "page_size must be between 1 and 200")
-			return
-		}
-		limit = parsed
+	limit, ok := pageSize(r, 100)
+	if !ok {
+		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-page-size", "Invalid page size", "page_size must be between 1 and 200")
+		return
 	}
 	store, err := auditstore.From(s.backend)
 	if err != nil {
@@ -80,56 +75,68 @@ func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, result)
 }
 
-func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
+type vpnAuditRecord struct {
+	NodeID          uuid.UUID  `json:"node_id"`
+	SessionID       string     `json:"session_id"`
+	Username        string     `json:"username"`
+	ClientIP        string     `json:"client_ip"`
+	VPNIP           *string    `json:"vpn_ip,omitempty"`
+	ConnectedAt     *time.Time `json:"connected_at,omitempty"`
+	BytesIn         *string    `json:"bytes_in,omitempty"`
+	BytesOut        *string    `json:"bytes_out,omitempty"`
+	LastSeenAt      time.Time  `json:"last_seen_at"`
+	AbsentAt        *time.Time `json:"absent_at,omitempty"`
+	EventType       string     `json:"event_type"`
+	EventID         *uuid.UUID `json:"event_id,omitempty"`
+	DestinationIP   *string    `json:"destination_ip,omitempty"`
+	DestinationPort *int32     `json:"destination_port,omitempty"`
+	Protocol        *string    `json:"protocol,omitempty"`
+	FlowStartedAt   *time.Time `json:"flow_started_at,omitempty"`
+}
+
+func parseVpnAuditFilter(r *http.Request) (auditstore.VpnAuditFilter, bool) {
 	query := r.URL.Query()
-	q := auditstore.VpnAuditFilter{Workspace: workspace(r), Username: query.Get("username"), Limit: 100}
-	invalid := func() {
-		writeProblem(w, r, 400, "https://ocservia.dev/problems/invalid-filter", "Invalid VPN audit filter", "Check the node, username, time range and page size")
+	q := auditstore.VpnAuditFilter{
+		Workspace:   workspace(r),
+		Username:    query.Get("username"),
+		Destination: query.Get("destination_ip"),
+		Kind:        query.Get("kind"),
 	}
-	q.Kind = query.Get("kind")
 	if q.Kind == "" {
 		q.Kind = "sessions"
 	}
 	if q.Kind != "sessions" && q.Kind != "observations" && q.Kind != "network" {
-		invalid()
-		return
+		return auditstore.VpnAuditFilter{}, false
 	}
 	if raw := query.Get("cursor"); raw != "" {
 		var c auditstore.VpnAuditCursor
 		if len(raw) > 2048 {
-			invalid()
-			return
+			return auditstore.VpnAuditFilter{}, false
 		}
 		b, err := base64.RawURLEncoding.DecodeString(raw)
 		if err != nil || json.Unmarshal(b, &c) != nil || c.Kind != q.Kind || c.Node == uuid.Nil || c.At.IsZero() || len(c.Key) > 256 || c.Key == "" {
-			invalid()
-			return
+			return auditstore.VpnAuditFilter{}, false
 		}
 		if q.Kind != "observations" {
 			if _, err := uuid.Parse(c.Key); err != nil {
-				invalid()
-				return
+				return auditstore.VpnAuditFilter{}, false
 			}
 		}
 		q.After = &c
 	}
-	q.Destination = query.Get("destination_ip")
 	if q.Destination != "" {
 		addr, err := netip.ParseAddr(q.Destination)
 		if q.Kind != "network" || err != nil || addr.Zone() != "" {
-			invalid()
-			return
+			return auditstore.VpnAuditFilter{}, false
 		}
 	}
 	if len(q.Username) > 128 {
-		invalid()
-		return
+		return auditstore.VpnAuditFilter{}, false
 	}
 	if raw := query.Get("node_id"); raw != "" {
 		node, err := uuid.Parse(raw)
 		if err != nil {
-			invalid()
-			return
+			return auditstore.VpnAuditFilter{}, false
 		}
 		q.Node = &node
 	}
@@ -137,23 +144,27 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 		if raw := query.Get(key); raw != "" {
 			at, err := time.Parse(time.RFC3339Nano, raw)
 			if err != nil {
-				invalid()
-				return
+				return auditstore.VpnAuditFilter{}, false
 			}
 			*target = &at
 		}
 	}
 	if q.Since != nil && q.Until != nil && !q.Since.Before(*q.Until) {
-		invalid()
-		return
+		return auditstore.VpnAuditFilter{}, false
 	}
-	if raw := query.Get("page_size"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > 200 {
-			invalid()
-			return
-		}
-		q.Limit = n
+	limit, ok := pageSize(r, 100)
+	if !ok {
+		return auditstore.VpnAuditFilter{}, false
+	}
+	q.Limit = limit
+	return q, true
+}
+
+func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
+	q, ok := parseVpnAuditFilter(r)
+	if !ok {
+		writeProblem(w, r, 400, "https://ocservia.dev/problems/invalid-filter", "Invalid VPN audit filter", "Check the node, username, time range and page size")
+		return
 	}
 	unavailable := func() {
 		writeProblem(w, r, 503, "https://ocservia.dev/problems/database-unavailable", "VPN audit unavailable", "VPN audit records could not be read")
@@ -169,7 +180,7 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	items := []map[string]any{}
+	items := []vpnAuditRecord{}
 	var cursor auditstore.VpnAuditCursor
 	var next string
 	for rows.Next() {
@@ -182,60 +193,23 @@ func (s *Server) listVpnAuditRecords(w http.ResponseWriter, r *http.Request) {
 			next = base64.RawURLEncoding.EncodeToString(b)
 			break
 		}
-		var node uuid.UUID
-		var session, user, client, kind string
-		var vpn, rx, tx, dest, protocol *string
-		var event *uuid.UUID
-		var port *int32
-		var last time.Time
-		var connected, absent, started *time.Time
-		if err := rows.Scan(&node, &session, &user, &client, &vpn, &connected, &rx, &tx, &last, &absent, &kind, &event, &dest, &port, &protocol, &started); err != nil {
+		var item vpnAuditRecord
+		if err := rows.Scan(&item.NodeID, &item.SessionID, &item.Username, &item.ClientIP, &item.VPNIP, &item.ConnectedAt, &item.BytesIn, &item.BytesOut, &item.LastSeenAt, &item.AbsentAt, &item.EventType, &item.EventID, &item.DestinationIP, &item.DestinationPort, &item.Protocol, &item.FlowStartedAt); err != nil {
 			unavailable()
 			return
 		}
-		item := map[string]any{"node_id": node, "session_id": session, "username": user, "client_ip": client, "last_seen_at": last, "event_type": kind}
-		if rx != nil {
-			item["bytes_in"] = *rx
-		}
-		if tx != nil {
-			item["bytes_out"] = *tx
-		}
-		if connected != nil {
-			item["connected_at"] = connected
-		}
-		if started != nil {
-			item["flow_started_at"] = started
-		}
-		if event != nil {
-			item["event_id"] = *event
-		}
-		if dest != nil {
-			item["destination_ip"] = *dest
-		}
-		if protocol != nil {
-			item["protocol"] = *protocol
-		}
-		if port != nil {
-			item["destination_port"] = *port
-		}
-		if absent != nil {
-			item["absent_at"] = absent
-		}
-		if vpn != nil {
-			item["vpn_ip"] = *vpn
-		}
 		if len(items)+1 == q.Limit {
-			at := last
-			key := session
-			if event != nil {
-				key = event.String()
-			} else if connected != nil {
-				at = *connected
+			at := item.LastSeenAt
+			key := item.SessionID
+			if item.EventID != nil {
+				key = item.EventID.String()
+			} else if item.ConnectedAt != nil {
+				at = *item.ConnectedAt
 			} else {
 				unavailable()
 				return
 			}
-			cursor = auditstore.VpnAuditCursor{At: at.UTC(), Node: node, Key: key, Kind: q.Kind}
+			cursor = auditstore.VpnAuditCursor{At: at.UTC(), Node: item.NodeID, Key: key, Kind: q.Kind}
 		}
 		items = append(items, item)
 	}

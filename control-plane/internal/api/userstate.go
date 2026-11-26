@@ -2,15 +2,11 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
 	"github.com/GentleKingson/ocservia/control-plane/internal/userstate"
-	"github.com/google/uuid"
 )
 
 type desiredMutationRequest struct {
@@ -34,9 +30,8 @@ func (s *Server) listUserGroupState(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user state service is unavailable")
 		return
 	}
-	nodeID, ok := pathUUIDv7(r.PathValue("node_id"))
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
 	if !ok {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
 		return
 	}
 	items, err := s.userstate.List(r.Context(), nodeID)
@@ -75,14 +70,12 @@ func (s *Server) mutateUserGroup(w http.ResponseWriter, r *http.Request, kind us
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "user state service is unavailable")
 		return
 	}
-	nodeID, ok := pathUUIDv7(r.PathValue("node_id"))
+	nodeID, ok := requirePathUUIDv7(w, r, "node_id", "")
 	if !ok {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "node_id must be a UUIDv7")
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+	idempotencyKey, ok := requireIdempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	var body desiredMutationRequest
@@ -93,7 +86,7 @@ func (s *Server) mutateUserGroup(w http.ResponseWriter, r *http.Request, kind us
 	if kind == userstate.UserCreate {
 		name = body.Name
 	}
-	expected, ok := desiredExpectedVersion(r.Header.Get("If-Match"), body.ExpectedVersion)
+	expected, ok := parseExpectedRevision(r.Header.Get("If-Match"), body.ExpectedVersion, 0)
 	if !ok {
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/expected-version-required", "Expected version is invalid", "provide If-Match revision-N or expected_version; use revision-0 when creating")
 		return
@@ -119,54 +112,14 @@ func (s *Server) mutateUserGroup(w http.ResponseWriter, r *http.Request, kind us
 		s.writeUserStateError(w, r, err)
 		return
 	}
-	if replayed {
-		w.Header().Set("Idempotency-Replayed", "true")
-	}
-	w.Header().Set("Location", "/api/v1/operations/"+operation.ID)
-	w.Header().Set("ETag", fmt.Sprintf("\"revision-%d\"", operation.Version))
-	writeJSON(w, http.StatusAccepted, operation)
-}
-
-func desiredExpectedVersion(ifMatch string, explicit *int64) (int64, bool) {
-	var header *int64
-	if ifMatch != "" {
-		if len(ifMatch) < 3 || ifMatch[0] != '"' || ifMatch[len(ifMatch)-1] != '"' {
-			return 0, false
-		}
-		value := ifMatch[1 : len(ifMatch)-1]
-		if !strings.HasPrefix(value, "revision-") {
-			return 0, false
-		}
-		parsed, err := strconv.ParseInt(strings.TrimPrefix(value, "revision-"), 10, 64)
-		if err != nil || parsed < 0 {
-			return 0, false
-		}
-		header = &parsed
-	}
-	if explicit != nil && *explicit < 0 {
-		return 0, false
-	}
-	if explicit != nil && header != nil && *explicit != *header {
-		return 0, false
-	}
-	if explicit != nil {
-		return *explicit, true
-	}
-	if header != nil {
-		return *header, true
-	}
-	return 0, false
-}
-
-func pathUUIDv7(value string) (uuid.UUID, bool) {
-	id, err := uuid.Parse(value)
-	return id, err == nil && id.Version() == 7
+	writeAcceptedOperation(w, operation, replayed, true)
 }
 
 func (s *Server) writeUserStateError(w http.ResponseWriter, r *http.Request, err error) {
+	if writeCommonDomainError(w, r, err, "the requested node or desired resource does not exist") {
+		return
+	}
 	switch {
-	case errors.Is(err, auth.ErrForbidden):
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, userstate.ErrInvalidRequest):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the desired state request failed validation")
 	case errors.Is(err, userstate.ErrCapacityExceeded):

@@ -74,24 +74,10 @@ type DropCounters struct {
 	Raw       uint64 `json:"raw"`
 }
 
-type Session struct {
-	ID          string    `json:"id"`
-	Username    string    `json:"username"`
-	ClientIP    string    `json:"client_ip"`
-	VPNIP       string    `json:"vpn_ip,omitempty"`
-	ConnectedAt time.Time `json:"connected_at"`
-	BytesIn     int64     `json:"bytes_in"`
-	BytesOut    int64     `json:"bytes_out"`
-}
-
+type Session = telemetrystore.Session
 type IPBan = telemetrystore.IPBan
 type ReadSession = telemetrystore.ReadSession
-
-type User struct {
-	Username string `json:"username"`
-	Enabled  bool   `json:"enabled"`
-	Revision uint64 `json:"revision"`
-}
+type User = telemetrystore.User
 
 type Group struct {
 	Name     string   `json:"name"`
@@ -99,19 +85,8 @@ type Group struct {
 	Revision uint64   `json:"revision"`
 }
 
-type Sample struct {
-	SampledAt time.Time `json:"sampled_at"`
-	Metric    string    `json:"metric"`
-	Value     float64   `json:"value"`
-}
-
-type SecurityEvent struct {
-	ID         uuid.UUID       `json:"id"`
-	ObservedAt time.Time       `json:"observed_at"`
-	Severity   string          `json:"severity"`
-	Type       string          `json:"type"`
-	Detail     json.RawMessage `json:"detail"`
-}
+type Sample = telemetrystore.Sample
+type SecurityEvent = telemetrystore.SecurityEvent
 
 type Batch struct {
 	ID       uuid.UUID       `json:"id"`

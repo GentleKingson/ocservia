@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GentleKingson/ocservia/control-plane/internal/auth"
-	"github.com/GentleKingson/ocservia/control-plane/internal/database"
 	"github.com/GentleKingson/ocservia/control-plane/internal/operations"
 	"github.com/google/uuid"
 )
@@ -25,9 +23,8 @@ func (s *Server) createAgentRollout(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/idempotency-key-required", "Idempotency key is required", "Idempotency-Key must be provided")
+	idempotencyKey, ok := requireIdempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	var body *agentRolloutRequest
@@ -40,8 +37,8 @@ func (s *Server) createAgentRollout(w http.ResponseWriter, r *http.Request) {
 	}
 	nodeIDs := make([]uuid.UUID, 0, len(body.NodeIDs))
 	for _, raw := range body.NodeIDs {
-		nodeID, err := uuid.Parse(strings.TrimSpace(raw))
-		if err != nil || nodeID.Version() != 7 {
+		nodeID, err := parseUUIDv7(strings.TrimSpace(raw))
+		if err != nil {
 			writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "every node_id must be a UUIDv7")
 			return
 		}
@@ -99,23 +96,30 @@ func (s *Server) listAgentRollouts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rollouts": rollouts})
 }
 
-func (s *Server) getAgentRollout(w http.ResponseWriter, r *http.Request) {
+func (s *Server) loadWorkspaceRollout(w http.ResponseWriter, r *http.Request) (uuid.UUID, operations.AgentRollout, bool) {
 	if s.operations == nil {
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
-		return
+		return uuid.Nil, operations.AgentRollout{}, false
 	}
-	rolloutID, ok := pathUUIDv7(r.PathValue("rollout_id"))
+	rolloutID, ok := requirePathUUIDv7(w, r, "rollout_id", "")
 	if !ok {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "rollout_id must be a UUIDv7")
-		return
+		return uuid.Nil, operations.AgentRollout{}, false
 	}
 	rollout, err := s.operations.GetAgentRollout(r.Context(), rolloutID)
 	if err != nil {
 		s.writeRolloutError(w, r, err)
-		return
+		return uuid.Nil, operations.AgentRollout{}, false
 	}
 	if rollout.WorkspaceID != workspace(r).String() {
 		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested rollout does not exist")
+		return uuid.Nil, operations.AgentRollout{}, false
+	}
+	return rolloutID, rollout, true
+}
+
+func (s *Server) getAgentRollout(w http.ResponseWriter, r *http.Request) {
+	_, rollout, ok := s.loadWorkspaceRollout(w, r)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, rollout)
@@ -124,22 +128,8 @@ func (s *Server) getAgentRollout(w http.ResponseWriter, r *http.Request) {
 // resumeAgentRollout records the explicit operator decision to continue a
 // paused rollout. No next batch ever starts automatically after a pause.
 func (s *Server) resumeAgentRollout(w http.ResponseWriter, r *http.Request) {
-	if s.operations == nil {
-		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "operation service is unavailable")
-		return
-	}
-	rolloutID, ok := pathUUIDv7(r.PathValue("rollout_id"))
+	rolloutID, _, ok := s.loadWorkspaceRollout(w, r)
 	if !ok {
-		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-id", "Identifier is invalid", "rollout_id must be a UUIDv7")
-		return
-	}
-	rollout, err := s.operations.GetAgentRollout(r.Context(), rolloutID)
-	if err != nil {
-		s.writeRolloutError(w, r, err)
-		return
-	}
-	if rollout.WorkspaceID != workspace(r).String() {
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested rollout does not exist")
 		return
 	}
 	actor := principal(r)
@@ -152,9 +142,10 @@ func (s *Server) resumeAgentRollout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeRolloutError(w http.ResponseWriter, r *http.Request, err error) {
+	if writeCommonDomainError(w, r, err, "the requested rollout does not exist") {
+		return
+	}
 	switch {
-	case errors.Is(err, auth.ErrForbidden):
-		writeProblem(w, r, http.StatusForbidden, "https://ocservia.dev/problems/forbidden", "Access denied", "the session or resource authority is no longer valid")
 	case errors.Is(err, operations.ErrRolloutInvalid):
 		writeProblem(w, r, http.StatusBadRequest, "https://ocservia.dev/problems/invalid-request", "Request is invalid", "the agent rollout request is invalid")
 	case errors.Is(err, operations.ErrIdempotencyConflict):
@@ -165,8 +156,6 @@ func (s *Server) writeRolloutError(w http.ResponseWriter, r *http.Request, err e
 		writeProblem(w, r, http.StatusConflict, "https://ocservia.dev/problems/rollout-state", "Rollout state is invalid", "only a paused rollout can be resumed")
 	case errors.Is(err, operations.ErrRolloutUnavailable):
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/service-unavailable", "Service is unavailable", "rollout orchestration is unavailable")
-	case errors.Is(err, database.ErrNotFound):
-		writeProblem(w, r, http.StatusNotFound, "https://ocservia.dev/problems/not-found", "Resource not found", "the requested rollout does not exist")
 	default:
 		s.logger.ErrorContext(r.Context(), "agent rollout request failed", "error", err)
 		writeProblem(w, r, http.StatusServiceUnavailable, "https://ocservia.dev/problems/database-unavailable", "Service is unavailable", "rollout state is temporarily unavailable")

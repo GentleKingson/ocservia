@@ -51,15 +51,19 @@ type Snapshot struct {
 }
 
 type Session struct {
-	ID, Username, ClientIP, VPNIP string
-	ConnectedAt                   time.Time
-	BytesIn, BytesOut             int64
+	ID          string    `json:"id"`
+	Username    string    `json:"username"`
+	ClientIP    string    `json:"client_ip"`
+	VPNIP       string    `json:"vpn_ip,omitempty"`
+	ConnectedAt time.Time `json:"connected_at"`
+	BytesIn     int64     `json:"bytes_in"`
+	BytesOut    int64     `json:"bytes_out"`
 }
 
 type User struct {
-	Username string
-	Enabled  bool
-	Revision uint64
+	Username string `json:"username"`
+	Enabled  bool   `json:"enabled"`
+	Revision uint64 `json:"revision"`
 }
 
 type Upgrade struct {
@@ -70,9 +74,9 @@ type Upgrade struct {
 }
 
 type Sample struct {
-	SampledAt time.Time
-	Metric    string
-	Value     float64
+	SampledAt time.Time `json:"sampled_at"`
+	Metric    string    `json:"metric"`
+	Value     float64   `json:"value"`
 }
 
 type Point struct {
@@ -92,10 +96,11 @@ type Group struct {
 }
 
 type SecurityEvent struct {
-	ID             uuid.UUID
-	ObservedAt     time.Time
-	Severity, Type string
-	Detail         json.RawMessage
+	ID         uuid.UUID       `json:"id"`
+	ObservedAt time.Time       `json:"observed_at"`
+	Severity   string          `json:"severity"`
+	Type       string          `json:"type"`
+	Detail     json.RawMessage `json:"detail"`
 }
 
 type Store interface {
